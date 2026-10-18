@@ -1,0 +1,12 @@
+/**
+ * AMLL 桌面歌词主题接线。
+ * 只做三个变量的映射，单一选择器 .amll-lyrics-stage（歌词舞台容器，R12 挂在 AMLL
+ * 播放器外层）；歌词的排版、动画、着色全部由 @applemusic-like-lyrics/core 自带
+ * style.css 负责，本文件不写任何自定义视觉样式。
+ * 变量由 AMLL 在 .amll-lyric-player 上以 var(...) 消费，靠继承生效。
+ */
+.amll-lyrics-stage {
+  --amll-lp-color: var(--foreground);
+  --amll-lp-font-size: var(--text-2xl);
+  --amll-lp-hover-bg-color: var(--accent);
+}
