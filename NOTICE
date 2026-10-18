@@ -1,0 +1,33 @@
+NOTICE
+======
+
+Copyright (C) 2026 本项目作者
+
+本项目的源代码以 GNU Affero General Public License v3.0 only（AGPL-3.0-only）授权，
+全文见同目录 LICENSE 文件。
+
+非官方声明
+----------
+
+本项目为非官方独立实现，与华为及其关联公司无任何隶属、合作或代理关系。
+
+第三方组件归属
+--------------
+
+本项目使用或打包了下列第三方组件，其权利归各自作者所有，遵循各自许可证：
+
+- Tauri（含 tauri、tauri-build 及官方插件）—— MIT 或 Apache-2.0
+- React、React DOM —— MIT
+- Vite —— MIT
+- TypeScript —— Apache-2.0
+- Tailwind CSS —— MIT
+- shadcn/ui —— MIT
+- radix-ui —— MIT
+- class-variance-authority —— MIT
+- Apple Music Like Lyrics / AMLL（@applemusic-like-lyrics/core、/lyric、/react）—— AGPL-3.0-only
+- Lucide 图标（lucide-react）—— ISC
+- undici —— MIT
+- Node.js —— MIT
+
+各组件许可证全文随其发行包提供。以二进制形式分发本项目时，须一并保留上述归属声明
+与相应许可证文本。

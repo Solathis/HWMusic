@@ -1,0 +1,26 @@
+# 依赖
+node_modules/
+
+# 构建产物
+out/
+dist/
+src-tauri/target/
+src-tauri/binaries/
+
+# 本地临时与运行时数据（可能含真实账号凭据／音乐库数据）
+.tmp/
+.local/
+
+# 调研与探针产物
+research/
+.probe/
+
+# 编辑器与系统
+.idea/
+.DS_Store
+
+# 日志
+*.log
+
+# 代理工作区（计划、任务简报、报告）
+.superpowers/
