@@ -213,6 +213,17 @@ huawei/dbankcdn 等域名）。
 | 自建歌单删除必须 `playlist/delete` | 审计事实 | `deletePlaylist` 只打 `playlistDelete` 端点，且测试断言"绝不走收藏端点" |
 | 播放地址必须落在 CDN 白名单 | 本项目约束 | 非白名单域 → `unsafe_media_url`（渲染层反正加载不了，早报错） |
 
+### 2.4 CDN 域（已确认可达）
+
+| 域 | probe 实测 | 用途 |
+|---|---|---|
+| `*.dbankcdn.cn` | `https://www.dbankcdn.cn/` → 200 | 封面 / 音频 |
+| `*.tingmall.com` | `https://www.tingmall.com/` → 200 | 封面 / 音频 |
+| `*.kuke.com` | `https://www.kuke.com/` → 200 | 封面 / 音频 |
+
+这三个后缀是 `src/protocols/safe-media-url.mjs` 的白名单，与 `src-tauri/tauri.conf.json` 的 CSP
+`img-src`/`media-src` **同源**，一致性由 `test/safe-media-url.test.mjs` 解析 CSP 行钉死。
+
 ### 2.5 主界面 ↔ sidecar 的数据通道（R8 落地）
 
 渲染层到 sidecar 的 `library:*` 七条请求频道（白名单唯一真源 `src/shared/request-channels.ts`，
@@ -554,16 +565,65 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 2. **`capabilities/main.json` 里的三条 `global-shortcut:allow-*` 现在没有渲染层调用方**
    （注册已收归宿主）：R2 的计划第 141 行显式要求这三条，本任务不动它——如实记为冗余权限。
 
-### 2.4 CDN 域（已确认可达）
+### 2.11 请求频道与宿主要求的完整登记（R15 核对后增补）
 
-| 域 | probe 实测 | 用途 |
+> **为什么有这一节**：§2.4–§2.10 各节只登记了 R8–R13 **新增**的频道；R3–R7 建立的五条请求频道
+> 与三条宿主要求在全文里**只被引用**（例如 §2.6 写「§2.5 的既有语义」、§2.7 引 `settings:set`），
+> 却没有任何一处写过它们的载荷与回执形状。R15 核对 `docs/API_CONTRACT.md` 时发现这个缺漏，
+> 按**代码事实**补齐（真源：`src/shared/request-channels.ts` 的两份清单，Rust 侧为镜像副本）。
+> 本节只登记，不改任何实现。
+
+**请求频道（渲染层 → core，唯一业务通道 `core_call`）** —— 共 15 条，真源 `REQUEST_CHANNELS`：
+
+| 频道 | 载荷 | 应答 `data` | 失败类别 | 落地 |
+|---|---|---|---|---|
+| `auth:login` | 无 | `{started:true, loggedIn, epoch, loginInFlight}` | — | R4/R7 |
+| `auth:logout` | 无 | `{sessionCleared, cacheCleared, notes[]}` | 清不干净**不改写成成功**，原因进 `notes` | R4/R7 |
+| `auth:cancel-login` | 无 | `{cancelled}`（`false` = 本来就没有进行中的登录，**不是错误**） | — | R7 |
+| `settings:get` | 无 | `{settings}` = 归一后的完整文档 | 读不到/读坏了 → 回默认文档（代理当没配）+ 一条日志，**不抛、不砸文件** | R6 |
+| `settings:set` | 二选一：`{patch:{...}}`（合并）或 `{reset:true}`（已知键回默认） | `{settings, restartRequired}` | `invalid_payload`（两个都给 / 都不给 / 类型不对，**不写盘**）；文件认不出 → 结构化错误并**保留原文件** | R6 |
+| `settings:test-proxy` | 见 §2.7 | 见 §2.7 | 见 §2.7 | R10（接 R6 的测试器） |
+| `library:*`（7 条） | 见 §2.5 | 见 §2.5 | 见 §2.5 | R8 |
+| `playback:resolve-url` | 见 §2.6 | 见 §2.6 | 见 §2.6 | R9 |
+| `playback:lyrics` | 见 §2.9 | 见 §2.9 | 见 §2.9 | R12 |
+
+三条关于 `auth:login` 的要紧事实：
+
+1. **它是"长轮询的反面"**：立刻回 `{started:true}`，真正的结论经 `auth:status` **广播**送达（§1.7）——
+   渲染层那条调用链（Rust `core_call`）有 60 秒上限，而扫码要等好几分钟。
+   dispatcher 支持处理器自行答复后 `return undefined` 不再写第二帧，这条路就是为它留的。
+2. `epoch` 是"会话属于哪一代"（R8+ 的业务请求用它绑定凭据）。
+3. **`auth:login` 的回执里没有账号标识**：设置页只显示「已登录/未登录」+ 退出按钮，
+   不为显示扩协议（§2.7）。
+
+**`settings:set` 的三层不对称（刻意，写在这里以免被当成不一致）**：
+
+| 层级 | 口径 | 为什么 |
 |---|---|---|
-| `*.dbankcdn.cn` | `https://www.dbankcdn.cn/` → 200 | 封面 / 音频 |
-| `*.tingmall.com` | `https://www.tingmall.com/` → 200 | 封面 / 音频 |
-| `*.kuke.com` | `https://www.kuke.com/` → 200 | 封面 / 音频 |
+| **字段级宽容** | 代理的 `host`/`port` 不合法 → 归成「没填」 | 用户可能正在半填表单 |
+| **枚举级严格** | `closeBehavior` 不在枚举（`tray`/`quit`）里 → 直接报错 | 枚举值是代码写的，错了就是 bug |
+| **结构级严格** | `patch.proxy` 不是对象也不是 `null` → `invalid_payload` | 形状错了不该猜 |
 
-这三个后缀是 `src/protocols/safe-media-url.mjs` 的白名单，与 `src-tauri/tauri.conf.json` 的 CSP
-`img-src`/`media-src` **同源**，一致性由 `test/safe-media-url.test.mjs` 解析 CSP 行钉死。
+另：`patch` 里某个键给 `null` = **删除该键**（§2.6 的队列清理依赖这条语义）。
+
+**宿主要求（core → 宿主，经 `rpc.callHost`）** —— 共 5 条，真源 `HOST_REQUEST_CHANNELS`：
+
+| 频道 | 入 | 出 | 落地 |
+|---|---|---|---|
+| `host:notify` | `{text}`（非空字符串，会 `trim`） | `{ok:true, data:null}` | R3：Rust `HostPlan::Notify` → `tauri-plugin-notification`；标题 = 应用显示名。空/非串 → `invalid_payload`（**不回显内容**） |
+| `host:secure-encrypt` | `{plaintext}` | `{cipher}`（base64 的 DPAPI 信封） | R5：`session-store.mjs` 只认 `data.cipher` |
+| `host:secure-decrypt` | `{cipher}` | `{plaintext}` | R5：只认 `data.plaintext`；解不开 → `invalid_cipher`（**不当成「没登录」**）；后端不可用 → `secure_store_unavailable`，**没有"失败降级成明文"这条分支** |
+| `host:open-login` | 见 §1.7 | 见 §1.7（长轮询：窗收场后才答复） | R7 |
+| `host:cancel-login` | 见 §1.7 | 见 §1.7 | R7 |
+
+- 出向 `callHost` **只放行宿主白名单**：非白名单当场回 `unknown_channel` 且**不写帧**（`src/host/rpc.mjs`）。
+- `host:notify` 的**端到端没被跑过**（R3 的 sidecar 不主动发起宿主要求）：Rust 单测覆盖了决策与
+  一次性守卫，**真弹通知这条链没有运行期证据**（见 §6 的 untested 口径）。
+
+**跨语言镜像**：两份清单的字面量只出现在 `src/shared/request-channels.ts`；Rust 侧
+（`src-tauri/src/commands.rs` 的 `require_request_channel` / `route_host_request`）是**刻意的镜像副本**，
+由 `test/channel-parity.test.mjs` 扫源码钉住集合相等。入口对 `REQUEST_CHANNELS` 逐个补齐兜底：
+尚未实现的频道回结构化 `unimplemented`（**不静默、不挂起**）。
 
 ## 3. 本地常量（唯一真源位置）
 
@@ -646,3 +706,11 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
   快捷键与托盘的兜底关系 / Wayland 热键限制写在代码注释里）；§3 增补两行。
   三条如实登记的未验证项（真机注册与投递、Wayland 会话、setup 期注册不自锁是源码结论）
   + 两条已知限制（设置页不显示快捷键、capabilities 里三条 `global-shortcut:allow-*` 冗余）。
+- 2026-10-19（Task R15）：**核对后增补 §2.11** —— R3–R7 建立的四条请求频道
+  （`auth:login`/`auth:logout`/`auth:cancel-login`/`settings:get`/`settings:set`）与三条宿主要求
+  （`host:notify`/`host:secure-encrypt`/`host:secure-decrypt`）此前在全文里只有引用、没有登记
+  （典型症状：§2.6/§2.7 引「§2.5 的既有语义」而 §2.5 里并没有它们）。本节按代码事实补齐载荷、
+  回执、失败类别与三层不对称语义，并登记 `host:notify` 端到端未跑过。**只补文档，不动代码。**
+  顺带把 §2.4（CDN 域）那一段**整体上移到 §2.5 之前**——R8 修复轮插回标题时它落在 §2.10 之后，
+  导致 §2 的物理顺序是 2.3→2.5…2.10→2.4；现在 §2.1–§2.11 按编号单调，且 §2.11 在末尾（纯挪行，内容一字未改）。
+  其余各节（§1.1–§1.7、§2.1–§2.10、§3–§4）核对无缺漏。

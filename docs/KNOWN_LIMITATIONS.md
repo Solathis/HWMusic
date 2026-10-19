@@ -1,0 +1,218 @@
+# KNOWN_LIMITATIONS — 已知限制与全部未验证项
+
+> **这份文档的口径**：**任何没有实测证据的东西都写在这里**，一条不漏。
+> 来源是 R0–R14 每份实现报告的「untested / 已知限制」节（逐份读了），加上 R15 汇总时复核出的几条。
+> 档位用四档：**verified**（有可复现证据）/ **in-progress** / **pending**（已设计未开始）/ **untested**（实现存在但没验过）。
+>
+> **读法**：每条都给了「为什么没验」与「谁来验」。**它不在别处被悄悄说成"已支持"** ——
+> README 的功能清单与 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) 的档位与本文一致。
+>
+> 共 **62 条**（A 5 / B 12 / C 12 / D 8 / E 15 / F 7 / G 3）。
+
+---
+
+## A. 授权与联调类（最要紧的一组：没有真实账号与真实端点，这些就是没验过）
+
+| # | 项 | 档位 | 为什么没验 | 谁来验 |
+|---|---|---|---|---|
+| A1 | **真实账号扫码登录** | untested | 需要真实华为账号 + 用户在场授权，超出自动化测试范围。扫码成功的整条链只在**注入式测试**里验过（假宿主交回真形状的回调 URL + 真 `state`），官方页是否真会跳 `hms://` 没有实机证据 | 用户在场的一次人工联调 |
+| A2 | **`loginex`（账号 AT → 音乐会话，请求带 Digest 头）** | pending | 端点 URL、请求形状、Digest 算法细节**均无任何公开证据**，探针无法离线确定（GET/POST 都要有效 AT）。默认实现直接返回结构化 `loginex_pending`，**一次请求都不发**——不猜 URL | 授权联调后填端点，`auth-manager` 不用改 |
+| A3 | **音乐业务端点全部未知（风险 K1 未消除）** | pending | `music.huawei.com` 与三个候选主机**全部 ENOTFOUND**（域名不解析）；公开入口页脚本里 0 条 API 候选。所以代码走**端点注入式**（`data.musicEndpoints`，**现在仍是空表**），每个请求回结构化 `endpoint_unknown`，UI 显示「接口尚未配置（待联调确认）」——**这是如实，不是坏了**。受影响的：收藏 / 歌单列表 / 歌单曲目 / 搜索 / 专辑 / 歌手 / 播放历史 / 播放地址 / 歌词文本 | 授权 probe 或用户在场的授权联调；写入方只改配置 |
+| A4 | **token 端点没做过真实兑换** | untested | 无账号授权。「`client_id=101444301` 被受理」只是**弱证据**（token 端点对无效授权码回了「授权码无效」而不是「客户端未注册」），**不等于**该身份被授权使用；身份随时可能失效 | 同 A1；且**不做**「修身份式重试」 |
+| A5 | **请求参数名与响应字段名仍是占位** | pending | `music.mjs` 的参数名（`page`/`pageSize`/`keyword`/`id`）集中在 `queryNames` 一张表，测试验的是「间接层有效」（覆写后请求随之变化），**不是「名字正确」**；列表容器字段（`list/items/songs/records/tracks`）、曲目 ID 字段（`id/songId/musicId/resourceId/trackId`）、歌词响应键（6 个候选）都是**宽容读取**。另外**时长单位待联调**：`trackDurationOf` 只认 `duration` 并按秒解读，猜别的字段名会显示一个看不出来的错值 | 联调后收敛到确定的那一个键 |
+
+连带影响（不单列条目，因为它们是 A3 的直接后果）：
+会话验证器**刻意没注入**（验证要打收藏接口）→ 启动恢复只报 `verify_unavailable`（会话仍在、没验过），
+而不是谎报「未登录」或「已登录」；`SESSION_INVALID_KINDS` 的类别表是按现有证据拟定的**待确认清单**；
+`sessionHeaders`（会话凭据注入）未接线（端点未确认前猜 header 名是空转）；收藏的**写入**接口不在注入表里，
+所以收藏按钮是**禁用**的（不做乐观更新——那是"点了看起来成功、其实什么都没存"）。
+
+---
+
+## B. 真窗视觉与运行期行为类
+
+**共同根因**：开发机的沙箱里**应用起不来真窗**。`tauri-plugin-log` 要写
+`%LOCALAPPDATA%\<identifier>\logs`，被沙箱拒绝：
+
+```
+thread 'main' panicked at src\lib.rs:326:10:
+Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error 5)")
+```
+
+`npm run smoke:build` 因此判 **UNTESTED（退出码 2）——不是通过**（单独给一个退出码，
+就是为了让调用方不可能把「没测」当成「过了」）。所以下面这些只有**编译级 + 纯函数单测级 +
+`react-dom/server` 静态渲染冒烟 + 源码扫描**证据：
+
+| # | 项 | 档位 | 谁来验 |
+|---|---|---|---|
+| B1 | **窗口的真实几何与聚焦**：主窗 1280×800 / 最小 960×640 的实际表现、前台聚焦、插件链的运行期行为、`app_data_dir()`/`app_cache_dir()` 的真实取值 | untested | 能起窗的环境里一次人工冒烟 |
+| B2 | **托盘真机点击与图标显示**：「点下去真的发生什么」「图标在托盘区长什么样」；Windows **高 DPI 下 ico 的实际清晰度**（只验证了内嵌字节是合法多尺寸 ico 且能被 `Image::from_bytes` 解码） | untested | 同上（托盘菜单构造、事件映射、勾选翻转、`decide_close` 矩阵、图标解码都有测试，缺的是"真机看得见的那一半"） |
+| B3 | **关窗 hide 的视觉/系统行为**：`prevent_close() + window.hide()` 之后任务栏图标是否消失、从托盘「显示窗口」恢复时的焦点行为 | untested | 同上 |
+| B4 | **歌词窗的透明 / 置顶 / 无边框 / 拖动 / 点透目视**：屏幕上看起来什么样、鼠标点下去发生什么 | untested | 同上 |
+| B5 | **任务栏歌词与真实任务栏的视觉关系**：窗口贴 `work_area` 下沿（= 任务栏上沿），理论上不重叠，但**不同 DPI / 自动隐藏任务栏**的机器上要看一眼 | untested | 同上 |
+| B6 | **多显示器实机**：三屏几何矩阵是**纯函数层面**的（含负坐标副屏），没在多屏机器上真跑过 | untested | 同上 |
+| B7 | **真机快捷键注册与投递**：「媒体键按下去播放器真的动」「`Ctrl+Alt+L` 真的能开关歌词窗」；**一次按键只发一条广播**的去重逻辑也没真机抓过 | untested | 同上（Windows 上媒体键被其它程序占用是常态——回退与提示正是为它写的，但「占用时插件返回的错误文案长什么样」只在夹具里模拟过） |
+| B8 | **开机自启的真实注册表写入/读取** | untested（**刻意不测**） | 真跑一次 `enable()` 会在用户机器上留一个自启项，所以单测用的是假 manager（覆盖判定逻辑：先写后读、报观测值、失败结构化、「插件没注册」走 `try_state` 而不是 panic） |
+| B9 | **界面观感**：暗色观感（构建产物已证伪"只有令牌换了、`dark:` 没换"，但没有真窗可看）、原生控件是否全部跟随、字体最终观感、IntersectionObserver 在 Tauri webview 里的实际触发时机、`hidden` 切换后 scrollTop 恢复的实测效果 | untested | 能起窗的环境里一次人工冒烟 |
+| B10 | **`<audio>` 的真实播放**：AMLL 背景/歌词在真 webview 里的观感与性能、rAF 推流的实际流畅度、Media Session 在 Windows 上是否被**系统媒体控件**识别、`<audio>` 经代理/CSP 的真实播放 | untested | 需要**一次真实音源联调**（依赖 A3） |
+| B11 | **「配代理 → 抓包」**：证明到「装配进了 dispatcher/浏览器参数、请求确实经过代理、凭据只给代理」这一层；**没有**用真实代理抓过华为业务流量，也没验证 WebView2 在真实代理下的封面/音频走向 | untested | 授权场景下的人工验证 |
+| B12 | **托盘「桌面歌词」勾选与窗存在性的正向同步**：「点一下真的建出窗」只有真机能验（失败路径的收口有单测） | untested | 同 B1 |
+
+**另有三项运行期缺口的如实登记**（不是"没测"，是"已知看不见"）：
+
+- **wry 0.57 没有 `FrameNavigationStarting`**：官方页若从 **iframe 内部**发起 `hms://` 跳转，
+  Rust 侧看不到（顶部框架跳转与 302 都能看到）。关闭它要么等上游提供帧级事件，
+  要么注入脚本监听——后者是硬边界**明令禁止**的（登录页零注入）。兜底：总期限仍会收口，不会永久挂住。
+- **Windows 关机不经过 `CloseRequested`**：源码级确认 tao 0.37.1 对 `WM_ENDSESSION` 直接
+  `std::process::exit(0)`（`tao-0.37.1 src/platform_impl/windows/event_loop.rs:2332`），
+  所以关窗 fail-safe **不会**拦住系统关机；**未在真机验证**。
+- **`core_call` 的一次性答复守卫有界淘汰**（`MAX_ANSWERED_IDS = 4096`，之后按插入顺序淘汰）：
+  理论上超长会话里一个极老的 id 可被重复答复（内存有界的代价），**未做压力测试**。
+
+---
+
+## C. 平台类（本仓不宣称支持 Windows 以外）
+
+| # | 项 | 档位 | 说明 |
+|---|---|---|---|
+| C1 | **Linux 整体** | untested | 从未构建、从未运行。托盘**需要 `libayatana-appindicator3`**（缺了装不上）且 **`TrayIconEvent` 不派发**（只有菜单可用）；Linux/WebKitGTK 的代理行为未验证；无打包 target |
+| C2 | **macOS 整体** | untested | 从未构建、从未运行。`icon_as_template(true)` 只是 `#[cfg(target_os = "macos")]` 分支，**本机从未编译过**；`macos-proxy` feature **只编到 macOS 14+**；autostart 走 `MacosLauncher::LaunchAgent`；菜单栏仅最小角色 |
+| C3 | **Linux/macOS 打包** | pending | `bundle.targets = ["nsis"]`，只产 Windows 安装包。其它平台的 installer 未配、未打包过 |
+| C4 | **DPAPI 的非 Windows 分支** | untested | `#[cfg(not(windows))]` 是**一行 stub**（`Err(unavailable_error())`），本机不参与编译，只在 Linux/macOS 构建时才会被编译器检查。纯函数层（base64、分类层、`unavailable_error` 文案）有测试覆盖，"空明文/空密文"守卫也与平台无关 |
+| C5 | **Wayland 会话下的全局快捷键** | untested | `global-hotkey` 的 Linux 后端**只有 X11**（`x11rb` + `xkeysym`）；Wayland 原生会话下没有 X 连接 → 注册会失败，**没有隐藏的降级路径**。处置是**如实降级**（每个动作各自走"注册失败"这条路 + 一条启动提示说清哪个键没注册 + 指路托盘菜单/主界面）。**结论来自源码结构，是源码推断，不是真机证据**；文案不承诺 Wayland，也不假装有替代方案 |
+| C6 | **`setup` 期注册不自锁** | untested | 结论来自 `tauri-runtime-wry` 的 `send_user_message` 主线程内联分支（源码），没跑过真机冷启动 |
+| C7 | **webview 侧代理的平台差异** | untested | macOS 需要 `macos-proxy` feature 且仅 14+；Linux/WebKitGTK 的代理行为未验证 |
+| C8 | **80 端口的代理** | untested | `Url::parse("http://host:80").port()` 是 `None`，而 wry 用 `url.port()` 拼参数 → 会传成 `--proxy-server=http://host:`（端口段为空）。按 URL 规范空端口 = 默认端口，**预期等效但未实测**。已钉成 `lib.rs` 的一条用例 + 注释，将来查从这里查起 |
+| C9 | **`bypass` 只对 sidecar 生效** | verified（这是**设计事实**，不是缺陷隐藏） | Tauri 的 `proxy_url` 只接受一个 URL，没有 bypass 参数（Chromium 的 `--proxy-bypass-list` 未被 Tauri 暴露）。命中例外的域名：sidecar 直连、webview 仍走代理 → **两套网络栈行为不一致**。要让 webview 也认例外，需要 `additional_browser_args` 另接一条路 |
+| C10 | **Chromium 不吃内联凭据** | verified（设计事实） | webview 侧只接受 `http://host:port`，用户名/密码**当场丢弃并报告**（`describe` 是唯一出口，有用例钉住它不含凭据）。**认证代理只有 sidecar 那条路能走通** |
+| C11 | **代理改动需重启才生效** | verified（设计事实） | 三个窗口都是"建窗时读一次"。主窗与 sidecar 改代理后**必须重启应用**；登录窗/歌词窗是"下次打开即生效"。回报里的 `restartRequired` 驱动设置页的说明文案 |
+| C12 | **`settings.json` 与 WebView2 的 user-data 同目录** | verified（设计代价） | 数据根只有一个（sidecar 与 webview 共用）：好处是单源，代价是目录里浏览器缓存与应用配置混在一起 |
+
+---
+
+## D. 功能边界（**明确不做**，不是"还没做完"）
+
+| # | 项 | 档位 | 说明 |
+|---|---|---|---|
+| D1 | **旧仓数据迁移（migrate）** | pending（明确不做） | 本仓**没有旧数据**（旧仓已整体删除），不做迁移 |
+| D2 | **每日推荐 / 移动端 / 云同步 / 自动更新服务 / 其它平台音源** | pending（范围外） | 计划 Global Constraints 明确排除 |
+| D3 | **音频解密 / 绕过付费或 DRM** | pending（范围外） | 只播官方接口给出的地址 |
+| D4 | **主题手动切换** | pending（**裁决非目标**） | 亮暗**只跟系统 `prefers-color-scheme`**。两份令牌（媒体查询 + `.dark`）逐条一致由测试钉住；渲染层不得写 `dark` 类或存主题偏好（同文件扫描）。**不引 next-themes**（它的防闪烁内联脚本会被 CSP `script-src 'self'` 拦） |
+| D5 | **歌词窗配置持久化** | pending（**裁决明确不做**） | 字号/颜色/模式/锁定/点透只在**本次运行内**生效，下次启动回默认；设置项旁边如实写着这句话（`LYRICS_SESSION_NOTICE`，由用例钉住必须说清"只在本次运行内"与"不写入设置文件"） |
+| D6 | **任务栏歌词不是真任务栏写入** | verified（**降级实现**） | 三端都没有「往任务栏里写文字」的公开 API，只有「独立透明窗 + 贴 `work_area` 下沿」这一种做法。**绝不注入系统进程、不装系统钩子、不做 shell 扩展**（全源码扫描 0 命中：`SetWindowsHookEx`/`SetWinEventHook`/`Shell_TrayWnd`/`FindWindow`/`SetParent`/`explorer.exe`…） |
+| D7 | **设置页不显示当前生效的快捷键** | pending（范围外） | 生效组合记在 `ShortcutState`（托管状态），只在启动提示说一次 |
+| D8 | **队列面板没有「移除单曲 / 拖动排序」** | pending（范围外） | 只有点击跳播与清空。「移除当前项时的播放语义」（停还是接着播下一首）需要裁决，没自己拍 |
+
+**另外几处"被动边界"也要知道**（不是选择，是当前形态）：
+
+- **登录门禁期间托盘的「设置…」与「桌面歌词」都没有消费方**：订阅在 `LibraryShell` 里，而未登录时它不挂载
+  → 那一刻勾选会翻转（托盘侧镜像）但**不会建窗**。不是丢事件，是那一刻本来就没有消费者；
+  也**没做**「登录后再补一次」的排队。
+- **歌词窗只有隐藏没有销毁**：进程退出前它一直占着一份 webview（**刻意**：保住进度与即时开关，代价是内存）。
+- **音质/试听标注不显示**：`auditionLikely` 在协议层算出来了，UI 不显示（不虚标音质，也没有音质切换 UI）。
+- **收藏页首屏会预取**：它常驻挂载，登录后即使直接切到设置页也会取第一页收藏（认定合理——它是默认页）。
+- **封面链路未接**：占位方块 + lucide 图标。真接要先过 CSP `img-src` 白名单与 CDN 校验；且 AMLL 对**字符串**
+  地址会自己 `fetch` 成 blob（`connect-src` 只有 `'self' ipc:`，会被 CSP 拦），得先用 `<img>` 加载再把
+  `HTMLImageElement` 传进 `BackgroundRender`。
+- **`log-terminal.tsx` 的语义是按简报文件名推断的**（没有更细的规格）。
+- **提示文案里的失败原因可能是英文**：原因原样来自库/系统（宁可给真话，也不替它编一句中文）。
+
+---
+
+## E. 设计与实现口径类（如实披露的取舍与偏差）
+
+| # | 项 | 档位 | 说明 |
+|---|---|---|---|
+| E1 | **代理密码明文存 `settings.json`** | verified（**简报钉死的磁盘形状**） | Rust 侧也要读同一份，所以没走 DPAPI。靠 `0600` 尽力而为 + 用户目录 ACL（**Windows 上 `chmod` 常常无效**，真正的边界是用户目录 ACL）。与 `session.enc` 口径不同是**有意**的：代理配置是"用户配置"不是"凭据"。设置页文案已提示"密码以明文保存在本机配置文件" |
+| E2 | **DPAPI 信封尾部追加字节不会被检测** | verified（DPAPI 的行为，不是本模块的选择） | 并用例钉成事实，**不宣称**"能检测追加篡改" |
+| E3 | **`session.enc` 没有密钥轮换 / 多用户区分** | verified（设计意图） | 作用域就是"当前 Windows 用户的本机"；跨用户/跨机器迁移**必然解不开**（→ `invalid_cipher`） |
+| E4 | **内存里的明文不做擦除；`cbData` 是 `u32`，不做 4 GiB 防御** | verified（刻意不做） | 明文最终要经帧发给 sidecar，擦一个中间 `Vec<u8>` 没有实际收益；会话载荷是 KB 级。不写"看起来安全"的代码 |
+| E5 | **`oauth-login1.cloud.huawei.com` 是整域放行** | verified（裁决取舍） | 授权页与回调都在该域，例外 URL 另按整条精确匹配（`/oauth2/v3/loginCallback`）。不放 `*.huawei.com` 通配、不放 `oauth-login2`（parity 测试扫源码禁止通配写法）。理由：不做域内跳转的精细拒绝，否则扫码流程会断链 |
+| E6 | **`login.cloud.huawei.com` 的证据等级较低** | unverified（证据弱） | probe 只证明"域存在"（裸请求 403，属预期）。该条目来自审计事实"华为官方登录域（CAS 系）"；已在代码注释与契约里标注证据等级 |
+| E7 | **探针存在过度打码** | verified（有意的 fail-closed） | `code_challenge_method` 因含子串 `code` 被打码成 `***`。宁多打不多漏 |
+| E8 | **`parseLrc` 忽略 `[offset:±ms]`、不合并同一时间戳的翻译行** | verified（已在 R9 补偿） | R4 的薄封装不做语义补偿（那是改语义）；R9 的 `amll-adapter.ts` 在官方 `parseLrc` 之上补了 `[offset:]` 与翻译行合并，并有测试 |
+| E9 | **`deletePlaylist` 默认 POST + 查询串带 id** | pending（真实方法未知） | `request.method` 可覆写；测试断言"绝不走收藏端点" |
+| E10 | **`music.mjs` 504 行偏长** | verified（如实记） | 职责仍是单一的「端点注入 + 响应解码 + 分页语义」，未再拆分 |
+| E11 | **`scripts/` 不进 `tsc`** | verified（如实记） | `tsconfig.include` 只有 `src` 与 `vite.config.ts`；探针脚本靠 Node 侧单测（`test/probe-lib.test.mjs`）保护，而非类型检查 |
+| E12 | **恢复出来的队列没有标题** | verified（裁决的直接后果） | 只存标识（`ids` + `index`），界面显示「曲目 &lt;id&gt;」。想显示真标题要么放宽持久化裁决，要么加一个"按 id 取曲目元信息"的通道（现在没有）。**音量/播放模式也不持久化**（重启回默认） |
+| E13 | **播放状态机的音频事件只接 6 个** | verified（如实记） | `ended/error/loadedmetadata/timeupdate/playing/waiting`；没接 `pause`（暂停由我们主动下发，避免事件与状态互相追打）、没接 `stalled/suspend`（不区分"卡住"与"在缓冲"）。真机联调时若发现状态机与元素不同步，先看这里 |
+| E14 | **进度刷新率取决于 `timeupdate`** | verified（Chromium 约 4Hz） | 播放器栏的进度是 4Hz 跳动的（歌词面板是 60fps 独立推流）。要让进度条更顺，得把 rAF 泵的读数也引到播放器栏（会带来每帧 React 渲染，本轮没做）。歌词的 rAF 泵**常转不歇**（设计如此，可优化） |
+| E15 | **「播完即停」在顺序模式下会停在最后一首** | verified（刻意） | 状态 `ended`，进度不清零；用户按「播放」会从头重放当前曲。想要"播完回到队列开头"是模式语义的改动（`list-loop` 已经是那个行为）。另：`offset` 的方向约定**未经真实样本验证** |
+
+**已知的缺陷级偏差（deferred，不影响正确性，但如实记）**：
+
+- `logout` 失败文案复用 `settingsFailureText`，主语错位（会说"设置没有保存"）；
+- 关窗行为的成功提示复用 `proxySaveNotice`，语境错位；
+- `bridge.mjs` 的关表竞态会误报「id 冲突」（应区分 `core_gone`）；
+- **截断帧全文进日志**：R7+ 的载荷可能带 token（应截断 64B 或哈希）——**这是本清单里最该优先修的一条**；
+- `webview_proxy` 的 `isProxyAuthFailure` 用 `"407"` 子串匹配，过宽；
+- `mergeSettings` 的"未知键 `null` = 删除"语义与注释不符；
+- `normalizeProxy` 会丢掉 `proxy` 里的未知子字段（而 `data` 层的未知键原样保留）——刻意但不显眼；
+- `reply` 队列的日志条数在二次拿锁间可能过期；冲刷瞬间直接投递与排队提示顺序可能反转（守恒不破坏）；
+- `TrackTable` 行 `aria-label` 写「双击播放」（R9 接通后成立）；
+- `useLibraryResource` 在 `enabled=false` 时仍渲染空态文案（当前不可达）；
+- `restartCurrent` 在 `loading` 态不 `playAudio`（边缘）；
+- `playback-handlers` 的 `textOf` 静默接受 `id` 备用键（与契约 `{trackId}` 不符）；
+- `media-session` 的 update 外层 `if` 是死逻辑；
+- `player_command_for` 是纯转发样板；`proxy_url_argument` 不必要 `pub`；`build_menu` 两趟装配写法绕；
+- `all-dead` 提示只报第一个失败原因（链 ≤ 3，影响小）；
+- `APP_OPEN_SETTINGS` 载荷 `{view}` 被渲染层忽略（死数据）；
+- `dragRegionEnabled` 不看 `clickThrough`（点透时该属性是死的，条件应收紧）；
+- `MAX_ANSWERED_IDS` 淘汰、`pumps` 线程句柄未 `join`（进程退出随之消亡，无害）；
+- `Rust pump read_line` 使 `FrameDecoder` 跨块路径生产不可达（仅测试覆盖）；
+- `SidecarKnobs::from_env` 的环境变量名无测试；错误类型字面量缺 Windows 侧互钉；
+- `webview_data_root` 在启动期解析两次（无害）；`pick_data_root` 第二断言写法冗余；
+- `icons/android`、`icons/ios` 共 35 个文件未被引用（`tauri icon` 的移动端产物，可删）；
+- `make-icon.mjs` 硬编码 lucide-react 版本号进 LICENSE 文本（应读 `node_modules/lucide-react/package.json`）；
+- `sonner.tsx` 引用的 `cn-toast` 类在全仓无定义（shadcn 上游注册表缺口，保持未手改）；
+- `lib/utils.ts` 目前无人引用（按契约保留）；
+- `index.html`/`lyrics.html` 的品牌串与 `APP_BRAND_LABEL` 是双源，未加注释（HTML 无法 import `.mjs`，
+  运行时由 `main.tsx` 覆盖）；
+- 自修的 3 个缺陷（滚动恢复时序 / 取数依赖环 / `hidden`+`flex` 冲突）未各配测试钉住；
+- `react-dom/server` 渲染冒烟（R8/R9/R10）是**一次性探针**（`.tmp`，未入库），未固化成测试；
+- parity 反漂移扫描只扫 `auth:|settings:|host:` 三个前缀，广播频道字面量不设防；
+- 「48 字面量」扫描器只扫同时含 `inset` 与 `48` 的行（`TOP_OFFSET=48` 可逃逸）；
+- 登录门禁的测试名声称钉住「先订阅后 `rendererReady`」的顺序，但只断言 `installDesktopBridge` 存在；
+- 守卫位置断言用 900 字符窗口而非"第一句"（宽松）；
+- 「保存中禁用」用例正则偏弱；
+- `test-browser.mjs` 的 `hasCss` 计算未使用；`check-nsis` 的暂存枚举下界 = 1（宜 ≥3）；
+- `tauri-smoke` 把 stdout 记入 stderr 累加器（有意但命名误导）；
+- `build-sidecar` 自验证的超时路径不 kill 挂死的子进程；
+- `TEMP`/`TMP` 两种写法并存（进程内 vs 每子进程）；
+- R7 期间有一次**未复现**的 `--lib` 偶发失败（其后 6+4 次全绿，未动 lib 用例）。
+
+---
+
+## F. 工具链与工程质量类
+
+| # | 项 | 档位 | 说明 |
+|---|---|---|---|
+| F1 | **CI 没有在 GitHub 上真跑过一遍** | untested | 本机无 runner、无仓库 remote、不联网推 CI。workflow 的 YAML 用真解析器验过（`yaml.safe_load` → 17 步），每条外部命令都显式查 `$LASTEXITCODE`，顺序由 5 条契约测试钉住——但**首次 push 后用它的日志回填**才算验过 |
+| F2 | **NSIS 安装包没有真正执行过安装** | untested（**按设计**） | `check:nsis` 只做**静态**校验（装一次要写系统目录、注册表、开始菜单，还会拉起 WebView2 安装器，在 CI 里等于给每个 PR 装一次应用）。**未验**：装 / 卸载 / 快捷方式 / WebView2 引导流程 |
+| F3 | **发布物未做代码签名** | verified（已知事实） | Windows SmartScreen 会提示"未知发布者"。这不是被篡改的证据，但也没有任何东西替你担保这个文件——请用同一 Release 的 `SHA256SUMS` 自查 |
+| F4 | **CI 发布说明里的源码地址是占位符** | pending | 本仓 `git remote -v` 为空，没有真实地址可写。AGPL 要求拿到二进制的人能拿到对应源码，**发布前必须替换**为真实地址 |
+| F5 | **本机 `vite build` / `dist:*` 需要 `TEMP` 指向仓内** | verified（环境限制，非代码问题） | 受限沙箱里 `%TEMP%` 落在不可删的目录下，esbuild/vite/tauri 清理自己的临时文件时报 `Access is denied`。打包脚本**对子进程**把 `TEMP`/`TMP` 指向仓内 `.tmp/temp`（已 gitignore），**不改用户环境变量**；CI runner 自带可写 TEMP，不受影响 |
+| F6 | **仓库整体不是 rustfmt-clean** | verified（如实记） | `cargo fmt --check` 在 `bridge.rs` 等既有文件上就有 diff。**CI 里刻意不加 `cargo fmt --check`**（那会把多个任务的代码一起重排成一个大 diff）；新代码按现有风格手写 |
+| F7 | **`tauri build` 会规范化 `src-tauri/Cargo.toml`** | verified（工具行为） | 会把 `tauri-build = "2"` 写成 `tauri-build = { version = "2", features = [] }`（语义等价），**工作树会变脏**。下次在本机跑 `dist:win` 会再次出现 |
+
+---
+
+## G. 文档与交付类
+
+| # | 项 | 档位 | 说明 |
+|---|---|---|---|
+| G1 | **Task R0（工具链与许可证）没有实现报告** | pending | 该任务的委派被会话中断反复打成 `canceled`，报告未写；**证据是控制器直测的**（rustc/cargo 1.99.1 可用、MSVC 组件实测、`.gitignore` 条目、LICENSE 661 行 AGPL 全文、NOTICE、git 身份），逐条记在 `.superpowers/sdd/.../progress.md` 的 Ruling 里。**本仓不假装有一份不存在的报告** |
+| G2 | **本文档与 README 不含截图** | verified（有意） | 旧仓截图已随旧仓删除，不再使用；而真窗视觉**本来就没有可截的实测画面**（见 B 组）。用截图冒充"看起来能用"正是这份文档要防的事 |
+| G3 | **过程文档（`docs/superpowers/plans/`、`.superpowers/sdd/`）与发布物分开** | verified | 计划文档在仓库里（`docs/superpowers/plans/`），任务简报与实现报告在 `.superpowers/`（已 gitignore，属本机过程资料）。它们**如标注是过程文档**，不是产品文档 |
+
+---
+
+## 附：这份清单是怎么来的
+
+1. 逐份读 R1–R14 的实现报告，取每份的「untested / 已知限制 / 问题」节；
+2. 与 `docs/API_CONTRACT.md` 各节的「如实登记的未验证项 / 已知限制」逐条对照（那是各任务写进契约的那一份）；
+3. 与 `progress.md` 的 `minor (deferred)` 记录对照，把"已知缺陷级偏差"一并收进来（E 组末尾）；
+4. 平台与工具链类（C/F 组）单独成组，因为它们的根因不是"这个功能没测"，而是"这台机器/这个平台没有证据"。
+
+**没有一条被"降级成通过"**：凡是没实测的，这里都写着 untested / pending，并且
+[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) 里的档位与本文逐条一致。
