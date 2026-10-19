@@ -689,4 +689,75 @@ mod tests {
         }
         condition()
     }
+
+    /// R6 端到端：真 sidecar 读真 `settings.json` → 广播 `app:notice` → 宿主帧泵收到 `Effect::Emit`。
+    ///
+    /// 这条横跨进程边界：证的不是"某个函数返回了什么"，而是**启动提示真的能被宿主收到**
+    /// （旧仓缺陷正是"启动期 emit 发进空气"）。凭据只允许停在磁盘上，绝不进提示文本。
+    #[test]
+    fn proxy_startup_notice_reaches_the_host_pump_without_credentials() {
+        let Some(dev_script) = fallback_dev_script() else {
+            eprintln!("跳过：release 构建没有开发期脚本回退");
+            return;
+        };
+        let data = temp_data_dir("proxy-notice");
+        std::fs::write(
+            data.join(crate::webview_proxy::SETTINGS_FILE_NAME),
+            r#"{"schemaVersion":1,"data":{"proxy":{"enabled":true,"host":"proxy.local","port":8080,"username":"notice-user","password":"notice-secret"}}}"#,
+        )
+        .expect("设置文件必须能写");
+
+        let knobs = SidecarKnobs {
+            node_bin: None,
+            script: None,
+            dev_script: Some(dev_script),
+        };
+        let plan = match resolve_launch(&std::env::temp_dir(), &data, &knobs) {
+            Ok(plan) => plan,
+            Err(error) => panic!("开发期启动计划必须可解析：{error}"),
+        };
+        let process = match SidecarProcess::spawn(&plan) {
+            Ok(process) => Arc::new(process),
+            Err(error) => {
+                eprintln!("跳过：起不了真实 sidecar（{error}）");
+                return;
+            }
+        };
+
+        let effects = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&effects);
+        process
+            .start_pump(move |effect| sink.lock().unwrap().push(effect))
+            .expect("帧泵必须能起来");
+
+        let arrived = wait_for(Duration::from_secs(20), || {
+            effects
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|effect| matches!(effect, Effect::Emit { channel, .. } if channel == "app:notice"))
+        });
+        let notice = effects
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Emit { channel, payload } if channel == "app:notice" => {
+                    payload["text"].as_str().map(str::to_string)
+                }
+                _ => None,
+            });
+        process.terminate("测试收尸");
+
+        let notice = notice.unwrap_or_else(|| {
+            panic!(
+                "启动提示必须到达宿主帧泵，实际效果：{:?}",
+                effects.lock().unwrap()
+            )
+        });
+        assert!(arrived);
+        assert!(notice.contains("proxy.local:8080"), "提示要说清 host:port：{notice}");
+        assert!(!notice.contains("notice-user"), "提示里不得出现用户名：{notice}");
+        assert!(!notice.contains("notice-secret"), "提示里不得出现密码：{notice}");
+    }
 }

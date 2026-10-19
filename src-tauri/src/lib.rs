@@ -9,6 +9,7 @@ mod bridge;
 mod commands;
 mod secure_store;
 mod sidecar;
+mod webview_proxy;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -86,10 +87,13 @@ pub fn webview_data_root(app: &tauri::AppHandle) -> Result<PathBuf, DataRootErro
     pick_data_root(paths.app_data_dir().ok(), paths.app_cache_dir().ok())
 }
 
-/// 创建主窗（1280×800，最小 960×640，显式数据目录）。
+/// 创建主窗（1280×800，最小 960×640，显式数据目录，接设置里的代理）。
 ///
 /// 返回实际使用的 webview 数据根，由 `run()` 登记为托管状态。目录必须先建：
 /// WebView2 不会自建，缺目录时建窗直接 `os error 5`（拒绝访问）。
+///
+/// **代理必须接**：封面图与 `<audio>` 音频流走 WebView2 自己的网络栈，不接 `proxy_url` 就绕过设置直连
+/// （旧仓审计出的缺陷 K6）。代理只在建窗时读取 → **改代理要重启应用才生效**（登录窗 R7、歌词窗 R12 同理）。
 pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let webview_data = webview_data_root(app)?;
     std::fs::create_dir_all(&webview_data)?;
@@ -101,7 +105,7 @@ pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std
         .clone()
         .unwrap_or_else(|| MAIN_WINDOW_LABEL.to_string());
 
-    let window = WebviewWindowBuilder::new(
+    let mut builder = WebviewWindowBuilder::new(
         app,
         MAIN_WINDOW_LABEL,
         WebviewUrl::App("index.html".into()),
@@ -109,12 +113,41 @@ pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std
     .title(title)
     .inner_size(MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT)
     .min_inner_size(MAIN_WINDOW_MIN_WIDTH, MAIN_WINDOW_MIN_HEIGHT)
-    .data_directory(webview_data.clone())
-    .build()?;
+    .data_directory(webview_data.clone());
+
+    // 没配代理/配置不可用 → None → 直连（绝不猜一个代理出来）。
+    // 走 `proxy_url_argument` 而不是直接 `Url::parse(...)?`：坏到解析不了的写法（清洗漏网的方括号 IPv6）
+    // 只降级成"没配"，绝不把建主窗这一步带崩（旧缺陷：一个配置错误 = 应用起不来）。
+    if let Some(proxy_url) =
+        proxy_url_argument(webview_proxy::resolve_for_webview(&webview_data, MAIN_WINDOW_LABEL))
+    {
+        builder = builder.proxy_url(proxy_url);
+    }
+    let window = builder.build()?;
 
     // 显式聚焦：Windows 下窗口刚建好时不保证在前台
     window.set_focus()?;
     Ok(webview_data)
+}
+
+/// 建窗用的代理 URL 参数：取值链的**最后一道闸**。
+///
+/// 清洗（`webview_proxy::clean_host`）与 `tauri::Url::parse` 判的不是同一件事：清洗查字符集与形状，
+/// 解析查 URL 结构——`[1.2.3.4]`、`[::::]` 这类写法能过清洗却解析不了。**解析失败一律当没配**
+/// （直连）+ 一行日志：一个配置错误绝不能让主窗建不起来（简报：None 的所有情形都是"当作没配"而非错误）。
+/// 这道闸同时兜住将来清洗规则的漏网（结构校验与字符集校验本来就不同源）。
+///
+/// 入参只可能是 `webview_proxy` 拼出的 `http://host:port`（凭据在那里就被丢弃并报告了），
+/// 所以这行日志里不会有用户名/密码。
+pub fn proxy_url_argument(candidate: Option<String>) -> Option<tauri::Url> {
+    let raw = candidate?;
+    match tauri::Url::parse(&raw) {
+        Ok(url) => Some(url),
+        Err(error) => {
+            log::warn!("webview 代理地址无法解析，按没配处理（该窗口直连）：{raw}（{error}）");
+            None
+        }
+    }
 }
 
 /// 第二个实例启动时把已有主窗拉到前台（single-instance 插件回调）。
@@ -276,5 +309,85 @@ mod tests {
             pick_data_root(None, None).unwrap_or_else(|_| abs("unused")),
             PathBuf::from(".")
         );
+    }
+
+    /// 事实钉：`proxy_url` 的取值链是 `tauri::Url` → `tauri_runtime_wry::parse_proxy_url`
+    /// （`url.host()` + `url.port()` → `--proxy-server=http://host:port`）。
+    ///
+    /// `url` crate 会把**默认端口**归一成 `None`（`http://host:80` → `port=None`），
+    /// 于是 wry 拼出的是 `--proxy-server=http://host:`（端口段为空）。按 URL 规范空端口 = 默认端口，
+    /// 预期仍等价于 80 —— 但**未实测**（真代理抓包属授权场景，见任务简报的范围外清单）。
+    /// 这条用例把它记成"已知事实"而不是"没人发现"：将来真要动 80 端口的代理，从这里查起。
+    #[test]
+    fn proxy_url_default_port_is_normalized_away_by_the_url_crate() {
+        let default_port = tauri::Url::parse("http://proxy.local:80").expect("合法 URL");
+        assert_eq!(default_port.host_str(), Some("proxy.local"));
+        assert_eq!(default_port.port(), None, "默认端口会被 url crate 抹掉");
+
+        let explicit = tauri::Url::parse("http://proxy.local:8080").expect("合法 URL");
+        assert_eq!(explicit.port(), Some(8080), "非默认端口原样保留");
+
+        let ipv6 = tauri::Url::parse("http://[::1]:3128").expect("带方括号的 IPv6 是合法 URL");
+        assert_eq!(ipv6.host_str(), Some("[::1]"), "方括号在 host 里保留（wry 直接拼进参数）");
+        assert_eq!(ipv6.port(), Some(3128));
+    }
+
+    /// 建窗参数的最后一道闸：**解析失败一律当没配**，绝不把错误往上传（主窗建不起来）。
+    #[test]
+    fn proxy_url_argument_treats_unparseable_url_as_not_configured() {
+        for good in ["http://proxy.local:8080", "http://[::1]:3128"] {
+            assert!(
+                proxy_url_argument(Some(good.to_string())).is_some(),
+                "合法代理地址必须照常交给 builder：{good}"
+            );
+        }
+        for bad in [
+            "http://[1.2.3.4]:8080",
+            "http://[::::]:8080",
+            "http://proxy.local:99999",
+            "不是 URL",
+        ] {
+            assert_eq!(
+                proxy_url_argument(Some(bad.to_string())),
+                None,
+                "{bad} 必须降级成「没配」（直连），而不是让建窗失败"
+            );
+        }
+        assert_eq!(proxy_url_argument(None), None);
+    }
+
+    /// 跨语言不变式：**清洗放行的 host，建窗用的 URL 必须能解析**。
+    ///
+    /// 清洗（`webview_proxy::clean_host`）与 `Url::parse` 的判定范围不同：前者查字符集与形状，
+    /// 后者查 URL 结构。夹具里任何一条"放行"的写法若拼不出可解析的代理 URL，主窗就建不起来
+    /// （简报：None 的所有情形都是"当作没配"而非错误）。这条用例是那类漏网的通用防线。
+    #[test]
+    fn every_host_cleaning_accepts_is_a_parseable_proxy_url() {
+        let raw = std::fs::read_to_string(host_fixture_path()).expect("跨语言夹具必须存在");
+        let fixture: serde_json::Value = serde_json::from_str(&raw).expect("夹具必须是合法 JSON");
+        let port = fixture["port"].as_f64().expect("夹具要有端口");
+
+        let mut accepted = 0;
+        for case in fixture["cases"].as_array().expect("夹具要有 cases 数组") {
+            let host = case["host"].as_str().expect("每条夹具都要有 host");
+            let Some(cleaned) = webview_proxy::clean_host(Some(host)) else {
+                continue;
+            };
+            let url = format!("http://{cleaned}:{port}");
+            assert!(
+                proxy_url_argument(Some(url.clone())).is_some(),
+                "清洗放行了 {host:?}，但 {url} 解析不了（建窗会失败）"
+            );
+            accepted += 1;
+        }
+        assert!(accepted >= 10, "夹具的放行用例不能缩水（实际 {accepted} 条）");
+    }
+
+    fn host_fixture_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("test")
+            .join("fixtures")
+            .join("proxy-host-cases.json")
     }
 }

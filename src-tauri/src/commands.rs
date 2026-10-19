@@ -5,7 +5,6 @@
 //! 判定逻辑刻意抽成纯函数（`require_main_window` / `require_request_channel` / `plan_host_request`），
 //! 这样不依赖 `tauri::test` mock runtime 就能钉住来源守卫与路由表。
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -59,7 +58,85 @@ pub fn require_request_channel(channel: &str) -> Result<(), CoreError> {
 #[derive(Default)]
 pub struct CoreState {
     process: Mutex<Option<Arc<SidecarProcess>>>,
-    renderer_ready: AtomicBool,
+    notices: NoticeQueue,
+}
+
+/// 启动期提示队列 + 渲染层就绪标志。
+///
+/// 旧仓缺陷：启动期 `emit` 直接发进空气（那时渲染层还没订阅）。代理启动提示（R6 的环境变量兜底）
+/// 恰好就是这种时机，所以队列在这里落地——R7 的门禁提示可以直接复用。
+///
+/// **就绪标志与队列必须在同一把锁下**：判定就绪与入队是两个动作，若分两次拿锁
+/// （先读标志、再入队），中间那一段就是 check-then-act 的缝——渲染层恰好在这一刻完成
+/// 「标记就绪 + 冲刷」，提示就 push 进那个**已经冲刷过**的队列，而冲刷只发生一次，
+/// 这条提示再没有人管（用户永远看不到）。
+#[derive(Default)]
+pub struct NoticeQueue {
+    state: Mutex<NoticeState>,
+}
+
+#[derive(Default)]
+struct NoticeState {
+    renderer_ready: bool,
+    pending: Vec<EmitEnvelope>,
+}
+
+/// `core_renderer_ready` 的冲刷结果。
+pub struct FlushOutcome {
+    /// 本次是否是"首次就绪"（只用于日志：重复调用不重复报）。
+    pub first_time: bool,
+    /// 本次冲刷出来的待发提示（顺序 = 入队顺序）。
+    pub flushed: Vec<EmitEnvelope>,
+}
+
+impl NoticeQueue {
+    /// 就绪判定 + 入队的**唯一入口**（同一把锁内完成，调用方没有第二步可写）。
+    ///
+    /// - `Some(envelope)`：渲染层已就绪 → 调用方立刻投递（拿回去 emit）；
+    /// - `None`：已就绪之前的提示，已排队，等 [`NoticeQueue::mark_ready_and_flush`]。
+    pub fn deliver_or_queue(&self, envelope: EmitEnvelope) -> Option<EmitEnvelope> {
+        let mut state = lock(&self.state);
+        match plan_broadcast(state.renderer_ready) {
+            BroadcastPlan::Deliver => Some(envelope),
+            BroadcastPlan::Queue => {
+                state.pending.push(envelope);
+                None
+            }
+        }
+    }
+
+    /// 标记就绪并取走待发（同一把锁内完成）：
+    /// 就绪之后入队的提示一律走"直接投递"，不会再落进队列，因此队列不会留下无人冲刷的孤儿。
+    pub fn mark_ready_and_flush(&self) -> FlushOutcome {
+        let mut state = lock(&self.state);
+        let first_time = !state.renderer_ready;
+        state.renderer_ready = true;
+        FlushOutcome {
+            first_time,
+            flushed: std::mem::take(&mut state.pending),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        lock(&self.state).pending.len()
+    }
+}
+
+/// 广播落地的时机决策（纯函数：让"启动期提示不会发进空气"可被单测钉住）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BroadcastPlan {
+    /// 渲染层已就绪：直接 emit
+    Deliver,
+    /// 渲染层没就绪：先排队，等 `core_renderer_ready`
+    Queue,
+}
+
+pub fn plan_broadcast(renderer_ready: bool) -> BroadcastPlan {
+    if renderer_ready {
+        BroadcastPlan::Deliver
+    } else {
+        BroadcastPlan::Queue
+    }
 }
 
 impl CoreState {
@@ -84,13 +161,21 @@ impl CoreState {
         }
     }
 
-    /// 渲染层就绪标志（启动期提示队列的冲刷前提，队列本体 R7+ 再建）。
-    pub fn mark_renderer_ready(&self) {
-        self.renderer_ready.store(true, Ordering::SeqCst);
+    /// 广播落地决策 + 入队：**一个加锁方法**，判定与入队之间没有缝（见 [`NoticeQueue`]）。
+    ///
+    /// `Some(..)` = 立刻投递，`None` = 已排队。就绪与否**只经这个方法对外可见**：
+    /// 刻意不再暴露"读就绪标志"的公开口子（那正是缝的形状，谁读到谁就想自己再判一次）。
+    pub fn deliver_or_queue(&self, envelope: EmitEnvelope) -> Option<EmitEnvelope> {
+        self.notices.deliver_or_queue(envelope)
     }
 
-    pub fn renderer_ready(&self) -> bool {
-        self.renderer_ready.load(Ordering::SeqCst)
+    /// 标记渲染层就绪并冲刷启动期提示（同一把锁内完成）。
+    pub fn mark_renderer_ready_and_flush(&self) -> FlushOutcome {
+        self.notices.mark_ready_and_flush()
+    }
+
+    pub fn queued_notices(&self) -> usize {
+        self.notices.len()
     }
 }
 
@@ -261,8 +346,17 @@ pub fn apply_effect(app: &AppHandle, shared: &Arc<CoreShared>, effect: Effect) {
     match effect {
         Effect::Emit { channel, payload } => {
             let envelope = emit_envelope(&channel, payload);
-            if let Err(source) = app.emit(CORE_EVENT, envelope) {
-                log::warn!("向渲染层广播 {channel} 失败：{source}");
+            match app.try_state::<Arc<CoreState>>() {
+                // 判定与入队是同一个加锁方法：不存在"判定说没就绪、入队时已经就绪"的缝，
+                // 也就不会有提示被塞进已经冲刷过的队列（那种提示再没人冲刷）。
+                Some(state) => match state.deliver_or_queue(envelope) {
+                    Some(envelope) => emit_now(app, envelope),
+                    None => log::info!(
+                        "渲染层未就绪：广播 {channel} 已排队（待冲刷 {} 条）",
+                        state.queued_notices()
+                    ),
+                },
+                _ => emit_now(app, envelope),
             }
         }
         Effect::HostRequest {
@@ -274,6 +368,14 @@ pub fn apply_effect(app: &AppHandle, shared: &Arc<CoreShared>, effect: Effect) {
             log::warn!("core（sidecar）已退出：退出码 {code:?}；在途调用已结清，此后调用立刻失败");
         }
         Effect::Notice(text) => log::info!("core 提示：{text}"),
+    }
+}
+
+/// 立刻向渲染层广播漏斗事件（`core:event`）。
+fn emit_now(app: &AppHandle, envelope: EmitEnvelope) {
+    let channel = envelope.channel.clone();
+    if let Err(source) = app.emit(CORE_EVENT, envelope) {
+        log::warn!("向渲染层广播 {channel} 失败：{source}");
     }
 }
 
@@ -382,17 +484,23 @@ pub async fn core_call(
 
 /// 渲染层就绪通知：启动期提示队列的冲刷钩子。
 ///
-/// 返回值 = 本次冲刷的提示条数。R3 恒为 0：队列本体在 R7+ 真正需要时再建
-/// （旧仓缺陷：渲染层就绪前 emit 的提示发进空气）。
+/// 返回值 = 本次冲刷的提示条数。渲染层必须先订阅 `core:event` 再调这里，否则提示还是会丢
+/// （订阅在渲染层，R8 的 main.tsx 负责；R6 只保证"排了队、就绪即冲刷"）。
 #[tauri::command]
 pub fn core_renderer_ready(window: Window, state: State<'_, Arc<CoreState>>) -> Result<u32, CoreError> {
     require_main_window(window.label())?;
-    let first_time = !state.renderer_ready();
-    state.mark_renderer_ready();
-    if first_time {
-        log::info!("渲染层就绪：core_renderer_ready 已登记（提示队列本体在 R7+ 建立）");
+    // 标记就绪与冲刷在同一个加锁方法里完成：冲刷期间到的广播会走"直接投递"这条更快的路，
+    // 也不会有人把提示塞进已经冲刷过的队列（见 NoticeQueue）。
+    let outcome = state.mark_renderer_ready_and_flush();
+    let count = outcome.flushed.len() as u32;
+    let app = window.app_handle();
+    for envelope in outcome.flushed {
+        emit_now(app, envelope);
     }
-    Ok(0)
+    if outcome.first_time {
+        log::info!("渲染层就绪：已冲刷启动期提示 {count} 条");
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -439,11 +547,188 @@ mod tests {
     #[test]
     fn renderer_ready_flag_is_recorded_once() {
         let state = CoreState::default();
-        assert!(!state.renderer_ready());
-        state.mark_renderer_ready();
-        assert!(state.renderer_ready());
-        state.mark_renderer_ready();
-        assert!(state.renderer_ready());
+        // 就绪与否只从**行为**上看（没有"读标志再自己判一次"的口子，那正是缝的形状）
+        assert!(
+            state
+                .deliver_or_queue(emit_envelope("app:notice", json!({"text": "还没就绪"})))
+                .is_none(),
+            "没就绪 → 排队"
+        );
+        assert!(state.mark_renderer_ready_and_flush().first_time, "第一次就绪要如实报告");
+        assert!(
+            state
+                .deliver_or_queue(emit_envelope("app:notice", json!({"text": "已就绪"})))
+                .is_some(),
+            "就绪之后 → 直接投递"
+        );
+        assert!(!state.mark_renderer_ready_and_flush().first_time, "重复调用不再是首次");
+    }
+
+    /// 旧仓缺陷：启动期 emit 发进空气 —— 代理启动提示（R6）正是这种时机，所以启动期提示要先排队，
+    /// `core_renderer_ready` 时冲刷（顺序保持、只冲一次、之后就绪的直接投递）。
+    #[test]
+    fn startup_notices_are_queued_until_renderer_ready() {
+        assert_eq!(plan_broadcast(false), BroadcastPlan::Queue);
+        assert_eq!(plan_broadcast(true), BroadcastPlan::Deliver);
+
+        let state = CoreState::default();
+        assert_eq!(state.queued_notices(), 0);
+        assert!(
+            state
+                .deliver_or_queue(emit_envelope("app:notice", json!({"text": "一"})))
+                .is_none(),
+            "没就绪要排队"
+        );
+        assert!(
+            state
+                .deliver_or_queue(emit_envelope("app:notice", json!({"text": "二"})))
+                .is_none()
+        );
+        assert_eq!(state.queued_notices(), 2);
+
+        let outcome = state.mark_renderer_ready_and_flush();
+        assert_eq!(outcome.flushed.len(), 2, "就绪时必须把排队的提示全冲出去");
+        assert_eq!(outcome.flushed[0].channel, "app:notice");
+        assert_eq!(outcome.flushed[0].payload["text"], "一", "顺序要保持（提示的先后有意义）");
+        assert_eq!(outcome.flushed[1].payload["text"], "二");
+        assert_eq!(state.queued_notices(), 0);
+        assert!(
+            state.mark_renderer_ready_and_flush().flushed.is_empty(),
+            "重复冲刷是空操作，不能重复提示"
+        );
+
+        assert!(
+            state
+                .deliver_or_queue(emit_envelope("app:notice", json!({"text": "三"})))
+                .is_some(),
+            "就绪之后的广播直接投递（进了队列就再没人冲刷）"
+        );
+        assert_eq!(state.queued_notices(), 0);
+    }
+
+    /// 这条钉的是 Important 3 的缝：**判定就绪与入队之间不能有第二步**。
+    /// 旧写法是 `plan_broadcast(state.renderer_ready())` → `state.queue_notice(..)` 两步。
+    /// 两步之间渲染层若完成 `mark_renderer_ready` + `flush_notices`，提示就 push 进那个**已经冲刷过**
+    /// 的队列，而《冲刷只发生一次》，这条提示再没有人管——永远发不出去。
+    /// 现在判定与入队是同一个加锁方法，把"就绪已翻"的那一刻原样交给调用方去投递。
+    #[test]
+    fn notice_is_not_stranded_when_readiness_flips_before_enqueue() {
+        let state = CoreState::default();
+
+        // 渲染层的「标记就绪 + 冲刷」先发生（冲刷的是空队列）
+        let outcome = state.mark_renderer_ready_and_flush();
+        assert!(outcome.first_time);
+        assert!(outcome.flushed.is_empty());
+
+        // 这一条必须被判成"立刻投递"：调用方拿回 envelope 直接 emit
+        let delivered = state
+            .deliver_or_queue(emit_envelope("app:notice", json!({"text": "启动提示"})))
+            .expect("已就绪的广播必须走投递这条路（不许进队列）");
+        assert_eq!(delivered.payload, json!({"text": "启动提示"}));
+        assert_eq!(
+            state.queued_notices(),
+            0,
+            "队列里留下没人冲刷的提示 = 这条提示永远发不出去"
+        );
+        assert!(
+            state.mark_renderer_ready_and_flush().flushed.is_empty(),
+            "重复冲刷不能凭空吐出提示"
+        );
+    }
+
+    /// 另一侧的先后：先入队、后就绪 → 排队的一条不落，且只冲一次。
+    #[test]
+    fn notices_queued_before_readiness_are_flushed_exactly_once() {
+        let state = CoreState::default();
+        for index in 0..3 {
+            assert!(
+                state
+                    .deliver_or_queue(emit_envelope("app:notice", json!({"n": index})))
+                    .is_none(),
+                "还没就绪就该排队"
+            );
+        }
+        let outcome = state.mark_renderer_ready_and_flush();
+        assert_eq!(outcome.flushed.len(), 3, "排队的提示必须全部冲出来");
+        assert_eq!(outcome.flushed[1].payload["n"], json!(1), "顺序要保持（提示的先后有意义）");
+        assert_eq!(state.queued_notices(), 0);
+        assert!(state.mark_renderer_ready_and_flush().flushed.is_empty(), "第二次冲刷是空操作");
+    }
+
+    /// 并发交错下的守恒律（真线程，不是模拟）：任何交错都不许丢提示、也不许重复投递。
+    ///
+    /// `queued == 冲刷出来的条数` 是这条缝的直接表述：旧写法在这个用例下会偶发少几条
+    /// （进了已冲刷过的队列）。判定与入队在同一个锁里完成之后，这是一条恒等式。
+    #[test]
+    fn no_notice_is_lost_or_delivered_twice_under_concurrent_readiness_flip() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        use std::sync::mpsc;
+        use std::sync::Arc as SharedArc;
+
+        const PUSHERS: usize = 4;
+        const ROUNDS: usize = 20_000;
+
+        let state = SharedArc::new(CoreState::default());
+        let queued = SharedArc::new(AtomicUsize::new(0));
+        let delivered = SharedArc::new(AtomicUsize::new(0));
+        let (sender, receiver) = mpsc::channel::<usize>();
+
+        std::thread::scope(|scope| {
+            for _ in 0..PUSHERS {
+                let state = SharedArc::clone(&state);
+                let queued = SharedArc::clone(&queued);
+                let delivered = SharedArc::clone(&delivered);
+                scope.spawn(move || {
+                    for index in 0..ROUNDS {
+                        match state.deliver_or_queue(emit_envelope("app:notice", json!({ "n": index }))) {
+                            Some(_) => {
+                                delivered.fetch_add(1, AtomicOrdering::Relaxed);
+                            }
+                            None => {
+                                queued.fetch_add(1, AtomicOrdering::Relaxed);
+                            }
+                        }
+                    }
+                });
+            }
+            let flipper = SharedArc::clone(&state);
+            scope.spawn(move || {
+                // 等队列真的攒下提示再翻就绪：保证这次交错确实跨过"就绪那一刻"
+                while flipper.queued_notices() < 8 {
+                    std::hint::spin_loop();
+                }
+                let outcome = flipper.mark_renderer_ready_and_flush();
+                let _ = sender.send(outcome.flushed.len());
+            });
+        });
+
+        let flushed = receiver.recv().expect("冲刷线程必须回报条数");
+        let queued = queued.load(AtomicOrdering::SeqCst);
+        let delivered = delivered.load(AtomicOrdering::SeqCst);
+
+        assert_eq!(queued + delivered, PUSHERS * ROUNDS, "每条广播要么排队要么投递，不能凭空消失");
+        assert!(queued > 0 && delivered > 0, "这次交错必须真的跨过就绪那一刻（queued={queued} delivered={delivered}）");
+        assert_eq!(flushed, queued, "排队过的每一条都必须被冲刷出来；差额就是丢掉的提示");
+        assert_eq!(state.queued_notices(), 0, "就绪之后队列必须永远为空（否则那些提示再没人冲刷）");
+    }
+
+    /// 源码扫描：广播分支只走 `deliver_or_queue` 这一个加锁入口，两步写法不许复活。
+    #[test]
+    fn broadcast_effect_uses_the_single_locked_entry_point() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands.rs"))
+            .expect("要能读到自己的源码");
+        let start = source.find("pub fn apply_effect").expect("找不到 apply_effect");
+        let end = source[start..]
+            .find("\nfn emit_now")
+            .map(|index| start + index)
+            .expect("找不到 apply_effect 的下一个函数");
+        let body = &source[start..end];
+
+        assert!(body.contains("deliver_or_queue("), "广播落地必须走唯一入口：{body}");
+        assert!(
+            !body.contains("queue_notice(") && !body.contains("renderer_ready()"),
+            "不许再出现「先读就绪标志、再入队」的两步写法：{body}"
+        );
     }
 
     #[test]

@@ -2,10 +2,12 @@
  * RPC 契约层：把桥的入帧交给 dispatcher，并给出 core → 宿主 的出向调用面。
  *
  * 桥只管帧与 pending；这里管"谁能被调用"：入向按请求白名单路由，
- * 出向只放行宿主要求频道（host:*），非白名单当场回结构化错误、不写帧。
+ * 出向只放行宿主要求频道（host:*），非白名单当场回结构化错误、不写帧；
+ * 另外给出向渲染层广播的口子（广播白名单 `src/shared/channels.ts`）。
  */
 import { HOST_REQUEST_CHANNELS, REQUEST_CHANNELS, isHostRequestChannel } from "../shared/request-channels.ts";
-import { CORE_ERROR_KINDS, err } from "../shared/result.ts";
+import { BROADCAST_CHANNELS } from "../shared/channels.ts";
+import { CORE_ERROR_KINDS, err, ok } from "../shared/result.ts";
 
 export function createRpc({ bridge, dispatcher }) {
   if (bridge === undefined || typeof bridge.onRequest !== "function") {
@@ -28,6 +30,18 @@ export function createRpc({ bridge, dispatcher }) {
         return Promise.resolve(err(`未知宿主要求频道：${channel}`, CORE_ERROR_KINDS.unknownChannel));
       }
       return bridge.call(channel, payload, options);
+    },
+    /**
+     * 向渲染层广播（漏斗事件）。白名单外当场拒（`unknown_channel`），桥已关闭如实报（`core_gone`）——
+     * 绝不静默丢提示。帧形状 `{channel, payload}` 由桥决定（见 `bridge.broadcast`）。
+     */
+    broadcast(channel, payload = null) {
+      if (!BROADCAST_CHANNELS.includes(channel)) {
+        return err(`未知广播频道：${channel}`, CORE_ERROR_KINDS.unknownChannel);
+      }
+      return bridge.broadcast(channel, payload)
+        ? ok(null)
+        : err("广播帧写出失败（桥已关闭）", CORE_ERROR_KINDS.coreGone);
     },
     /** 收尸：结清在途调用、此后入帧不再处理、出向调用立刻失败。 */
     shutdown(reason = "sidecar 收尸") {

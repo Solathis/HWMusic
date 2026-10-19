@@ -15,6 +15,8 @@ export const CORE_EVENT = "core:event";
  * 白名单一旦为空，sidecar 的任何广播都会被当成白名单外帧丢掉）。R4+ 每新增一个广播频道
  * 都往这里增补，不另立清单。
  */
-export const BROADCAST_CHANNELS = ["app:notice"] as const;
+export const APP_NOTICE = "app:notice" as const;
+
+export const BROADCAST_CHANNELS = [APP_NOTICE] as const;
 
 export type BroadcastChannel = (typeof BROADCAST_CHANNELS)[number];

@@ -210,6 +210,16 @@ export function createBridge({
     return write(isOk ? { id, ok: true, data: result.data ?? null } : { id, ok: false, error: failureOf(result) });
   }
 
+  /**
+   * 广播帧：`{channel, payload}` —— **没有 `id`、没有 `ok`**（Rust `classify_line` 的广播分支只认这个形状；
+   * 带上 id 就会被当成宿主要求，带上 ok 就会被当成响应帧）。
+   * 频道白名单校验在 rpc 层（本模块不认业务频道）。
+   */
+  function broadcast(channel, payload = null) {
+    if (pending.closed) return false;
+    return write({ channel, payload });
+  }
+
   function handleFrame(frame) {
     if (pending.closed) {
       report({ kind: "bridge_closed", frame });
@@ -321,6 +331,7 @@ export function createBridge({
   const api = {
     call,
     respond,
+    broadcast,
     handleFrame,
     handleChunk,
     handleEof,

@@ -69,7 +69,8 @@ test("端到端：其余白名单频道同样给出结构化答复（不静默�
   const sidecar = startSidecar();
   t.after(() => sidecar.cleanup());
 
-  for (const channel of ["auth:logout", "auth:cancel-login", "settings:get", "settings:set"]) {
+  // settings:* 已由 R6 实现（真答复在 test/proxy.test.mjs 里钉），这里只剩仍未实现的 auth:* 占位频道
+  for (const channel of ["auth:logout", "auth:cancel-login"]) {
     const result = await sidecar.bridge.call(channel, {});
     assert.equal(result.ok, false, `${channel} 不该成功`);
     assert.equal(result.error.kind, "unimplemented", `${channel} 的错误类别不对`);
