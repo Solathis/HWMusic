@@ -12,7 +12,7 @@
 Tauri v2 + React 的桌面客户端外壳：官方授权页扫码登录、音乐库浏览、播放器与歌词、
 桌面歌词窗与任务栏歌词降级、托盘与全局快捷键、统一 HTTP 代理设置。
 
-**当前交付状态的准确说法**：代码级与纯函数级已验收（Node 525 / Rust 188 / 验收六路径 6 / 真 Chromium 7 项 / NSIS 静态校验 8 项，全绿）；
+**当前交付状态的准确说法**：代码级与纯函数级已验收（Node 528 / Rust 194 / 验收六路径 6 / 真 Chromium 7 项 / NSIS 静态校验 8 项，全绿）；
 **但真实账号扫码、真实音乐业务端点、真实窗口视觉与 Linux/macOS 平台都还没有实测**。
 逐项档位见 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)，
 逐项限制见 [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md)。
@@ -26,7 +26,7 @@ Tauri v2 + React 的桌面客户端外壳：官方授权页扫码登录、音乐
 
 | 项 | 要求 | 说明 |
 |---|---|---|
-| Node.js | **≥ 22.15.0** | `package.json` 的 `engines` 硬约束；SEA 打包与 `node --test` 都用它 |
+| Node.js | **≥ 22.18.0** | `package.json` 的 `engines` 硬约束；SEA 打包与 `node --test` 都用它。**22.18 起 type stripping 默认开启**：22.15–22.17 跑 `npm test` 会失败（`.ts` 直接 import） |
 | Rust 工具链 | stable（实测 rustc/cargo 1.99.1） | `rustup` 安装，Windows 目标 `x86_64-pc-windows-msvc` |
 | MSVC Build Tools | 需含 `VC.Tools.x86.x64` | Windows 上 `cargo` 的链接器；实测 VS 18 Community 满足 |
 | WebView2 Runtime | Windows 上由安装包 `downloadBootstrapper` 引导 | 开发机通常已随 Edge 装好（实测 155.0.4283.62） |
@@ -123,11 +123,11 @@ vite build    esbuild + SEA     cargo + NSIS
 
 | 命令 | 验什么 | 口径 |
 |---|---|---|
-| `npm run test` | Node 侧功能与契约测试 | `525 pass / 0 fail / 0 skipped`（**跳过的测试不算验过**） |
+| `npm run test` | Node 侧功能与契约测试 | `528 pass / 0 fail / 0 skipped`（**跳过的测试不算验过**） |
 | `npm run typecheck` | `tsc --noEmit` | exit 0 |
 | `npm run test:acceptance` | 六条关键路径（登录门禁/代理/托盘/桌面歌词/任务栏降级无注入/设置持久化） | `PASS 6 / SKIP 0 / FAIL 0`；引用既有测试与源码锚点，**不复制断言逻辑** |
 | `npm run test:browser` | AMLL 面板/背景在**真 Chromium** 里的 DOM 与像素断言 | `PASS 7 / SKIP 0 / FAIL 0`；无 Chromium = **FAIL**，不静默跳过 |
-| `cd src-tauri; cargo test` | Rust 侧单元 + 集成测试 | `188 passed / 0 failed / 1 ignored` |
+| `cd src-tauri; cargo test` | Rust 侧单元 + 集成测试 | `194 passed / 0 failed / 1 ignored` |
 
 `cargo test` 的 **1 个 ignored** 是 R5 那条半程端到端 DPAPI 用例（sidecar 发起方在 R7，
 当前形态不是完整端到端）；用 `cargo test -- --ignored` 手动跑。

@@ -12,11 +12,11 @@ use std::time::Duration;
 
 use huawei_music_desktop_lib::bridge::CoreError;
 use huawei_music_desktop_lib::login::{
-    abandon_unmanaged_window, deadline_conclusion, deliver_build_result, layout_target,
-    login_data_dir, navigation_for, parse_config, shutdown_failures, BuildDelivery,
-    DiscardableWindow, LoginConclusion, LoginSession, LoginState, Navigation, Rect,
-    ShutdownFailure, ShutdownOutcome, LOGIN_ALLOWED_ORIGINS, LOGIN_ALLOWED_URLS,
-    LOGIN_LOAD_DEADLINE_SECS, LOGIN_LOAD_TIMEOUT_MESSAGE, LOGIN_TIMEOUT_SECS,
+    abandon_build_data_dir, abandon_build_data_dir_with, abandon_unmanaged_window,
+    deadline_conclusion, deliver_build_result, layout_target, login_data_dir, navigation_for,
+    parse_config, shutdown_failures, BuildDelivery, DiscardableWindow, LoginConclusion, LoginSession,
+    LoginState, Navigation, Rect, ShutdownFailure, ShutdownOutcome, LOGIN_ALLOWED_ORIGINS,
+    LOGIN_ALLOWED_URLS, LOGIN_LOAD_DEADLINE_SECS, LOGIN_LOAD_TIMEOUT_MESSAGE, LOGIN_TIMEOUT_SECS,
     LOGIN_TOTAL_TIMEOUT_MESSAGE, LOGIN_VIEW_TOP_INSET, MAX_TOP_INSET, MIN_LOGIN_HEIGHT,
     MIN_LOGIN_WIDTH, PARTITION_MAX_LEN,
 };
@@ -608,6 +608,52 @@ fn the_build_handoff_is_wired_through_the_delivery_guard() {
     assert!(
         production.contains("drop(receiver)"),
         "等待方一旦收场就要立刻扔掉接收端：否则晚到的 `send` 仍可能成功，窗被丢进没人再读的通道 = 孤儿窗"
+    );
+}
+
+/// 建窗失败那条路（终审 C）：`create_login_window` 可能在"目录已建、窗没建起来"之后失败
+/// （`build()` / `show()` 失败）。那条路上 `shutdown_window` **永远不会跑**（它只在建窗成功的路径上
+/// 被调用），于是那个一次性数据目录没人负责——里面可能已经有本次的 cookie。
+#[test]
+fn a_window_that_never_opened_does_not_leave_its_data_dir_behind() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join(format!("login-abandon-build-test-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("EBWebView").join("Default")).expect("能建测试目录");
+    std::fs::write(dir.join("EBWebView").join("Default").join("Cookies"), b"x").expect("能写文件");
+
+    let failures = abandon_build_data_dir(&dir);
+    assert!(failures.is_empty(), "删干净了就不该有任何失败项：{failures:?}");
+    assert!(!dir.exists(), "建窗失败的一次性目录必须删掉（里面可能已经有 cookie）");
+
+    // 更早的失败（比如 url 解析不了）根本没建出目录：不算失败，也不许报残留
+    assert!(abandon_build_data_dir(&dir).is_empty(), "本来就不存在 = 已经清干净");
+
+    // 删不掉：按 `DataDir` 分级 → 必须打扰用户（与收尾路径共用同一张分级表与文案）
+    let stubborn =
+        abandon_build_data_dir_with(&dir, |_| Some("拒绝访问。 (os error 5)".to_string()));
+    assert_eq!(stubborn.len(), 1, "{stubborn:?}");
+    assert!(matches!(stubborn[0], ShutdownFailure::DataDir(_)), "{stubborn:?}");
+    assert!(stubborn[0].needs_user_notice(), "目录没删掉是真残留：{stubborn:?}");
+    assert!(stubborn[0].message().contains("建议手动清理"), "{}", stubborn[0].message());
+}
+
+/// 纯函数测不了"有没有真接上"：钉住建窗失败分支真的调了那次善后，且失败原因仍如实回给等待方。
+#[test]
+fn the_build_failure_branch_also_cleans_the_one_shot_data_dir() {
+    let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/login.rs"))
+        .expect("要能读到 login.rs");
+    let start = source.find("fn run_login_window(").expect("登录线程的正体要还在");
+    let end = source.find("fn wait_for_conclusion(").expect("下一个函数要还在");
+    let login_thread = &source[start..end];
+
+    assert!(
+        login_thread.contains("abandon_build_data_dir("),
+        "建窗失败那条路要删掉它可能已经建出来的一次性数据目录"
+    );
+    assert!(
+        login_thread.contains("respond(&shared, &request_id, Err(error))"),
+        "失败原因仍要如实回给等待方（不是塞一句「打不开官方页」）"
     );
 }
 

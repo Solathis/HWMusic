@@ -312,6 +312,28 @@ impl FrameDecoder {
     }
 }
 
+/// 帧摘要的字节上限：残余帧/非法行进日志时最多留这么多字节（与 `src/host/bridge.mjs` 的
+/// `FRAME_EXCERPT_BYTES` 同一口径，两侧都改才不会一边漏）。
+pub const FRAME_EXCERPT_BYTES: usize = 64;
+
+/// 帧摘要：日志里**只给前 [`FRAME_EXCERPT_BYTES`] 字节 + 总字节数**。
+///
+/// 为什么不是"原样带上那段残余"：截断帧是唯一会把**未解析的字节**交出来的地方，而它可能正是
+/// 一帧带着凭据的 JSON（负载里躺着一个密码字段的那种安全存储请求）。
+/// 日志会落盘、会被贴进 issue，所以按裁决取 64 字节上限：够认出"是哪个频道、坏在哪一段"，
+/// 第 64 字节之后的凭据进不了日志。按 UTF-8 字符边界切，不产生半个汉字。
+pub fn frame_excerpt(text: &str) -> String {
+    let total = text.len();
+    if total <= FRAME_EXCERPT_BYTES {
+        return format!("{text}（共 {total} 字节）");
+    }
+    let mut end = FRAME_EXCERPT_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…（已截断，共 {total} 字节）", &text[..end])
+}
+
 #[derive(Debug, Default)]
 struct PendingInner {
     entries: HashMap<String, Sender<Result<Value, CoreError>>>,

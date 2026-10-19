@@ -111,7 +111,55 @@ test("非法 JSON 行：报告 invalid_json 且后续帧照常解析", () => {
   assert.deepEqual(frames, [{ a: 1 }]);
   assert.equal(problems.length, 1);
   assert.equal(problems[0].reason, "invalid_json");
-  assert.ok(problems[0].line.includes("not json"));
+  assert.ok(problems[0].excerpt.includes("not json"), "短行在 64 字节上限内可见，够排障");
+});
+
+test("非法帧脱敏：超过 64 字节的行只给摘要，哑凭据绝不进日志", () => {
+  const problems = [];
+  const decoder = createFrameDecoder({ onInvalidFrame: (problem) => problems.push(problem) });
+  const secret = "dummy-secret-do-not-log";
+  // 前半截是垃圾字节 → 整行是非法的；哑凭据刻意放在第 64 字节**之后**（这就是"凭据邻接"的形状）
+  const line = `${"x".repeat(80)}{"password":"${secret}"}`;
+  decoder.push(`${line}\n`);
+
+  assert.equal(problems.length, 1);
+  assert.equal(problems[0].reason, "invalid_json");
+  const logged = JSON.stringify(problems[0]);
+  assert.ok(!logged.includes(secret), `非法帧不得全文进日志（凭据在里面）：${logged}`);
+  assert.ok(!logged.includes("x".repeat(65)), `摘要不得超过 64 字节：${logged}`);
+  assert.ok(problems[0].excerpt.includes("已截断"), problems[0].excerpt);
+  assert.equal(problems[0].bytes, Buffer.byteLength(line, "utf8"), "总字节数如实报出");
+  assert.equal(problems[0].line, undefined, "旧字段 line 带的是全文，必须从报告里消失");
+});
+
+test("截断帧脱敏：EOF 半帧的报告只给 64 字节摘要，哑凭据绝不进日志", () => {
+  const problems = [];
+  const decoder = createFrameDecoder({ onInvalidFrame: (problem) => problems.push(problem) });
+  const secret = "dummy-secret-do-not-log";
+  const head = `{"id":"half","channel":"host:secure-store-get","payload":{"key":"${"p".repeat(40)}","password":"`;
+  const half = `${head}${secret}"`;
+  decoder.push(half);
+  const rest = decoder.end();
+
+  assert.equal(rest, half, "协议层照旧拿到完整残余（摘要只作用于日志）");
+  assert.equal(problems.length, 1);
+  assert.equal(problems[0].reason, "truncated_frame");
+  const logged = JSON.stringify(problems[0]);
+  assert.ok(!logged.includes(secret), `截断帧不得全文进日志（凭据在里面）：${logged}`);
+  assert.equal(problems[0].excerpt, `${half.slice(0, 64)}…（已截断，共 ${Buffer.byteLength(half, "utf8")} 字节）`);
+});
+
+test("脱敏摘要按 UTF-8 字符边界切：不产生半个汉字、不超 64 字节", () => {
+  const problems = [];
+  const decoder = createFrameDecoder({ onInvalidFrame: (problem) => problems.push(problem) });
+  // 每字 3 字节 → 第 64 字节正好落在一个汉字中间
+  decoder.push(`{"text":"${"中".repeat(40)}"}`);
+  decoder.end();
+
+  const [head] = problems[0].excerpt.split("…");
+  assert.ok(!problems[0].excerpt.includes("\uFFFD"), `不许留半个汉字：${problems[0].excerpt}`);
+  assert.ok(Buffer.byteLength(head, "utf8") <= 64, `摘要头仍要 ≤64 字节：${head}`);
+  assert.ok(problems[0].excerpt.includes("已截断"), problems[0].excerpt);
 });
 
 test("encodeFrame 往返：payload 内的换行不破坏分帧", () => {

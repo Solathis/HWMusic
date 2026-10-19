@@ -128,7 +128,7 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
 | E3 | **`session.enc` 没有密钥轮换 / 多用户区分** | verified（设计意图） | 作用域就是"当前 Windows 用户的本机"；跨用户/跨机器迁移**必然解不开**（→ `invalid_cipher`） |
 | E4 | **内存里的明文不做擦除；`cbData` 是 `u32`，不做 4 GiB 防御** | verified（刻意不做） | 明文最终要经帧发给 sidecar，擦一个中间 `Vec<u8>` 没有实际收益；会话载荷是 KB 级。不写"看起来安全"的代码 |
 | E5 | **`oauth-login1.cloud.huawei.com` 是整域放行** | verified（裁决取舍） | 授权页与回调都在该域，例外 URL 另按整条精确匹配（`/oauth2/v3/loginCallback`）。不放 `*.huawei.com` 通配、不放 `oauth-login2`（parity 测试扫源码禁止通配写法）。理由：不做域内跳转的精细拒绝，否则扫码流程会断链 |
-| E6 | **`login.cloud.huawei.com` 的证据等级较低** | unverified（证据弱） | probe 只证明"域存在"（裸请求 403，属预期）。该条目来自审计事实"华为官方登录域（CAS 系）"；已在代码注释与契约里标注证据等级 |
+| E6 | **`login.cloud.huawei.com` 的证据等级较低** | untested（证据弱） | probe 只证明"域存在"（裸请求 403，属预期）。该条目来自审计事实"华为官方登录域（CAS 系）"；已在代码注释与契约里标注证据等级 |
 | E7 | **探针存在过度打码** | verified（有意的 fail-closed） | `code_challenge_method` 因含子串 `code` 被打码成 `***`。宁多打不多漏 |
 | E8 | **`parseLrc` 忽略 `[offset:±ms]`、不合并同一时间戳的翻译行** | verified（已在 R9 补偿） | R4 的薄封装不做语义补偿（那是改语义）；R9 的 `amll-adapter.ts` 在官方 `parseLrc` 之上补了 `[offset:]` 与翻译行合并，并有测试 |
 | E9 | **`deletePlaylist` 默认 POST + 查询串带 id** | pending（真实方法未知） | `request.method` 可覆写；测试断言"绝不走收藏端点" |

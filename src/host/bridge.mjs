@@ -22,11 +22,40 @@ export function encodeFrame(frame) {
   return `${JSON.stringify(frame)}\n`;
 }
 
+/** 帧摘要的字节上限：残余帧/非法行进日志时最多留这么多字节。 */
+export const FRAME_EXCERPT_BYTES = 64;
+
+const utf8Decoder = new TextDecoder("utf-8", { fatal: false });
+
+/**
+ * 帧摘要：日志与 `onInvalidFrame` 报告里**只给前 [`FRAME_EXCERPT_BYTES`] 字节 + 总字节数**。
+ *
+ * 为什么不是"原样带上那一行"：截断帧/非法行是**唯一**会把未解析的字节原样交出来的地方，
+ * 而它可能正是一帧带着凭据的 JSON（比如负载里躺着一个密码字段的那条安全存储请求——频道名
+ * 在 src/shared 是唯一真源，这里不写第二份）。日志会落盘、会被贴进 issue，所以这里按裁决取
+ * 64 字节上限：够认出"是哪个频道、坏在哪一段"，又保证第 64 字节之后的凭据进不了日志。
+ * 按 UTF-8 字符边界切，不产生半个汉字。
+ */
+export function frameExcerpt(text) {
+  const value = typeof text === "string" ? text : String(text);
+  const bytes = Buffer.byteLength(value, "utf8");
+  if (bytes <= FRAME_EXCERPT_BYTES) return `${value}（共 ${bytes} 字节）`;
+  const head = utf8Decoder
+    .decode(Buffer.from(value, "utf8").subarray(0, FRAME_EXCERPT_BYTES))
+    .replace(/\uFFFD+$/, "");
+  return `${head}…（已截断，共 ${bytes} 字节）`;
+}
+
 /**
  * 分帧状态机。
  * - 完整行立即吐出（吞掉 CRLF 与空行）；
  * - 残余（半帧）留在内部等下一片；
  * - `end()` 交出残余：非空即截断帧，必须报出来而不是静默丢弃。
+ *
+ * 报告给 `onInvalidFrame` 的**只有摘要**（[`frameExcerpt`]），绝不带原文：
+ * 这个回调的默认去向是宿主 stderr 日志。
+ * `cause` 也不带原始 Error：V8 的 `JSON.parse` 报错会把出错的**原文片段**写进 message，
+ * 那是同一条凭据的第二个出口（只留 `causeName`，细节看摘要就够）。
  */
 export function createFrameDecoder({ onInvalidFrame = () => {} } = {}) {
   let buffer = "";
@@ -43,7 +72,12 @@ export function createFrameDecoder({ onInvalidFrame = () => {} } = {}) {
         try {
           frames.push(JSON.parse(line));
         } catch (cause) {
-          onInvalidFrame({ reason: "invalid_json", line, cause });
+          onInvalidFrame({
+            reason: "invalid_json",
+            excerpt: frameExcerpt(line),
+            bytes: Buffer.byteLength(line, "utf8"),
+            causeName: cause instanceof Error ? cause.name : typeof cause,
+          });
         }
       }
       return frames;
@@ -51,7 +85,13 @@ export function createFrameDecoder({ onInvalidFrame = () => {} } = {}) {
     end() {
       const rest = buffer.trim();
       buffer = "";
-      if (rest !== "") onInvalidFrame({ reason: "truncated_frame", line: rest });
+      if (rest !== "") {
+        onInvalidFrame({
+          reason: "truncated_frame",
+          excerpt: frameExcerpt(rest),
+          bytes: Buffer.byteLength(rest, "utf8"),
+        });
+      }
       return rest;
     },
     get remainder() {

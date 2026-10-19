@@ -1,11 +1,11 @@
 {
   "name": "huawei-music-desktop",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
   "type": "module",
   "description": "华为音乐第三方桌面客户端（Tauri v2 + React）。显示名见 src/shared/app-name.mjs。",
   "engines": {
-    "node": ">=22.15.0"
+    "node": ">=22.18.0"
   },
   "scripts": {
     "tauri": "tauri",

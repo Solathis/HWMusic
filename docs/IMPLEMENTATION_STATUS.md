@@ -14,29 +14,32 @@
 > **红线**：一切「已验收」都能指到证据；**未验证的平台与功能一律不宣称支持**。
 > 本文与 [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) 的档位逐条一致。
 
-基准时间：2026-10-19　仓库 HEAD：`6968ba2`（R0–R14 共 **15 次提交**；R15 的交付文档是工作树文件，未提交）
+基准时间：2026-10-19　仓库 HEAD：`97a03d6`（R0–R15 共 **16 次提交**，R15 的交付文档已提交；
+终审修复波的 7 项改动在工作树里，随 v0.1.0 标签一并提交）
 
 ---
 
-## 0. 全局测试基线（R14 实测，全绿）
+## 0. 全局测试基线（终审修复波实测，全绿；真窗冒烟除外，见末行）
 
 | 链路 | 命令 | 结果 |
 |---|---|---|
-| Node 单元/契约测试 | `npm run test`（`node --test test/*.test.mjs`） | **525 pass / 0 fail / 0 skipped** |
+| Node 单元/契约测试 | `npm run test`（`node --test test/*.test.mjs`） | **528 pass / 0 fail / 0 skipped** |
 | 类型检查 | `npm run typecheck` | exit 0（`tsc --noEmit` 无输出） |
-| 验收六路径 | `npm run test:acceptance` | **PASS 6 / SKIP 0 / FAIL 0**；无注入扫描 15 类 token × 109 文件 → **0 命中** |
-| 真 Chromium 守卫 | `npm run test:browser` | **PASS 7 / SKIP 0 / FAIL 0**（像素级：面板字迹比例 67.02%、推进 3300ms 像素差 1.4–1.8%、运行期 console error 0；R14 与 R15 各跑一次，数字是同一档） |
-| Rust 测试 | `cd src-tauri; cargo test` | **188 passed / 0 failed / 1 ignored**（lib 173 + 集成 15） |
-| sidecar 自验证 | `npm run dist:sidecar` | 2/2（`memory-only` PASS、`secure` PASS；产物 SHA ≠ node.exe） |
-| NSIS 静态校验 | `npm run check:nsis` | 8/8 |
+| 验收六路径 | `npm run test:acceptance` | **PASS 6 / SKIP 0 / FAIL 0**；无注入扫描 15 类 token × 110 文件 → **0 命中** |
+| 真 Chromium 守卫 | `npm run test:browser` | **PASS 7 / SKIP 0 / FAIL 0**（像素级：面板字迹比例 67.02%、推进 3300ms 像素差 1.79%、运行期 console error 0；R14 / R15 / 终审修复波各跑一次，数字是同一档） |
+| Rust 测试 | `cd src-tauri; cargo test` | **194 passed / 0 failed / 1 ignored**（lib 173 + 集成 21：`login_policy` 17 + `frame_log_redaction` 4） |
+| sidecar 自验证 | `npm run dist:sidecar` | 2/2（`memory-only` PASS、`secure` PASS；产物 SHA ≠ node.exe）——**R14 实测值，终审修复波未重跑** |
+| NSIS 静态校验 | `npm run check:nsis` | 8/8 ——**R14 实测值，终审修复波未重跑** |
 | 真窗冒烟 | `npm run smoke:build` | **UNTESTED（退出码 2）——不是通过**（见 KNOWN_LIMITATIONS B 组） |
 
+> 本表前五行是终审修复波（工作树：HEAD `97a03d6` + 7 项修复）的实测值；R14 那一轮的同类数字
+> （`npm test` 525、Rust 188）留在 §1 的 R14 行，作为那一轮的历史证据。
 > `0 skipped` 是硬口径：**跳过的测试不算验过**。验收脚本对引用测试同样要求 `skipped == 0`，
 > 并把 `SKIP > 0` 直接判 FAIL。
 
 ---
 
-## 1. R0–R14 逐任务完成态
+## 1. R0–R15 逐任务完成态
 
 | 任务 | 内容 | 提交 | 状态 | 决定性证据 |
 |---|---|---|---|---|
@@ -55,6 +58,7 @@
 | **R12** | 桌面歌词与任务栏降级 | `76e2c1c` | **verified（代码级）**；真窗 untested | Rust 148+15、Node 496/496；四条 async 命令全守卫；R6 三窗 `proxy_url` 收口实测接线；**无注入扫描 16 token × 0 命中**；4 变异全灭；tsc 拦下 `document` 遮蔽全局真缺陷 |
 | **R13** | 系统集成（快捷键等七项） | `9e1352d` | **verified（代码级）**；真机按键 untested | Rust 173+15、Node 496/496；`shortcuts.rs` 925 行 21 内联测试；**接线变异校验**（install 提前 + 托盘写死 true → 2 用例红）；媒体键无备选不静默换键；七项收口核对全过 |
 | **R14** | 打包、验收与 CI | `6968ba2` | **verified（代码级 + 本机打包真跑通）**；CI/安装/真窗 untested | `npm test` 525/525/0；acceptance 6/0/0；`test:browser` 7/0/0；`check:nsis` 8/8；`dist:win` **本机真跑通**（NSIS **26134896 B** + mtime 新鲜度检查通过）；修 2 真缺陷 + 1 flake 根因 |
+| **R15** | 交付文档与契约核对 | `97a03d6` | **verified（文档级）**；`host:notify` 端到端未跑过（如实登记） | `docs/API_CONTRACT.md` §2.11 增补（R3–R7 五条请求频道 + 三条宿主要求）与 §5 变更记录；[KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) 与本文的档位收口。**只补文档、不动代码**（该提交只改了 `README.md` 与 `docs/` 下四份文档） |
 
 **唯一那个 `1 ignored`**：R5 的 DPAPI 半程端到端用例——sidecar 的发起方在 R7，
 所以当前形态不是完整端到端。`cargo test -- --ignored` 手动跑得 `1 passed`。
@@ -76,7 +80,7 @@
 | 6 | HTTP 代理（sidecar 侧 undici `ProxyAgent`） | **verified** | **verified**（本地假代理端到端到 HTTP 头级） | `test/proxy.test.mjs`；`test/fixtures/proxy-host-cases.json` 31 例跨语言互钉（5 变异全灭） |
 | 7 | HTTP 代理（三窗 webview `proxy_url`） | **verified**（源码扫描 + 跨进程 e2e 双钉） | untested（真抓包） | `test/proxy.test.mjs` 的接线扫描；`scripts/acceptance.mjs` 的 `proxy` 路径 |
 | 8 | 登录门禁（未登录不渲染主界面） | **verified** | untested | `test/login-gate.test.mjs`；`scripts/acceptance.mjs` 的 `login-gate` 路径（4 锚点：`shouldShowLoginGate` 判定 + `App.tsx` 真的挡在 `app-shell` 之前） |
-| 9 | 登录子窗（白名单导航 / `hms://` 拦截 / 双期限 / 四收场） | **verified** | untested | `test/login-parity.test.mjs`（双端互钉）；Rust `src/login.rs` 内联测试 + `tests/login_policy.rs` 15 passed |
+| 9 | 登录子窗（白名单导航 / `hms://` 拦截 / 双期限 / 四收场） | **verified** | untested | `test/login-parity.test.mjs`（双端互钉）；Rust `src/login.rs` 内联测试 + `tests/login_policy.rs` 17 passed（含建窗失败路径删一次性数据目录） |
 | 10 | 收藏分页（无可信总数 → 完整分页去重） | **verified** | untested（端点未配） | `test/favorites-pagination.test.mjs`；协议层 `readFavoritesPage` |
 | 11 | 歌单 / 搜索 / 专辑 / 歌手 / 历史 | **verified（协议层 + UI 三态）** | untested（端点未配） | `test/music.test.mjs`、`test/library-views.test.mjs`、`test/dispatcher.test.mjs`、`test/sidecar-e2e.test.mjs`（真进程） |
 | 12 | 播放器状态机 + 队列持久化 | **verified** | untested（无真实音源） | `test/playback-state.test.mjs`、`test/playback-queue.test.mjs`、`test/playback-runtime.test.mjs`、`test/playback-player.test.mjs` |
@@ -109,7 +113,7 @@
 | `proxy` | 代理 | 单一真源 `settings.json` + 三窗接线 + 凭据纪律 | `proxy` / `proxy-settings` / `settings-test-proxy` |
 | `tray` | 托盘 | 托盘 9 槽位 + 关窗 fail-safe（托盘真装上才藏窗口） | `tray` / `close-behavior` |
 | `desktop-lyrics` | 桌面歌词 | 独立透明窗 + 几何纯函数 + 不回写 | `lyrics-window` / `lyrics-panel` |
-| `taskbar-fallback-no-injection` | 任务栏降级 | 贴 `work_area` 下沿；全源码 0 注入 API | `lyrics-window` + token 扫描（15 类 × 109 文件） |
+| `taskbar-fallback-no-injection` | 任务栏降级 | 贴 `work_area` 下沿；全源码 0 注入 API | `lyrics-window` + token 扫描（15 类 × 110 文件） |
 | `settings-persistence` | 设置持久化 | `settings.json` 形状 + DPAPI 会话信封 | `settings-test-proxy` / `session-store` / `settings-page` |
 
 三条口径（写在脚本文件头，这里复述）：**不复制断言逻辑**（引用既有测试，否则漂移的那一份才是假证据）；
@@ -146,10 +150,10 @@
 ```powershell
 npm ci
 npm run typecheck
-npm run test                 # 525 / 0 / 0
+npm run test                 # 528 / 0 / 0
 npm run test:acceptance      # PASS 6 / SKIP 0 / FAIL 0
 npm run test:browser         # PASS 7 / SKIP 0 / FAIL 0（需 Chromium）
-cd src-tauri; cargo test; cd ..   # 188 passed / 1 ignored
+cd src-tauri; cargo test; cd ..   # 194 passed / 1 ignored
 
 # 打包（顺序是硬要求，用编排脚本而不是直接 tauri build）
 npm run dist:sidecar

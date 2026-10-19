@@ -553,7 +553,19 @@ fn run_login_window(
             // 而不是塞一句"打不开官方页，请检查网络或代理"——那是另一回事，处置方式也不同。
             // 用户点一次登录什么都没发生是最难排查的故障，所以这里必须留痕。
             log::warn!("登录窗建不起来：{error}");
+            // 先答复、再善后（与成功路径同一条纪律）：退避删目录最长要等约 1.5 秒，
+            // 不能让等待方陪着等——何况"删目录失败"的结论不该改变这次登录的答复。
             respond(&shared, &request_id, Err(error));
+            // `create_dir_all(login_data)` 在建窗**之前**就跑了：`build()`/`show()` 失败时目录已经
+            // 在那儿，而这条路上 `shutdown_window` 永远不会被调用 → 就地尽力清一次（终审 C）。
+            for failure in abandon_build_data_dir(&login_data) {
+                if failure.needs_user_notice() {
+                    log::warn!("建窗失败后的目录善后有残留：{}", failure.message());
+                    announce_failure(&app, &shared, &failure.message());
+                } else {
+                    log::warn!("建窗失败后的目录善后未竟（不打扰用户）：{}", failure.message());
+                }
+            }
             state.finish();
             return;
         }
@@ -705,8 +717,10 @@ fn create_login_window(
 /// 尽力清掉一个"可能已经建出来、但已经没人等待"的登录窗（建窗超时那条路专用）。
 ///
 /// 只写日志不发 `app:notice`：这条路上用户已经拿到结构化错误了，残留与否不影响他的下一步。
-/// **这里只销毁窗口、不删数据目录**：闭包可能正在用那个目录建 WebView2，并发删会把它弄坏；
-/// 窗真的建出来了的话，交付守卫会连目录一起清掉。
+/// **这个函数只销毁窗口、不删数据目录**：闭包可能正在用那个目录建 WebView2，并发删会把它弄坏。
+/// 目录由 [`run_login_window`] 的 Err 支用退避删除兜底（那里对"删不掉"仍按 [`ShutdownFailure::DataDir`]
+/// 分级——目录里可能真有 cookie）；并发删的最坏结果是那个晚到的闭包建不出窗，而那比留下一个
+/// 无人等待的孤儿窗更好；窗真的建出来了的话，交付守卫也会连目录一起清掉。
 fn discard_pending_login_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window(LOGIN_WINDOW_LABEL) else {
         return; // 还没建出来：闭包侧的交付守卫会接住它
@@ -1072,6 +1086,30 @@ pub fn remove_dir_with_backoff(dir: &Path) -> Option<String> {
         }
     }
     Some(last)
+}
+
+/// 建窗失败路径的目录善后（**注入式**：删除器可替身，好测"删不掉"那一半）。
+///
+/// 与收尾路径共用 [`shutdown_failures`] 的分级：唯一的失败项是 [`ShutdownFailure::DataDir`]，
+/// 于是"删不掉才会打扰用户"这条判断不需要第二份实现。
+pub fn abandon_build_data_dir_with(
+    data_dir: &Path,
+    remove: impl FnOnce(&Path) -> Option<String>,
+) -> Vec<ShutdownFailure> {
+    shutdown_failures(&ShutdownOutcome {
+        data_dir: remove(data_dir),
+        ..Default::default()
+    })
+}
+
+/// 建窗失败后的善后：尽力删掉 `create_login_window` 可能**已经建出来**的那个一次性目录。
+///
+/// 为什么必须有：`create_dir_all(login_data)` 在建窗之前就跑了，而 `build()` / `show()` 失败会让
+/// 函数带着 `Err` 返回——那条路上 [`shutdown_window`] 永远不会被调用（它只接在"建窗成功"后面），
+/// 于是目录没人删。里面可能有 cookie，也是"下次登录会另建新目录"之外的纯垃圾。
+/// 失败时按 [`ShutdownFailure::DataDir`] 分级：只有真删不掉才广播 `app:notice`。
+pub fn abandon_build_data_dir(data_dir: &Path) -> Vec<ShutdownFailure> {
+    abandon_build_data_dir_with(data_dir, remove_dir_with_backoff)
 }
 
 /// 向渲染层发一条 `app:notice`（宿主级提示：登录窗收尾没做完）。

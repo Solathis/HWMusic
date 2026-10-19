@@ -706,7 +706,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
   快捷键与托盘的兜底关系 / Wayland 热键限制写在代码注释里）；§3 增补两行。
   三条如实登记的未验证项（真机注册与投递、Wayland 会话、setup 期注册不自锁是源码结论）
   + 两条已知限制（设置页不显示快捷键、capabilities 里三条 `global-shortcut:allow-*` 冗余）。
-- 2026-10-19（Task R15）：**核对后增补 §2.11** —— R3–R7 建立的四条请求频道
+- 2026-10-19（Task R15）：**核对后增补 §2.11** —— R3–R7 建立的五条请求频道
   （`auth:login`/`auth:logout`/`auth:cancel-login`/`settings:get`/`settings:set`）与三条宿主要求
   （`host:notify`/`host:secure-encrypt`/`host:secure-decrypt`）此前在全文里只有引用、没有登记
   （典型症状：§2.6/§2.7 引「§2.5 的既有语义」而 §2.5 里并没有它们）。本节按代码事实补齐载荷、

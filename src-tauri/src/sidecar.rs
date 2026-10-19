@@ -13,7 +13,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crate::bridge::{
-    classify_line, CoreError, CoreShared, Effect, FrameDecoder, FramePolicy, LineOutcome,
+    classify_line, frame_excerpt, CoreError, CoreShared, Effect, FrameDecoder, FramePolicy,
+    LineOutcome,
 };
 
 /// node 可执行文件覆盖旋钮：绝对路径或 PATH 上的裸命令名；空值/相对路径=未设置。
@@ -343,8 +344,11 @@ impl SidecarProcess {
             }
 
             if let Some(rest) = decoder.end() {
+                // **绝不落全文**：这半帧可能正是带着凭据的一帧（凭据纪律，见 `frame_excerpt`）。
+                // 进 Notice 的只有前 64 字节摘要 + 总长度，够排障、不够泄露。
                 let _ = sender.send(Effect::Notice(format!(
-                    "sidecar stdout 在半个帧上结束：{rest}"
+                    "sidecar stdout 在半个帧上结束（只留前 64 字节）：{}",
+                    frame_excerpt(&rest)
                 )));
             }
 
