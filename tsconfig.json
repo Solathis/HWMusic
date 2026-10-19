@@ -9,6 +9,9 @@
     "strict": true,
     "noEmit": true,
     "allowJs": true,
+    // src/shared/*.ts 是 Node sidecar 与渲染层共用的同一份真源：Node 的 ESM 解析要求
+    // 显式后缀（import "../shared/request-channels.ts"），所以两侧统一写 .ts 后缀。
+    "allowImportingTsExtensions": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
     "isolatedModules": true,

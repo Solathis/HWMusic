@@ -1,9 +1,15 @@
 //! 华为音乐第三方桌面客户端 · Tauri v2 外壳。
 //!
 //! R2 范围：窗口策略（1280×800 / min 960×640 / 显式 webview 数据目录）、最小权限
-//! capabilities、插件链编排。sidecar 桥、命令白名单、登录窗、托盘、歌词窗由后续任务加入。
+//! capabilities、插件链编排。R3 增加 sidecar 桥（NDJSON stdio、命令白名单、宿主要求路由）。
+//! 登录窗、托盘、歌词窗由后续任务加入。
+
+mod bridge;
+mod commands;
+mod sidecar;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_window_state::StateFlags;
@@ -148,10 +154,46 @@ pub fn run() {
         .setup(|app| {
             let data_root = create_main_window(app.handle())?;
             app.manage(WebviewDataRoot(data_root));
+
+            // core（sidecar）：起不来也不拦启动——core_call 会返回结构化 core_unavailable，
+            // 比"应用直接起不来"更好排查，也不静默。
+            app.manage(Arc::new(commands::CoreState::default()));
+            let knobs = sidecar::SidecarKnobs::from_env();
+            let exe_dir = std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(Path::to_path_buf))
+                .unwrap_or_else(|| PathBuf::from("."));
+
+            match sidecar::resolve_launch(&exe_dir, &knobs)
+                .and_then(|plan| sidecar::SidecarProcess::spawn(&plan))
+            {
+                Ok(process) => {
+                    let process = Arc::new(process);
+                    commands::start_pump(app.handle(), &process);
+                    app.state::<Arc<commands::CoreState>>()
+                        .install(Arc::clone(&process));
+                    log::info!("core（sidecar）已启动：{:?}", process.plan());
+                }
+                Err(error) => log::warn!("core（sidecar）未能启动：{error}"),
+            }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("Tauri 应用启动失败");
+        .invoke_handler(tauri::generate_handler![
+            commands::core_call,
+            commands::core_renderer_ready
+        ])
+        .build(tauri::generate_context!())
+        .expect("Tauri 应用启动失败")
+        .run(|app_handle, event| {
+            // tao 在 Windows 上 run_return 之后直接 process::exit，Drop 不会执行：
+            // 退出路径必须显式收尸（关 stdin → sidecar exit(0) → 帧泵 EOF → 结清 pending）。
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                commands::shutdown_core(app_handle, "应用退出");
+            }
+        });
 }
 
 #[cfg(test)]
