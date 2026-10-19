@@ -17,6 +17,7 @@ pub mod login;
 pub mod lyrics_window;
 mod secure_store;
 mod sidecar;
+pub mod shortcuts;
 pub mod tray;
 mod webview_proxy;
 
@@ -262,6 +263,22 @@ pub fn run() {
                 }
             }
 
+            // 快捷键（R13）：**逐条**注册（插件本身不注册任何组合——它遇到注册失败会把整个
+            // 启动带崩），主组合被占用时沿备选链试。三条纪律：
+            //
+            // - 顺序：排在 `tray::install` **之后**——失败提示要指路托盘菜单，那得先知道托盘
+            //   到底装上没有（指一个不存在的地方比不指更糟）；排在 core 状态登记之后同理
+            //   （提示要能排队到渲染层就绪）。
+            // - 失败/回退**逐条**经启动提示（`app:notice`）如实上报：真正生效的组合同时记进
+            //   `ShortcutState`，用户看到的是"现在用的是哪个键"，不是"设置里写着另一个键"。
+            // - 注册不上**不拦启动**：没有快捷键的用户仍然有主界面与托盘。
+            let shortcut_report = shortcuts::install(handle);
+            for text in shortcuts::shortcut_notices(&shortcut_report, tray::available(handle)) {
+                log::warn!("快捷键：{text}");
+                commands::emit_core_event(handle, crate::bridge::APP_NOTICE, serde_json::json!({ "text": text }));
+            }
+            app.manage(shortcuts::ShortcutState::new(shortcut_report));
+
             // 登录窗的独占状态：同一时刻只允许一次登录（R7）。登记在这里而不是懒初始化，
             // 免得"第一次登录时才发现没状态"要先写一段 fallback。
             // （顺序无契约：它不在广播路径上——广播的排队能力只归 `Arc<CoreState>`。
@@ -355,6 +372,18 @@ mod tests {
             .find(".invoke_handler(")
             .map(|offset| start + offset)
             .expect("setup 之后应当紧跟 invoke_handler");
+        &source[start..end]
+    }
+
+    /// 源码扫描：插件注册段（`Builder::default()` 到 `setup` 之间）。
+    fn plugins_block(source: &str) -> &str {
+        let start = source
+            .find("tauri::Builder::default()")
+            .expect("找不到插件注册段");
+        let end = source[start..]
+            .find(".setup(|app| {")
+            .map(|offset| start + offset)
+            .expect("插件注册段之后应当是 setup");
         &source[start..end]
     }
 
@@ -619,6 +648,168 @@ mod tests {
         assert!(
             core_state < install,
             "core 状态登记必须先于 tray::install：托盘失败的提示要靠它的队列扣到渲染层就绪（core={core_state}, install={install}）"
+        );
+    }
+
+    /// R13 顺序契约一：快捷键注册排在 **core 状态登记之后、托盘安装之后**。
+    ///
+    /// - 排在 core 状态之前：失败提示取不到队列，`emit_core_event` 退回直接 `app.emit`——
+    ///   那时渲染层还没跑 `listen()`，提示发进空气（R11 修复轮 1/5 的同一个坑）。
+    /// - 排在托盘之前：提示里"请改用托盘菜单"就成了没根据的话（托盘可能压根没装上）。
+    ///
+    /// 注册本身**不拦启动**：一个注册不上的快捷键不该把应用带走（简报）。
+    #[test]
+    fn shortcuts_are_registered_after_the_core_state_and_after_the_tray() {
+        let source = lib_source();
+        let setup = setup_block(&source);
+
+        let core_state = setup
+            .find("app.manage(Arc::new(commands::CoreState::default()))")
+            .expect("setup 里必须登记 core 状态（提示队列住在它里面）");
+        let tray = setup.find("tray::install(").expect("setup 里必须装托盘");
+        let register = setup
+            .find("shortcuts::install(")
+            .expect("setup 里必须逐条注册快捷键（R13 的交付点）");
+        assert!(
+            core_state < register,
+            "快捷键的失败提示要靠 core 状态的队列扣到渲染层就绪（core={core_state}, register={register}）"
+        );
+        assert!(
+            tray < register,
+            "提示里要指路托盘菜单，就得先知道托盘到底装上没有（tray={tray}, register={register}）"
+        );
+        assert!(
+            !setup.contains("shortcuts::install(handle)?"),
+            "快捷键注册失败绝不能把启动带崩：结论要收进 ShortcutReport 逐条上报"
+        );
+    }
+
+    /// R13 的接线：注册结论**逐条入队**（经 `emit_core_event`），生效组合记进托管状态。
+    ///
+    /// 扫的是那一小段（从 `shortcuts::install` 到 `invoke_handler`）：整份扫的话，
+    /// 别处（托盘 R11）的 `emit_core_event` 会把这条用例自己满足掉。
+    #[test]
+    fn shortcut_failures_are_queued_as_notices_and_the_state_is_managed() {
+        let source = lib_source();
+        let setup = setup_block(&source);
+
+        let start = setup.find("shortcuts::install(").expect("setup 里必须注册快捷键");
+        let end = setup.find(".invoke_handler(").unwrap_or(setup.len());
+        let compact: String = setup[start..end].chars().filter(|c| !c.is_whitespace()).collect();
+
+        assert!(
+            compact.contains("shortcuts::shortcut_notices("),
+            "失败与回退要经 shortcut_notices 逐条问出来：{compact}"
+        );
+        assert!(
+            compact.contains("tray::available(handle)"),
+            "提示里'请改用托盘菜单'要有根据：现问托盘表，不许猜：{compact}"
+        );
+        assert!(
+            compact.contains("commands::emit_core_event(handle,crate::bridge::APP_NOTICE,"),
+            "启动提示的唯一出口是 emit_core_event（不许自己 app.emit）：{compact}"
+        );
+        assert!(
+            !compact.contains("app.emit(") && !compact.contains(".emit("),
+            "快捷键这段不许绕开唯一构造点自己 emit：{compact}"
+        );
+        assert!(
+            compact.contains("app.manage(shortcuts::ShortcutState::new(shortcut_report))"),
+            "真正生效的组合要记进托管状态（设置页后续可读，本任务不做 UI）：{compact}"
+        );
+    }
+
+    /// R13 的插件口径：**插件本身不注册任何组合**。
+    ///
+    /// `tauri-plugin-global-shortcut` 的 `Builder::with_shortcut(s)` 在它自己的 setup 里注册，
+    /// 失败直接让 `setup` 返回 Err → tauri 在 `RuntimeRunEvent::Ready` 里 `panic!("Failed to setup
+    /// app")`。那正是简报要防的"注册失败把应用带走"：组合只能由我们在 setup 里逐条注册。
+    #[test]
+    fn the_global_shortcut_plugin_registers_no_combos_itself() {
+        let source = lib_source();
+        let setup = setup_block(&source);
+        let plugins = production_source(&source);
+        for forbidden in [".with_shortcut(", ".with_shortcuts("] {
+            assert!(
+                !plugins.contains(forbidden),
+                "组合不许交给插件注册（{forbidden}）：它一失败就是把应用带崩"
+            );
+        }
+        assert!(
+            plugins.contains("tauri_plugin_global_shortcut::Builder::new()"),
+            "插件照常注册（提供管理器）"
+        );
+        assert!(
+            !setup.contains(".with_shortcut(") && !setup.contains(".with_shortcuts("),
+            "setup 里也不许用插件的组合注册接口"
+        );
+    }
+
+    /// R13 收口核对（七项里的四项）：系统集成插件的**注册参数**是契约，逐项钉住。
+    ///
+    /// 这些参数各有一个"写错了要到用户机器上才发现"的后果：
+    /// - **single-instance 必须最先注册**：晚于其它插件的话，第二个实例会先走完那些插件的
+    ///   初始化（窗口状态恢复、日志文件打开）才被拦下——旧仓的"双击图标没反应"就是这么来的。
+    /// - **window-state 的 flags 只许 SIZE|POSITION|MAXIMIZED**：混进 `VISIBLE`，桌面歌词窗
+    ///   就会在**下次开机**自己弹出来（旧会话里它是可见的）；混进 `FULLSCREEN`/`DECORATIONS`
+    ///   会跟歌词窗的无边框/置顶属性打架。
+    /// - **filter 只放行 main/lyrics**：登录子窗的位置不该被持久化（一次性窗口）。
+    /// - **autostart 用 `MacosLauncher::LaunchAgent`**：macOS 上的另一档（AppleScript）会在
+    ///   系统设置里留一个"脚本"项，而自启注册失败在 macOS 上只有它这一条路。
+    /// - **log 的档位**：Info / 单文件 4MB / KeepOne（落 `app_log_dir` 是插件的默认目标，
+    ///   见 `tauri-plugin-log` 的 `DEFAULT_LOG_TARGETS`，不需要显式 `.target(..)`）。
+    #[test]
+    fn the_system_integration_plugins_keep_their_registration_parameters() {
+        let source = lib_source();
+        let plugins = plugins_block(&source);
+
+        // 1. single-instance 最先，且回调把已有主窗拉到前台
+        let single = plugins
+            .find("tauri_plugin_single_instance::init(")
+            .expect("必须注册 single-instance（第二实例要聚焦主窗）");
+        assert!(
+            single < plugins.find("tauri_plugin_window_state::").expect("窗口状态插件"),
+            "single-instance 必须最先注册：晚于其它插件时第二实例会先跑完那些插件的初始化"
+        );
+        let after_single = &plugins[single..];
+        assert!(
+            after_single[..after_single.find(".plugin(").unwrap_or(after_single.len())]
+                .contains("focus_main(app)"),
+            "第二实例启动时必须 focus_main（否则用户双击图标什么都不会发生）"
+        );
+
+        // 2. window-state：flags 与 filter
+        assert!(
+            plugins.contains("StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED"),
+            "窗口状态的 flags 是契约：{plugins}"
+        );
+        for forbidden in ["StateFlags::VISIBLE", "StateFlags::DECORATIONS", "StateFlags::FULLSCREEN"] {
+            assert!(
+                !plugins.contains(forbidden),
+                "{forbidden} 不许混进 flags：歌词窗下次开机会自己弹出来 / 与无边框置顶打架"
+            );
+        }
+        assert!(
+            plugins.contains("with_filter(") && plugins.contains("MAIN_WINDOW_LABEL")
+                && plugins.contains("LYRICS_WINDOW_LABEL"),
+            "只记 main 与 lyrics 两个窗口的位置与尺寸：{plugins}"
+        );
+
+        // 3. notification 照常注册（host:notify 的落地口，R3 已接）
+        assert!(plugins.contains("tauri_plugin_notification::init()"), "系统通知插件");
+
+        // 4. autostart 的 macOS 档位
+        assert!(
+            plugins.contains("tauri_plugin_autostart::MacosLauncher::LaunchAgent"),
+            "macOS 用 LaunchAgent：{plugins}"
+        );
+
+        // 5. log 的档位与落点
+        assert!(plugins.contains(".level(log::LevelFilter::Info)"), "日志级别 Info");
+        assert!(plugins.contains(".max_file_size(4 * 1024 * 1024)"), "单文件 4MB");
+        assert!(
+            plugins.contains("tauri_plugin_log::RotationStrategy::KeepOne"),
+            "轮转只留一个文件"
         );
     }
 

@@ -485,6 +485,75 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 3. **歌词窗只有隐藏没有销毁**：进程退出前它一直占着一份 webview（这是刻意的：保住进度与
    即时开关的代价，换来的是内存占用）。
 
+### 2.10 系统集成与全局快捷键（R13 落地）
+
+**快捷键组合清单（唯一真源：`src-tauri/src/shortcuts.rs` 的 `SHORTCUT_BINDINGS`）**
+
+| 动作 | 主组合 | 备选链 | 落地（全部经 `emit_core_event`） |
+|---|---|---|---|
+| 播放·暂停 | `MediaPlayPause` | **无** | `player:command {command:"toggle"}` |
+| 上一首 | `MediaTrackPrevious` | **无** | `player:command {command:"previous"}` |
+| 下一首 | `MediaTrackNext` | **无** | `player:command {command:"next"}` |
+| 桌面歌词 | `CmdOrCtrl+Alt+L` | `CmdOrCtrl+Alt+Shift+L` → `CmdOrCtrl+Shift+L` | `lyrics:toggle {checked}`（目标态 = 歌词窗的反事实状态）+ 托盘勾选镜像到同一目标态 |
+| 设置 | `CmdOrCtrl+Alt+S` | `CmdOrCtrl+Alt+Shift+S` → `CmdOrCtrl+Shift+S` | `app:open-settings {view:"settings"}` |
+
+注册在 `setup` 里**逐条**做，**插件不注册任何组合**（`Builder::with_shortcut(..)` 失败会让整个
+`setup` 返回 Err → 启动即崩，一个被占用的媒体键不该把应用带走）。主组合被占用 → 沿备选链试；
+媒体三键**没有备选**（配一条用户没按过的组合 = 偷偷换键，且他无从知道按哪个键）。只有 `Pressed`
+那一次触发（`Released` 再来一次 = 播放/暂停翻两次）。生效组合记进 `ShortcutState`（托管状态，
+设置页后续可读），回退与全废**逐条**经 `app:notice` 说清"原来想用哪个、现在实际是哪个、为什么"；
+下一步指路托盘菜单，**托盘没装上就改指应用窗口**（指一个不存在的地方比不指更糟）。
+**设置页不显示快捷键**（本任务范围外，已知限制，见 §2.10 末）。
+
+**七项系统集成收口核对（逐项结论）**
+
+1. **single-instance ✓**：最先注册（晚于其它插件 = 第二实例会先跑完那些插件的初始化）；
+   回调 `focus_main`（unminimize + show + set_focus）——主窗藏在托盘里时也拉得回来。
+2. **window-state ✓**：flags 只有 `SIZE|POSITION|MAXIMIZED`，`with_filter` 只放行 `main`/`lyrics`。
+   **不含 `VISIBLE`** 是刻意的：插件只在 flags 含 `VISIBLE` 时才 `show()`
+   （`tauri-plugin-window-state-2.5.0/src/lib.rs:279`），所以歌词窗不会在下次开机自己弹出来；
+   不含 `DECORATIONS`/`FULLSCREEN`（不与歌词窗的无边框/置顶属性打架）。如实记一条副作用：
+   SIZE/POSITION 会被恢复，歌词窗**首次创建**时 R12 的几何在其后应用（R12 的判定胜），
+   隐藏后再显示不重摆（正是"保住用户拖动位置"的设计）。
+3. **notification ✓**：`host:notify` → `HostPlan::Notify`。标题 = 应用显示名（`product_name`，
+   不写任务号），正文 = sidecar 给的 `{text}`（trim 后非空；空串/非字符串回 `invalid_payload`）；
+   送达失败 → 一行 `log::warn` **+** 结构化错误响应帧（比"只记日志"更强：上游知道没送到）。
+   渲染层只有一处调用它（`auth-manager.ts` 的会话读取失败原因），文案克制。
+4. **autostart ✓**：`MacosLauncher::LaunchAgent`；两条命令过 `require_main_window`；写入后
+   `is_enabled()` **回读**并报**观测到的**状态（不回显请求——`enable()` 返回 Ok 不等于系统记下了）；
+   插件未注册时回结构化错误（插件扩展 trait 的 `autolaunch()` 会 panic）。
+5. **log ✓**：Info / 单文件 4MB / `KeepOne`；插件默认目标含 `LogDir`
+   （`DEFAULT_LOG_TARGETS`），文件落 `app_log_dir()`（`tauri-plugin-log-2.10.1/src/lib.rs:820`），
+   不需要显式 `.target(..)`。**`eprintln!` 只出现在 `sidecar.rs` 的 `#[cfg(test)]` 段**（4 处：
+   "release 没有开发期脚本回退"/"起不了真 sidecar" 时打印跳过）——生产代码只有 `log::` 一条通道。
+6. **快捷键 ↔ 托盘兜底 ✓**：全废时提示里指路托盘菜单；托盘不可用则指应用窗口入口（同一句话
+   不指两个地方）。歌词键与托盘勾选的联动走 `tray::revert_lyrics_checked`（同一个"把勾选改成
+   某个确定状态"的动作；R12 用它翻回事实，R13 用它镜像目标态），失败收口仍归 R12。
+7. **Wayland ✓（限制已写进代码）**：`global-hotkey` 的 Linux 后端只有 **X11**（`x11rb`），
+   Wayland 原生会话下没有 X 连接 → 每条注册都失败（`GlobalHotKeyManager::new()` 只起线程、
+   当场返 Ok，错误落在 `register` 上）→ 走逐条提示这条既有降级路，不会把启动带崩。
+   未实测，文案不承诺 Wayland。注释在 `shortcuts.rs` 模块头（`PLATFORM_DIFFERENCES.md` 是 R15
+   的交付物，R15 直接取用）。
+
+**如实登记的未验证项（本任务）**
+
+1. **真机快捷键注册与投递未实测**：本任务只覆盖"注册计划/备选链/状态/文案"的纯函数层与
+   `lib.rs` 的接线扫描；"媒体键按下去播放器真的动"没有实机证据（Windows 上媒体键被别的程序
+   占用是常态，回退与提示正是为它写的）。
+2. **Wayland 会话未实测**：预期是"每条注册都失败 → 逐条提示"，这是读 `global-hotkey` 源码
+   得出的结论，不是真机证据。
+3. **注册时机不在主线程自锁**：插件每次注册都 `run_on_main_thread` + 阻塞等结果，而
+   `setup` 跑在主线程的事件循环回调里。已核到 `Context::send_user_message` 在主线程上**内联
+   执行**（`tauri-runtime-wry-2.12.2/src/lib.rs:263-273`），因此 `setup` 里注册不会自锁——
+   源码结论，未在真机跑过冷启动。
+
+**已知限制**
+
+1. **设置页看不到当前快捷键**（明确不做 UI）：生效组合记在 `ShortcutState` 里，只经启动提示
+   说一次；
+2. **`capabilities/main.json` 里的三条 `global-shortcut:allow-*` 现在没有渲染层调用方**
+   （注册已收归宿主）：R2 的计划第 141 行显式要求这三条，本任务不动它——如实记为冗余权限。
+
 ### 2.4 CDN 域（已确认可达）
 
 | 域 | probe 实测 | 用途 |
@@ -521,6 +590,8 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `LYRICS_COLOR_TOKENS` | `foreground`/`muted`/`primary`/`contrast` | 同上（TS 为真源、Rust 为镜像） | R12：歌词颜色的令牌档位（只认设计令牌，绝不接受任意色值） |
 | `MIN_PROGRESS_INTERVAL_MS` | `100` | `src/renderer/features/lyrics/lyrics-window.mjs` | R12：进度节流窗口（rAF 每帧调 `pushProgress`，只有该推的才出 IPC） |
 | `LYRICS_SESSION_NOTICE` | 会话内说明文案 | `src/renderer/features/lyrics/lyrics-window.mjs` | R12：设置项旁边如实写"只在本次运行内生效、不写入设置文件" |
+| `SHORTCUT_BINDINGS` | 5 动作 / 主组合 + 备选链 | `src-tauri/src/shortcuts.rs` | R13：全局快捷键的唯一真源（媒体三键无备选；两条提示型组合各有 2 条备选）。每个组合都必须能被 `global-hotkey` 解析、且不许两个动作抢同一个组合（内联单测钉住） |
+| `ShortcutState` | 生效组合快照 | `src-tauri/src/shortcuts.rs` | R13：`setup` 里登记成托管状态（设置页后续可读；本任务只记 + 提示，不做 UI） |
 
 ## 4. 红线（任何后续任务不得越过）
 
@@ -567,3 +638,11 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
   三条广播与四条 async 命令、歌词数据流与五档状态、托盘勾选失败路径的收口；
   §2.6 的"歌词来源通道"那条未接线项**由本节关闭**（频道已接，缺的是端点）。
   §3 增补七行常量。三条如实登记的未验证项 + 三条已知限制。
+- 2026-10-19（Task R13）：新增 §2.10——全局快捷键组合清单（媒体三键无备选 / 两条提示型组合
+  各 2 条备选）、逐条注册与备选链回退（**插件不注册任何组合**：它的注册失败会崩启动）、
+  回退与全废逐条经 `app:notice` 说清"现在用的是哪个键"（托盘不可用则改指应用窗口）、
+  歌词键顺带把托盘勾选镜像到目标态；**七项系统集成收口核对逐项结论**
+  （single-instance / window-state flags 与 filter / notification / autostart / log /
+  快捷键与托盘的兜底关系 / Wayland 热键限制写在代码注释里）；§3 增补两行。
+  三条如实登记的未验证项（真机注册与投递、Wayland 会话、setup 期注册不自锁是源码结论）
+  + 两条已知限制（设置页不显示快捷键、capabilities 里三条 `global-shortcut:allow-*` 冗余）。
