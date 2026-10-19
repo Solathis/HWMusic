@@ -1,12 +1,50 @@
 /**
  * AMLL 桌面歌词主题接线。
- * 只做三个变量的映射，单一选择器 .amll-lyrics-stage（歌词舞台容器，R12 挂在 AMLL
- * 播放器外层）；歌词的排版、动画、着色全部由 @applemusic-like-lyrics/core 自带
- * style.css 负责，本文件不写任何自定义视觉样式。
+ * 只做变量映射，选择器是歌词容器 `.amll-lyrics-stage`（主窗歌词舞台与 R12 的桌面歌词窗共用）；
+ * 歌词的排版、动画、着色全部由 @applemusic-like-lyrics/core 自带 style.css 负责，
+ * 本文件不写任何自定义视觉样式（不写颜色值、不写字体族、不写布局）。
  * 变量由 AMLL 在 .amll-lyric-player 上以 var(...) 消费，靠继承生效。
+ *
+ * R12 的两组档位：
+ * - `[data-lyrics-size]`：桌面歌词窗的字号档位。为什么是档位而不是连续字号——渲染层的视觉
+ *   一律走工具类/令牌，内联样式只允许几何契约与 AMLL 的 100% 尺寸那两处，所以这里只能用
+ *   "一个档位一条规则"的写法；档位的 px 值在 features/lyrics/lyrics-window.mjs（钳制与文案用），
+ *   两边的对应关系由 test/lyrics-window.test.mjs 钉住（16px = 1rem）。
+ * - `[data-lyrics-color]`：颜色令牌档位，一律映射到 styles.css 里的设计令牌（不接受任意色值）。
  */
 .amll-lyrics-stage {
   --amll-lp-color: var(--foreground);
   --amll-lp-font-size: var(--text-2xl);
   --amll-lp-hover-bg-color: var(--accent);
+}
+
+/* 字号档位（px 见 features/lyrics/lyrics-window.mjs 的 LYRICS_FONT_STEPS） */
+.amll-lyrics-stage[data-lyrics-size="sm"] {
+  --amll-lp-font-size: 1rem;
+}
+.amll-lyrics-stage[data-lyrics-size="md"] {
+  --amll-lp-font-size: 1.25rem;
+}
+.amll-lyrics-stage[data-lyrics-size="lg"] {
+  --amll-lp-font-size: 1.75rem;
+}
+.amll-lyrics-stage[data-lyrics-size="xl"] {
+  --amll-lp-font-size: 2.5rem;
+}
+.amll-lyrics-stage[data-lyrics-size="xxl"] {
+  --amll-lp-font-size: 3.5rem;
+}
+
+/* 颜色令牌档位（id 见 features/lyrics/lyrics-window.mjs 的 LYRICS_COLOR_TOKENS） */
+.amll-lyrics-stage[data-lyrics-color="foreground"] {
+  --amll-lp-color: var(--foreground);
+}
+.amll-lyrics-stage[data-lyrics-color="muted"] {
+  --amll-lp-color: var(--muted-foreground);
+}
+.amll-lyrics-stage[data-lyrics-color="primary"] {
+  --amll-lp-color: var(--primary);
+}
+.amll-lyrics-stage[data-lyrics-color="contrast"] {
+  --amll-lp-color: var(--background);
 }

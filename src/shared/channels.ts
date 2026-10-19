@@ -70,12 +70,46 @@ export const LYRICS_TOGGLE = "lyrics:toggle" as const;
  */
 export const APP_OPEN_SETTINGS = "app:open-settings" as const;
 
+/**
+ * 歌词文档广播（R12 增补）：`{lines: LyricLine[], status: string}`。
+ *
+ * 为什么经广播而不是让歌词窗自己取：**歌词窗没有业务频道权限**（`core_call` 只收主窗来源），
+ * 它有且只有"订阅事件"这一条路。数据由主窗取（`playback:lyrics` → 官方 `parseLrc`）后转发，
+ * 用的是主窗已经解析好的同一份行数组——主窗里的歌词面板与桌面歌词窗因此不可能显示两首歌。
+ *
+ * 载荷里刻意只有"行 + 状态"：解析、时间轴、逐字切分全是官方 `parseLrc` 的事（R9 的边界）。
+ */
+export const LYRICS_DOCUMENT = "lyrics:document" as const;
+
+/**
+ * 歌词进度广播（R12 增补）：`{timeMs, playing, seekGeneration}`。
+ *
+ * 歌词窗里没有音频元素（它只是个显示器），所以进度只能由主窗推：主窗的 rAF 读播放状态机，
+ * **节流在桥里**（`features/lyrics/lyrics-window.mjs` 的 `shouldPushProgress`：≥100ms
+ * 或播放/跳转变化才发），避免每帧一条 IPC。
+ *
+ * `seekGeneration` 与主窗面板同源（状态机的跳转信号）：拖动时歌词跟着手走，不靠比较时间差猜。
+ */
+export const LYRICS_PROGRESS = "lyrics:progress" as const;
+
+/**
+ * 歌词窗配置广播（R12 增补）：`{config: {...}, visible: boolean}`。
+ *
+ * 配置是**会话内**的（持久化不做，写入已知限制）：Rust 侧握着唯一一份（`LyricsWindowState`），
+ * 每次变更广播给两个窗口——歌词窗按它换字号/颜色/模式，主窗设置页按它显示当前档位。
+ * 歌词窗建窗时的初值由 URL 查询串带入（渲染层还没订阅事件时也不会丢配置）。
+ */
+export const LYRICS_STATE = "lyrics:state" as const;
+
 export const BROADCAST_CHANNELS = [
   APP_NOTICE,
   AUTH_STATUS,
   PLAYER_COMMAND,
   LYRICS_TOGGLE,
   APP_OPEN_SETTINGS,
+  LYRICS_DOCUMENT,
+  LYRICS_PROGRESS,
+  LYRICS_STATE,
 ] as const;
 
 export type BroadcastChannel = (typeof BROADCAST_CHANNELS)[number];

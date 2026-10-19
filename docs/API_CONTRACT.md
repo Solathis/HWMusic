@@ -278,11 +278,11 @@ Rust 镜像见 §3 的 parity 钉）：
 
 **尚未接线（如实登记）**：
 
-1. **歌词来源**：本任务交付解析适配（`features/lyrics/amll-adapter.ts`：`[offset:]` 补偿 +
-   翻译行合并）、进度同步（`features/lyrics/lyric-sync.mjs`）与 AMLL 面板宿主；
-   但**没有歌词文本通道**（本任务只增补了 `playback:resolve-url` 与 `player:command` 两条，
-   见上面）——所以面板今天如实显示"歌词来源尚未接入。"，不冒充"这首歌没有歌词"。
-   歌词通道与 R12 的桌面歌词窗一起定（`task-9-brief.md` 的范围外清单：桌面歌词窗属 R12）。
+1. **歌词来源**：解析适配（`features/lyrics/amll-adapter.ts`：`[offset:]` 补偿 + 翻译行合并）、
+   进度同步（`features/lyrics/lyric-sync.mjs`）与 AMLL 面板宿主在本任务交付；
+   **歌词文本通道由 R12 接上**（`playback:lyrics`，见 §2.9）——所以在 R9 那两个提交里
+   面板如实显示"歌词来源尚未接入。"，而 R12 起改口为"歌词来源尚未配置。"（频道已接，
+   缺的是端点）。这不是改文案了事：五档状态与两句失败文案的区分见 §2.9。
 2. **封面/背景图**：曲目投影里没有封面字段（未确认），且 AMLL 对**字符串**地址会自己
    `fetch` 成 blob（`connect-src` 只有 `'self' ipc:`，会被 CSP 拦）。要接通得先用 `<img>`
    （`img-src` 白名单）加载再把 `HTMLImageElement` 传进 `BackgroundRender`。
@@ -386,7 +386,104 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
    依赖检查与环境差异写进 `PLATFORM_DIFFERENCES` 是 R15 的事；
 3. **登录门禁期间**托盘"设置…"没有消费方：设置页在门禁之后才挂载，那时广播已经发出去且没人订阅
    （渲染层的订阅在 `LibraryShell` 里）——不是丢事件，是那一刻本来就没有设置页可切；
-4. **勾选态与歌词窗存在性的同步**：R12 收口，本任务只保证广播的目标态正确（不建假同步）。
+4. **勾选态与歌词窗存在性的同步**：**R12 已收口**（见 §2.9）：勾选态仍由托盘自己镜像并翻转，
+   R12 只补失败路径（窗命令失败 → `app:notice` + 勾选翻回实际状态），不建双向同步链。
+
+### 2.9 桌面歌词窗与任务栏降级（R12 落地）
+
+桌面歌词窗本体在 Rust（`src-tauri/src/lyrics_window.rs`）：label `lyrics`、无边框、透明、无阴影、
+置顶、不进任务栏、不可缩放、不抢焦点、**先建出来是隐藏的**（摆好几何再 `show`，防闪默认样式）、
+独占 webview 数据目录 `<数据根>/webview2/lyrics`（与登录窗 `webview2/login/<partition>` 同款，
+与主窗共用会被 WebView2 的库锁互相踩）。**代理三窗收口**：歌词窗建窗时同样走
+`webview_proxy::resolve_for_webview(data_root, "lyrics")` + `proxy_url`（R6 的审计缺口：
+不接则封面图与音频流绕过设置直连）。
+
+**请求频道增补一条**（唯一真源 `src/shared/request-channels.ts`，Rust 镜像 `commands.rs`）：
+
+| 频道 | 载荷 | 应答 `data` | 说明 |
+|---|---|---|---|
+| `playback:lyrics` | `{trackId}` | `{text, format, warnings}` | 歌词**文本**来源（原始 LRC 文本，不是解析结果）。为什么返回文本：逐行滚动必须来自 AMLL 官方组件，而"文本 → 行"是官方 `parseLrc` 的职责（`features/lyrics/amll-adapter.ts` 在它之上补 `[offset:]` 与翻译行）。端点仍是**注入**的（`data.musicEndpoints.lyrics`，与其余业务端点同一张表）：未配置时协议层回结构化 `endpoint_unknown`，界面说"歌词来源尚未配置"——不冒充"这首歌没有歌词"。响应形状尚未联调确认，`parseLyricsPayload` 按候选键宽容读取（`lyric`/`lyrics`/`lrc`/`lyricText`/`content`/`text`，只往里看一层），读到的键名进 `warnings` 备查。文本**不进日志、不落盘、不缓存** |
+
+**广播频道增补三条**（唯一真源 `src/shared/channels.ts`，Rust 镜像 `bridge.rs`，parity 钉住）：
+
+| 频道 | 方向 | 载荷 | 语义 |
+|---|---|---|---|
+| `lyrics:document` | 主窗 → 歌词窗 | `{lines, status}` | 歌词文档。歌词窗**没有业务频道权限**（`core_call` 只收主窗），所以广播是它唯一的数据来源；主窗面板与歌词窗共用**同一份行数组**，两处不可能显示两首歌 |
+| `lyrics:progress` | 主窗 → 歌词窗 | `{timeMs, playing, seekGeneration}` | 进度。歌词窗里没有音频元素，进度只能由主窗推；**节流在桥里**（`shouldPushProgress`：≥100ms 或播放/跳转变化才发），且只在窗真的开着时跑 |
+| `lyrics:state` | 宿主 → 两窗 | `{config, visible}` | 歌词窗配置（会话内）：`{mode, size, color, locked, clickThrough, effectiveSize}` + 窗可见性 |
+
+**tauri 命令增补四条**（名字唯一真源 `src/shared/commands.ts`；Rust 侧镜像由
+`test/lyrics-window.test.mjs` 与 `lib.rs` 的注册扫描钉住）：
+
+| 命令 | 载荷 | 回执 | 说明 |
+|---|---|---|---|
+| `core_lyrics_toggle` | `{checked}` | `{config, visible}` | 开/关歌词窗。`checked` 是**目标态**（托盘 `lyrics:toggle` 给的就是它）；开 = 建（没有就建）/摆好/显示，关 = **隐藏不销毁**（保住 webview 与进度） |
+| `core_lyrics_configure` | `{config}` 补丁 | `{config, visible}` | 改配置。**空补丁 = 读回当前配置**（设置页挂载时用，所以不需要第五条命令，且读操作无副作用）。认不出的值一律不猜（落回上一个合法值） |
+| `core_lyrics_document` | `{lines, status}` | `null` | 转发歌词文档（歌词窗只订阅，数据由主窗转发） |
+| `core_lyrics_progress` | `{timeMs, playing, seekGeneration}` | `null` | 推进度（主窗侧已按 ≥100ms / 播放或跳转变化节流） |
+
+**四条命令都是 `async`，且都过主窗来源守卫**（`require_main_window`）。async 不是风格问题：
+`WebviewWindowBuilder::build` 内部要走一趟主线程往返（窗口只能在事件循环线程上创建），
+同步命令自己就站在主线程上，等那一趟 = 死锁（旧仓结论，沿用）。**歌词窗自己只订阅事件、
+不调任何命令**（`test/lyrics-window.test.mjs` 扫描钉住：那个文件里没有 `coreCall`/`invoke`）。
+
+**几何（纯函数，含矩阵单测）**：`taskbar_position`（水平居中、贴 `work_area` 下沿）与
+`desktop_position`（再上抬 `DESKTOP_LIFT = 120px`，**夹回工作区顶部**）。尺寸按模式取
+`TASKBAR_SIZE`（1200×44，单行）或 `DESKTOP_SIZE`（960×120），并**夹进工作区**（小屏上窗口
+不该比屏幕还宽）。显示器口径：**优先主窗 `current_monitor()`，取不到退主屏**（桌面歌词是给
+正在用主窗的人看的；摆到另一块屏上用户会以为它没开）。
+
+> **"负偏移钳 0"的准确含义**：钳的是**偏移**（居中量 / 贴底量），不是最终坐标。
+> 副屏摆在主屏左边时工作区原点就是负的（-1920），把最终坐标钳到 0 会把窗口从左侧副屏
+> 扔到主屏上。钳偏移的效果是：窗口比工作区还宽/还高时贴左上角摆，绝不推出屏幕外。
+> 由 `a_monitor_left_of_the_primary_keeps_its_negative_origin` 与
+> `every_monitor_keeps_the_window_inside_its_own_work_area` 两条用例钉住。
+
+**配置（会话内，持久化不做）**：字号是**档位**（`LYRICS_FONT_STEPS`：16/20/28/40/56px）而不是
+连续值——渲染层的视觉一律走工具类/令牌，内联样式只允许几何契约与 AMLL 的 100% 尺寸那两处，
+所以连续字号这条 CSS 路本来就不存在；档位与 CSS 的 rem 规则由测试钉住一致。
+颜色只认设计令牌（`LYRICS_COLOR_TOKENS`：`foreground`/`muted`/`primary`/`contrast`），
+映射在 `amll-theme.css`（AMLL 变量的唯一接线点）。**任务栏模式的有效字号 ≤ 20px**
+（`TASKBAR_MAX_FONT_PX`，简报裁决）：配置值本身保留，切回桌面模式时用户的选择还在。
+**任务栏模式一律点透**（贴边的一条显示带不该抢底下窗口的点击），桌面模式默认可点（要能接手拖动）；
+锁定（`locked`）时渲染层不挂 `data-tauri-drag-region`。
+
+**歌词数据流**：主窗在曲目变化时调 `playback:lyrics` → 官方 `parseLrc` 适配
+（`features/lyrics/amll-adapter.ts`）→ `player.setLyrics(lines, status)`（主窗面板）
+**与** `core_lyrics_document`（歌词窗）共用同一份行；进度由主窗 rAF 读播放状态机 → 节流 →
+`core_lyrics_progress`。歌词状态五档（`unavailable`/`loading`/`empty`/`ready`/`failed`）：
+端点没配说"尚未配置"，别的失败说"暂时取不到"——**两句不同的话**（R9 的"尚未接入"在 R12
+之后不再成立，因为频道已经接上了，缺的是端点）。
+
+**托盘勾选收口**：勾选态由托盘的 `CheckMenuItem` 自己镜像并翻转（R11，不建假同步链）。
+R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原因）**+** 勾选翻回**窗的实际状态**
+（`tray::revert_lyrics_checked`，只有托盘握着那个句柄）。翻回不再发广播：那是
+对已发生事实的修正，不是新的目标态（再发一条会让渲染层再跑一遍大概率仍然失败的命令）。
+
+**任务栏歌词是降级实现**：三端都没有"往任务栏里写文字"的公开 API，所以只有"独立透明窗 +
+贴 `work_area` 下沿"这一种做法。**绝不注入系统进程、不装系统钩子、不做 shell 扩展**——
+`test/lyrics-window.test.mjs` 有一条全源码扫描把这件事钉死（`SetWindowsHookEx` /
+`SetWinEventHook` / `Shell_TrayWnd` / `FindWindow` / `SetParent` / `explorer.exe` / … 0 命中）。
+
+**如实登记的未验证项（本任务）**：
+
+1. **真窗的透明/置顶/拖动/点透未实测**（本任务环境起不了真窗）：建窗属性、几何、
+   `data-tauri-drag-region` 的挂法、点透开关都有单测与源码扫描，但"屏幕上看起来什么样、
+   鼠标点下去发生什么"没有实机证据。多显示器矩阵也只是纯函数层面的（没在多屏机器上跑过）；
+2. **任务栏模式与真实任务栏的视觉关系未实测**：窗口贴 `work_area` 下沿（= 任务栏上沿），
+   理论上不重叠；不同 DPI/自动隐藏任务栏的机器上要看一眼（R14 的验收路径）；
+3. **歌词端点未联调**：`playback:lyrics` 的**响应形状**是宽容读取的（候选键见上），
+   真实形状确认后应收敛到那一个键（`warnings` 会指出实际读到的是哪个）。
+
+**已知限制**：
+
+1. **配置不持久化**（裁决：明确不做）：字号/颜色/模式/锁定/点透只在本次运行内生效，
+   下次启动回默认；设置项旁边如实写着这句话（`LYRICS_SESSION_NOTICE`）；
+2. **登录门禁期间托盘的"桌面歌词"没有消费方**：订阅在 `LibraryShell` 里，而未登录时它不挂载
+   ——那一刻勾选会翻转（托盘侧镜像）但不会建窗。与 R11 的"设置…"是同一档（不是丢事件，
+   是那一刻本来就没有消费者）；
+3. **歌词窗只有隐藏没有销毁**：进程退出前它一直占着一份 webview（这是刻意的：保住进度与
+   即时开关的代价，换来的是内存占用）。
 
 ### 2.4 CDN 域（已确认可达）
 
@@ -415,6 +512,15 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 | `TRAY_AVAILABLE` | `false` | `src/renderer/features/settings/settings-form.mjs` | R11：**兜底值**——宿主没答上来时用（真值来自 `core_get_tray_available`）。方向保守：界面说"不可用"而实际能用，比反过来代价小 |
 | `TRAY_ID` | `"tray"` | `src-tauri/src/lib.rs` | R11：托盘**图标** id（菜单项 id 前缀是 `tray:`，见 `tray::MENU_ID_PREFIX`）；`core_get_tray_available` 与关窗回调都按它现问托盘表 |
 | `MENU_SLOTS`（9 槽位/7 项/2 分隔线） | 见 `src-tauri/src/tray.rs` | `src-tauri/src/tray.rs` | R11：托盘菜单的唯一真源（顺序与文案由 Rust 内联单测 + `test/tray.test.mjs` 双向钉住） |
+| `PLAYBACK_LYRICS` | `"playback:lyrics"` | `src/shared/request-channels.ts` | R12：歌词文本来源（Rust 镜像由 `test/channel-parity.test.mjs` 钉住） |
+| `LYRICS_DOCUMENT` / `LYRICS_PROGRESS` / `LYRICS_STATE` | `"lyrics:document"` / `"lyrics:progress"` / `"lyrics:state"` | `src/shared/channels.ts` | R12：主窗 → 歌词窗的三条广播（歌词窗只订阅事件，这是它唯一的输入） |
+| `CORE_LYRICS_TOGGLE` / `_CONFIGURE` / `_DOCUMENT` / `_PROGRESS` | `"core_lyrics_toggle"` / `"core_lyrics_configure"` / `"core_lyrics_document"` / `"core_lyrics_progress"` | `src/shared/commands.ts` | R12：四条命令名的唯一真源（Rust 侧为镜像副本，由 `test/lyrics-window.test.mjs` 与 `lib.rs` 注册扫描钉住） |
+| `LYRICS_WINDOW_LABEL` | `"lyrics"` | `src-tauri/src/lib.rs` | R12：歌词窗 label（window-state 过滤白名单、四条命令的来源守卫、`current_monitor()` 的窗口都按它认） |
+| `TASKBAR_SIZE` / `DESKTOP_SIZE` / `DESKTOP_LIFT` | `1200×44` / `960×120` / `120` | `src-tauri/src/lyrics_window.rs` | R12：两种模式的窗口尺寸与桌面上抬量（夹进工作区；几何矩阵有内联单测） |
+| `LYRICS_FONT_STEPS` / `TASKBAR_MAX_FONT_PX` | `sm16/md20/lg28/xl40/xxl56` / `20` | `src/renderer/features/lyrics/lyrics-window.mjs` ↔ `src-tauri/src/lyrics_window.rs` | R12：字号档位与任务栏模式上限（两侧一张表，由 `test/lyrics-window.test.mjs` 逐条钉住；CSS 的 rem 规则在 `amll-theme.css`） |
+| `LYRICS_COLOR_TOKENS` | `foreground`/`muted`/`primary`/`contrast` | 同上（TS 为真源、Rust 为镜像） | R12：歌词颜色的令牌档位（只认设计令牌，绝不接受任意色值） |
+| `MIN_PROGRESS_INTERVAL_MS` | `100` | `src/renderer/features/lyrics/lyrics-window.mjs` | R12：进度节流窗口（rAF 每帧调 `pushProgress`，只有该推的才出 IPC） |
+| `LYRICS_SESSION_NOTICE` | 会话内说明文案 | `src/renderer/features/lyrics/lyrics-window.mjs` | R12：设置项旁边如实写"只在本次运行内生效、不写入设置文件" |
 
 ## 4. 红线（任何后续任务不得越过）
 
@@ -454,3 +560,10 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
   两条广播增补（`lyrics:toggle`、`app:open-settings`）与命令 `core_get_tray_available`；
   §2.7 的关窗行为口径与"托盘不存在"那条限制随之更新；§3 增补三行常量与 `TRAY_ID`/`MENU_SLOTS` 两行。
   四条如实登记的未验证项（真机托盘点击/图标、Linux appindicator、门禁期间的"设置…"、歌词窗同步归 R12）。
+- 2026-10-19（Task R12）：新增 §2.9——桌面歌词窗（label/无边框/透明/置顶/不进任务栏/隐藏后 show/
+  独占数据目录/代理三窗收口）、任务栏歌词降级（贴 `work_area` 下沿，**绝不注入**，
+  由全源码扫描钉死）、几何纯函数（含"负偏移钳 0"的准确含义与多显示器负坐标）、
+  会话内配置（字号档位 ≤20px / 颜色令牌 / 锁定 / 点透）、请求频道 `playback:lyrics`、
+  三条广播与四条 async 命令、歌词数据流与五档状态、托盘勾选失败路径的收口；
+  §2.6 的"歌词来源通道"那条未接线项**由本节关闭**（频道已接，缺的是端点）。
+  §3 增补七行常量。三条如实登记的未验证项 + 三条已知限制。

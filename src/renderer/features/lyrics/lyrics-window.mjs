@@ -1,0 +1,267 @@
+/**
+ * 桌面歌词窗的**纯逻辑**（R12）：配置、档位、拖动/点透判定、进度节流、查询串解析。
+ *
+ * 为什么单独一个模块：这些判定两边都要用（歌词窗渲染、主窗设置页、主窗转发桥），
+ * 写在组件里就只能靠人眼对齐——而"任务栏模式字号必须 ≤ 20"这种规矩，靠人眼是守不住的。
+ *
+ * 三条口径（写清楚，因为它们都是裁决而不是显然）：
+ * 1. **字号是档位，不是连续值**。渲染层的视觉一律走工具类/令牌，内联样式只允许
+ *    几何契约与 AMLL 的 100% 尺寸那两处，所以"连续字号"这条 CSS 路本来就不存在。
+ *    档位的 px 值在这里（钳制、文案用），实际字号在 `amll-theme.css` 的 `[data-lyrics-size]`
+ *    规则里（rem，由测试钉住与 px 对得上）。契约里存的是**用户选的档位**；
+ *    任务栏模式下再经 `effectiveSizeId` 压到 ≤ 20px——切回桌面模式时用户的选择还在。
+ * 2. **颜色只认设计令牌**（`LYRICS_COLOR_TOKENS`）：不接受任意色值。
+ *    渲染层把令牌 id 写进 `data-lyrics-color`，真正的 AMLL 歌词颜色变量映射在
+ *    `amll-theme.css`（那些变量的唯一接线点，R9 的规矩，由扫描钉住）。
+ * 3. **任务栏模式一律点透**：它是贴在 work_area 下沿的一条显示带，挡住底下窗口的点击
+ *    比"能点它"重要得多；桌面模式默认可点（要能接手拖动）。
+ *
+ * Rust 侧握着同一张档位表/词表（`src-tauri/src/lyrics_window.rs`），由
+ * `test/lyrics-window.test.mjs` 逐条钉住两侧相等。
+ */
+
+/** 两种模式：桌面悬浮条（可拖）与任务栏显示带（贴 work_area 下沿）。 */
+export const LYRICS_MODES = ["desktop", "taskbar"];
+
+const MODE_LABELS = {
+  desktop: "桌面悬浮",
+  taskbar: "任务栏",
+};
+
+/**
+ * 字号档位表（唯一真源）。
+ *
+ * 上限 56px 不是省事：桌面歌词窗是一条约 120px 高的横条，再大就只能显示半行字。
+ * px 值必须与 `amll-theme.css` 里的 rem 规则一致（16px = 1rem，测试钉住）。
+ */
+export const LYRICS_FONT_STEPS = [
+  { id: "sm", px: 16, label: "小" },
+  { id: "md", px: 20, label: "较小" },
+  { id: "lg", px: 28, label: "标准" },
+  { id: "xl", px: 40, label: "大" },
+  { id: "xxl", px: 56, label: "特大" },
+];
+
+/** 任务栏模式的字号上限（简报钉死：≤ 20）：贴边的一条，字不能比系统的还大。 */
+export const TASKBAR_MAX_FONT_PX = 20;
+
+/**
+ * 颜色令牌表（唯一真源）：只在这几个设计令牌里选，不接受任意色值。
+ *
+ * 歌词窗是**透明**窗（浮在桌面/窗口之上），所以给一档"反差"（用背景色当字色）：
+ * 深色壁纸上那才是唯一读得清的一档。
+ */
+export const LYRICS_COLOR_TOKENS = [
+  { id: "foreground", label: "主题前景" },
+  { id: "muted", label: "弱化" },
+  { id: "primary", label: "主题色" },
+  { id: "contrast", label: "反差" },
+];
+
+/** 默认配置（会话内；每次启动都是它，持久化不做——设置项旁边如实写明）。 */
+export const DEFAULT_LYRICS_CONFIG = {
+  mode: "desktop",
+  size: "lg",
+  color: "foreground",
+  locked: false,
+  clickThrough: false,
+};
+
+/** 进度节流窗口：rAF 每帧都可能调，但只有该推的才出 IPC（≥100ms 或播放/跳转变化）。 */
+export const MIN_PROGRESS_INTERVAL_MS = 100;
+
+/** 歌词状态词表（与 `playback-state.mjs` 的文案表、播放器状态机共用的那一套）。 */
+export const LYRICS_STATUS = {
+  /** 没有可显示的歌词来源（端点没配 / 还没请求过） */
+  unavailable: "unavailable",
+  loading: "loading",
+  /** 取了，这首确实没有 */
+  empty: "empty",
+  ready: "ready",
+  /** 取不到（网络/HTTP 等）：与"没配置"是两件事 */
+  failed: "failed",
+};
+
+/** 设置项旁边的如实说明：会话内配置这件事必须写出来，不能让用户以为存下来了。 */
+export const LYRICS_SESSION_NOTICE =
+  "桌面歌词的设置只在本次运行内生效（不会写入设置文件），下次启动恢复默认。";
+
+function stepOf(id) {
+  return LYRICS_FONT_STEPS.find((step) => step.id === id) ?? null;
+}
+
+function tokenOf(id) {
+  return LYRICS_COLOR_TOKENS.find((token) => token.id === id) ?? null;
+}
+
+/** 档位标签（认不出的按默认档位说——界面不显示空串）。 */
+export function fontStepLabel(id) {
+  return (stepOf(id) ?? stepOf(DEFAULT_LYRICS_CONFIG.size)).label;
+}
+
+/** 颜色令牌标签。 */
+export function colorTokenLabel(id) {
+  return (tokenOf(id) ?? tokenOf(DEFAULT_LYRICS_CONFIG.color)).label;
+}
+
+/** 模式标签。 */
+export function modeLabel(id) {
+  return MODE_LABELS[id] ?? MODE_LABELS[DEFAULT_LYRICS_CONFIG.mode];
+}
+
+/**
+ * 配置归一（纯函数）：`patch` 里**认不出的值一律不猜**，落回 `base` 里那一个合法值
+ * （`base` 也认不出就落默认）。布尔只认真正的布尔——`"yes"`、`1` 都不算。
+ *
+ * 空 patch / 坏 patch 返回 `base` 本身：设置页挂载时用空补丁读回当前配置，不该有任何副作用。
+ */
+export function normalizeLyricsConfig(patch, base = DEFAULT_LYRICS_CONFIG) {
+  const current = base !== null && typeof base === "object" ? base : DEFAULT_LYRICS_CONFIG;
+  const source = patch !== null && typeof patch === "object" ? patch : {};
+
+  const mode = LYRICS_MODES.includes(source.mode)
+    ? source.mode
+    : LYRICS_MODES.includes(current.mode)
+      ? current.mode
+      : DEFAULT_LYRICS_CONFIG.mode;
+  const size = stepOf(source.size) !== null
+    ? source.size
+    : stepOf(current.size) !== null
+      ? current.size
+      : DEFAULT_LYRICS_CONFIG.size;
+  const color = tokenOf(source.color) !== null
+    ? source.color
+    : tokenOf(current.color) !== null
+      ? current.color
+      : DEFAULT_LYRICS_CONFIG.color;
+
+  return {
+    mode,
+    size,
+    color,
+    locked: typeof source.locked === "boolean" ? source.locked : current.locked === true,
+    clickThrough:
+      typeof source.clickThrough === "boolean" ? source.clickThrough : current.clickThrough === true,
+  };
+}
+
+/**
+ * 有效字号档位：任务栏模式下压到 ≤ [`TASKBAR_MAX_FONT_PX`] 的最大档位。
+ *
+ * 刻意**不改配置本身**（`normalizeLyricsConfig` 存的是用户选的那个档位）：
+ * 用户从桌面模式切到任务栏再切回来，看到的不该是自己没选过的小字号。
+ */
+export function effectiveSizeId(config) {
+  const normalized = normalizeLyricsConfig({}, config);
+  if (normalized.mode !== "taskbar") return normalized.size;
+  const allowed = LYRICS_FONT_STEPS.filter((step) => step.px <= TASKBAR_MAX_FONT_PX);
+  const chosen = stepOf(normalized.size);
+  if (chosen !== null && chosen.px <= TASKBAR_MAX_FONT_PX) return chosen.id;
+  return allowed[allowed.length - 1].id;
+}
+
+/** 拖动区开关：桌面模式且未锁定才挂 `data-tauri-drag-region`（任务栏模式贴在边上，不给拖）。 */
+export function dragRegionEnabled(config) {
+  const normalized = normalizeLyricsConfig({}, config);
+  return normalized.mode === "desktop" && !normalized.locked;
+}
+
+/** 点透开关：用户显式开了就点透；任务栏模式一律点透（贴边的一条显示带不该抢点击）。 */
+export function clickThroughEnabled(config) {
+  const normalized = normalizeLyricsConfig({}, config);
+  return normalized.clickThrough || normalized.mode === "taskbar";
+}
+
+/**
+ * 歌词窗的初值来自 URL 查询串（Rust 建窗时按当前配置拼）。
+ *
+ * 为什么要带进 URL 而不是"建完再发一条广播"：渲染层订阅事件是异步的，
+ * 建窗那一刻它可能还没 `listen`——事件发进空气，歌词窗就会用默认档位显示，
+ * 而用户在设置页里明明选过。查询串是同步到位的，没有这个缝。
+ */
+export function lyricsConfigFromSearch(search) {
+  const params = new URLSearchParams(typeof search === "string" ? search : "");
+  const patch = {};
+  if (params.has("mode")) patch.mode = params.get("mode");
+  if (params.has("size")) patch.size = params.get("size");
+  if (params.has("color")) patch.color = params.get("color");
+  // 0/1 才是布尔（Rust 侧就写这两个值）：别的写法不算，落回默认
+  if (params.has("locked")) patch.locked = params.get("locked") === "1";
+  if (params.has("clickThrough")) patch.clickThrough = params.get("clickThrough") === "1";
+  return normalizeLyricsConfig(patch);
+}
+
+/**
+ * 该不该把这一帧进度推给歌词窗（纯函数）。
+ *
+ * 三条：第一次必推（否则歌词窗停在 0）；播放态或跳转信号变了立刻推（用户按了暂停/拖了进度，
+ * 等 100ms 是能感觉到的）；否则要至少差 [`MIN_PROGRESS_INTERVAL_MS`]。
+ * 算不出差值（NaN）时推一次——多推一帧的代价远小于"歌词卡住不动"。
+ */
+export function shouldPushProgress(previous, next) {
+  if (previous === null || previous === undefined) return true;
+  const before = previous;
+  const after = next !== null && typeof next === "object" ? next : {};
+  if (after.seekGeneration !== before.seekGeneration) return true;
+  if (after.playing !== before.playing) return true;
+  const delta = Math.abs(Number(after.timeMs) - Number(before.timeMs));
+  return !(delta < MIN_PROGRESS_INTERVAL_MS);
+}
+
+/** 播放状态机快照 → 进度载荷（唯一出处：字段名只在这里拼一次）。 */
+export function progressOf(state) {
+  const source = state !== null && typeof state === "object" ? state : {};
+  const timeMs = Number(source.currentTimeMs);
+  return {
+    timeMs: Number.isFinite(timeMs) && timeMs > 0 ? Math.round(timeMs) : 0,
+    playing: source.status === "playing",
+    seekGeneration: Number.isInteger(source.seekGeneration) ? source.seekGeneration : 0,
+  };
+}
+
+/** 取歌词失败 → 状态档：端点没配就说没配，别的失败说"暂时取不到"（两句不同的话）。 */
+export function lyricsStatusFromFailure(error) {
+  const kind = error !== null && typeof error === "object" ? error.kind : null;
+  return kind === "endpoint_unknown" ? LYRICS_STATUS.unavailable : LYRICS_STATUS.failed;
+}
+
+/** 歌词文档载荷（行 + 状态）。 */
+export function lyricsDocumentOf(lines, status) {
+  return {
+    lines: Array.isArray(lines) ? lines : [],
+    status: typeof status === "string" && status !== "" ? status : LYRICS_STATUS.unavailable,
+  };
+}
+
+/**
+ * 进度插值估计（纯函数）：`lastPush` = 最近一次广播 `{timeMs, playing, atMs}`，
+ * `atMs` 是**本地**收到它的时刻。
+ *
+ * 为什么需要它：广播是节流的（≥100ms 一条），若直接把 `timeMs` 当 `currentTime`，
+ * 逐字渐变会每 100ms 跳一格。播放中按"经过的真实时间"往前推即可平滑；
+ * 暂停时**停住不动**（接着推算会让歌词在暂停时继续走）。这只是同一条进度的插值，
+ * 不是第二份时钟——真正的进度始终只有播放状态机那一个来源。
+ */
+export function estimateTimeMs(lastPush, nowMs) {
+  const push = lastPush !== null && typeof lastPush === "object" ? lastPush : null;
+  const base = push === null ? 0 : Number(push.timeMs);
+  const anchor = Number.isFinite(base) && base > 0 ? Math.round(base) : 0;
+  if (push === null || push.playing !== true) return anchor;
+  const elapsed = Number(nowMs) - Number(push.atMs);
+  if (!Number.isFinite(elapsed) || elapsed <= 0) return anchor;
+  return anchor + Math.round(elapsed);
+}
+
+/**
+ * 把插值锚点挪到"现在"（纯函数，窗从隐藏变可见时用）。
+ *
+ * 为什么需要它：窗被托盘藏起来的那段时间里，主窗**不推进度**（它知道窗不在，见
+ * `use-lyrics-window.ts` 的进度泵），所以手里那条推送已经过期。窗再显示时若不重锚，
+ * 插值会按"隐藏了多久"一次性往前跳（歌词瞬间窜到后面再被新推送拉回来）；
+ * 重锚之后就是"停在上次的位置，等 100ms 内的新推送"。
+ */
+export function reanchorProgress(lastPush, nowMs) {
+  const push = lastPush !== null && typeof lastPush === "object" ? lastPush : null;
+  if (push === null) return null;
+  return { ...push, atMs: Number.isFinite(Number(nowMs)) ? Number(nowMs) : push.atMs };
+}

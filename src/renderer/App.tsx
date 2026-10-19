@@ -58,6 +58,7 @@ import {
 } from "./pages.tsx"
 import { shouldShowLoginGate } from "./features/auth/login-gate-logic.mjs"
 import { usePlayer } from "./features/playback/use-player.ts"
+import { useLyricsWindow } from "./use-lyrics-window.ts"
 import {
   NAV_LIST_TESTID,
   SIDEBAR_VIEWS,
@@ -110,6 +111,11 @@ export function LibraryShell() {
   const notices = useNoticeLog()
   // 播放运行时是模块级单例（音频/媒体会话/广播都只能有一份），hook 只负责订阅状态
   const { runtime, state: playback } = usePlayer()
+  /**
+   * 桌面歌词窗的接线（R12）：托盘勾选 → 建/显/隐窗口、歌词文本 → 地面歌词窗，
+   * 以及进度推送。数据链与主窗里的歌词面板**共用同一份行**（`player.setLyrics`）。
+   */
+  const lyrics = useLyricsWindow(runtime, playback)
 
   const navigate = useCallback((next: unknown) => {
     setView(normalizeView(next))
@@ -215,8 +221,15 @@ export function LibraryShell() {
         return <HistoryPage {...navigation} />
       case VIEW.settings:
         // 设置页只读地显示队列状态（管理队列在播放队列面板里）：状态由外壳交下去，页面不自己取；
-        // 托盘可用性同理（R11：查一次、交下去，页面不自己问宿主）
-        return <SettingsPage queue={playback} trayAvailable={trayAvailable ?? TRAY_AVAILABLE} />
+        // 托盘可用性同理（R11：查一次、交下去，页面不自己问宿主）；
+        // 桌面歌词的配置与开关同理（R12：宿主握着会话内那一份，外壳读回来交下去）
+        return (
+          <SettingsPage
+            queue={playback}
+            trayAvailable={trayAvailable ?? TRAY_AVAILABLE}
+            lyrics={lyrics}
+          />
+        )
       default:
         // 认不出的视图（正常不会发生）：给一句空态，绝不白屏
         return <EmptyState text={libraryEmptyText(view)} />

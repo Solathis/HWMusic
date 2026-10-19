@@ -11,7 +11,9 @@
  * 4. 渲染层不 import 协议层（业务 HTTP 只在 sidecar；渲染层只走 host-api 的 core_call）；
  * 5. 播放器栏 R9 已接通状态机：`data-state` 由状态给，但**UI 层不持有音频、不碰 core**
  *    （地址与音频都在 features/playback 的运行时里；音频元素的唯一实例由
- *    test/playback-runtime.test.mjs 的扫描钉住）。
+ *    test/playback-runtime.test.mjs 的扫描钉住）；
+ * 6. R12：歌词窗宿主（LyricsWindow.tsx）与歌词窗入口也在网内——它只是第三个 AMLL 宿主，
+ *    连 shadcn 原语都不掺（数据全靠广播进来）。
  *
  * 先写先看红。
  */
@@ -37,8 +39,15 @@ const UI_FILES = [
 /**
  * AMLL 宿主组件是**例外**：它们的视觉全部来自官方包（`BackgroundRender` / `LyricPlayer`），
  * 宿主只提供定位容器——所以它们不"组合 shadcn 原语"，但同样不许自绘（见 lyrics-panel.test.mjs）。
+ *
+ * R12 的 `LyricsWindow.tsx` 是第三处宿主：歌词窗里的一切视觉仍然是官方 `LyricPlayer` 的，
+ * 它只多了一件事——把广播来的歌词与进度喂给组件（数据来自主窗转发，见 lyrics-window.test.mjs）。
  */
-const AMLL_HOSTS = ["src/renderer/AmllBackground.tsx", "src/renderer/AmllLyricsPanel.tsx"];
+const AMLL_HOSTS = [
+  "src/renderer/AmllBackground.tsx",
+  "src/renderer/AmllLyricsPanel.tsx",
+  "src/renderer/LyricsWindow.tsx",
+];
 
 /** 全部"要么组合原语、要么把视觉交给官方组件"的界面文件。 */
 const ALL_UI_FILES = [...UI_FILES, ...AMLL_HOSTS];

@@ -4,14 +4,17 @@
 //! capabilities、插件链编排。R3 增加 sidecar 桥（NDJSON stdio、命令白名单、宿主要求路由）。
 //! R5 增加 DPAPI 安全存储（`secure_store.rs`）并把数据根经 argv 传给 sidecar。
 //! R7 增加登录子窗（`login.rs`：白名单导航/hms 拦截/双期限/四收场/一次性数据目录）。
-//! 托盘、歌词窗由后续任务加入。
+//! R11 增加托盘与关窗 fail-safe（`tray.rs` / `close_behavior.rs`）。
+//! R12 增加桌面歌词窗与任务栏歌词降级（`lyrics_window.rs`）。
 //!
-//! `bridge` 与 `login` 是 `pub`：`tests/login_policy.rs` 直接钉登录窗策略（纯函数，不要 GUI）。
+//! `bridge` / `login` / `lyrics_window` / `tray` 是 `pub`：前两者的策略由 `tests/` 与内联单测直接钉
+//! （纯函数，不要 GUI），歌词窗的几何与配置判定同理（见 `lyrics_window.rs` 的内联单测）。
 
 pub mod bridge;
 pub mod close_behavior;
 mod commands;
 pub mod login;
+pub mod lyrics_window;
 mod secure_store;
 mod sidecar;
 pub mod tray;
@@ -25,7 +28,8 @@ use tauri_plugin_window_state::StateFlags;
 
 /// 主窗 label。窗口由代码创建（`tauri.conf.json` 的 `app.windows` 故意留空）。
 pub const MAIN_WINDOW_LABEL: &str = "main";
-/// 桌面歌词窗 label。窗口本体由 R12 创建，这里先定义以固定 window-state 的过滤白名单。
+/// 桌面歌词窗 label。窗口由 R12 的 `lyrics_window.rs` 起（无边框/透明/置顶/点透），
+/// 这里定义常量以固定 window-state 的过滤白名单与四条歌词命令的来源守卫。
 pub const LYRICS_WINDOW_LABEL: &str = "lyrics";
 /// 托盘**图标** id（菜单项 id 的前缀是 `tray:`，见 `tray::MENU_ID_PREFIX`；两件事别混）。
 pub const TRAY_ID: &str = "tray";
@@ -231,6 +235,11 @@ pub fn run() {
             let data_root = create_main_window(handle)?;
             app.manage(WebviewDataRoot(data_root.clone()));
 
+            // 歌词窗的会话内配置（R12）：**登记在这里**而不是懒初始化——四条命令都可能
+            // 是用户第一次点托盘时来的，而那时才"发现没状态"要多写一段 fallback。
+            // 它不在任何广播路径上（顺序无契约）：只有四条歌词命令与设置页读它。
+            app.manage(lyrics_window::LyricsWindowState::default());
+
             // core（sidecar）的托管状态**先于托盘安装**登记（R11 修复轮 1/5）：
             // 启动提示的排队能力住在 `Arc<CoreState>` 里，而 `tray::install` 装不上时要发一条
             // `app:notice`。登记晚于 install 的后果不是"少一条日志"——`emit_core_event` 在
@@ -287,7 +296,14 @@ pub fn run() {
             commands::core_set_autostart,
             commands::core_get_autostart,
             // R11：托盘可用性（R10 写死的 TRAY_AVAILABLE 占位改真查询的唯一来源）
-            commands::core_get_tray_available
+            commands::core_get_tray_available,
+            // R12：桌面歌词窗的四条命令（全部 async + 全部主窗来源守卫；歌词窗只订阅事件）。
+            // async 不是风格问题：`WebviewWindowBuilder::build` 要走一趟主线程往返，
+            // 同步命令自己就站在主线程上，等那一趟 = 死锁（见 lyrics_window.rs 的模块头）。
+            lyrics_window::core_lyrics_toggle,
+            lyrics_window::core_lyrics_configure,
+            lyrics_window::core_lyrics_document,
+            lyrics_window::core_lyrics_progress
         ])
         .build(tauri::generate_context!())
         .expect("Tauri 应用启动失败")
@@ -525,6 +541,26 @@ mod tests {
             registered.contains("commands::core_get_tray_available"),
             "core_get_tray_available 必须进 generate_handler!：{registered}"
         );
+    }
+
+    /// R12：桌面歌词窗的四条命令必须进 `generate_handler!`——只定义不注册，用户点托盘那个
+    /// "桌面歌词"勾选项就完全没有反应（而错误要到运行时才知道）。**四条都要**：少一条的后果
+    /// 各不一样（少 toggle = 开关不动；少 document = 窗永远空白；少 progress = 歌词不动）。
+    #[test]
+    fn lyrics_window_commands_are_registered_in_the_invoke_handler() {
+        let source = lib_source();
+        let registered = invoke_handler_block(&source);
+        for name in [
+            "lyrics_window::core_lyrics_toggle",
+            "lyrics_window::core_lyrics_configure",
+            "lyrics_window::core_lyrics_document",
+            "lyrics_window::core_lyrics_progress",
+        ] {
+            assert!(
+                registered.contains(name),
+                "{name} 必须进 generate_handler!（否则 invoke 只回 command not found）：{registered}"
+            );
+        }
     }
 
     /// R11 的顺序契约一：**关窗行为恢复必须先于建窗**。

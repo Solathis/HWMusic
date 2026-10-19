@@ -66,6 +66,7 @@ test("端点注入：清单是唯一真源；缺端点的方法返回结构化 e
     "artist",
     "favorites",
     "history",
+    "lyrics",
     "playback",
     "playlistDelete",
     "playlistDetail",

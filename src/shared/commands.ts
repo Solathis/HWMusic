@@ -45,3 +45,25 @@ export const CORE_GET_AUTOSTART = "core_get_autostart";
  * `tray::decide_close` 的 fail-safe 同一个保守方向。
  */
 export const CORE_GET_TRAY_AVAILABLE = "core_get_tray_available";
+
+/**
+ * 桌面歌词窗的四条命令（R12 增补）。
+ *
+ * **全部异步**：`WebviewWindowBuilder::build` 内部要走一趟主线程往返（窗口只能在事件循环线程
+ * 上创建），同步命令自己就站在主线程上，等那一趟 = 死锁（旧仓结论）。所以这四条一律 `async fn`
+ * —— 异步命令跑在 tauri 的异步运行时线程上，那一趟往返才有得等。
+ *
+ * **全部过主窗来源守卫**（`require_main_window`）：歌词窗自己**只订阅事件、不调命令**
+ * （数据由主窗转发），登录子窗/托盘也一律调不了。这既是权限收口，也是"窗存在性只有一处说了算"。
+ *
+ * 契约（README/API_CONTRACT 的同一份形状）：
+ * - `core_lyrics_toggle`：`{checked}`（**目标态**，来自托盘广播）→ `{config, visible}`；
+ * - `core_lyrics_configure`：`{config}` 补丁（**空补丁 = 读回当前配置**，设置页挂载时用，
+ *   所以不需要第五条命令）→ `{config, visible}`；
+ * - `core_lyrics_document`：`{lines, status}` → 转发给歌词窗（广播 `lyrics:document`）；
+ * - `core_lyrics_progress`：`{timeMs, playing, seekGeneration}` → 广播 `lyrics:progress`。
+ */
+export const CORE_LYRICS_TOGGLE = "core_lyrics_toggle";
+export const CORE_LYRICS_CONFIGURE = "core_lyrics_configure";
+export const CORE_LYRICS_DOCUMENT = "core_lyrics_document";
+export const CORE_LYRICS_PROGRESS = "core_lyrics_progress";

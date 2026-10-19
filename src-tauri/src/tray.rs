@@ -178,6 +178,28 @@ pub fn plan_lyrics_toggle(checked: bool) -> LyricsTogglePlan {
     LyricsTogglePlan { checked: !checked }
 }
 
+/// 把"桌面歌词"勾选态**改回窗的实际状态**（R12：歌词窗命令失败时的收口）。
+///
+/// 勾选态是托盘自己镜像并翻转的（R11），所以"翻回"也只能由托盘做——歌词窗/R12 手上
+/// 没有 `CheckMenuItem` 句柄。返回是否真的改到了：托盘不在（没装上、句柄早没了）时
+/// 只记一行日志，**绝不 panic**（与安装路径同一条纪律）。
+///
+/// 只改勾选、不发广播：这是对**已发生的事实**的修正，不是一条新的目标态。再发一条广播
+/// 会让渲染层再跑一遍开关命令，而那次命令大概率还是失败——两个循环互相点火。
+pub fn revert_lyrics_checked<R: Runtime>(app: &AppHandle<R>, checked: bool) -> bool {
+    let Some(state) = app.try_state::<Arc<TrayState<R>>>() else {
+        log::warn!("桌面歌词勾选态翻回失败：托盘状态不在（托盘没装上或已消失）");
+        return false;
+    };
+    match state.lyrics_item().set_checked(checked) {
+        Ok(()) => true,
+        Err(error) => {
+            log::warn!("桌面歌词勾选态没能翻回（{error}）");
+            false
+        }
+    }
+}
+
 /// 关窗决议。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseAction {

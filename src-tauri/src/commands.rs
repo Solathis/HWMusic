@@ -29,6 +29,10 @@ use crate::MAIN_WINDOW_LABEL;
 ///
 /// R10 增补 `settings:test-proxy`：设置页的"测试连接"（core 侧用独立的 ProxyAgent 发一次请求）。
 /// 少了它，那个按钮只会拿到 `unknown_channel`——而它看起来像"代理不通"。
+///
+/// R12 增补 `playback:lyrics`：歌词**文本**来源（`{trackId}` → 原始 LRC 文本；解析在渲染层，
+/// 由官方 `parseLrc` 负责）。少了它，桌面歌词窗与主窗歌词面板都只会空白，而设置页显示
+/// "歌词来源尚未配置"——那句话本身没错，但原因是频道压根没接（两个原因长得一模一样）。
 pub const REQUEST_CHANNELS: &[&str] = &[
     "auth:login",
     "auth:logout",
@@ -44,6 +48,7 @@ pub const REQUEST_CHANNELS: &[&str] = &[
     "library:artist",
     "library:history",
     "playback:resolve-url",
+    "playback:lyrics",
 ];
 
 /// core → 宿主 的宿主要求频道（与 src/shared/request-channels.ts 的 HOST_REQUEST_CHANNELS 同源）。

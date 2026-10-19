@@ -68,6 +68,16 @@ import {
   validateProxyForm,
 } from "./features/settings/settings-form.mjs"
 import { VIEW, createView, viewParam } from "./features/library/views.mjs"
+import {
+  LYRICS_COLOR_TOKENS,
+  LYRICS_FONT_STEPS,
+  LYRICS_MODES,
+  LYRICS_SESSION_NOTICE,
+  colorTokenLabel,
+  fontStepLabel,
+  modeLabel,
+} from "./features/lyrics/lyrics-window.mjs"
+import type { LyricsWindowBinding } from "./use-lyrics-window.ts"
 
 /** 页大小：收藏页有自己的常量（滚动加载），这里是一页式列表的取数大小。 */
 const LIST_PAGE_SIZE = 50
@@ -325,6 +335,14 @@ export interface SettingsPageProps {
    * 此刻也按"不可用"处理），比先画一个"能用"的饼再改口要好。
    */
   trayAvailable?: boolean
+  /**
+   * 桌面歌词窗的绑定（R12）：由外壳的 `useLyricsWindow` 交下来。
+   *
+   * 页面**不自己问宿主**（与 `trayAvailable` 同一条纪律）：配置的唯一真源在 Rust 侧
+   * （会话内），外壳读回来之后交下来，页面只负责把值渲染出来、把改动交回去。
+   * 缺省 `null` = 外壳还没挂上（设置页不该因为少一个 prop 就崩）。
+   */
+  lyrics?: LyricsWindowBinding | null
 }
 
 /**
@@ -337,7 +355,7 @@ export interface SettingsPageProps {
  * - 不冒充：没测过不给测试结论、读不到自启状态就说"未取到"、保存回执按 `restartRequired`
  *   如实说"要重启"，主机没通过清洗就说"仍是直连"。
  */
-export function SettingsPage({ queue = null, trayAvailable = TRAY_AVAILABLE }: SettingsPageProps) {
+export function SettingsPage({ queue = null, trayAvailable = TRAY_AVAILABLE, lyrics = null }: SettingsPageProps) {
   const [form, setForm] = useState(() => proxyFormFromSettings(null))
   const [closeBehavior, setCloseBehavior] = useState(() => closeBehaviorFromSettings(null))
   const [loaded, setLoaded] = useState(false)
@@ -668,6 +686,113 @@ export function SettingsPage({ queue = null, trayAvailable = TRAY_AVAILABLE }: S
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground">{APPEARANCE_NOTICE_TEXT}</p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>桌面歌词</CardTitle>
+          <CardDescription>桌面上的独立歌词窗（无边框、置顶、可拖可锁）。</CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          <div className="flex items-center gap-2">
+            <Switch
+              id="lyrics-visible"
+              checked={lyrics?.visible === true}
+              disabled={lyrics === null}
+              onCheckedChange={(checked) => lyrics?.setVisible(checked)}
+            />
+            <Label htmlFor="lyrics-visible">显示桌面歌词</Label>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="lyrics-mode">窗口位置</Label>
+              <Select
+                value={lyrics?.config.mode ?? LYRICS_MODES[0]}
+                disabled={lyrics === null}
+                onValueChange={(value) => lyrics?.updateConfig({ mode: value })}
+              >
+                <SelectTrigger id="lyrics-mode" className="w-full">
+                  {/* 标签直接写进 SelectValue：radix 在没展开过内容时拿不到选项文案（R10 的同一个坑） */}
+                  <SelectValue>{modeLabel(lyrics?.config.mode)}</SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {LYRICS_MODES.map((mode) => (
+                    <SelectItem key={mode} value={mode}>
+                      {modeLabel(mode)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="lyrics-size">字号</Label>
+              <Select
+                value={lyrics?.config.size ?? LYRICS_FONT_STEPS[0].id}
+                disabled={lyrics === null}
+                onValueChange={(value) => lyrics?.updateConfig({ size: value })}
+              >
+                <SelectTrigger id="lyrics-size" className="w-full">
+                  <SelectValue>{fontStepLabel(lyrics?.config.size)}</SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {LYRICS_FONT_STEPS.map((step) => (
+                    <SelectItem key={step.id} value={step.id}>
+                      {fontStepLabel(step.id)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="lyrics-color">颜色</Label>
+              <Select
+                value={lyrics?.config.color ?? LYRICS_COLOR_TOKENS[0].id}
+                disabled={lyrics === null}
+                onValueChange={(value) => lyrics?.updateConfig({ color: value })}
+              >
+                <SelectTrigger id="lyrics-color" className="w-full">
+                  <SelectValue>{colorTokenLabel(lyrics?.config.color)}</SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {LYRICS_COLOR_TOKENS.map((token) => (
+                    <SelectItem key={token.id} value={token.id}>
+                      {colorTokenLabel(token.id)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex flex-col justify-end gap-2">
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="lyrics-locked"
+                  checked={lyrics?.config.locked === true}
+                  disabled={lyrics === null}
+                  onCheckedChange={(checked) => lyrics?.updateConfig({ locked: checked })}
+                />
+                <Label htmlFor="lyrics-locked">锁定（不可拖动）</Label>
+              </div>
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="lyrics-click-through"
+                  checked={lyrics?.config.clickThrough === true}
+                  disabled={lyrics === null}
+                  onCheckedChange={(checked) => lyrics?.updateConfig({ clickThrough: checked })}
+                />
+                <Label htmlFor="lyrics-click-through">鼠标穿透</Label>
+              </div>
+            </div>
+          </div>
+
+          <p className="text-xs text-muted-foreground">
+            {/* 会话内这件事必须写在设置项旁边（已知限制，见 docs/API_CONTRACT.md §2.9） */}
+            {LYRICS_SESSION_NOTICE}
+          </p>
         </CardContent>
       </Card>
 

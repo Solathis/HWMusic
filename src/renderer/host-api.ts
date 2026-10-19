@@ -7,7 +7,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import { CORE_CALL, CORE_GET_AUTOSTART, CORE_GET_TRAY_AVAILABLE, CORE_RENDERER_READY, CORE_SET_AUTOSTART } from "../shared/commands.ts";
+import {
+  CORE_CALL,
+  CORE_GET_AUTOSTART,
+  CORE_GET_TRAY_AVAILABLE,
+  CORE_LYRICS_CONFIGURE,
+  CORE_LYRICS_DOCUMENT,
+  CORE_LYRICS_PROGRESS,
+  CORE_LYRICS_TOGGLE,
+  CORE_RENDERER_READY,
+  CORE_SET_AUTOSTART,
+} from "../shared/commands.ts";
 import { CORE_EVENT } from "../shared/channels.ts";
 import type { CoreError } from "../shared/result.ts";
 import type { RequestChannel } from "../shared/request-channels.ts";
@@ -107,6 +117,45 @@ export async function getTrayAvailable(): Promise<boolean> {
   } catch (failure) {
     throw normalizeFailure(failure);
   }
+}
+
+// ---------------------------------------------------------------------------
+// 桌面歌词窗（R12）：四条命令的具名封装
+// ---------------------------------------------------------------------------
+//
+// 为什么是四条具名函数而不是一个通用的 `invokeLyrics(command, args)`：命令名是跨语言契约
+// （写错一个字母 → 运行时 "command not found"），具名封装让"渲染层到底会发哪几条命令"
+// 在源码里可数（test/lyrics-window.test.mjs 扫的就是这个）。
+//
+// 回执形状统一是 `{config, visible}`（`lyricsStatusFromAnswer` 折成状态）：每条命令都回整个状态，
+// 免得调用方拿着半份状态去猜另一半。歌词窗自己**不调**这四条——它只订阅事件。
+
+async function invokeLyrics<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await invoke<T>(command, args);
+  } catch (failure) {
+    throw normalizeFailure(failure);
+  }
+}
+
+/** 开/关桌面歌词窗（目标态：`true` = 要开）。 */
+export async function coreLyricsToggle(checked: boolean): Promise<unknown> {
+  return invokeLyrics(CORE_LYRICS_TOGGLE, { checked });
+}
+
+/** 改歌词窗配置（**空对象 = 读回当前配置**，设置页挂载时用）。 */
+export async function coreLyricsConfigure(config: unknown): Promise<unknown> {
+  return invokeLyrics(CORE_LYRICS_CONFIGURE, { config });
+}
+
+/** 把歌词文档转发给歌词窗（行数组来自官方 `parseLrc` 的适配层）。 */
+export async function coreLyricsDocument(document: unknown): Promise<unknown> {
+  return invokeLyrics(CORE_LYRICS_DOCUMENT, { document });
+}
+
+/** 推进度（调用方已按 `shouldPushProgress` 节流）。 */
+export async function coreLyricsProgress(progress: unknown): Promise<unknown> {
+  return invokeLyrics(CORE_LYRICS_PROGRESS, { progress });
 }
 
 /**

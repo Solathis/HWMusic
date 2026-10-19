@@ -40,7 +40,12 @@ function rendererFiles() {
   return found.filter((relative) => !relative.startsWith("src/renderer/components/ui/"));
 }
 
-const AMLL_HOSTS = ["src/renderer/AmllBackground.tsx", "src/renderer/AmllLyricsPanel.tsx"];
+const AMLL_HOSTS = [
+  "src/renderer/AmllBackground.tsx",
+  "src/renderer/AmllLyricsPanel.tsx",
+  // R12：桌面歌词窗也是 AMLL 宿主（进度来自广播而不是本地音频，见 lyrics-window.test.mjs）
+  "src/renderer/LyricsWindow.tsx",
+];
 const STAGE = "src/renderer/playback-stage.tsx";
 
 test("官方组件：背景与歌词都来自 @applemusic-like-lyrics/react（不是自己画的）", () => {

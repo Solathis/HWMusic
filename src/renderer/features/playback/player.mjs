@@ -20,6 +20,10 @@
  * 4. **换队列 = 停止播放**：队列被替换后，音频里装着的还是上一首，装作没发生只会播错歌。
  */
 import { queueEntriesOf, queueRecordOf, restoredEntries, sanitizeQueueRecord } from "./queue.mjs";
+import { LYRICS_STATUS } from "../lyrics/lyrics-window.mjs";
+
+/** 歌词状态词表（唯一真源在 features/lyrics/lyrics-window.mjs）：认不出的值一律不写进状态。 */
+const LYRICS_STATUSES = Object.values(LYRICS_STATUS);
 
 /** 播放模式（顺序是默认；随机也叫"打乱播放"）。 */
 export const PLAYBACK_MODES = ["sequential", "list-loop", "single-loop", "shuffle"];
@@ -591,15 +595,23 @@ export function createPlayer(options = {}) {
 
   /**
    * 歌词行（AMLL 的 `LyricLine[]`）：状态机只做**搬运**，解析在 features/lyrics/amll-adapter.ts。
-   * `status` 三档是"不冒充"的关键：`unavailable`（还没有歌词来源）、`empty`（取了，这首没有）、
-   * `ready`。把前者说成后者，就是替接口撒谎。
+   * `status` 是"不冒充"的关键：`unavailable`（来源没配/还没请求）、`loading`（正在取）、
+   * `empty`（取了，这首没有）、`failed`（取不到）、`ready`。把前者说成后者，就是替接口撒谎。
+   *
+   * R12 增补第二个参数：主窗在"还没有行但要说清是哪一档"的情形（loading / failed /
+   * unavailable）下把状态显式给出来。给的值必须出自 `LYRICS_STATUS`（同一份词表），
+   * 认不出的按行数推断（绝不把任意字符串当状态发给界面）。
    *
    * @param {Array<import("@applemusic-like-lyrics/lyric").LyricLine>|null|undefined} lines
+   * @param {string} [status]
    */
-  function setLyrics(lines) {
+  function setLyrics(lines, status) {
     const list = Array.isArray(lines) ? lines : [];
-    publish({ lyrics: { status: list.length > 0 ? "ready" : "empty", lines: list } });
-    return done({ lineCount: list.length });
+    const inferred = list.length > 0 ? LYRICS_STATUS.ready : LYRICS_STATUS.empty;
+    const resolved =
+      typeof status === "string" && LYRICS_STATUSES.includes(status) ? status : inferred;
+    publish({ lyrics: { status: resolved, lines: list } });
+    return done({ lineCount: list.length, status: resolved });
   }
 
   function subscribe(listener) {

@@ -95,11 +95,16 @@ test("艺人：取不到就「未知艺人」；没有曲目时给空串（不�
 });
 
 test("歌词占位：三档分开（没有来源 ≠ 这首歌没有歌词）", () => {
-  assert.match(LYRICS_NOTICE_TEXT.unavailable, /尚未接入/);
+  // R12 起频道已接上，所以"尚未接入"不再成立——端点是可能缺的那一环，文案改说"尚未配置"；
+  // 其他失败（网络/HTTP）另有一档，不许冒充成"没配置"。
+  assert.match(LYRICS_NOTICE_TEXT.unavailable, /尚未配置/);
   assert.match(LYRICS_NOTICE_TEXT.empty, /没有歌词/);
+  assert.match(LYRICS_NOTICE_TEXT.loading, /正在取|取歌词/);
+  assert.ok(!/尚未配置/.test(LYRICS_NOTICE_TEXT.failed), "取不到 ≠ 没配置（两句不同的话）");
   assert.equal(lyricsNoticeText({ status: "ready", lines: [{}] }), null, "有词时不该再压一行占位字");
   assert.equal(lyricsNoticeText({ status: "empty" }), LYRICS_NOTICE_TEXT.empty);
   assert.equal(lyricsNoticeText({ status: "unavailable" }), LYRICS_NOTICE_TEXT.unavailable);
+  assert.equal(lyricsNoticeText({ status: "failed" }), LYRICS_NOTICE_TEXT.failed);
   assert.equal(lyricsNoticeText(null), LYRICS_NOTICE_TEXT.unavailable, "状态不知道时按「没有来源」说，不替接口撒谎");
 });
 

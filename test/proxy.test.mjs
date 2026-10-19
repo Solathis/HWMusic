@@ -605,8 +605,17 @@ test("广播帧形状：{channel, payload}，没有 id 也没有 ok（Rust class
   assert.deepEqual(frame.payload, { text: "已启用代理" });
   assert.deepEqual(
     [...BROADCAST_CHANNELS],
-    [APP_NOTICE, "auth:status", "player:command", "lyrics:toggle", "app:open-settings"],
-    "R7 增补 auth:status（登录状态）、R9 预登记 player:command（R11 托盘）、R11 增补托盘那两条",
+    [
+      APP_NOTICE,
+      "auth:status",
+      "player:command",
+      "lyrics:toggle",
+      "app:open-settings",
+      "lyrics:document",
+      "lyrics:progress",
+      "lyrics:state",
+    ],
+    "R7 增补 auth:status（登录状态）、R9 预登记 player:command（R11 托盘）、R11 增补托盘那两条、R12 增补歌词窗那三条",
   );
 });
 

@@ -94,6 +94,9 @@ test("令牌扫描范围：自己写的渲染层代码都在网内（含 R8 的�
     "src/renderer/playback-stage.tsx",
     "src/renderer/AmllBackground.tsx",
     "src/renderer/AmllLyricsPanel.tsx",
+    // R12：桌面歌词窗宿主（字号/颜色档位经 data 属性交给 amll-theme.css，不走内联样式）
+    "src/renderer/LyricsWindow.tsx",
+    "src/renderer/lyrics-main.tsx",
   ]) {
     assert.ok(files.includes(relative), `界面文件必须在扫描范围内：${relative}`);
   }

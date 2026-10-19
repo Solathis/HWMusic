@@ -62,6 +62,20 @@ export const LIBRARY_HISTORY = "library:history" as const;
  */
 export const PLAYBACK_RESOLVE_URL = "playback:resolve-url" as const;
 
+/**
+ * 歌词文本频道（R12 增补）：载荷 `{trackId}`，应答 `data` 即协议层 `parseLyricsPayload` 的产物
+ * （`{text, format}` —— **原始歌词文本**，不是解析结果）。
+ *
+ * 为什么返回文本而不是 AMLL 行数组：逐行滚动必须来自官方组件，而"文本 → 行"这一步是官方
+ * `parseLrc` 的职责（R9 的 `features/lyrics/amll-adapter.ts` 在它之上补 `[offset:]` 与翻译行）。
+ * 把解析放在 sidecar 会让渲染层拿到的是一份"别人解析好的东西"，AMLL 的版本一变就对不上。
+ *
+ * 端点仍未注入（`data.musicEndpoints.lyrics`，与其余业务端点同一张表）：
+ * 未配置时协议层如实回结构化 `endpoint_unknown`，界面说"歌词来源尚未配置"——
+ * 不冒充"这首歌没有歌词"，也不打到一个瞎猜的地址上。
+ */
+export const PLAYBACK_LYRICS = "playback:lyrics" as const;
+
 export const REQUEST_CHANNELS = [
   AUTH_LOGIN,
   AUTH_LOGOUT,
@@ -77,6 +91,7 @@ export const REQUEST_CHANNELS = [
   LIBRARY_ARTIST,
   LIBRARY_HISTORY,
   PLAYBACK_RESOLVE_URL,
+  PLAYBACK_LYRICS,
 ] as const;
 
 export type RequestChannel = (typeof REQUEST_CHANNELS)[number];

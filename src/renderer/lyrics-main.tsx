@@ -6,10 +6,7 @@ import "./styles.css"
 import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 
-/** R1 只做最小挂载：歌词窗内容在 R12 接入（LyricsWindow.tsx）。 */
-function App() {
-  return null
-}
+import { LyricsWindow } from "./LyricsWindow.tsx"
 
 const container = document.getElementById("root")
 
@@ -19,6 +16,6 @@ if (!container) {
 
 createRoot(container).render(
   <StrictMode>
-    <App />
+    <LyricsWindow />
   </StrictMode>
 )

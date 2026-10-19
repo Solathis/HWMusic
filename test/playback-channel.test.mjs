@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import { createPlaybackHandlers } from "../src/host/playback-handlers.mjs";
 import { createMusicApi } from "../src/protocols/music.mjs";
-import { PLAYBACK_RESOLVE_URL } from "../src/shared/request-channels.ts";
+import { PLAYBACK_LYRICS, PLAYBACK_RESOLVE_URL } from "../src/shared/request-channels.ts";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const read = (relative) => readFileSync(`${repoRoot}${relative}`, "utf8");
@@ -51,14 +51,15 @@ function handlerWith(api) {
   return createPlaybackHandlers({ api })[PLAYBACK_RESOLVE_URL];
 }
 
-test("频道名来自共享常量：处理器表的键就是 playback:resolve-url（不另立字面量）", () => {
+test("频道名来自共享常量：处理器表的键就是那两个 playback 频道（不另立字面量）", () => {
   const handlers = createPlaybackHandlers({ api: { getPlayback: async () => ({ ok: true, data: {} }) } });
-  assert.deepEqual(Object.keys(handlers), [PLAYBACK_RESOLVE_URL]);
+  assert.deepEqual(Object.keys(handlers), [PLAYBACK_RESOLVE_URL, PLAYBACK_LYRICS]);
   assert.equal(PLAYBACK_RESOLVE_URL, "playback:resolve-url");
+  assert.equal(PLAYBACK_LYRICS, "playback:lyrics", "R12 的歌词文本次通道（同一个处理器表，不另立清单）");
 
   const source = read("src/host/playback-handlers.mjs");
   assert.match(source, /PLAYBACK_RESOLVE_URL/, "处理器必须 import 共享常量");
-  assert.doesNotMatch(stripComments(source), /["'`]playback:resolve-url["'`]/, "不得出现第二份频道名字面量");
+  assert.doesNotMatch(stripComments(source), /["'`]playback:(?:resolve-url|lyrics)["'`]/, "不得出现第二份频道名字面量");
 });
 
 test("正常路径：{trackId} → 协议层 getPlayback，当次应答里带着放行过的地址", async () => {

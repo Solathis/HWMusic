@@ -29,6 +29,11 @@
  * - 广播频道加 `lyrics:toggle`：托盘"桌面歌词"勾选的目标态（歌词窗本体是 R12）；
  * - 广播频道加 `app:open-settings`：托盘"设置…"（渲染层收到后切到设置页）。
  *   两条都是 **Rust 侧发出**（托盘菜单在 Rust 里），所以白名单少一条的后果同样是"点了没反应"。
+ *
+ * R12 的四处增补（同一流程）：
+ * - 请求频道加 `playback:lyrics`：歌词**文本**来源（渲染层用官方 `parseLrc` 解析）；
+ * - 广播频道加 `lyrics:document` / `lyrics:progress` / `lyrics:state`：主窗→歌词窗的数据链
+ *   （歌词窗只订阅事件、不调业务命令，所以这三条是它唯一的数据来源）。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -37,6 +42,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   HOST_REQUEST_CHANNELS,
+  PLAYBACK_LYRICS,
   PLAYBACK_RESOLVE_URL,
   REQUEST_CHANNELS,
 } from "../src/shared/request-channels.ts";
@@ -44,6 +50,9 @@ import {
   APP_OPEN_SETTINGS,
   BROADCAST_CHANNELS,
   CORE_EVENT,
+  LYRICS_DOCUMENT,
+  LYRICS_PROGRESS,
+  LYRICS_STATE,
   LYRICS_TOGGLE,
   PLAYER_COMMAND,
 } from "../src/shared/channels.ts";
@@ -98,8 +107,14 @@ const LIBRARY_CHANNELS = [
   "library:search",
 ];
 
-/** R9 增补的播放请求频道（硬钉：多一条就等于白名单悄悄放宽了）。 */
-const PLAYBACK_CHANNELS = ["playback:resolve-url"];
+/**
+ * R9 增补的播放请求频道（硬钉：多一条就等于白名单悄悄放宽了）。
+ *
+ * R12 增补 `playback:lyrics`：歌词**文本**来源（`{trackId}` → 原始 LRC 文本）。它与
+ * `playback:resolve-url` 的分工是刻意的——地址是"当次播放结果"（不落任何痕迹），
+ * 歌词文本则要交给渲染层用官方 `parseLrc` 解析，所以**返回文本而不是解析结果**。
+ */
+const PLAYBACK_CHANNELS = ["playback:lyrics", "playback:resolve-url"];
 
 /** R10 增补的设置请求频道（硬钉：设置页的"测试连接"唯一要用的那一条）。 */
 const SETTINGS_CHANNELS = ["settings:get", "settings:set", "settings:test-proxy"];
@@ -114,6 +129,9 @@ const BROADCAST_CHANNEL_NAMES = [
   "app:notice",
   "app:open-settings",
   "auth:status",
+  "lyrics:document",
+  "lyrics:progress",
+  "lyrics:state",
   "lyrics:toggle",
   "player:command",
 ];
@@ -135,6 +153,7 @@ test("一致性：请求频道白名单（Node 共享常量 ↔ Rust commands.rs
     "library:playlist-detail",
     "library:playlists",
     "library:search",
+    "playback:lyrics",
     "playback:resolve-url",
     "settings:get",
     "settings:set",
@@ -151,7 +170,7 @@ test("一致性：settings:* 频道两侧逐条相等（R10 增补 settings:test
   );
 });
 
-test("一致性：playback:* 频道两侧逐条相等（R9 唯一的播放请求通道）", () => {
+test("一致性：playback:* 频道两侧逐条相等（R9 取地址 + R12 取歌词文本）", () => {
   const rust = rustChannelLiterals(rustProduction(rustSource("commands.rs")), "playback:");
   assert.deepEqual(sorted(rust), PLAYBACK_CHANNELS);
   assert.deepEqual(
@@ -159,6 +178,7 @@ test("一致性：playback:* 频道两侧逐条相等（R9 唯一的播放请求
     PLAYBACK_CHANNELS,
   );
   assert.equal(PLAYBACK_RESOLVE_URL, "playback:resolve-url", "「拿当次播放地址」的频道名是契约");
+  assert.equal(PLAYBACK_LYRICS, "playback:lyrics", "「拿歌词文本」的频道名是契约");
 });
 
 test("一致性：library:* 频道两侧逐条相等（R8 主界面唯一的数据通道）", () => {
@@ -217,6 +237,23 @@ test("一致性：R11 托盘的两条广播（常量 + 字面量两侧逐字相�
       BROADCAST_CHANNELS.includes(channel),
       `${channel} 必须在广播白名单里：不在的话 Rust 会把这条广播当成白名单外帧丢掉`,
     );
+    assert.ok(rustBroadcasts.includes(channel), `Rust 侧白名单同样必须含 ${channel}`);
+  }
+});
+
+test("一致性：R12 桌面歌词窗的三条广播（常量 + 字面量两侧逐字相等）", () => {
+  // 发送方是主窗侧的四条命令（Rust 侧 emit_core_event）：歌词文档 / 进度 / 配置。
+  // 白名单少一条的后果是歌词窗永远收不到数据（只订阅、不请求的那个窗口只能等广播）。
+  assert.equal(LYRICS_DOCUMENT, "lyrics:document");
+  assert.equal(LYRICS_PROGRESS, "lyrics:progress");
+  assert.equal(LYRICS_STATE, "lyrics:state");
+  assert.equal(rustStringConst(rustSource("bridge.rs"), "LYRICS_DOCUMENT"), LYRICS_DOCUMENT);
+  assert.equal(rustStringConst(rustSource("bridge.rs"), "LYRICS_PROGRESS"), LYRICS_PROGRESS);
+  assert.equal(rustStringConst(rustSource("bridge.rs"), "LYRICS_STATE"), LYRICS_STATE);
+
+  const rustBroadcasts = rustStringArray(rustSource("bridge.rs"), "BROADCAST_CHANNELS");
+  for (const channel of [LYRICS_DOCUMENT, LYRICS_PROGRESS, LYRICS_STATE]) {
+    assert.ok(BROADCAST_CHANNELS.includes(channel), `${channel} 必须在广播白名单里`);
     assert.ok(rustBroadcasts.includes(channel), `Rust 侧白名单同样必须含 ${channel}`);
   }
 });

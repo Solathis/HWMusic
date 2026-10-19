@@ -43,12 +43,24 @@ pub const LYRICS_TOGGLE: &str = "lyrics:toggle";
 /// 托盘点不了渲染层的页面切换（视图状态在渲染层），所以发一条"去设置页"的意图，
 /// 由渲染层自己走它既有的 `navigate`（不新增任何 IPC 通道）。
 pub const APP_OPEN_SETTINGS: &str = "app:open-settings";
+/// 歌词文档广播频道（R12）：`{lines, status}` —— 主窗转发给桌面歌词窗。
+///
+/// 歌词窗**没有业务频道权限**（`core_call` 只收主窗来源），所以它唯一的输入就是广播；
+/// 少一条白名单的后果是桌面歌词永远空白，而日志里什么都看不出来。
+pub const LYRICS_DOCUMENT: &str = "lyrics:document";
+/// 歌词进度广播频道（R12）：`{timeMs, playing, seekGeneration}`（主窗 rAF 节流后推）。
+pub const LYRICS_PROGRESS: &str = "lyrics:progress";
+/// 歌词窗配置广播频道（R12）：`{config, visible}` —— 字号/颜色/模式/锁定/点透（会话内）。
+pub const LYRICS_STATE: &str = "lyrics:state";
 pub const BROADCAST_CHANNELS: &[&str] = &[
     "app:notice",
     "auth:status",
     "player:command",
     "lyrics:toggle",
     "app:open-settings",
+    "lyrics:document",
+    "lyrics:progress",
+    "lyrics:state",
 ];
 
 /// 已答复 id 的保留上限：应答一次性守卫必须有界（超出按插入顺序淘汰）。
@@ -546,13 +558,25 @@ mod tests {
     fn bridge_broadcast_channels_match_the_named_constants() {
         assert_eq!(
             BROADCAST_CHANNELS,
-            [APP_NOTICE, AUTH_STATUS, PLAYER_COMMAND, LYRICS_TOGGLE, APP_OPEN_SETTINGS]
+            [
+                APP_NOTICE,
+                AUTH_STATUS,
+                PLAYER_COMMAND,
+                LYRICS_TOGGLE,
+                APP_OPEN_SETTINGS,
+                LYRICS_DOCUMENT,
+                LYRICS_PROGRESS,
+                LYRICS_STATE
+            ]
         );
         assert_eq!(APP_NOTICE, "app:notice");
         assert_eq!(AUTH_STATUS, "auth:status");
         assert_eq!(PLAYER_COMMAND, "player:command");
         assert_eq!(LYRICS_TOGGLE, "lyrics:toggle");
         assert_eq!(APP_OPEN_SETTINGS, "app:open-settings");
+        assert_eq!(LYRICS_DOCUMENT, "lyrics:document");
+        assert_eq!(LYRICS_PROGRESS, "lyrics:progress");
+        assert_eq!(LYRICS_STATE, "lyrics:state");
     }
 
     /// 可读回的假写入端：断言"到底写出了什么帧"。
@@ -706,15 +730,19 @@ mod tests {
         // 生产路径用的是 FramePolicy::default()；集合为空时这里会退化成 Reject，
         // 无 id 的广播帧只能进日志——等于 sidecar 发出去的广播被静默丢弃。
         let default_policy = FramePolicy::default();
-        // R7 增补了 auth:status、R9 预登记了 player:command、R11 增补了托盘那两条：每加一个都在这里同步。
+        // R7 增补了 auth:status、R9 预登记了 player:command、R11 增补了托盘那两条、
+        // R12 增补了歌词窗那三条（文档/进度/配置）：每加一个都在这里同步。
         let expected: &[&str] = &[
             "app:notice",
             "auth:status",
             "player:command",
             "lyrics:toggle",
             "app:open-settings",
+            "lyrics:document",
+            "lyrics:progress",
+            "lyrics:state",
         ];
-        assert_eq!(BROADCAST_CHANNELS, expected, "控制器裁决的广播集合（R11 起加上托盘那两条）");
+        assert_eq!(BROADCAST_CHANNELS, expected, "控制器裁决的广播集合（R12 起加上歌词窗那三条）");
 
         let frame = r#"{"channel":"app:notice","payload":{"text":"已复制"}}"#;
         match classify_line(frame, &default_policy) {

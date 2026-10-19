@@ -201,6 +201,22 @@ test("端到端：playback:resolve-url 端点未配置时回结构化 endpoint_u
   assert.deepEqual(sidecar.problems, []);
 });
 
+test("端到端：playback:lyrics 频道真的注册了；端点未配置时回结构化 endpoint_unknown（R12）", async (t) => {
+  const sidecar = startSidecar();
+  t.after(() => sidecar.cleanup());
+
+  // 真进程里没有端点写入方 → 必须如实报"接口未配"，而不是回一段编出来的歌词
+  const lyrics = await sidecar.bridge.call("playback:lyrics", { trackId: "1001" });
+  assert.equal(lyrics.ok, false, `端点未配置不许"成功"：${JSON.stringify(lyrics)}`);
+  assert.equal(lyrics.error.kind, "endpoint_unknown");
+  assert.match(lyrics.error.message, /lyrics/, "要说清是哪个端点没配（渲染层据此说「歌词来源尚未配置」）");
+
+  const bad = await sidecar.bridge.call("playback:lyrics", { trackId: " " });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.error.kind, "invalid_payload", "坏载荷在边界被拒，不透给协议层");
+  assert.deepEqual(sidecar.problems, []);
+});
+
 test("端到端：未知频道不被桥放行（Node dispatch 层白名单生效）", async (t) => {
   const sidecar = startSidecar();
   t.after(() => sidecar.cleanup());

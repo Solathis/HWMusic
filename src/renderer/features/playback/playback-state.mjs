@@ -80,11 +80,19 @@ export function trackArtistOf(track) {
   return typeof track.artists === "string" && track.artists.trim() !== "" ? track.artists.trim() : "未知艺人";
 }
 
-/** 歌词区的占位文案（三档分开：没有来源 ≠ 这首歌没有歌词）。 */
+/**
+ * 歌词区的占位文案（四档分开：没有来源 ≠ 取不到 ≠ 这首歌没有歌词）。
+ *
+ * R12 起 `playback:lyrics` 这条来源通道真的接上了，所以 R9 那句"歌词来源尚未接入"
+ * 不再成立——**缺的是端点**（业务端点全部待联调确认），文案如实改成"尚未配置"；
+ * 而"网络不通/接口报错"是另一档（`failed`），把它说成"尚未配置"会让用户跑去设置页
+ * 找一个本来就填好的端点。
+ */
 export const LYRICS_NOTICE_TEXT = {
-  unavailable: "歌词来源尚未接入。",
+  unavailable: "歌词来源尚未配置。",
   loading: "正在取歌词…",
   empty: "这首歌没有歌词。",
+  failed: "歌词暂时取不到（详情见日志）。",
 };
 
 /** 歌词状态 → 占位文案；有词时返回 `null`（界面不该再压一行字在歌词上）。 */

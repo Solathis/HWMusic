@@ -30,6 +30,8 @@ export const MUSIC_ENDPOINT_KEYS = [
   "artist",
   "history",
   "playback",
+  /** 歌词文本（R12 增补）：`{trackId}` → 原始歌词文本（渲染层用官方 parseLrc 解析） */
+  "lyrics",
 ];
 
 export const MUSIC_ERROR_KINDS = {
@@ -256,6 +258,53 @@ export function parsePlaybackPayload(raw, options = {}) {
     signals: audition.signals,
     warnings,
   });
+}
+
+/**
+ * 歌词响应解码（纯函数，R12）。
+ *
+ * 端点的**响应形状尚未联调确认**（业务端点全部待确认，见 docs/API_CONTRACT.md §2.1），
+ * 所以这里按"多个候选键宽容读取"的老办法（与 `trackIdOf` / `extractList` 同款）：
+ * 拿到非空字符串就算歌词文本，一个都没有就如实回 `invalid_response`（**不猜**、不把
+ * 整段响应体当歌词塞给渲染层——那只会让歌词窗显示一坨 JSON）。
+ *
+ * 读出来的 `warnings` 会随应答回到渲染层：形状不合预期时，"到底是用哪个键读到的"
+ * 是唯一能排查的线索（不比播放地址那条——歌词文本不是敏感信息，不需要隐藏）。
+ */
+export function parseLyricsPayload(raw) {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return err("歌词接口响应不是对象", MUSIC_ERROR_KINDS.invalidResponse);
+  }
+
+  const warnings = [];
+  // 候选键：联调确认后就收敛到那一个（读到的键名会进 warnings，便于确认）
+  const candidates = ["lyric", "lyrics", "lrc", "lyricText", "content", "text"];
+  let text = null;
+  let key = null;
+  for (const candidate of candidates) {
+    const value = raw[candidate];
+    if (isNonEmptyString(value)) {
+      text = value;
+      key = candidate;
+      break;
+    }
+  }
+  if (text === null && raw.data !== undefined && raw.data !== raw) {
+    // 有的网关把业务数据再包一层：只在**顶层没找到**时才往里看一层（不递归猜）
+    const nested = parseLyricsPayload(raw.data);
+    if (nested.ok && isNonEmptyString(nested.data.text)) return nested;
+    warnings.push("nested_shape_unrecognized");
+  }
+  if (text === null) {
+    return err(
+      `歌词接口响应里没有可识别的歌词文本（找过 ${candidates.join(" / ")}）`,
+      MUSIC_ERROR_KINDS.invalidResponse,
+    );
+  }
+
+  const format = isNonEmptyString(raw.format) ? raw.format.trim() : "lrc";
+  if (key !== "lyric" && key !== "lyrics") warnings.push(`read_from_${key}`);
+  return ok({ text, format, warnings });
 }
 
 /**
@@ -544,6 +593,22 @@ export function createMusicApi(options = {}) {
     return parsePlaybackPayload(result.data, { isSafeUrl, flagKeys });
   }
 
+  /**
+   * 歌词文本（R12）：`{trackId}` → `{text, format, warnings}`。
+   *
+   * 端点未注入时由 `requestJson` 回结构化 `endpoint_unknown`（渲染层据此说"歌词来源尚未配置"，
+   * 不冒充"这首歌没有歌词"）。拿到的文本**不进日志、不落盘**：它只经这一帧交给渲染层。
+   */
+  async function getLyrics(request = {}) {
+    const trackId = request.trackId ?? request.id;
+    if (!isNonEmptyString(trackId)) return err("歌词接口需要 trackId", MUSIC_ERROR_KINDS.missingParam);
+    const result = await requestJson("lyrics", {
+      params: { [queryNames.id]: trackId.trim(), ...(request.params ?? {}) },
+    });
+    if (!result.ok) return result;
+    return parseLyricsPayload(result.data);
+  }
+
   return {
     endpointOf,
     requestJson,
@@ -559,6 +624,7 @@ export function createMusicApi(options = {}) {
     getArtist,
     getHistory,
     getPlayback,
+    getLyrics,
   };
 }
 
