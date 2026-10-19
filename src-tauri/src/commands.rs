@@ -26,12 +26,16 @@ use crate::MAIN_WINDOW_LABEL;
 ///
 /// R9 增补 `playback:resolve-url`：拿**当次**播放地址（地址只作当次播放结果交给渲染层，
 /// 不写日志、不持久化）。少了它，播放器点播放只会拿到 `unknown_channel`。
+///
+/// R10 增补 `settings:test-proxy`：设置页的"测试连接"（core 侧用独立的 ProxyAgent 发一次请求）。
+/// 少了它，那个按钮只会拿到 `unknown_channel`——而它看起来像"代理不通"。
 pub const REQUEST_CHANNELS: &[&str] = &[
     "auth:login",
     "auth:logout",
     "auth:cancel-login",
     "settings:get",
     "settings:set",
+    "settings:test-proxy",
     "library:favorites",
     "library:playlists",
     "library:playlist-detail",
@@ -541,6 +545,107 @@ pub fn core_renderer_ready(window: Window, state: State<'_, Arc<CoreState>>) -> 
     Ok(count)
 }
 
+// ---------------------------------------------------------------------------
+// 开机自启（R10）
+// ---------------------------------------------------------------------------
+
+/// 开机自启的读写口子。
+///
+/// 抽成 trait 的两个理由：
+/// 1. 单测不需要 tauri app / mock runtime（`AutoLaunchManager` 是插件 setup 里托管的，拿不到就
+///    只能整段不测）；
+/// 2. **单测绝不能写本机注册表**——真跑一次 `enable()` 会在开发机上留下一个自启项，
+///    而那是用户的机器状态，不是测试夹具。假 manager 覆盖判定逻辑，真插件调用层只做转发。
+pub trait AutoStart {
+    fn enable(&self) -> Result<(), String>;
+    fn disable(&self) -> Result<(), String>;
+    fn is_enabled(&self) -> Result<bool, String>;
+}
+
+impl AutoStart for tauri_plugin_autostart::AutoLaunchManager {
+    fn enable(&self) -> Result<(), String> {
+        tauri_plugin_autostart::AutoLaunchManager::enable(self).map_err(|error| error.to_string())
+    }
+
+    fn disable(&self) -> Result<(), String> {
+        tauri_plugin_autostart::AutoLaunchManager::disable(self).map_err(|error| error.to_string())
+    }
+
+    fn is_enabled(&self) -> Result<bool, String> {
+        tauri_plugin_autostart::AutoLaunchManager::is_enabled(self).map_err(|error| error.to_string())
+    }
+}
+
+/// 应用自启开关，并**回报观测到的实际状态**。
+///
+/// 为什么写完要回读：`enable()` 返回 `Ok` 只说明这次调用没报错，不代表系统真的记下了
+/// （Windows 上是 `Run` 键写入，可能被策略/权限挡回）。把请求回显成"已开启"，
+/// 代价是用户下次开机才发现没生效——而这中间界面一直在说"已开启"。
+pub fn apply_autostart(enabled: bool, manager: &dyn AutoStart) -> Result<bool, CoreError> {
+    let applied = if enabled { manager.enable() } else { manager.disable() };
+    if let Err(detail) = applied {
+        return Err(CoreError::new(
+            "internal",
+            format!("开机自启设置失败（{detail}）"),
+        ));
+    }
+    manager.is_enabled().map_err(|detail| {
+        CoreError::new("internal", format!("开机自启状态读取失败（{detail}）"))
+    })
+}
+
+/// 读当前自启状态（设置页挂载时用）。
+pub fn read_autostart(manager: &dyn AutoStart) -> Result<bool, CoreError> {
+    manager.is_enabled().map_err(|detail| {
+        CoreError::new("internal", format!("开机自启状态读取失败（{detail}）"))
+    })
+}
+
+/// 取插件的 `AutoLaunchManager` 托管状态。
+///
+/// 用 `try_state` 而不是插件扩展 trait 的 `autolaunch()`：后者在插件没注册时**直接 panic**，
+/// 命令里 panic 的后果是整个应用崩掉，而不是界面上显示一句"改不了开机自启"。
+fn autostart_manager<R: tauri::Runtime>(
+    window: &tauri::Window<R>,
+) -> Result<State<'_, tauri_plugin_autostart::AutoLaunchManager>, CoreError> {
+    window
+        .try_state::<tauri_plugin_autostart::AutoLaunchManager>()
+        .ok_or_else(|| {
+            CoreError::new(
+                "internal",
+                "开机自启插件未注册：无法读写系统自启（详情见日志）",
+            )
+        })
+}
+
+/// 设置页的"开机自启"开关。
+///
+/// **为什么不加 capabilities 权限条目**（Tauri 2.12 语义，逐行出处已核对）：
+/// `tauri::Webview::on_message`（tauri-2.12.4 `src/webview/mod.rs:2080`）只在三种情形查 ACL——
+/// ① 命令名带 `plugin:` 前缀；② 应用定义了 app 级 ACL manifest；③ 来源不是本地
+/// （`!is_local`，远程 URL）。而 ② 的前置是 `tauri-build` 侧算出的 `has_app_manifest`
+/// （`src/acl.rs:421`：`app_manifest` 带 commands，或 `src-tauri/permissions` 非空）——
+/// 本应用 `build.rs` 只调 `tauri_build::build()`（无 app_manifest）、没有 `permissions/` 目录，
+/// 渲染层来源是本地 `tauri://localhost`，所以自定义命令**不经 ACL**（`core_call` /
+/// `core_renderer_ready` 一直如此）。这些前置条件由 `test/autostart.test.mjs` 钉住：
+/// 将来谁加了 app 级 manifest，那条用例会先红，提醒他同步加权限条目。
+///
+/// 顺带：这条命令挂在 `require_main_window` 后面——登录子窗/歌词窗/托盘都改不了系统自启。
+#[tauri::command]
+pub fn core_set_autostart(window: Window, enabled: bool) -> Result<bool, CoreError> {
+    require_main_window(window.label())?;
+    let manager = autostart_manager(&window)?;
+    apply_autostart(enabled, manager.inner())
+}
+
+/// 读当前开机自启状态（设置页挂载时一次；没有这条，开关的初始状态只能靠猜）。
+#[tauri::command]
+pub fn core_get_autostart(window: Window) -> Result<bool, CoreError> {
+    require_main_window(window.label())?;
+    let manager = autostart_manager(&window)?;
+    read_autostart(manager.inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -970,5 +1075,135 @@ mod tests {
             json!({"channel": "auth:state", "payload": {"loggedIn": true}}),
             "渲染层拿到的漏斗事件载荷形如 {{channel, payload}}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 开机自启（R10）：只测判定逻辑，**绝不碰本机注册表**
+    // -----------------------------------------------------------------------
+
+    /// 假的自启后端：记录调用顺序，可分别让"写"或"读"失败。
+    ///
+    /// `ignore_write` 模拟"调用没报错，但系统没真的改"（策略挡回、注册表被改写）——
+    /// 这正是"必须回读实际状态"那条规矩要抓的情形。
+    #[derive(Default)]
+    struct FakeAutostart {
+        enabled: std::cell::Cell<bool>,
+        ignore_write: bool,
+        fail_write: bool,
+        fail_read: bool,
+        calls: std::cell::RefCell<Vec<&'static str>>,
+    }
+
+    impl FakeAutostart {
+        fn note(&self, step: &'static str) {
+            self.calls.borrow_mut().push(step);
+        }
+    }
+
+    impl AutoStart for FakeAutostart {
+        fn enable(&self) -> Result<(), String> {
+            self.note("enable");
+            if self.fail_write {
+                return Err("注册表写入被拒绝".to_string());
+            }
+            if !self.ignore_write {
+                self.enabled.set(true);
+            }
+            Ok(())
+        }
+
+        fn disable(&self) -> Result<(), String> {
+            self.note("disable");
+            if self.fail_write {
+                return Err("注册表写入被拒绝".to_string());
+            }
+            if !self.ignore_write {
+                self.enabled.set(false);
+            }
+            Ok(())
+        }
+
+        fn is_enabled(&self) -> Result<bool, String> {
+            self.note("is_enabled");
+            if self.fail_read {
+                return Err("读取注册表被拒绝".to_string());
+            }
+            Ok(self.enabled.get())
+        }
+    }
+
+    #[test]
+    fn autostart_writes_then_reads_back_the_real_state() {
+        let manager = FakeAutostart::default();
+        assert_eq!(apply_autostart(true, &manager), Ok(true));
+        assert_eq!(
+            manager.calls.borrow().as_slice(),
+            ["enable", "is_enabled"],
+            "先写再读：反过来报的就是写入前的旧状态"
+        );
+
+        let manager = FakeAutostart {
+            enabled: std::cell::Cell::new(true),
+            ..Default::default()
+        };
+        assert_eq!(apply_autostart(false, &manager), Ok(false));
+        assert_eq!(manager.calls.borrow().as_slice(), ["disable", "is_enabled"]);
+    }
+
+    /// 旧仓缺陷的形状：把"这次调用没报错"当成"已经打开了"。
+    #[test]
+    fn autostart_reports_the_observed_state_not_the_request() {
+        let manager = FakeAutostart {
+            ignore_write: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            apply_autostart(true, &manager),
+            Ok(false),
+            "写入没生效时不许回 true（否则界面一直显示一个不存在的「已开启」）"
+        );
+    }
+
+    #[test]
+    fn autostart_write_failure_is_structured_and_does_not_report_success() {
+        let manager = FakeAutostart {
+            fail_write: true,
+            ..Default::default()
+        };
+        let error = apply_autostart(true, &manager).expect_err("写入失败必须报错");
+        assert_eq!(error.kind.as_deref(), Some("internal"));
+        assert!(error.message.contains("注册表写入被拒绝"), "{}", error.message);
+        assert!(error.message.starts_with("开机自启设置失败"), "{}", error.message);
+        assert_eq!(
+            manager.calls.borrow().as_slice(),
+            ["enable"],
+            "写入失败就不该再去回读（那只会把一次失败变成两条噪声）"
+        );
+    }
+
+    #[test]
+    fn autostart_read_failure_is_structured() {
+        let manager = FakeAutostart {
+            fail_read: true,
+            ..Default::default()
+        };
+        for result in [
+            apply_autostart(false, &manager),
+            read_autostart(&manager),
+        ] {
+            let error = result.expect_err("读不到状态必须报错，不许猜一个「关闭」");
+            assert_eq!(error.kind.as_deref(), Some("internal"));
+            assert!(error.message.contains("读取注册表被拒绝"), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn autostart_read_reports_what_the_system_says() {
+        assert_eq!(read_autostart(&FakeAutostart::default()), Ok(false));
+        let on = FakeAutostart {
+            enabled: std::cell::Cell::new(true),
+            ..Default::default()
+        };
+        assert_eq!(read_autostart(&on), Ok(true));
     }
 }

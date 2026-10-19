@@ -208,3 +208,87 @@ test("控制台只剩错误路径：渲染层不得有 console.log/info/debug", 
   }
   assert.deepEqual(offenders, [], `调试残留（只允许 console.warn/error 的错误路径）：\n${offenders.join("\n")}`);
 });
+
+/**
+ * R10 裁决：**主题只跟系统**（`prefers-color-scheme`），不做手动切换。
+ *
+ * 最省的接法：把 `.dark` 那套令牌照原样接到 `@media (prefers-color-scheme: dark)` 的 `:root` 上
+ * ——不引 next-themes（它的防闪烁内联脚本会被 CSP 拦）、不写 JS、不引入第二套配色。
+ * 代价是令牌写了两份，所以**两份必须逐条一致**由测试钉住：漏一条，暗色下就有一处颜色
+ * 悄悄留在亮色（这种差别在 review 里几乎看不出来）。
+ */
+
+/** 取 `from` 之后第一个 `{...}` 块的内容（按大括号配对，能处理嵌套）。 */
+function blockAfter(source, from) {
+  const open = source.indexOf("{", from);
+  assert.ok(open !== -1, `找不到代码块：${source.slice(from, from + 40)}`);
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    else if (source[index] === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(open + 1, index);
+    }
+  }
+  throw new Error("大括号没有闭合");
+}
+
+/** 块里的声明（`--name: value;` 与 `color-scheme: dark;` 一视同仁）。 */
+function declarations(text) {
+  return [...text.matchAll(/(--[a-z0-9-]+|[a-z-]+)\s*:\s*([^;{}]+);/g)].map(
+    (found) => `${found[1].trim()}=${found[2].trim()}`,
+  );
+}
+
+const PREFERS_DARK = "@media (prefers-color-scheme: dark)";
+
+test("主题跟随系统：prefers-color-scheme 的 :root 令牌与 .dark 逐条一致", () => {
+  const styles = read("src/renderer/styles.css");
+  // 顶层的那一条（行首）：dark 变体块里也有一条同名媒体查询，那条查的是 `&`
+  const mediaMatch = styles.match(/^@media \(prefers-color-scheme: dark\)/m);
+  assert.ok(mediaMatch, `styles.css 必须把系统暗色接上（顶层 ${PREFERS_DARK}）`);
+
+  const mediaBlock = blockAfter(styles, mediaMatch.index);
+  const rootAt = mediaBlock.indexOf(":root");
+  assert.ok(rootAt !== -1, "系统暗色要改的是 :root 上的令牌（不是挑个别组件改颜色）");
+  const systemTokens = declarations(blockAfter(mediaBlock, rootAt));
+
+  const darkMatch = styles.match(/^\.dark\s*\{/m);
+  assert.ok(darkMatch, "styles.css 必须仍有 shadcn 的 .dark 令牌块（独立成块，不是散落各处的覆盖）");
+  const darkTokens = declarations(blockAfter(styles, darkMatch.index));
+
+  assert.ok(darkTokens.length >= 20, `令牌块缩水了（只有 ${darkTokens.length} 条），扫描就是空转`);
+  assert.deepEqual(
+    systemTokens.slice().sort(),
+    darkTokens.slice().sort(),
+    "系统暗色与 .dark 的令牌必须逐条一致：少一条 = 暗色下有一处颜色留在亮色",
+  );
+  assert.ok(
+    systemTokens.some((entry) => entry.startsWith("color-scheme=")),
+    "系统暗色要带 color-scheme: dark（原生滚动条/下拉框才会跟着暗）",
+  );
+});
+
+test("主题跟随系统：dark: 变体也认系统偏好（上游原语的暗色微调不能落空）", () => {
+  const styles = read("src/renderer/styles.css");
+  const variantAt = styles.indexOf("@custom-variant dark");
+  assert.ok(variantAt !== -1, "styles.css 要有 dark 变体的定义");
+  // 变体块到下一个顶层 at-rule（`\n@`）为止：不假设它是一行式还是块式
+  const rest = styles.slice(variantAt);
+  const next = rest.indexOf("\n@", 1);
+  const variant = next === -1 ? rest : rest.slice(0, next);
+  assert.match(variant, /prefers-color-scheme/, "dark: 工具类必须跟着系统暗色（否则只有令牌换了，原语的暗色微调没换）");
+  assert.match(variant, /\.dark/, "保留 .dark 类的路径（shadcn 默认写法，将来要做手动切换时直接可用）");
+});
+
+test("不做手动切换：渲染层不写 dark 类、不存主题偏好（裁决：手动切换非目标）", () => {
+  for (const relative of rendererCodeFiles()) {
+    const source = stripComments(read(relative));
+    assert.doesNotMatch(
+      source,
+      /classList\.(?:add|remove|toggle)\(\s*["'`]dark/,
+      `${relative} 不许自己切 dark 类（主题由系统决定）`,
+    );
+    assert.doesNotMatch(source, /localStorage[^\n]*theme/i, `${relative} 不许存主题偏好（没有手动切换这回事）`);
+  }
+});

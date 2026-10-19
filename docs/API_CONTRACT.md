@@ -288,6 +288,49 @@ Rust 镜像见 §3 的 parity 钉）：
    （`img-src` 白名单）加载再把 `HTMLImageElement` 传进 `BackgroundRender`。
 3. **音质/试听标注**：`auditionLikely` 已在协议层算出，UI 本任务不显示（不虚标音质）。
 
+### 2.7 设置页 ↔ core / 外壳（R10 落地）
+
+**请求频道增补一条**（白名单唯一真源 `src/shared/request-channels.ts`，Rust 镜像见 §3 的 parity 钉）：
+
+| 频道 | 载荷 | 应答 `data` | 说明 |
+|---|---|---|---|
+| `settings:test-proxy` | `{proxy:{enabled,host,port,username,password,bypass}}` | `{result}` | `result` 即 R6 `testProxyConnection` 的结构化结论（`{ok,ms,status}` 或 `{ok:false,error:{kind,message}}`）。**目标 URL 由 core 侧的固定常量 `PROXY_TEST_URL` 决定**（`https://oauth-login1.cloud.huawei.com/`，R4 已确认可达的官方授权主机根路径）——不接受调用方指定，否则等于把一个能带凭据出去的代理塞进渲染层手里；业务端点仍待联调，**不猜**。凭据原样进测试器（不然测的是另一个代理），但**答复文案与日志里一个字都不回显**，坏载荷那条路也不回显（`{proxy:null,password:"…"}` 有专门用例） |
+
+**tauri 命令增补两条**（名字的唯一真源 `src/shared/commands.ts`；Rust 侧镜像由
+`test/autostart.test.mjs` 扫描 `commands.rs` 与 `generate_handler!` 钉住）：
+
+| 命令 | 载荷 | 回执 | 说明 |
+|---|---|---|---|
+| `core_set_autostart` | `{enabled: boolean}` | 观测到的实际状态（`boolean`） | 写完**回读** `is_enabled`：请求被受理 ≠ 真的打开了（Windows 上是 `Run` 键写入）。界面开关跟着观测值走——乐观翻转会在写入失败时显示一个不存在的"已开启" |
+| `core_get_autostart` | 无 | 当前状态（`boolean`） | 设置页挂载时读一次；读不到就如实显示"状态未取到"并禁用开关（不猜） |
+
+两条命令都过**主窗来源守卫**（`require_main_window`）：登录子窗/歌词窗/托盘改不了系统自启。
+
+**权限裁决（Tauri 2.12 语义，已逐行核对源码）**：自定义命令**不进 capabilities**。
+`tauri::Webview::on_message`（tauri-2.12.4 `src/webview/mod.rs:2080`）只在三种情形查 ACL——
+命令名带 `plugin:` 前缀、应用定义了 app 级 ACL manifest（`tauri-build` 在 `app_manifest` 带
+commands 或 `src-tauri/permissions` 非空时才写入 `__app-acl__`，`src/acl.rs:421`）、或来源不是本地。
+本应用三者皆不成立，所以 `core_call`/`core_renderer_ready` 一直如此，新命令同理。
+**前置条件由 `test/autostart.test.mjs` 钉住**：将来谁加了 app 级 manifest，那条用例会先红。
+
+**主题裁决（R10）**：**不做手动切换**，亮暗只跟系统的 `prefers-color-scheme`——
+`src/renderer/styles.css` 里把 `.dark` 那套令牌照原样接到 `@media (prefers-color-scheme: dark)` 的
+`:root` 上，并让 `dark:` 变体也认系统偏好；不引 next-themes（它的防闪烁内联脚本会被 CSP 拦）、
+不写 JS、不引入第二套配色。两份令牌**逐条一致**由 `test/theme-tokens.test.mjs` 钉住
+（漏一条 = 暗色下有一处颜色留在亮色）。渲染层不得写 `dark` 类或存主题偏好（同文件扫描）。
+
+**关窗行为**：`settings:set` 的 `{patch:{closeBehavior}}`（枚举 `tray`/`quit`，§2.5 既有语义）。
+托盘本体是 R11；在那之前 `TRAY_AVAILABLE = false`，选了托盘当场说明"会回退成退出"。
+
+**如实登记的已知限制（本任务）**：
+
+1. **托盘不存在**（R11）：桌面托盘、关窗时真正的最小化到托盘都还没有——选 `tray` 今天等同于退出；
+2. **开机自启未经真机验证**：单测只覆盖判定逻辑（假 manager，**绝不写本机注册表**），
+   真实注册表写入/读取未实测；Rust 侧的错误按结构化 `internal` 回，界面文案带原因；
+3. **代理改动要重启才生效**：回执照实回报 `restartRequired`（sidecar 的全局 dispatcher 与
+   主窗的 `proxy_url` 都只在启动时装配一次）——设置页据此提示"重启后生效；登录窗口下次打开即生效"；
+4. **队列在设置页只读**（长度 + 当前曲），管理队列仍在播放队列面板。
+
 ### 2.4 CDN 域（已确认可达）
 
 | 域 | probe 实测 | 用途 |
@@ -309,6 +352,9 @@ Rust 镜像见 §3 的 parity 钉）：
 | 两条期限文案 | 见 §1.7 | `src-tauri/src/login.rs` ↔ `src/main/huawei.ts` | 两侧逐字一致，parity 互钉 |
 | `LYRICS_SEEK_WINDOW_MS` | `200` | `src/renderer/features/lyrics/lyric-sync.mjs` | R9：歌词的 `isSeeking` 窗口（拖动时歌词跟着手走、手停 200ms 后自动收窗）；组件里不许再写这个数字（扫描钉住） |
 | `QUEUE_SETTING_KEY` | `"queue"` | `src/renderer/features/playback/queue.mjs` | R9：播放队列的持久化键（`data.queue`，只存曲目标识 + 索引） |
+| `PROXY_TEST_URL` | `https://oauth-login1.cloud.huawei.com/` | `src/host/proxy-handlers.mjs` | R10：`settings:test-proxy` 的唯一目标（不接受调用方指定；业务端点仍待联调） |
+| `CORE_SET_AUTOSTART` / `CORE_GET_AUTOSTART` | `"core_set_autostart"` / `"core_get_autostart"` | `src/shared/commands.ts` | R10：命令名的唯一真源（渲染层只用常量；Rust 侧为镜像副本，由 `test/autostart.test.mjs` 钉住） |
+| `TRAY_AVAILABLE` | `false` | `src/renderer/features/settings/settings-form.mjs` | R10：R11 之前托盘不存在——写死在渲染层是如实，不是偷懒（宿主侧今天没有"托盘在不在"的口子） |
 
 ## 4. 红线（任何后续任务不得越过）
 
@@ -336,3 +382,9 @@ Rust 镜像见 §3 的 parity 钉）：
   三条如实登记的未接线项（**歌词来源通道**、封面/背景图、音质/试听标注）。§3 增补两个常量
   （`LYRICS_SEEK_WINDOW_MS`、`QUEUE_SETTING_KEY`）。
   协议层新增 `readFavoritesPage`（单页分页结论，**不给 total**）与 `getPlaylistDetail`。
+- 2026-10-19（Task R10）：新增 §2.7——`settings:test-proxy` 频道（固定测试目标、凭据不回显）
+  与两条 tauri 命令 `core_set_autostart` / `core_get_autostart`（报观测到的状态、主窗来源守卫、
+  **不进 capabilities** 的 Tauri 2.12 出处与前置条件）；主题裁决（只跟 `prefers-color-scheme`，
+  不做手动切换，两份令牌逐条一致由测试钉住）；关窗行为的托盘可用性口径；四条如实登记的限制。
+  §3 增补三行常量。设置页**不显示账号标识**（`auth:status` 载荷里没有该字段，不为显示扩协议），
+  登录状态只显示"已登录/未登录" + 退出按钮。

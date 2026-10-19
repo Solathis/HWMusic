@@ -1,5 +1,5 @@
 /**
- * 渲染层唯一的宿主桥封装（R3 只交付封装与类型，不接 UI）。
+ * 渲染层唯一的宿主桥封装（R3 交付封装与类型；R10 增补开机自启）。
  *
  * 边界：渲染层拿到的是白名单方法，拿不到任何 Token——凭据与业务 HTTP 只在 sidecar/Rust。
  * 这里只做两件事：把 `core_call` 包成带类型的调用、把漏斗事件 `core:event` 包成按频道过滤的订阅。
@@ -7,6 +7,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import { CORE_CALL, CORE_GET_AUTOSTART, CORE_RENDERER_READY, CORE_SET_AUTOSTART } from "../shared/commands.ts";
 import { CORE_EVENT } from "../shared/channels.ts";
 import type { CoreError } from "../shared/result.ts";
 import type { RequestChannel } from "../shared/request-channels.ts";
@@ -27,6 +28,10 @@ export interface DesktopBridge {
   rendererReady: () => Promise<number>;
   /** 订阅漏斗事件并按频道过滤；返回退订函数。 */
   onCoreEvent: <T = unknown>(channel: string, handler: (payload: T) => void) => Promise<UnlistenFn>;
+  /** 开机自启：写入并返回观测状态（R10）。 */
+  setAutostart: (enabled: boolean) => Promise<boolean>;
+  /** 开机自启：读当前状态（R10）。 */
+  getAutostart: () => Promise<boolean>;
 }
 
 export function isCoreError(value: unknown): value is CoreError {
@@ -47,7 +52,7 @@ function normalizeFailure(failure: unknown): CoreError {
 
 export async function coreCall<T = unknown>(channel: RequestChannel, payload: unknown = null): Promise<T> {
   try {
-    return await invoke<T>("core_call", { channel, payload });
+    return await invoke<T>(CORE_CALL, { channel, payload });
   } catch (failure) {
     throw normalizeFailure(failure);
   }
@@ -55,7 +60,33 @@ export async function coreCall<T = unknown>(channel: RequestChannel, payload: un
 
 export async function rendererReady(): Promise<number> {
   try {
-    return await invoke<number>("core_renderer_ready");
+    return await invoke<number>(CORE_RENDERER_READY);
+  } catch (failure) {
+    throw normalizeFailure(failure);
+  }
+}
+
+/**
+ * 开机自启的开关（R10）。
+ *
+ * 回执是 Rust **观测到的实际状态**（写完再 `is_enabled` 回读），所以界面上的开关直接跟着它走：
+ * 乐观地把开关翻过去，会在注册表写入失败时显示一个不存在的状态（用户下次开机才发现没生效）。
+ *
+ * 失败抛出 `CoreError` 形状（与 `coreCall` 同一套归一）：调用方用 `settingsFailureText` 之类
+ * 的纯函数把它变成人话，不把原始错误糊到界面上。
+ */
+export async function setAutostart(enabled: boolean): Promise<boolean> {
+  try {
+    return await invoke<boolean>(CORE_SET_AUTOSTART, { enabled });
+  } catch (failure) {
+    throw normalizeFailure(failure);
+  }
+}
+
+/** 读当前自启状态（设置页挂载时一次）。 */
+export async function getAutostart(): Promise<boolean> {
+  try {
+    return await invoke<boolean>(CORE_GET_AUTOSTART);
   } catch (failure) {
     throw normalizeFailure(failure);
   }
@@ -78,7 +109,13 @@ export async function onCoreEvent<T = unknown>(
 }
 
 /** 方法路由表：`window.desktop` 的全部能力。 */
-export const desktopBridge: DesktopBridge = { coreCall, rendererReady, onCoreEvent };
+export const desktopBridge: DesktopBridge = {
+  coreCall,
+  rendererReady,
+  onCoreEvent,
+  setAutostart,
+  getAutostart,
+};
 
 /** 挂到 `window.desktop`（R8 起在 main.tsx 调用；本任务不接 UI）。 */
 export function installDesktopBridge(target: Window = window): void {

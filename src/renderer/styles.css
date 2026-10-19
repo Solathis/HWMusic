@@ -4,7 +4,19 @@
    no-scrollbar 工具类由该文件提供，缺它这些类会被静默丢弃。 */
 @import "shadcn/tailwind.css";
 
-@custom-variant dark (&:is(.dark *));
+/* 暗色变体：`.dark` 类（shadcn 默认）与**系统偏好**两条路都认。
+   R10 裁决：主题只跟系统，不做手动切换、不引 next-themes（它的防闪烁内联脚本会被 CSP 拦）。
+   块形式的多分支写法是 Tailwind v4 的 `@custom-variant` 语法：`@slot` 处插入工具类本体。 */
+@custom-variant dark {
+  @media (prefers-color-scheme: dark) {
+    & {
+      @slot;
+    }
+  }
+  &:is(.dark *) {
+    @slot;
+  }
+}
 
 @theme inline {
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
@@ -85,6 +97,8 @@
 }
 
 .dark {
+  /* 原生控件（滚动条、下拉框、日期选择器）跟着暗：只换令牌的话它们还是亮的 */
+  color-scheme: dark;
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);
@@ -116,6 +130,46 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
+}
+
+/* 系统暗色：把上面那套令牌照原样接到 :root 上（**逐条一致**由 test/theme-tokens.test.mjs 钉住）。
+   令牌写两份是刻意的：一份给 `.dark` 类（shadcn 默认写法）、一份给系统偏好，
+   漏一条的后果是暗色下有一处颜色悄悄留在亮色，而那在 review 里几乎看不出来。 */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --background: oklch(0.145 0 0);
+    --foreground: oklch(0.985 0 0);
+    --card: oklch(0.205 0 0);
+    --card-foreground: oklch(0.985 0 0);
+    --popover: oklch(0.205 0 0);
+    --popover-foreground: oklch(0.985 0 0);
+    --primary: oklch(0.922 0 0);
+    --primary-foreground: oklch(0.205 0 0);
+    --secondary: oklch(0.269 0 0);
+    --secondary-foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.708 0 0);
+    --accent: oklch(0.269 0 0);
+    --accent-foreground: oklch(0.985 0 0);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 15%);
+    --ring: oklch(0.556 0 0);
+    --chart-1: oklch(0.87 0 0);
+    --chart-2: oklch(0.556 0 0);
+    --chart-3: oklch(0.439 0 0);
+    --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0);
+    --sidebar: oklch(0.205 0 0);
+    --sidebar-foreground: oklch(0.985 0 0);
+    --sidebar-primary: oklch(0.488 0.243 264.376);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.269 0 0);
+    --sidebar-accent-foreground: oklch(0.985 0 0);
+    --sidebar-border: oklch(1 0 0 / 10%);
+    --sidebar-ring: oklch(0.556 0 0);
+  }
 }
 
 @layer base {

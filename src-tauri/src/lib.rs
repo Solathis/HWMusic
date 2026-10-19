@@ -223,7 +223,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::core_call,
-            commands::core_renderer_ready
+            commands::core_renderer_ready,
+            // R10：设置页的开机自启开关（读写都经主窗来源守卫；**不进 capabilities**——
+            // 自定义命令不走 ACL，理由与前置条件见 commands.rs 的注释）
+            commands::core_set_autostart,
+            commands::core_get_autostart
         ])
         .build(tauri::generate_context!())
         .expect("Tauri 应用启动失败")
@@ -397,5 +401,32 @@ mod tests {
             .join("test")
             .join("fixtures")
             .join("proxy-host-cases.json")
+    }
+
+    /// R10：两条自启命令必须进 `generate_handler!`——只定义不注册，渲染层点了没反应
+    /// （`invoke` 报 "command not found"，而那是运行时才知道的事）。
+    ///
+    /// 源码扫描而不是行为测试：`generate_handler!` 展开后的白名单在运行期拿不到
+    /// （要起一个真 app），而这条契约的关键就在"这一行有没有写"。
+    #[test]
+    fn autostart_commands_are_registered_in_the_invoke_handler() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+            .expect("要能读到自己的源码");
+        // 只看 generate_handler! 那一块：整份扫的话，本用例自己的字面量就把它自己满足了
+        let start = source
+            .find("invoke_handler(tauri::generate_handler![")
+            .expect("找不到 generate_handler! 的注册处");
+        let end = source[start..]
+            .find("])")
+            .map(|offset| start + offset)
+            .expect("generate_handler! 没有闭合");
+        let registered = &source[start..end];
+
+        for name in ["commands::core_set_autostart", "commands::core_get_autostart"] {
+            assert!(
+                registered.contains(name),
+                "{name} 必须进 generate_handler!（否则 invoke 只会回 command not found）：{registered}"
+            );
+        }
     }
 }

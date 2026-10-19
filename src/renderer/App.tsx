@@ -163,7 +163,8 @@ export function LibraryShell() {
       case VIEW.history:
         return <HistoryPage {...navigation} />
       case VIEW.settings:
-        return <SettingsPage />
+        // 设置页只读地显示队列状态（管理队列在播放队列面板里）：状态由外壳交下去，页面不自己取
+        return <SettingsPage queue={playback} />
       default:
         // 认不出的视图（正常不会发生）：给一句空态，绝不白屏
         return <EmptyState text={libraryEmptyText(view)} />

@@ -17,21 +17,56 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { SearchIcon } from "lucide-react"
 
 import {
+  AUTH_LOGOUT,
   LIBRARY_ALBUM,
   LIBRARY_ARTIST,
   LIBRARY_HISTORY,
   LIBRARY_PLAYLIST_DETAIL,
   LIBRARY_PLAYLISTS,
   LIBRARY_SEARCH,
+  SETTINGS_GET,
+  SETTINGS_SET,
+  SETTINGS_TEST_PROXY,
   type RequestChannel,
 } from "../shared/request-channels.ts"
 import { Button } from "./components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card"
 import { Input } from "./components/ui/input"
+import { Label } from "./components/ui/label"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "./components/ui/select"
+import { Switch } from "./components/ui/switch"
 import { EmptyState, GridSkeleton, ListSkeleton, LoadFailed, TrackTable } from "./components"
-import { coreCall, isCoreError } from "./host-api"
+import { coreCall, getAutostart, isCoreError, setAutostart } from "./host-api"
 import { PlaylistGrid } from "./playlist-grid.tsx"
 import { libraryEmptyText, libraryFailureText } from "./features/library/library-state.mjs"
+import {
+  APPEARANCE_NOTICE_TEXT,
+  CLOSE_BEHAVIORS,
+  TRAY_AVAILABLE,
+  autostartFailureText,
+  autostartStateText,
+  autostartStatusFailureText,
+  closeBehaviorFromSettings,
+  closeBehaviorLabel,
+  closeBehaviorNotice,
+  closeBehaviorPatch,
+  loginStatusText,
+  passwordHint,
+  proxyFormFromSettings,
+  proxyPatchFromForm,
+  proxySaveNotice,
+  proxyTestResultText,
+  queueSummary,
+  queueSummaryText,
+  settingsFailureText,
+  validateProxyForm,
+} from "./features/settings/settings-form.mjs"
 import { VIEW, createView, viewParam } from "./features/library/views.mjs"
 
 /** 页大小：收藏页有自己的常量（滚动加载），这里是一页式列表的取数大小。 */
@@ -262,20 +297,400 @@ export function HistoryPage({ ...navigation }: PageNavigationProps) {
 }
 
 // ---------------------------------------------------------------------------
-// 设置（R10 接入；本任务只给一个如实的占位）
+// 设置（R10）
 // ---------------------------------------------------------------------------
 
-export function SettingsPage() {
-  const view = createView(VIEW.settings)
+/**
+ * `settings:get` / `settings:set` 回执的形状（与 `src/main/settings.mjs` 同源）。
+ *
+ * 页面**只把整份文档交给 `proxyFormFromSettings`**，自己不去读 `data.proxy` 里的任何字段：
+ * 凭据不回显这件事靠投影函数结构性保证，而不是靠这里"小心一点"。
+ */
+interface SettingsAnswer {
+  settings: { schemaVersion: number; data: Record<string, unknown> }
+  restartRequired?: boolean
+}
+
+export interface SettingsPageProps {
+  /**
+   * 播放状态（只读摘录用）。设置页**不做任何队列管理**：队列有专门的播放队列面板，
+   * 这里只是把"现在有几首、在放哪首"如实显示出来。
+   */
+  queue?: { entries?: unknown[]; track?: unknown } | null
+}
+
+/**
+ * 设置页：代理表单、关窗行为、开机自启、外观、队列（只读）、登录状态与退出。
+ *
+ * 三条纪律（沿 R8/R9 的做法）：
+ * - 所有文案与判定都在 `features/settings/settings-form.mjs`（纯函数，跑得了测试）；
+ *   页面只做"把状态塞进去、把返回值渲染出来"。
+ * - 凭据只写不读：密码字段永远是 `type="password"`、永远从空开始，回执里有密码但**不进表单**。
+ * - 不冒充：没测过不给测试结论、读不到自启状态就说"未取到"、保存回执按 `restartRequired`
+ *   如实说"要重启"，主机没通过清洗就说"仍是直连"。
+ */
+export function SettingsPage({ queue = null }: SettingsPageProps) {
+  const [form, setForm] = useState(() => proxyFormFromSettings(null))
+  const [closeBehavior, setCloseBehavior] = useState(() => closeBehaviorFromSettings(null))
+  const [loaded, setLoaded] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [failure, setFailure] = useState<string | null>(null)
+  const [autostartEnabled, setAutostartEnabled] = useState<boolean | null>(null)
+  const [autostartReady, setAutostartReady] = useState(false)
+  const [autostartBusy, setAutostartBusy] = useState(false)
+  const [autostartFailure, setAutostartFailure] = useState<string | null>(null)
+
+  // 读设置：挂载时一次（表单是本地状态，之后的编辑不再打请求）
+  useEffect(() => {
+    let alive = true
+    void (async () => {
+      try {
+        const answer = await coreCall<SettingsAnswer>(SETTINGS_GET, null)
+        if (!alive) return
+        setForm(proxyFormFromSettings(answer.settings))
+        setCloseBehavior(closeBehaviorFromSettings(answer.settings))
+        setLoaded(true)
+      } catch (error) {
+        if (!alive) return
+        setFailure(settingsFailureText(error))
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  // 读开机自启状态：挂载时一次。读不到就不猜（开关显示"未取到"并禁用）
+  useEffect(() => {
+    let alive = true
+    void (async () => {
+      try {
+        const current = await getAutostart()
+        if (alive) setAutostartEnabled(current)
+      } catch (error) {
+        if (alive) setAutostartFailure(autostartStatusFailureText(error))
+      } finally {
+        // "还在读"与"读不到"是两件事：没读完就说"未取到"是把读的过程说成失败
+        if (alive) setAutostartReady(true)
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  /** 保存代理：先本地校验（坏端口先拦下），再落盘，最后按回执重建表单与提示。 */
+  async function saveProxy() {
+    const invalid = validateProxyForm(form)
+    if (invalid !== null) {
+      setFailure(invalid)
+      setNotice(null)
+      return
+    }
+    setSaving(true)
+    setFailure(null)
+    setNotice(null)
+    try {
+      const answer = await coreCall<SettingsAnswer>(SETTINGS_SET, { patch: proxyPatchFromForm(form) })
+      // 按回执重建表单：写的和显示的下一次是同一条数据（密码字段随之回到空）
+      setForm(proxyFormFromSettings(answer.settings))
+      setCloseBehavior(closeBehaviorFromSettings(answer.settings))
+      setNotice(proxySaveNotice(answer.settings, answer.restartRequired === true))
+    } catch (error) {
+      setFailure(settingsFailureText(error))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** 恢复默认：**只回默认代理**（整份 reset 会把关窗行为一起打回默认，用户没要求那件事）。 */
+  async function restoreDefaultProxy() {
+    setSaving(true)
+    setFailure(null)
+    setNotice(null)
+    setTestResult(null)
+    try {
+      const answer = await coreCall<SettingsAnswer>(SETTINGS_SET, { patch: { proxy: null } })
+      setForm(proxyFormFromSettings(answer.settings))
+      setCloseBehavior(closeBehaviorFromSettings(answer.settings))
+      setNotice(proxySaveNotice(answer.settings, answer.restartRequired === true))
+    } catch (error) {
+      setFailure(settingsFailureText(error))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** 测试连接：用**表单当前的草稿**（用户想验证的是刚填的这组，不是已保存的旧值）。 */
+  async function testConnection() {
+    const invalid = validateProxyForm(form)
+    if (invalid !== null) {
+      setFailure(invalid)
+      return
+    }
+    setTesting(true)
+    setFailure(null)
+    setTestResult(null)
+    try {
+      const answer = await coreCall<{ result: unknown }>(SETTINGS_TEST_PROXY, {
+        proxy: proxyPatchFromForm(form).proxy,
+      })
+      setTestResult(proxyTestResultText(answer.result))
+    } catch (error) {
+      setFailure(settingsFailureText(error))
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  async function chooseCloseBehavior(value: string) {
+    const previous = closeBehavior
+    const next = closeBehaviorPatch(value).closeBehavior
+    setCloseBehavior(next)
+    setFailure(null)
+    try {
+      const answer = await coreCall<SettingsAnswer>(SETTINGS_SET, { patch: closeBehaviorPatch(next) })
+      setNotice(proxySaveNotice(answer.settings, answer.restartRequired === true))
+    } catch (error) {
+      // 没写成就把选择拨回去：界面上停在一个"没保存的值"，跟撒谎只差一步
+      setCloseBehavior(previous)
+      setFailure(settingsFailureText(error))
+    }
+  }
+
+  /** 自启开关：显示的是 core **回报的实际状态**（乐观翻转会在写入失败时撒谎）。 */
+  async function applyAutostart(next: boolean) {
+    setAutostartBusy(true)
+    setAutostartFailure(null)
+    try {
+      setAutostartEnabled(await setAutostart(next))
+    } catch (error) {
+      setAutostartFailure(autostartFailureText(error))
+    } finally {
+      setAutostartBusy(false)
+    }
+  }
+
+  async function logout() {
+    setFailure(null)
+    try {
+      await coreCall(AUTH_LOGOUT, null)
+      // 不在这里自己跳回门禁页：`auth:status` 广播会把门禁层翻回来（唯一真源在 core）
+    } catch (error) {
+      setFailure(settingsFailureText(error))
+    }
+  }
+
+  const busy = saving || testing
+
   return (
-    <Card className="m-4 max-w-xl" data-testid="settings-placeholder">
-      <CardHeader>
-        <CardTitle>设置</CardTitle>
-        <CardDescription>{libraryEmptyText(view)}</CardDescription>
-      </CardHeader>
-      <CardContent className="text-sm text-muted-foreground">
-        代理、关窗行为与开机自启会在这里配置（数据已经在 sidecar 侧可用）。
-      </CardContent>
-    </Card>
+    <div className="m-4 flex max-w-3xl flex-col gap-4" data-testid="settings-page">
+      {failure !== null ? (
+        <p className="text-sm text-destructive" role="alert">
+          {failure}
+        </p>
+      ) : null}
+      {notice !== null ? (
+        <p className="text-sm text-muted-foreground" role="status">
+          {notice}
+        </p>
+      ) : null}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>网络与代理</CardTitle>
+          <CardDescription>
+            代理只对本应用的请求生效。凭据写入本机配置文件，界面上不回显。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <div className="flex items-center gap-2">
+            <Switch
+              id="proxy-enabled"
+              checked={form.enabled}
+              disabled={!loaded || busy}
+              onCheckedChange={(checked) => setForm((current) => ({ ...current, enabled: checked }))}
+            />
+            <Label htmlFor="proxy-enabled">使用代理</Label>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="proxy-host">主机</Label>
+              <Input
+                id="proxy-host"
+                value={form.host}
+                disabled={!loaded || busy}
+                placeholder="proxy.example.com"
+                onChange={(event) => setForm((current) => ({ ...current, host: event.target.value }))}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="proxy-port">端口</Label>
+              <Input
+                id="proxy-port"
+                value={form.portText}
+                disabled={!loaded || busy}
+                inputMode="numeric"
+                placeholder="8080"
+                onChange={(event) => setForm((current) => ({ ...current, portText: event.target.value }))}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="proxy-username">用户名</Label>
+              <Input
+                id="proxy-username"
+                value={form.username}
+                disabled={!loaded || busy}
+                autoComplete="off"
+                onChange={(event) => setForm((current) => ({ ...current, username: event.target.value }))}
+              />
+            </div>
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="proxy-password">密码</Label>
+              <Input
+                id="proxy-password"
+                type="password"
+                value={form.password}
+                disabled={!loaded || busy}
+                autoComplete="new-password"
+                onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
+              />
+              <span className="text-xs text-muted-foreground">{passwordHint(form)}</span>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <Label htmlFor="proxy-bypass">例外列表</Label>
+            <Input
+              id="proxy-bypass"
+              value={form.bypassText}
+              disabled={!loaded || busy}
+              placeholder="localhost, 127.0.0.1"
+              onChange={(event) => setForm((current) => ({ ...current, bypassText: event.target.value }))}
+            />
+            <span className="text-xs text-muted-foreground">
+              逗号分隔：这些地址不走代理（例外只在应用内核侧生效）。
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button onClick={() => void saveProxy()} disabled={!loaded || busy}>
+              {saving ? "正在保存…" : "保存"}
+            </Button>
+            <Button variant="secondary" onClick={() => void testConnection()} disabled={!loaded || busy}>
+              {testing ? "正在测试…" : "测试连接"}
+            </Button>
+            <Button variant="ghost" onClick={() => void restoreDefaultProxy()} disabled={!loaded || busy}>
+              恢复默认代理
+            </Button>
+          </div>
+
+          {testResult !== null ? (
+            <p className="text-sm text-muted-foreground" role="status">
+              {testResult}
+            </p>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>关窗行为</CardTitle>
+          <CardDescription>点关闭按钮时做什么。</CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-2">
+          <Select
+            value={closeBehavior}
+            disabled={!loaded || saving}
+            onValueChange={(value) => void chooseCloseBehavior(value)}
+          >
+            <SelectTrigger aria-label="关窗行为" className="w-64">
+              {/* 直接把标签写进 SelectValue：radix 在没有展开过内容时拿不到选项文案
+                  （选项文本要等它挂载），触发器就会是空的——受控值 + 自绘标签才稳定 */}
+              <SelectValue>{closeBehaviorLabel(closeBehavior)}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {CLOSE_BEHAVIORS.map((behavior) => (
+                <SelectItem key={behavior} value={behavior}>
+                  {closeBehaviorLabel(behavior)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            {closeBehaviorNotice(closeBehavior, { trayAvailable: TRAY_AVAILABLE })}
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>开机自启</CardTitle>
+          <CardDescription>登录系统后自动启动本应用（写入系统自启项）。</CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <Switch
+              id="autostart-enabled"
+              checked={autostartEnabled === true}
+              disabled={!autostartReady || autostartEnabled === null || autostartBusy}
+              onCheckedChange={(checked) => void applyAutostart(checked)}
+            />
+            <Label htmlFor="autostart-enabled">随系统启动</Label>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {autostartReady ? autostartStateText(autostartEnabled) : "正在读取当前状态…"}
+          </p>
+          {autostartFailure !== null ? (
+            <p className="text-xs text-destructive" role="alert">
+              {autostartFailure}
+            </p>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>外观</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground">{APPEARANCE_NOTICE_TEXT}</p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>播放队列</CardTitle>
+          <CardDescription>这里只显示当前状态，队列在播放队列面板里管理。</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground">{queueSummaryText(queueSummary(queue))}</p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>登录</CardTitle>
+          <CardDescription>
+            登录始终在华为官方的登录窗口里完成，本应用不接触你的凭据。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex items-center gap-3">
+          {/* 设置页只存在于 app-shell 里，而 app-shell 只在门禁判定为"已登录"时渲染
+              （`shouldShowLoginGate`）：这里的"已登录"是结构给的事实，不是页面自己猜的。
+              退出之后 `auth:status` 广播会把门禁翻回来，这个页面随之卸载。 */}
+          <span className="text-sm" role="status">
+            {loginStatusText(true)}
+          </span>
+          <Button variant="secondary" onClick={() => void logout()}>
+            退出登录
+          </Button>
+        </CardContent>
+      </Card>
+    </div>
   )
 }

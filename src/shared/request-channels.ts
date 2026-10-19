@@ -17,6 +17,19 @@ export const SETTINGS_GET = "settings:get" as const;
 export const SETTINGS_SET = "settings:set" as const;
 
 /**
+ * 代理测试频道（R10 增补）：把 R6 的 `testProxyConnection` 接到设置页的"测试连接"按钮。
+ *
+ * 为什么不并进 `settings:set`：它**不发网络请求**（只写盘），而这条会发一次真实请求——
+ * 两件事的耗时、失败方式、超时语义都不同（保存是写盘失败，测试是代理不通），并在一起就只能靠
+ * 载荷形状区分意图（"保存并顺手测一下"？），而用户要的是"先测通再保存"。
+ *
+ * 载荷 `{proxy:{...}}`（表单当前的草稿，**不是已保存的旧值**：用户点它就是想验证刚填的这组能不能通）；
+ * 应答 `data.result` 即 R6 测试器的结构化结论（`{ok, ms, status}` 或 `{ok:false, error:{kind, message}}`）。
+ * 目标 URL 由 core 侧的固定常量决定（不接受调用方指定，见 `src/host/proxy-handlers.mjs`）。
+ */
+export const SETTINGS_TEST_PROXY = "settings:test-proxy" as const;
+
+/**
  * 库页面数据频道（R8 一次增补齐）：主界面六个页面的**唯一**数据通道。
  *
  * 一次补齐而不是按页面零散加：这些页面共用同一套"分页 + 结构化错误 + 空态"处理，
@@ -55,6 +68,7 @@ export const REQUEST_CHANNELS = [
   AUTH_CANCEL_LOGIN,
   SETTINGS_GET,
   SETTINGS_SET,
+  SETTINGS_TEST_PROXY,
   LIBRARY_FAVORITES,
   LIBRARY_PLAYLISTS,
   LIBRARY_PLAYLIST_DETAIL,

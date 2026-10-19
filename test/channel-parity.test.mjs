@@ -20,6 +20,10 @@
  * - 广播频道加 `player:command`：大屏/托盘的播放控制**预登记**（托盘在 Rust 侧，R11 接线）。
  *   预登记的理由与 R8 一次补齐 library 相同：白名单缺一项 = 那条广播被 Rust 的 FramePolicy
  *   当作白名单外帧丢掉，托盘点了没反应，而错误只出现在日志里。
+ *
+ * R10 的一处增补（同一流程）：
+ * - 请求频道加 `settings:test-proxy`：设置页"测试连接"那条路（core 侧用独立 ProxyAgent 发一次
+ *   请求）。不并进 `settings:set` 的理由见 src/shared/request-channels.ts。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -86,6 +90,9 @@ const LIBRARY_CHANNELS = [
 /** R9 增补的播放请求频道（硬钉：多一条就等于白名单悄悄放宽了）。 */
 const PLAYBACK_CHANNELS = ["playback:resolve-url"];
 
+/** R10 增补的设置请求频道（硬钉：设置页的"测试连接"唯一要用的那一条）。 */
+const SETTINGS_CHANNELS = ["settings:get", "settings:set", "settings:test-proxy"];
+
 /** 广播频道硬钉内容（两侧一起写错也能过互比，所以内容必须钉死）。 */
 const BROADCAST_CHANNEL_NAMES = ["app:notice", "auth:status", "player:command"];
 
@@ -109,7 +116,17 @@ test("一致性：请求频道白名单（Node 共享常量 ↔ Rust commands.rs
     "playback:resolve-url",
     "settings:get",
     "settings:set",
+    "settings:test-proxy",
   ]);
+});
+
+test("一致性：settings:* 频道两侧逐条相等（R10 增补 settings:test-proxy）", () => {
+  const rust = rustChannelLiterals(rustProduction(rustSource("commands.rs")), "settings:");
+  assert.deepEqual(sorted(rust), SETTINGS_CHANNELS);
+  assert.deepEqual(
+    sorted(REQUEST_CHANNELS.filter((channel) => channel.startsWith("settings:"))),
+    SETTINGS_CHANNELS,
+  );
 });
 
 test("一致性：playback:* 频道两侧逐条相等（R9 唯一的播放请求通道）", () => {

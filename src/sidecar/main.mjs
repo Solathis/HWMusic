@@ -17,13 +17,14 @@ import { createBridge } from "../host/bridge.mjs";
 import { createDispatcher } from "../host/dispatcher.mjs";
 import { createLibraryHandlers } from "../host/library-handlers.mjs";
 import { createPlaybackHandlers } from "../host/playback-handlers.mjs";
+import { createProxyHandlers } from "../host/proxy-handlers.mjs";
 import { createRpc } from "../host/rpc.mjs";
 import { createHostServices } from "../host/host-services.mjs";
 import { createAuthManager } from "../main/auth-manager.ts";
 import { dataDirFromArgv } from "../main/data-dir.mjs";
 import { createLoginHost } from "../main/huawei.ts";
 import { createMusicService } from "../main/music-service.mjs";
-import { applyStartupProxy } from "../main/proxy.mjs";
+import { applyStartupProxy, testProxyConnection } from "../main/proxy.mjs";
 import { createSessionStore } from "../main/session-store.mjs";
 import { createSettingsHandlers, createSettingsStore } from "../main/settings.mjs";
 import { APP_NOTICE } from "../shared/channels.ts";
@@ -106,6 +107,15 @@ for (const [channel, handler] of Object.entries(createLibraryHandlers({ api: mus
 // 处理器把地址原样放进这一次的应答，不写日志、不落盘（见 src/host/playback-handlers.mjs）。
 // 端点仍未配置 → 协议层如实回 `endpoint_unknown`，渲染层显示"接口尚未配置"。
 for (const [channel, handler] of Object.entries(createPlaybackHandlers({ api: musicService.api }))) {
+  dispatcher.register(channel, handler);
+}
+
+// —— 设置页的"测试连接"（R10）——
+//
+// 用的是 R6 那同一个测试器（独立 ProxyAgent，**绝不换掉全局 dispatcher**：测试连接不该把
+// 整个进程的出口改掉）。它唯一一次发网络请求就发生在这里，所以凭据只经这条路出去、
+// 不写日志（见 src/host/proxy-handlers.mjs 与 src/main/proxy.mjs 的凭据纪律）。
+for (const [channel, handler] of Object.entries(createProxyHandlers({ testProxy: testProxyConnection }))) {
   dispatcher.register(channel, handler);
 }
 
