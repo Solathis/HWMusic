@@ -166,6 +166,24 @@ test("端到端：auth:logout / auth:cancel-login 都给出结构化答复（不
   assert.deepEqual(sidecar.problems, []);
 });
 
+test("端到端：library:favorites 在端点未配置时回结构化 endpoint_unknown（不冒充空数据、不挂起）", async (t) => {
+  const sidecar = startSidecar();
+  t.after(() => sidecar.cleanup());
+
+  // 真进程里没有任何端点写入方（docs/API_CONTRACT.md §2.1）→ 必须如实报"接口未配"
+  const favorites = await sidecar.bridge.call("library:favorites", { page: 1, pageSize: 20 });
+  assert.equal(favorites.ok, false, `端点未配置不许"成功"：${JSON.stringify(favorites)}`);
+  assert.equal(favorites.error.kind, "endpoint_unknown");
+  assert.match(favorites.error.message, /favorites/);
+
+  // 坏载荷（缺必填参数）不是端点问题，要在边界就被拒
+  const search = await sidecar.bridge.call("library:search", { keyword: "   " });
+  assert.equal(search.ok, false);
+  assert.equal(search.error.kind, "invalid_payload");
+
+  assert.deepEqual(sidecar.problems, []);
+});
+
 test("端到端：未知频道不被桥放行（Node dispatch 层白名单生效）", async (t) => {
   const sidecar = startSidecar();
   t.after(() => sidecar.cleanup());

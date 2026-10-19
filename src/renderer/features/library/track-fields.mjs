@@ -1,0 +1,150 @@
+/**
+ * 歌曲条目的展示投影（R8）：把"字段名不确定"的原始条目翻成能渲染的几项。
+ *
+ * 为什么渲染层还要一份候选表：接口响应里的字段名待联调确认（docs/API_CONTRACT.md §2.3），
+ * 而协议层的 `trackIdOf` 只在 Node 侧跑。渲染层这里**不重建对象**——只做读取兜底，
+ * 取不到就如实回占位（"未知歌曲"/"—"），绝不编一个看起来像真的值。
+ *
+ * 与协议层的关系：id 的候选顺序必须与 `src/protocols/music.mjs` 的 `trackIdOf` **同结论**，
+ * test/library-views.test.mjs 用同一批夹具对两处做差分钉——分开演进就会让"能显示的 id"
+ * 和"能去重的 id"分家（列表里出现删不掉的幽灵行）。
+ */
+
+/** 与协议层同序的 id 候选（差分测试钉住）。 */
+const ID_KEYS = ["id", "songId", "musicId", "resourceId", "trackId"];
+const NAME_KEYS = ["name", "songName", "title", "musicName"];
+const ARTIST_TEXT_KEYS = ["singer", "singers", "artistNames", "artistName"];
+const ALBUM_NAME_KEYS = ["albumName", "album"];
+const ALBUM_ID_KEYS = ["albumId"];
+
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function textOf(value) {
+  if (typeof value === "string" && value.trim() !== "") return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+/** 曲目 id：与协议层 `trackIdOf` 同结论；取不到回 null（UI 侧不编 id）。 */
+export function trackIdOf(item) {
+  if (!isObject(item)) return null;
+  for (const key of ID_KEYS) {
+    const value = textOf(item[key]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+export function trackNameOf(item) {
+  if (!isObject(item)) return "未知歌曲";
+  for (const key of NAME_KEYS) {
+    const value = textOf(item[key]);
+    if (value !== null) return value;
+  }
+  return "未知歌曲";
+}
+
+/** 艺人：可能是字符串、字符串数组、对象数组（`[{name}]`），也可能是嵌套的 `artist` 对象。 */
+export function trackArtistsOf(item) {
+  if (!isObject(item)) return "未知艺人";
+
+  const fromList = (list) => {
+    const names = [];
+    for (const entry of list) {
+      const name = isObject(entry) ? textOf(entry.name) ?? textOf(entry.artistName) : textOf(entry);
+      if (name !== null) names.push(name);
+    }
+    return names;
+  };
+
+  for (const key of ARTIST_TEXT_KEYS) {
+    const value = item[key];
+    const direct = textOf(value);
+    if (direct !== null) return direct;
+    if (Array.isArray(value)) {
+      const names = fromList(value);
+      if (names.length > 0) return names.join("、");
+    }
+  }
+
+  for (const key of ["artist", "artists"]) {
+    const value = item[key];
+    const direct = isObject(value) ? textOf(value.name) : textOf(value);
+    if (direct !== null) return direct;
+    if (Array.isArray(value)) {
+      const names = fromList(value);
+      if (names.length > 0) return names.join("、");
+    }
+  }
+
+  return "未知艺人";
+}
+
+export function trackAlbumOf(item) {
+  if (!isObject(item)) return "未知专辑";
+  for (const key of ALBUM_NAME_KEYS) {
+    const value = item[key];
+    const name = isObject(value) ? textOf(value.name) ?? textOf(value.albumName) : textOf(value);
+    if (name !== null) return name;
+  }
+  return "未知专辑";
+}
+
+/** 专辑 id：只有名字时回 null——专辑页打不开，就不在界面上装作能打开。 */
+export function trackAlbumIdOf(item) {
+  if (!isObject(item)) return null;
+  const album = item.album;
+  if (isObject(album)) {
+    const nested = textOf(album.id) ?? textOf(album.albumId);
+    if (nested !== null) return nested;
+  }
+  for (const key of ALBUM_ID_KEYS) {
+    const value = textOf(item[key]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+/** 歌手 id：同上，从嵌套的 artist(s) 对象里找。 */
+export function trackArtistIdOf(item) {
+  if (!isObject(item)) return null;
+  const candidates = [item.artistId, isObject(item.artist) ? item.artist.id : null];
+  const list = Array.isArray(item.artists) ? item.artists : [];
+  candidates.push(...list.map((entry) => (isObject(entry) ? entry.id : null)));
+  for (const candidate of candidates) {
+    const value = textOf(candidate);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+/**
+ * 时长读数：**只认 `duration`**。
+ *
+ * 为什么不去猜 `durationMs`/`time` 这些别的名字：单位与名字都待联调确认，
+ * 猜错的名字会显示一个错得看不出来的时长（比"—"糟得多）。
+ */
+export function trackDurationOf(item) {
+  if (!isObject(item)) return null;
+  const raw = item.duration;
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string" && raw.trim() !== "" && Number.isFinite(Number(raw))) return Number(raw);
+  return null;
+}
+
+/**
+ * 时长格式化：**单位待联调确认**（接口可能给秒也可能给毫秒），这里按秒解读。
+ * 取不到就是占位符——不显示 0:00（那看起来像"这首歌真的 0 秒"）。
+ */
+export function formatDuration(value) {
+  // null/空串会被 Number() 悄悄变成 0（显示成 0:00，看起来像"这首歌真的 0 秒"）：先挡掉
+  if (value === null || value === undefined || value === "") return "—";
+  const seconds = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) return "—";
+  const total = Math.floor(seconds);
+  const minutes = Math.floor(total / 60);
+  const rest = total % 60;
+  return `${minutes}:${String(rest).padStart(2, "0")}`;
+}

@@ -122,7 +122,13 @@
   * {
     @apply border-border outline-ring/50;
   }
+  /* 桌面应用占满窗口：整条高度链都要有确定高度，否则 `h-full` 的界面会塌成内容高度 */
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
   body {
-    @apply bg-background text-foreground;
+    @apply overflow-hidden bg-background text-foreground;
   }
 }

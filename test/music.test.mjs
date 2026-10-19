@@ -26,6 +26,7 @@ import {
 const ENDPOINTS = {
   favorites: "https://example.invalid/api/favorites",
   playlistList: "https://example.invalid/api/playlist/list",
+  playlistDetail: "https://example.invalid/api/playlist/detail",
   playlistDelete: "https://example.invalid/api/playlist/delete",
   search: "https://example.invalid/api/search",
   album: "https://example.invalid/api/album",
@@ -67,6 +68,7 @@ test("端点注入：清单是唯一真源；缺端点的方法返回结构化 e
     "history",
     "playback",
     "playlistDelete",
+    "playlistDetail",
     "playlistList",
     "search",
   ]);
@@ -225,6 +227,70 @@ test("收藏分页：无 ID 条目被丢弃并计数；中途失败保留已加�
   await loader.loadNext();
   assert.deepEqual(loader.snapshot().songs.map((item) => item.id), ["s1"], "失败不清空已加载内容");
   assert.equal(loader.snapshot().stopReason, "error");
+});
+
+test("收藏单页读取：分页结论走协议层的同一规则，渲染层不自己猜 hasMore、也不自己造总数", async () => {
+  const { calls, fetchImpl } = scriptedFetch([
+    {
+      match: "page=2",
+      reply: jsonResponse(envelope({ list: [song("s3"), { name: "没有 id" }], hasMore: true, total: 999 })),
+    },
+  ]);
+  const api = apiOf({ fetchImpl });
+  const page = await api.readFavoritesPage({ page: 2, pageSize: 2 });
+
+  assert.equal(page.ok, true);
+  assert.equal(new URL(calls[0].url).searchParams.get("page"), "2");
+  assert.equal(new URL(calls[0].url).searchParams.get("size"), "2");
+  assert.deepEqual(page.data.songs.map((item) => item.id), ["s3"], "无 ID 条目如实丢弃（不编 ID）");
+  assert.equal(page.data.skipped, 1);
+  assert.equal(page.data.hasMore, true, "接口说还有下一页就如实转达");
+  assert.equal(page.data.page, 2);
+  assert.equal(page.data.pageSize, 2);
+  assert.equal(page.data.reportedTotal, 999, "接口上报的 total 只作记录");
+  assert.equal("total" in page.data, false, "协议层不替渲染层给总数：总数只能来自完整分页后的 ID 去重");
+
+  const shortPage = apiOf({
+    fetchImpl: scriptedFetch([{ match: "page=1", reply: jsonResponse(envelope({ list: [song("s1")] })) }]).fetchImpl,
+  });
+  const single = await shortPage.readFavoritesPage({ page: 1, pageSize: 5 });
+  assert.equal(single.data.hasMore, false, "短页即到底（接口不发 hasMore 时的既有规则）");
+
+  const withoutEndpoint = apiOf({ endpoints: {} });
+  const refused = await withoutEndpoint.readFavoritesPage({ page: 1 });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.error.kind, MUSIC_ERROR_KINDS.endpointUnknown);
+  assert.match(refused.error.message, /favorites/);
+});
+
+test("歌单曲目：走 playlistDetail 端点（与歌单列表分开）；缺 id / 缺端点都结构化报错", async () => {
+  const { calls, fetchImpl } = scriptedFetch([
+    { match: "api/playlist/detail", reply: jsonResponse(envelope({ list: [song("t1"), song("t2")], hasMore: false })) },
+  ]);
+  const api = apiOf({ fetchImpl });
+  const detail = await api.getPlaylistDetail("P-9", { page: 1, pageSize: 20 });
+
+  assert.equal(detail.ok, true);
+  const query = new URL(calls[0].url).searchParams;
+  assert.equal(query.get("id"), "P-9");
+  assert.equal(query.get("page"), "1");
+  assert.deepEqual(detail.data.songs.map((item) => item.id), ["t1", "t2"]);
+  assert.equal(detail.data.hasMore, false);
+  assert.equal(
+    calls.some((call) => call.url.startsWith(ENDPOINTS.playlistList)),
+    false,
+    "歌单曲目不得拿歌单列表端点冒充",
+  );
+
+  const missingId = await api.getPlaylistDetail("   ");
+  assert.equal(missingId.ok, false);
+  assert.equal(missingId.error.kind, MUSIC_ERROR_KINDS.missingParam);
+
+  const withoutEndpoint = apiOf({ endpoints: { ...ENDPOINTS, playlistDetail: undefined } });
+  const refused = await withoutEndpoint.getPlaylistDetail("P-9");
+  assert.equal(refused.ok, false);
+  assert.equal(refused.error.kind, MUSIC_ERROR_KINDS.endpointUnknown);
+  assert.match(refused.error.message, /playlistDetail/, "错误要指明缺的是哪个注入键");
 });
 
 test("会话头注入：默认不带任何凭据，注入的 headers 原样进请求", async () => {

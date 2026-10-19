@@ -15,11 +15,13 @@
  */
 import { createBridge } from "../host/bridge.mjs";
 import { createDispatcher } from "../host/dispatcher.mjs";
+import { createLibraryHandlers } from "../host/library-handlers.mjs";
 import { createRpc } from "../host/rpc.mjs";
 import { createHostServices } from "../host/host-services.mjs";
 import { createAuthManager } from "../main/auth-manager.ts";
 import { dataDirFromArgv } from "../main/data-dir.mjs";
 import { createLoginHost } from "../main/huawei.ts";
+import { createMusicService } from "../main/music-service.mjs";
 import { applyStartupProxy } from "../main/proxy.mjs";
 import { createSessionStore } from "../main/session-store.mjs";
 import { createSettingsHandlers, createSettingsStore } from "../main/settings.mjs";
@@ -38,6 +40,7 @@ import { CORE_ERROR_KINDS, err, ok } from "../shared/result.ts";
 function implementedBy(channel) {
   if (channel.startsWith("auth:")) return "R7 登录链路";
   if (channel.startsWith("settings:")) return "R6 设置与统一代理";
+  if (channel.startsWith("library:")) return "R8 主界面";
   return "后续任务";
 }
 
@@ -84,6 +87,16 @@ dispatcher.register(SETTINGS_SET, async (request) => {
   }
   return answer;
 });
+
+// —— 库页面数据通道（R8）——
+//
+// 端点从设置文档读（`data.musicEndpoints`，见 src/main/music-service.mjs）：现在没有任何
+// 写入方 → 表是空的 → 每个请求都由协议层如实回 `endpoint_unknown`，UI 显示"接口尚未配置"。
+// 这是设计落点而不是坏掉：宁可说"没配"，也不给出一个看起来是空的收藏夹。
+const musicService = createMusicService({ settingsData: settings.data });
+for (const [channel, handler] of Object.entries(createLibraryHandlers({ api: musicService.api }))) {
+  dispatcher.register(channel, handler);
+}
 
 const bridge = createBridge({
   readable: process.stdin,

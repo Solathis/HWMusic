@@ -9,6 +9,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { createDispatcher } from "../src/host/dispatcher.mjs";
+import { createLibraryHandlers } from "../src/host/library-handlers.mjs";
+import { createMusicService, readMusicEndpoints } from "../src/main/music-service.mjs";
 import { createRpc } from "../src/host/rpc.mjs";
 import { createHostServices } from "../src/host/host-services.mjs";
 import {
@@ -18,6 +20,13 @@ import {
   HOST_REQUEST_CHANNELS,
   HOST_SECURE_DECRYPT,
   HOST_SECURE_ENCRYPT,
+  LIBRARY_ALBUM,
+  LIBRARY_ARTIST,
+  LIBRARY_FAVORITES,
+  LIBRARY_HISTORY,
+  LIBRARY_PLAYLIST_DETAIL,
+  LIBRARY_PLAYLISTS,
+  LIBRARY_SEARCH,
   REQUEST_CHANNELS,
 } from "../src/shared/request-channels.ts";
 import { err, ok } from "../src/shared/result.ts";
@@ -202,6 +211,159 @@ test("rpc.shutdown：收尸后出向调用立刻失败、入帧不再处理", as
   bridge.handleFrame({ id: "13", channel: "settings:get", payload: {} });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(written.length, before, "收尸后不再写帧");
+});
+
+/* ---------------------------------------------------------------------------
+ * R8：library:* 七条频道的路由（注入 music 模块桩——协议层真身由 test/music.test.mjs 钉）
+ * ------------------------------------------------------------------------- */
+
+/** music.mjs 的桩：记录调用、按脚本答复。 */
+function stubMusicApi(answers = {}) {
+  const calls = [];
+  const record = (name, ...args) => {
+    calls.push({ name, args });
+    return answers[name] ?? ok({ stub: name });
+  };
+  return {
+    calls,
+    api: {
+      readFavoritesPage: (request) => record("readFavoritesPage", request),
+      listPlaylists: (request) => record("listPlaylists", request),
+      getPlaylistDetail: (id, request) => record("getPlaylistDetail", id, request),
+      search: (keyword, request) => record("search", keyword, request),
+      getAlbum: (id, request) => record("getAlbum", id, request),
+      getArtist: (id, request) => record("getArtist", id, request),
+      getHistory: (request) => record("getHistory", request),
+    },
+  };
+}
+
+async function dispatchLibrary(dispatcher, channel, payload) {
+  const responder = createResponder();
+  await dispatcher.dispatch({ id: `lib-${channel}`, channel, payload }, responder.respond);
+  assert.equal(responder.answers.length, 1, `${channel} 必须恰好答复一次`);
+  return responder.answers[0];
+}
+
+test("dispatcher：library:* 七条频道都注册得上并路由到 music 模块（参数逐条对上）", async () => {
+  const stub = stubMusicApi();
+  const dispatcher = createDispatcher();
+  for (const [channel, handler] of Object.entries(createLibraryHandlers({ api: stub.api }))) {
+    dispatcher.register(channel, handler);
+  }
+
+  const favorites = await dispatchLibrary(dispatcher, LIBRARY_FAVORITES, { page: 2, pageSize: 30 });
+  assert.equal(favorites.ok, true);
+  assert.deepEqual(stub.calls.at(-1), {
+    name: "readFavoritesPage",
+    args: [{ page: 2, pageSize: 30, params: undefined }],
+  });
+
+  const playlists = await dispatchLibrary(dispatcher, LIBRARY_PLAYLISTS, { page: 1 });
+  assert.equal(playlists.ok, true);
+  assert.equal(stub.calls.at(-1).name, "listPlaylists");
+
+  const detail = await dispatchLibrary(dispatcher, LIBRARY_PLAYLIST_DETAIL, { playlistId: "P-1", page: 3, pageSize: 10 });
+  assert.equal(detail.ok, true);
+  assert.deepEqual(stub.calls.at(-1).args.slice(0, 2), ["P-1", { page: 3, pageSize: 10, params: undefined }]);
+
+  const search = await dispatchLibrary(dispatcher, LIBRARY_SEARCH, { keyword: "  周杰伦 " });
+  assert.equal(search.ok, true);
+  assert.equal(stub.calls.at(-1).args[0], "周杰伦", "关键字去首尾空白");
+
+  const album = await dispatchLibrary(dispatcher, LIBRARY_ALBUM, { albumId: "A-1" });
+  assert.equal(album.ok, true);
+  assert.equal(stub.calls.at(-1).name, "getAlbum");
+  assert.equal(stub.calls.at(-1).args[0], "A-1");
+
+  const artist = await dispatchLibrary(dispatcher, LIBRARY_ARTIST, { artistId: "B-1" });
+  assert.equal(artist.ok, true);
+  assert.equal(stub.calls.at(-1).args[0], "B-1");
+
+  const history = await dispatchLibrary(dispatcher, LIBRARY_HISTORY, { page: 1 });
+  assert.equal(history.ok, true);
+  assert.equal(stub.calls.at(-1).name, "getHistory");
+
+  assert.equal(stub.calls.length, 7, "七条频道各打一次协议层，不多不少");
+});
+
+test("dispatcher：library 的坏载荷在边界就被拒（invalid_payload），不透给协议层", async () => {
+  const stub = stubMusicApi();
+  const dispatcher = createDispatcher();
+  for (const [channel, handler] of Object.entries(createLibraryHandlers({ api: stub.api }))) {
+    dispatcher.register(channel, handler);
+  }
+
+  const cases = [
+    [LIBRARY_PLAYLIST_DETAIL, {}],
+    [LIBRARY_PLAYLIST_DETAIL, { playlistId: "   " }],
+    [LIBRARY_SEARCH, {}],
+    [LIBRARY_SEARCH, { keyword: "  " }],
+    [LIBRARY_SEARCH, { keyword: 42 }],
+    [LIBRARY_ALBUM, {}],
+    [LIBRARY_ARTIST, { artistId: null }],
+  ];
+  for (const [channel, payload] of cases) {
+    const answer = await dispatchLibrary(dispatcher, channel, payload);
+    assert.equal(answer.ok, false, `${channel} 的坏载荷必须失败：${JSON.stringify(payload)}`);
+    assert.equal(answer.error.kind, "invalid_payload", `${channel} ${JSON.stringify(payload)}`);
+  }
+  assert.deepEqual(stub.calls, [], "坏载荷不许打到协议层");
+
+  // 收藏/歌单列表/历史没有必填参数：坏页号由协议层自己归一（不在这里猜）
+  const page = await dispatchLibrary(dispatcher, LIBRARY_FAVORITES, { page: "NaN" });
+  assert.equal(page.ok, true);
+  assert.deepEqual(stub.calls.at(-1).args, [{ page: undefined, pageSize: undefined, params: undefined }]);
+});
+
+test("dispatcher：端点未配置时 library:* 回结构化 endpoint_unknown（不是空列表、不是假成功）", async () => {
+  const service = createMusicService({ settingsData: {}, fetchImpl: async () => assert.fail("不该发出请求") });
+  assert.deepEqual(service.endpoints, {}, "没有任何写入方时端点表必须是空的");
+
+  const dispatcher = createDispatcher();
+  for (const [channel, handler] of Object.entries(createLibraryHandlers({ api: service.api }))) {
+    dispatcher.register(channel, handler);
+  }
+
+  for (const [channel, payload] of [
+    [LIBRARY_FAVORITES, { page: 1 }],
+    [LIBRARY_PLAYLISTS, {}],
+    [LIBRARY_PLAYLIST_DETAIL, { playlistId: "P-1" }],
+    [LIBRARY_ALBUM, { albumId: "A-1" }],
+    [LIBRARY_ARTIST, { artistId: "B-1" }],
+    [LIBRARY_HISTORY, {}],
+  ]) {
+    const answer = await dispatchLibrary(dispatcher, channel, payload);
+    assert.equal(answer.ok, false, `${channel} 在端点未配置时不能"成功"`);
+    assert.equal(answer.error.kind, "endpoint_unknown", `${channel} 的失败类别要能被 UI 认出来`);
+  }
+
+  const search = await dispatchLibrary(dispatcher, LIBRARY_SEARCH, { keyword: "abc" });
+  assert.equal(search.error.kind, "endpoint_unknown");
+});
+
+test("音乐端点注入表：只从设置文档收已知键（非 https/空值/陌生键一律丢弃，不猜）", () => {
+  assert.deepEqual(readMusicEndpoints(undefined), {});
+  assert.deepEqual(readMusicEndpoints({ musicEndpoints: null }), {});
+  assert.deepEqual(readMusicEndpoints({ musicEndpoints: "https://example.invalid/api" }), {});
+  assert.deepEqual(
+    readMusicEndpoints({
+      musicEndpoints: {
+        favorites: "https://example.invalid/api/favorites",
+        album: "  ",
+        artist: 42,
+        somethingElse: "https://example.invalid/api/other",
+      },
+    }),
+    { favorites: "https://example.invalid/api/favorites" },
+    "只收 MUSIC_ENDPOINT_KEYS 里的键与非空字符串值",
+  );
+
+  const service = createMusicService({
+    settingsData: { musicEndpoints: { favorites: "https://example.invalid/api/favorites" } },
+    fetchImpl: async () => new Response(JSON.stringify({ code: "0", data: { list: [] } }), { status: 200 }),
+  });
+  assert.deepEqual(service.endpoints, { favorites: "https://example.invalid/api/favorites" });
 });
 
 test("host-services：notify 走 host:notify 且文本透传", async () => {

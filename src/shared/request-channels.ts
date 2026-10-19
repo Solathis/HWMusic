@@ -16,12 +16,39 @@ export const AUTH_CANCEL_LOGIN = "auth:cancel-login" as const;
 export const SETTINGS_GET = "settings:get" as const;
 export const SETTINGS_SET = "settings:set" as const;
 
+/**
+ * 库页面数据频道（R8 一次增补齐）：主界面六个页面的**唯一**数据通道。
+ *
+ * 一次补齐而不是按页面零散加：这些页面共用同一套"分页 + 结构化错误 + 空态"处理，
+ * 分批加只会让渲染层在中间几轮里出现"某些页面点了没反应"（频道不在白名单 =
+ * Rust 准入直接回 `unknown_channel`，看起来像坏掉）。
+ *
+ * 业务语义（与 src/protocols/music.mjs 同源，端点全部注入、未配置时结构化 `endpoint_unknown`）：
+ * - `library:favorites`：收藏分页（**没有可信总数**，总数 = 完整分页后 ID 去重，UI 与已加载数分开显示）；
+ * - `library:playlist-detail`：歌单曲目分页（与歌单列表分开：列表只有元信息）；
+ * - 其余为一页式列表（`hasMore` 由协议层的同一规则给出，渲染层不自己猜）。
+ */
+export const LIBRARY_FAVORITES = "library:favorites" as const;
+export const LIBRARY_PLAYLISTS = "library:playlists" as const;
+export const LIBRARY_PLAYLIST_DETAIL = "library:playlist-detail" as const;
+export const LIBRARY_SEARCH = "library:search" as const;
+export const LIBRARY_ALBUM = "library:album" as const;
+export const LIBRARY_ARTIST = "library:artist" as const;
+export const LIBRARY_HISTORY = "library:history" as const;
+
 export const REQUEST_CHANNELS = [
   AUTH_LOGIN,
   AUTH_LOGOUT,
   AUTH_CANCEL_LOGIN,
   SETTINGS_GET,
   SETTINGS_SET,
+  LIBRARY_FAVORITES,
+  LIBRARY_PLAYLISTS,
+  LIBRARY_PLAYLIST_DETAIL,
+  LIBRARY_SEARCH,
+  LIBRARY_ALBUM,
+  LIBRARY_ARTIST,
+  LIBRARY_HISTORY,
 ] as const;
 
 export type RequestChannel = (typeof REQUEST_CHANNELS)[number];

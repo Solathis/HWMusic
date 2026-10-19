@@ -22,6 +22,8 @@ import { isSafeMediaUrl, safeMediaUrl } from "./safe-media-url.mjs";
 export const MUSIC_ENDPOINT_KEYS = [
   "favorites",
   "playlistList",
+  /** 歌单曲目（R8 增补）：与歌单列表是两件事——列表只有元信息，曲目要单独取 */
+  "playlistDetail",
   "playlistDelete",
   "search",
   "album",
@@ -120,6 +122,34 @@ export function trackIdOf(item) {
     if (typeof value === "number" && Number.isFinite(value)) return String(value);
   }
   return null;
+}
+
+/**
+ * 单页列表归一（R8 抽出：渐进加载器与"一次一页"的库页面频道共用同一套结论）。
+ *
+ * 三件事只在这里做一次：取列表（多容器名兼容）、**丢掉无 ID 的条目并计数**（不编 ID）、
+ * 读接口上报的 total（**只作记录**——收藏没有可信总数，真值是完整分页后的 ID 去重）。
+ */
+export function normalizeListPage(payload) {
+  const container = payload !== null && typeof payload === "object" ? payload : {};
+  const list = extractList(container);
+  const songs = [];
+  let skipped = 0;
+  for (const item of list) {
+    if (trackIdOf(item) === null) {
+      skipped += 1;
+      continue;
+    }
+    songs.push(item);
+  }
+  const reported = container.total ?? container.totalCount;
+  return {
+    container,
+    songs,
+    skipped,
+    received: list.length,
+    reportedTotal: typeof reported === "number" && Number.isFinite(reported) ? reported : null,
+  };
 }
 
 /** fileInfos 可能是 JSON 字符串，也可能是已解析的对象；坏 JSON 不抛。 */
@@ -344,22 +374,18 @@ export function createMusicApi(options = {}) {
     }
 
     function accept(page) {
-      // 信封解出的 data 可能把 list 直接挂在 data 上，也可能再嵌一层
-      const container = page !== null && typeof page === "object" ? page : {};
-      const list = extractList(container);
+      const normalized = normalizeListPage(page);
+      skipped += normalized.skipped;
       let added = 0;
-      for (const item of list) {
+      for (const item of normalized.songs) {
         const id = trackIdOf(item);
-        if (id === null) {
-          skipped += 1;
-          continue;
-        }
         if (seen.has(id)) continue;
         seen.add(id);
         songs.push(item);
         added += 1;
       }
-      return { added, received: list.length, container };
+      if (normalized.reportedTotal !== null) reportedTotal = normalized.reportedTotal;
+      return { added, received: normalized.received, container: normalized.container };
     }
 
     async function loadNext() {
@@ -377,8 +403,6 @@ export function createMusicApi(options = {}) {
 
       pages = nextPage;
       const { added, received, container } = accept(result.data);
-      const reported = container.total ?? container.totalCount;
-      if (typeof reported === "number" && Number.isFinite(reported)) reportedTotal = reported;
 
       if (hasMoreFrom(container, received, pageSize)) {
         if (pages >= pageLimit) {
@@ -414,6 +438,44 @@ export function createMusicApi(options = {}) {
     });
     if (!result.ok) return result;
     return ok({ playlists: extractList(result.data), hasMore: hasMoreFrom(result.data, extractList(result.data).length, positiveInt(request.pageSize, defaultPageSize)) });
+  }
+
+  /**
+   * 单页收藏读取（R8 的滚动加载走这条）：把**分页结论**在协议层算好——渲染层不必、也不许
+   * 自己猜 "还有没有下一页"。刻意不给 `total`：收藏没有可信总数，"共 M 首"只能等
+   * 完整分页后去重才知道，那是拼页者的结论，不是单页的结论。
+   */
+  async function readFavoritesPage(request = {}) {
+    const page = positiveInt(request.page, 1);
+    const pageSize = positiveInt(request.pageSize, defaultPageSize);
+    const result = await listFavoritesPage({ page, pageSize, params: request.params });
+    if (!result.ok) return result;
+    const normalized = normalizeListPage(result.data);
+    return ok({
+      page,
+      pageSize,
+      songs: normalized.songs,
+      skipped: normalized.skipped,
+      reportedTotal: normalized.reportedTotal,
+      hasMore: hasMoreFrom(normalized.container, normalized.received, pageSize),
+    });
+  }
+
+  /** 歌单曲目（与歌单列表分开）：id 必填，缺了就是调用方的问题，如实回 missing_param。 */
+  async function getPlaylistDetail(playlistId, request = {}) {
+    if (!isNonEmptyString(playlistId)) return err("歌单曲目接口需要 playlistId", MUSIC_ERROR_KINDS.missingParam);
+    const pageSize = positiveInt(request.pageSize, defaultPageSize);
+    const result = await requestJson("playlistDetail", {
+      params: {
+        [queryNames.id]: playlistId.trim(),
+        [queryNames.page]: positiveInt(request.page, 1),
+        [queryNames.pageSize]: pageSize,
+        ...(request.params ?? {}),
+      },
+    });
+    if (!result.ok) return result;
+    const list = extractList(result.data);
+    return ok({ songs: list, hasMore: hasMoreFrom(result.data, list.length, pageSize) });
   }
 
   /** 自建歌单删除：**只走 playlistDelete**（拿收藏端点删歌单会拿到"成功"码却没删掉）。 */
@@ -486,9 +548,11 @@ export function createMusicApi(options = {}) {
     endpointOf,
     requestJson,
     listFavoritesPage,
+    readFavoritesPage,
     createFavoritesLoader,
     loadAllFavorites,
     listPlaylists,
+    getPlaylistDetail,
     deletePlaylist,
     search,
     getAlbum,

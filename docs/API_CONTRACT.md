@@ -187,6 +187,7 @@ huawei/dbankcdn 等域名）。
 |---|---|---|
 | `favorites` | 收藏列表分页 | 待确认 |
 | `playlistList` | 自建歌单列表 | 待确认 |
+| `playlistDetail` | **歌单曲目（R8 增补）**：与歌单列表分开——列表只有元信息，曲目要单独取 | 待确认 |
 | `playlistDelete` | **自建歌单删除（必须用这个，不能用收藏端点）** | 待确认 |
 | `search` | 搜索 | 待确认 |
 | `album` / `artist` | 专辑 / 歌手详情与曲目 | 待确认 |
@@ -211,6 +212,33 @@ huawei/dbankcdn 等域名）。
 | **`auditionTime` 不能单独判 30 秒试听** | 审计事实 | `classifyAudition` 要求**两个信号齐备**（`auditionTime > 0` **且** 标志位命中）才判 `auditionLikely`；标志位候选表 `DEFAULT_AUDITION_FLAG_KEYS` 可覆写 |
 | 自建歌单删除必须 `playlist/delete` | 审计事实 | `deletePlaylist` 只打 `playlistDelete` 端点，且测试断言"绝不走收藏端点" |
 | 播放地址必须落在 CDN 白名单 | 本项目约束 | 非白名单域 → `unsafe_media_url`（渲染层反正加载不了，早报错） |
+
+### 2.5 主界面 ↔ sidecar 的数据通道（R8 落地）
+
+渲染层到 sidecar 的 `library:*` 七条请求频道（白名单唯一真源 `src/shared/request-channels.ts`，
+Rust 镜像见 §3 的 parity 钉）：
+
+| 频道 | 载荷 | 应答 `data` | 说明 |
+|---|---|---|---|
+| `library:favorites` | `{page, pageSize}` | `{page, pageSize, songs, skipped, reportedTotal, hasMore}` | **应答里没有 `total`**：收藏没有可信总数，总数由渲染层把页拼完后去重得出，未走完就是"已加载 N 首" |
+| `library:playlists` | `{page, pageSize}` | `{playlists, hasMore}` | 歌单元信息 |
+| `library:playlist-detail` | `{playlistId, page, pageSize}` | `{songs, hasMore}` | 走 `playlistDetail` 端点；缺 `playlistId` → `invalid_payload` |
+| `library:search` | `{keyword, page, pageSize}` | `{songs, hasMore}` | 空关键字 → `invalid_payload`（不把坏参数透给协议层） |
+| `library:album` / `library:artist` | `{albumId}` / `{artistId}` | `{songs, detail}` | 缺 id → `invalid_payload`；`detail` 是端点的原始回包（`getAlbum`/`getArtist` 原样透出，供后续页面取专辑/歌手元信息） |
+| `library:history` | `{page, pageSize}` | `{songs, hasMore}` | 播放历史 |
+
+**端点注入点**（R8 新增，取代"没有写入方"的状态）：设置文档 `data.musicEndpoints`，
+键名 = §2.2 的端点键，值必须是 `https://`。`src/main/music-service.mjs` 只收已知键与非空字符串
+（陌生键/空值一律丢弃），**现在仍是空表** → 每个库页面请求都由协议层如实回
+`endpoint_unknown`，UI 显示"接口尚未配置（待联调确认）。"。这是设计落点：宁可说"没配"，
+也不给出一个看起来是空的收藏夹。
+
+**渲染层的三态纪律**（`src/renderer/features/library/library-state.mjs`，由测试钉住）：
+加载中 → 骨架屏；失败 → `endpoint_unknown` 说"未配置"、其余类别说人话；真的空 → 一句空态。
+**失败绝不复用空态文案**——那会把"连不上"说成"你什么都没有"。
+
+**尚未接线**：`sessionHeaders`（会话凭据注入）没有接——端点未确认前猜 header 名是空转；
+音源/封面链路（CSP `img-src`/`media-src` + CDN 白名单）也留给联调后的任务。
 
 ### 2.4 CDN 域（已确认可达）
 
@@ -249,3 +277,7 @@ huawei/dbankcdn 等域名）。
   `host:cancel-login` 增补、五个 `status` 词表、双期限文案）、`auth:status` 广播载荷与
   "结论为什么走广播"、`FrameNavigationStarting` 缺口如实登记；§3 补两行常量。
   `loginex` 仍为**待联调**（§1.5 未变）：本任务不猜它的 URL，默认实现直接回结构化「待联调」。
+- 2026-10-19（Task R8）：§2.2 增补 `playlistDetail` 注入键（歌单曲目与歌单列表是两件事）；
+  新增 §2.5——主界面 ↔ sidecar 的 `library:*` 七条频道、应答形状、端点注入点
+  （设置文档 `data.musicEndpoints`，仍为空表）、渲染层的三态纪律与两处如实登记的未接线项。
+  协议层新增 `readFavoritesPage`（单页分页结论，**不给 total**）与 `getPlaylistDetail`。

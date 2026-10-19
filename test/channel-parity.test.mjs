@@ -9,6 +9,10 @@
  * R7 的两处增补（走"增补进共享常量表 + 硬钉同步改"的既有流程，不另立清单）：
  * - 宿主要求频道加 `host:cancel-login`（渲染层取消登录 → core_call auth:cancel-login → 宿主要求）；
  * - 广播频道加 `auth:status`（登录状态变化：门禁与 R8 主界面靠它知道"该显示哪一层"）。
+ *
+ * R8 的一处增补（同一流程：唯一真源增补 → Rust 镜像增补 → 本文件硬钉同步改）：
+ * - 请求频道加 `library:*` 七条（主界面六个库页面的数据通道）。R8 之前渲染层没有任何
+ *   业务请求频道，若只改一侧，`core_call` 会在 Rust 准入处被拒（用户看到"未知请求频道"）。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -57,16 +61,43 @@ function sorted(values) {
   return [...values].sort();
 }
 
-test("一致性：请求频道白名单（Node 共享常量 ↔ Rust commands.rs 全部 auth:/settings: 字面量）", () => {
-  const rust = rustChannelLiterals(rustProduction(rustSource("commands.rs")), "(?:auth|settings):");
+/** R8 增补的库页面请求频道（硬钉：少一条 = 某个页面点了没反应，多一条 = 白名单悄悄放宽）。 */
+const LIBRARY_CHANNELS = [
+  "library:album",
+  "library:artist",
+  "library:favorites",
+  "library:history",
+  "library:playlist-detail",
+  "library:playlists",
+  "library:search",
+];
+
+test("一致性：请求频道白名单（Node 共享常量 ↔ Rust commands.rs 全部 auth:/settings:/library: 字面量）", () => {
+  const rust = rustChannelLiterals(rustProduction(rustSource("commands.rs")), "(?:auth|settings|library):");
   assert.deepEqual(sorted(rust), sorted(REQUEST_CHANNELS));
   assert.deepEqual(sorted(REQUEST_CHANNELS), [
     "auth:cancel-login",
     "auth:login",
     "auth:logout",
+    "library:album",
+    "library:artist",
+    "library:favorites",
+    "library:history",
+    "library:playlist-detail",
+    "library:playlists",
+    "library:search",
     "settings:get",
     "settings:set",
   ]);
+});
+
+test("一致性：library:* 频道两侧逐条相等（R8 主界面唯一的数据通道）", () => {
+  const rust = rustChannelLiterals(rustProduction(rustSource("commands.rs")), "library:");
+  assert.deepEqual(sorted(rust), LIBRARY_CHANNELS);
+  assert.deepEqual(
+    sorted(REQUEST_CHANNELS.filter((channel) => channel.startsWith("library:"))),
+    LIBRARY_CHANNELS,
+  );
 });
 
 test("一致性：宿主要求频道（Node 共享常量 ↔ Rust commands.rs 全部 host: 字面量）", () => {
@@ -115,7 +146,7 @@ test("反漂移：Node 运行期代码里不得出现频道名字面量（只有
   assert.ok(scanned.length >= 8, `扫描范围异常，只拿到 ${scanned.length} 个文件：${scanned.join(", ")}`);
 
   // 只认普通引号里的字面量：注释里用反引号写的频道名是说明文字，不是第二份清单
-  const literal = /["']((?:auth|settings|host):[a-z][a-z-]*)["']/g;
+  const literal = /["']((?:auth|settings|host|library):[a-z][a-z-]*)["']/g;
   const offenders = [];
   for (const relative of scanned) {
     const source = readFileSync(`${repoRoot}${relative}`, "utf8");

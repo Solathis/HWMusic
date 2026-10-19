@@ -86,9 +86,30 @@ export interface FavoritesStep {
 
 /** 端点表：键名是实现里的 `MUSIC_ENDPOINT_KEYS`，值必须是 https URL。 */
 export type MusicEndpoints = Partial<Record<
-  "favorites" | "playlistList" | "playlistDelete" | "search" | "album" | "artist" | "history" | "playback",
+  | "favorites"
+  | "playlistList"
+  | "playlistDetail"
+  | "playlistDelete"
+  | "search"
+  | "album"
+  | "artist"
+  | "history"
+  | "playback",
   string
 >>;
+
+/** 单页收藏读取（R8 的滚动加载走这条）：**没有 total**——总数只能来自完整分页后的 ID 去重。 */
+export interface FavoritesPage {
+  page: number;
+  pageSize: number;
+  /** 已剔除无 ID 的条目（不编 ID），每条都带可用 id */
+  songs: Song[];
+  skipped: number;
+  /** 接口上报的 total（不可信，只作记录）；没报就是 null */
+  reportedTotal: number | null;
+  /** 分页结论由协议层给出（渲染层不自己猜） */
+  hasMore: boolean;
+}
 
 /** 请求参数名表（真实参数名待 R7 联调确认）。 */
 export interface QueryNames {
@@ -113,9 +134,11 @@ export interface MusicApi {
   endpointOf(key: string): CoreResult<string>;
   requestJson(key: string, request?: { method?: string; params?: Record<string, unknown>; body?: unknown }): Promise<CoreResult<unknown>>;
   listFavoritesPage(request?: { page?: number; pageSize?: number; params?: Record<string, unknown> }): Promise<CoreResult<unknown>>;
+  readFavoritesPage(request?: { page?: number; pageSize?: number; params?: Record<string, unknown> }): Promise<CoreResult<FavoritesPage>>;
   createFavoritesLoader(options?: { pageSize?: number; maxPages?: number }): FavoritesLoader;
   loadAllFavorites(options?: { pageSize?: number; maxPages?: number }): Promise<CoreResult<FavoritesSnapshot>>;
   listPlaylists(request?: { page?: number; pageSize?: number; params?: Record<string, unknown> }): Promise<CoreResult<{ playlists: Playlist[]; hasMore: boolean }>>;
+  getPlaylistDetail(playlistId: string, request?: { page?: number; pageSize?: number; params?: Record<string, unknown> }): Promise<CoreResult<{ songs: Song[]; hasMore: boolean }>>;
   deletePlaylist(playlistId: string, request?: { method?: string; params?: Record<string, unknown>; body?: unknown }): Promise<CoreResult<{ deleted: true; playlistId: string; detail: unknown }>>;
   search(keyword: string, request?: { page?: number; pageSize?: number; params?: Record<string, unknown> }): Promise<CoreResult<{ songs: Song[]; hasMore: boolean }>>;
   getAlbum(albumId: string, request?: { params?: Record<string, unknown> }): Promise<CoreResult<{ songs: Song[]; detail: unknown }>>;

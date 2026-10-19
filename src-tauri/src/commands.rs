@@ -20,12 +20,22 @@ use crate::MAIN_WINDOW_LABEL;
 ///
 /// 这是刻意与 src/shared/request-channels.ts 同源的镜像副本（Rust 无法 import TS）：
 /// test/channel-parity.test.mjs 扫描两侧源码，集合必须相等——改这里就必须同步改那里。
+///
+/// R8 增补 `library:*` 七条：主界面六个库页面的唯一数据通道。少一条的后果是那个页面
+/// 的请求在**这里**就被拒（`unknown_channel`）——渲染层只会显示"加载失败"，很难看出是准入问题。
 pub const REQUEST_CHANNELS: &[&str] = &[
     "auth:login",
     "auth:logout",
     "auth:cancel-login",
     "settings:get",
     "settings:set",
+    "library:favorites",
+    "library:playlists",
+    "library:playlist-detail",
+    "library:search",
+    "library:album",
+    "library:artist",
+    "library:history",
 ];
 
 /// core → 宿主 的宿主要求频道（与 src/shared/request-channels.ts 的 HOST_REQUEST_CHANNELS 同源）。
