@@ -13,7 +13,15 @@
  * 唯一的例外是收藏页：它常驻挂载（切页不卸载），所以挂在 switch 之外、用 active 控制显隐。
  */
 import { useCallback, useState } from "react"
-import { HistoryIcon, HeartIcon, ListMusicIcon, SearchIcon, SettingsIcon, ScrollTextIcon } from "lucide-react"
+import {
+  HistoryIcon,
+  HeartIcon,
+  ListMusicIcon,
+  MicVocalIcon,
+  SearchIcon,
+  SettingsIcon,
+  ScrollTextIcon,
+} from "lucide-react"
 
 import { APP_BRAND_LABEL } from "../shared/app-name.mjs"
 import { LoginGate, useAuthGate } from "./login-gate"
@@ -35,6 +43,7 @@ import {
   SidebarTrigger,
 } from "./components/ui/sidebar"
 import { EmptyState, PlayerBar, QueuePanel } from "./components"
+import { PlaybackStage } from "./playback-stage.tsx"
 import { FavoritesPage } from "./favorites-page.tsx"
 import { LogTerminal, useNoticeLog } from "./log-terminal.tsx"
 import {
@@ -47,6 +56,7 @@ import {
   SettingsPage,
 } from "./pages.tsx"
 import { shouldShowLoginGate } from "./features/auth/login-gate-logic.mjs"
+import { usePlayer } from "./features/playback/use-player.ts"
 import {
   NAV_LIST_TESTID,
   SIDEBAR_VIEWS,
@@ -58,7 +68,7 @@ import {
 } from "./features/library/views.mjs"
 import { libraryEmptyText } from "./features/library/library-state.mjs"
 import { playlistNameOf } from "./features/library/playlist-fields.mjs"
-import { trackAlbumOf, trackArtistsOf, trackNameOf } from "./features/library/track-fields.mjs"
+import { trackAlbumOf, trackArtistsOf } from "./features/library/track-fields.mjs"
 
 export function App() {
   const gate = useAuthGate()
@@ -91,17 +101,27 @@ const NAV_ICONS = {
 
 export function LibraryShell() {
   const [view, setView] = useState(() => createView(VIEW.favorites))
-  const [selectedTrack, setSelectedTrack] = useState<string | null>(null)
+  const [stageOpen, setStageOpen] = useState(false)
   const notices = useNoticeLog()
+  // 播放运行时是模块级单例（音频/媒体会话/广播都只能有一份），hook 只负责订阅状态
+  const { runtime, state: playback } = usePlayer()
 
   const navigate = useCallback((next: unknown) => {
     setView(normalizeView(next))
   }, [])
 
-  const onActivateTrack = useCallback((song: unknown) => {
-    // 播放是 R9 的事：这里只记下"选了哪首"（点击不该假装开始播放）
-    setSelectedTrack(trackNameOf(song))
-  }, [])
+  /**
+   * 双击一首歌 = **整张列表进队列**并从那一首开始。
+   *
+   * 只播那一首而不是整张列表，会让"下一首"永远没有下一首——列表就在用户眼前，
+   * 队列用同一份顺序才符合预期（`songs` 由页面在点击点给出，见 pages.tsx 的注释）。
+   */
+  const onActivateTrack = useCallback(
+    (song: unknown, index: number, songs: unknown[]) => {
+      void runtime.player.playQueue(songs.length > 0 ? songs : [song], index)
+    },
+    [runtime],
+  )
 
   const onOpenAlbum = useCallback(
     (albumId: string, song: unknown) => {
@@ -201,6 +221,15 @@ export function LibraryShell() {
           <SidebarTrigger />
           <h1 className="truncate text-sm font-medium">{viewTitle(view)}</h1>
           <div className="ml-auto flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="歌词"
+              aria-pressed={stageOpen}
+              onClick={() => setStageOpen((open) => !open)}
+            >
+              <MicVocalIcon />
+            </Button>
             <Sheet>
               <SheetTrigger asChild>
                 <Button variant="ghost" size="icon" aria-label="播放队列">
@@ -210,16 +239,25 @@ export function LibraryShell() {
               <SheetContent side="right">
                 <SheetHeader>
                   <SheetTitle>播放队列</SheetTitle>
-                  <SheetDescription>播放器接入后这里显示队列。</SheetDescription>
+                  <SheetDescription>双击列表里的曲目会替换整个队列。</SheetDescription>
                 </SheetHeader>
-                <QueuePanel selectedTrackName={selectedTrack} />
+                <QueuePanel
+                  entries={playback.entries}
+                  index={playback.index}
+                  onSelect={(position) => {
+                    void runtime.player.playAt(position)
+                  }}
+                  onClear={() => {
+                    runtime.player.clear()
+                  }}
+                />
               </SheetContent>
             </Sheet>
           </div>
         </header>
 
-        {/* 收藏页常驻（切走只是 hidden），其余页面按视图重挂 */}
-        <div className="min-h-0 flex-1 overflow-hidden">
+        {/* 收藏页常驻（切走只是 hidden），其余页面按视图重挂；歌词舞台盖在这一层之上 */}
+        <div className="relative min-h-0 flex-1 overflow-hidden">
           {isResidentView(view) ? null : <div className="h-full min-h-0 overflow-y-auto">{renderPage()}</div>}
           <FavoritesPage
             active={isResidentView(view)}
@@ -227,9 +265,15 @@ export function LibraryShell() {
             onOpenAlbum={onOpenAlbum}
             onOpenArtist={onOpenArtist}
           />
+          <PlaybackStage
+            open={stageOpen}
+            runtime={runtime}
+            state={playback}
+            onClose={() => setStageOpen(false)}
+          />
         </div>
 
-        <PlayerBar />
+        <PlayerBar runtime={runtime} state={playback} />
       </SidebarInset>
     </SidebarProvider>
   )

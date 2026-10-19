@@ -240,6 +240,54 @@ Rust 镜像见 §3 的 parity 钉）：
 **尚未接线**：`sessionHeaders`（会话凭据注入）没有接——端点未确认前猜 header 名是空转；
 音源/封面链路（CSP `img-src`/`media-src` + CDN 白名单）也留给联调后的任务。
 
+### 2.6 播放器 ↔ sidecar 的通道（R9 落地）
+
+| 频道 | 方向 | 载荷 | 应答 / 语义 |
+|---|---|---|---|
+| `playback:resolve-url` | 渲染层 → core（请求） | `{trackId}` | `data` = `parsePlaybackPayload` 的产物 `{url, fileInfos, format, size, bitrate, duration, auditionLikely, signals, warnings}`；缺 `trackId` → `invalid_payload`；端点未配置 → `endpoint_unknown`；地址不在 CDN 白名单 → `unsafe_media_url`（文案只带域名） |
+| `player:command` | core → 渲染层（广播） | `{command}`，取值 `play`/`pause`/`toggle`/`next`/`previous` | R9 **预登记**（真正的发送方是 R11 的托盘）；渲染层 `features/playback/player-commands.mjs` 执行，认不出的命令回结构化 `invalid_command`，**拒绝且不猜** |
+
+**播放地址的四条纪律**（R9 裁决，逐条在测试里钉住）：
+
+1. 地址只作**当次**播放结果交给渲染层：不写日志（处理器与运行时都没有日志出口）、不落盘、不缓存
+   （可能带时效签名，缓存它等于把"这一次能用"变成"以后也能用"）；
+2. 渲染层拿到后**还要再过一次** `safe-media-url`（渲染层唯一允许引用协议层的地方是
+   `features/playback/media-url.mjs`），不放行就不装载；状态机的 `guardUrl` 是**必填参数**，
+   缺了直接抛——"忘了校验"不是一种可能的写法；
+3. 地址**不进状态**：状态机快照里只有 `loaded: boolean`（测试断言快照序列化后不含 `http`/CDN 域），
+   所以 UI 与日志都拿不到它；
+4. 失败文案不回显整段地址（协议层只给域名），且失败类别原样透传
+   （`endpoint_unknown` 就是"接口没配"，不会被改写成"这首歌放不了"）。
+
+**队列持久化**（R9 裁决：只存曲目标识 + 当前索引）：
+
+```json
+{ "schemaVersion": 1, "data": { "queue": { "ids": ["1001", "1002"], "index": 1 } } }
+```
+
+- 键名 `QUEUE_SETTING_KEY = "queue"`（`src/renderer/features/playback/queue.mjs`），
+  写入走 `settings:set` 的 `{patch: {queue: …}}`；`queue: null` = **删除该键**（§2.5 的既有语义）；
+- 记录**结构上只有 `ids` 与 `index` 两个键**：不存播放地址（纪律 1）、不存标题/模式
+  （裁决没让存；恢复出来的队列只有标识，界面如实显示"曲目 &lt;id&gt;"）；
+- 反向同样严格：任何输入都洗不出第三个键（手工改坏的 `settings.json` 带 `url` 也进不来）；
+- 恢复**不自动播放**：只还原队列与索引（没有用户手势的自动出声既打扰又会被浏览器拒绝）。
+
+**Media Session**：浏览层能力（`features/playback/media-session.mjs`），不涉新权限、不起新窗口。
+元数据只有标题/艺人（**不放封面**：字段未确认），状态映射 `playing→playing`、
+`paused/loading→paused`、其余 `none`；环境没有这个 API 时静默降级（不报错）。
+
+**尚未接线（如实登记）**：
+
+1. **歌词来源**：本任务交付解析适配（`features/lyrics/amll-adapter.ts`：`[offset:]` 补偿 +
+   翻译行合并）、进度同步（`features/lyrics/lyric-sync.mjs`）与 AMLL 面板宿主；
+   但**没有歌词文本通道**（本任务只增补了 `playback:resolve-url` 与 `player:command` 两条，
+   见上面）——所以面板今天如实显示"歌词来源尚未接入。"，不冒充"这首歌没有歌词"。
+   歌词通道与 R12 的桌面歌词窗一起定（`task-9-brief.md` 的范围外清单：桌面歌词窗属 R12）。
+2. **封面/背景图**：曲目投影里没有封面字段（未确认），且 AMLL 对**字符串**地址会自己
+   `fetch` 成 blob（`connect-src` 只有 `'self' ipc:`，会被 CSP 拦）。要接通得先用 `<img>`
+   （`img-src` 白名单）加载再把 `HTMLImageElement` 传进 `BackgroundRender`。
+3. **音质/试听标注**：`auditionLikely` 已在协议层算出，UI 本任务不显示（不虚标音质）。
+
 ### 2.4 CDN 域（已确认可达）
 
 | 域 | probe 实测 | 用途 |
@@ -259,6 +307,8 @@ Rust 镜像见 §3 的 parity 钉）：
 | `LOGIN_TIMEOUT_MS` | `10 * 60_000` | `src/protocols/login-callback.mjs` | Node 侧；Rust `LOGIN_TIMEOUT_SECS = 600` 由 R7 镜像并由 parity 测试互钉 |
 | `LOGIN_LOAD_DEADLINE_SECS` | `30` | `src-tauri/src/login.rs` | 首载期限（Rust 独有：Node 侧没有对应的墙钟，只有"打不开官方页"这条结论） |
 | 两条期限文案 | 见 §1.7 | `src-tauri/src/login.rs` ↔ `src/main/huawei.ts` | 两侧逐字一致，parity 互钉 |
+| `LYRICS_SEEK_WINDOW_MS` | `200` | `src/renderer/features/lyrics/lyric-sync.mjs` | R9：歌词的 `isSeeking` 窗口（拖动时歌词跟着手走、手停 200ms 后自动收窗）；组件里不许再写这个数字（扫描钉住） |
+| `QUEUE_SETTING_KEY` | `"queue"` | `src/renderer/features/playback/queue.mjs` | R9：播放队列的持久化键（`data.queue`，只存曲目标识 + 索引） |
 
 ## 4. 红线（任何后续任务不得越过）
 
@@ -280,4 +330,9 @@ Rust 镜像见 §3 的 parity 钉）：
 - 2026-10-19（Task R8）：§2.2 增补 `playlistDetail` 注入键（歌单曲目与歌单列表是两件事）；
   新增 §2.5——主界面 ↔ sidecar 的 `library:*` 七条频道、应答形状、端点注入点
   （设置文档 `data.musicEndpoints`，仍为空表）、渲染层的三态纪律与两处如实登记的未接线项。
+- 2026-10-19（Task R9）：新增 §2.6——`playback:resolve-url`（当次播放地址：不写日志、不落盘、
+  不缓存、渲染层再闸一次、地址不进状态）与 `player:command` 广播（R11 托盘的预登记）；
+  队列持久化 `data.queue = {ids, index}` 的裁决与"恢复不自动播放"；Media Session 的对接范围；
+  三条如实登记的未接线项（**歌词来源通道**、封面/背景图、音质/试听标注）。§3 增补两个常量
+  （`LYRICS_SEEK_WINDOW_MS`、`QUEUE_SETTING_KEY`）。
   协议层新增 `readFavoritesPage`（单页分页结论，**不给 total**）与 `getPlaylistDetail`。

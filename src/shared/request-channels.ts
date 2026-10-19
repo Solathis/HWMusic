@@ -36,6 +36,19 @@ export const LIBRARY_ALBUM = "library:album" as const;
 export const LIBRARY_ARTIST = "library:artist" as const;
 export const LIBRARY_HISTORY = "library:history" as const;
 
+/**
+ * 播放地址频道（R9 增补）：拿**当次**播放地址，载荷 `{trackId}`，应答 `data` 即协议层
+ * `parsePlaybackPayload` 的产物（`{url, fileInfos, format, size, bitrate, duration,
+ * auditionLikely, signals, warnings}`）。
+ *
+ * 三条不可协商的边界（R9 简报裁决）：
+ * 1. **地址只作当次播放结果**交给渲染层：不写日志、不持久化（队列持久化只存曲目标识 + 索引）；
+ * 2. 渲染层拿到后还要**再过一次 safe-media-url**（CSP `media-src` 白名单）才允许装载，
+ *    协议层的校验不是"渲染层可以省掉这一步"的理由；
+ * 3. 端点未配置时是结构化的 `endpoint_unknown`（不冒充已实现，也不打到一个瞎猜的地址上）。
+ */
+export const PLAYBACK_RESOLVE_URL = "playback:resolve-url" as const;
+
 export const REQUEST_CHANNELS = [
   AUTH_LOGIN,
   AUTH_LOGOUT,
@@ -49,6 +62,7 @@ export const REQUEST_CHANNELS = [
   LIBRARY_ALBUM,
   LIBRARY_ARTIST,
   LIBRARY_HISTORY,
+  PLAYBACK_RESOLVE_URL,
 ] as const;
 
 export type RequestChannel = (typeof REQUEST_CHANNELS)[number];

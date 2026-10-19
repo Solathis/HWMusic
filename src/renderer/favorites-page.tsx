@@ -49,7 +49,8 @@ type FavoritesState = ReturnType<typeof createFavoritesState>
 export interface FavoritesPageProps {
   /** 当前是否显示中（常驻挂载靠它控制显隐，而不是卸载） */
   active: boolean
-  onActivateTrack: (song: unknown) => void
+  /** 双击曲目：`songs` 是已加载的完整列表（播放器用它当队列） */
+  onActivateTrack: (song: unknown, index: number, songs: unknown[]) => void
   onOpenAlbum: (albumId: string, song: unknown) => void
   onOpenArtist: (artistId: string, song: unknown) => void
 }
@@ -182,7 +183,7 @@ export function FavoritesPage({ active, onActivateTrack, onOpenAlbum, onOpenArti
             <TrackTable
               songs={state.songs}
               emptyText={libraryEmptyText(view)}
-              onActivate={onActivateTrack}
+              onActivate={(song, index) => onActivateTrack(song, index, state.songs)}
               onOpenAlbum={onOpenAlbum}
               onOpenArtist={onOpenArtist}
             />

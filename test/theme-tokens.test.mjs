@@ -82,7 +82,7 @@ const PURE_BLACK_WHITE = /(?:^|[\s"'`:[])(?:bg|text|border|ring|fill|stroke|divi
 /** 裸色值：hex / rgb() / hsl() / oklch()（令牌定义在 styles.css，代码里一律引用变量）。 */
 const RAW_COLOR = /#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(|\boklch\(/;
 
-test("令牌扫描范围：自己写的渲染层代码都在网内（含 R8 的主界面六个文件）", () => {
+test("令牌扫描范围：自己写的渲染层代码都在网内（含 R8 的主界面与 R9 的播放/歌词文件）", () => {
   const files = handWrittenFiles();
   for (const relative of [
     "src/renderer/App.tsx",
@@ -91,8 +91,11 @@ test("令牌扫描范围：自己写的渲染层代码都在网内（含 R8 的�
     "src/renderer/components.tsx",
     "src/renderer/playlist-grid.tsx",
     "src/renderer/log-terminal.tsx",
+    "src/renderer/playback-stage.tsx",
+    "src/renderer/AmllBackground.tsx",
+    "src/renderer/AmllLyricsPanel.tsx",
   ]) {
-    assert.ok(files.includes(relative), `R8 的界面文件必须在扫描范围内：${relative}`);
+    assert.ok(files.includes(relative), `界面文件必须在扫描范围内：${relative}`);
   }
   // 豁免范围只有 shadcn 生成物这一个目录：多豁免一个文件就等于把规则悄悄放宽
   assert.deepEqual(
@@ -115,7 +118,16 @@ test("禁止硬编码色：不出现非令牌调色板类、纯黑白工具类�
   assert.deepEqual(offenders, [], `一律使用设计令牌（styles.css 的 :root/.dark 变量）：\n${offenders.join("\n")}`);
 });
 
-test("禁止 <style> 与内联视觉样式：内联 style 只允许 R7 那处几何契约", () => {
+/**
+ * AMLL 宿主的 100% 尺寸例外（R9）：AMLL 的渲染器按容器尺寸建画布，官方文档要求的
+ * 就是给组件一个显式尺寸的盒子。除此之外**没有第三个例外**——例外集合写死在这里，
+ * 且下面有用例断言"全项目只有这两处"。
+ */
+const AMLL_SIZE_STYLE_FILES = ["src/renderer/AmllBackground.tsx", "src/renderer/AmllLyricsPanel.tsx"];
+const AMLL_SIZE_STYLE = 'style={{ width: "100%", height: "100%" }}';
+
+test("禁止 <style> 与内联视觉样式：内联 style 只允许几何契约与 AMLL 两处 100% 尺寸", () => {
+  const amllStyles = [];
   for (const relative of handWrittenFiles()) {
     const source = stripComments(read(relative));
     assert.doesNotMatch(
@@ -124,14 +136,29 @@ test("禁止 <style> 与内联视觉样式：内联 style 只允许 R7 那处几
       `${relative} 不得内联 <style>（CSP script-src 'self' 会阻断内联脚本，样式也不走这条路）`,
     );
     for (const match of source.matchAll(/style=\{\{[^}]*\}\}/g)) {
+      if (match[0] === AMLL_SIZE_STYLE) {
+        assert.ok(
+          AMLL_SIZE_STYLE_FILES.includes(relative),
+          `${relative} 不是 AMLL 宿主，不许写 AMLL 的 100% 尺寸内联样式：${match[0]}`,
+        );
+        amllStyles.push(relative);
+        continue;
+      }
       assert.match(
         match[0],
         /^style=\{\{\s*height:\s*LOGIN_VIEW_TOP_INSET\s*\}\}$/,
-        `${relative} 的内联 style 只能是几何契约（高度=共享常量）：${match[0]}`,
+        `${relative} 的内联 style 只能是几何契约（高度=共享常量）或 AMLL 的 100% 尺寸：${match[0]}`,
       );
     }
     assert.doesNotMatch(source, /\bstyle=\{(?!\{)/, `${relative} 不得内联 style={表达式}（视觉一律走工具类）`);
   }
+
+  // 例外只有两处（旧仓同款）：一处给背景、一处给歌词组件，多一处就是规则被悄悄放宽
+  assert.deepEqual(
+    amllStyles.sort(),
+    [...AMLL_SIZE_STYLE_FILES].sort(),
+    `AMLL 的 100% 尺寸内联样式应当恰好两处（背景 + 歌词）：${JSON.stringify(amllStyles)}`,
+  );
 });
 
 test("AMLL 变量只许出现在 amll-theme.css（歌词主题的唯一接线点）", () => {

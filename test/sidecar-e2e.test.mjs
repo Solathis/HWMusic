@@ -184,6 +184,23 @@ test("端到端：library:favorites 在端点未配置时回结构化 endpoint_u
   assert.deepEqual(sidecar.problems, []);
 });
 
+test("端到端：playback:resolve-url 端点未配置时回结构化 endpoint_unknown；坏载荷在边界被拒", async (t) => {
+  const sidecar = startSidecar();
+  t.after(() => sidecar.cleanup());
+
+  // 真进程里没有端点写入方 → 必须如实报"接口未配"，而不是回一个假的播放地址
+  const resolved = await sidecar.bridge.call("playback:resolve-url", { trackId: "1001" });
+  assert.equal(resolved.ok, false, `端点未配置不许"成功"：${JSON.stringify(resolved)}`);
+  assert.equal(resolved.error.kind, "endpoint_unknown");
+  assert.match(resolved.error.message, /playback/);
+
+  const bad = await sidecar.bridge.call("playback:resolve-url", { trackId: "   " });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.error.kind, "invalid_payload");
+
+  assert.deepEqual(sidecar.problems, []);
+});
+
 test("端到端：未知频道不被桥放行（Node dispatch 层白名单生效）", async (t) => {
   const sidecar = startSidecar();
   t.after(() => sidecar.cleanup());

@@ -1,15 +1,17 @@
 /**
- * R8 主界面 · 不自绘视觉（源码扫描）。
+ * R8 主界面 · 不自绘视觉（源码扫描）；R9 起覆盖播放器接通与歌词舞台。
  *
  * 项目的 UI 约束只有一句：**只组合 shadcn 原语 + Tailwind 工具类 + 设计令牌**。
  * 这条扫描把它落到可执行的形式——本文件只管"有没有自己画"，颜色/内联样式由
- * test/theme-tokens.test.mjs 管。要点：
+ * test/theme-tokens.test.mjs 管，歌词组件的来源由 test/lyrics-panel.test.mjs 管。要点：
  *
- * 1. 六个界面文件必须真的组合 shadcn 原语（不是自己拿 div 拼一个表格/按钮）；
+ * 1. 界面文件必须真的组合 shadcn 原语（不是自己拿 div 拼一个表格/按钮）；
  * 2. 不许手写 `<svg>`/`<canvas>`/`dangerouslySetInnerHTML`（图形一律 lucide-react 图标）；
  * 3. 组件契约（TrackTable / PlayerBar / QueuePanel / GridSkeleton 的导出与关键接线）；
  * 4. 渲染层不 import 协议层（业务 HTTP 只在 sidecar；渲染层只走 host-api 的 core_call）；
- * 5. 播放器栏本任务只是**占位**：不许出现 Audio 实例或播放状态机的半点影子。
+ * 5. 播放器栏 R9 已接通状态机：`data-state` 由状态给，但**UI 层不持有音频、不碰 core**
+ *    （地址与音频都在 features/playback 的运行时里；音频元素的唯一实例由
+ *    test/playback-runtime.test.mjs 的扫描钉住）。
  *
  * 先写先看红。
  */
@@ -21,7 +23,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const read = (relative) => readFileSync(`${repoRoot}${relative}`, "utf8");
 
-/** R8 交付的界面文件（简报 Files 一节）。 */
+/** 组合 shadcn 原语的界面文件（简报 Files 一节 + R9 的舞台）。 */
 const UI_FILES = [
   "src/renderer/App.tsx",
   "src/renderer/pages.tsx",
@@ -29,7 +31,17 @@ const UI_FILES = [
   "src/renderer/components.tsx",
   "src/renderer/playlist-grid.tsx",
   "src/renderer/log-terminal.tsx",
+  "src/renderer/playback-stage.tsx",
 ];
+
+/**
+ * AMLL 宿主组件是**例外**：它们的视觉全部来自官方包（`BackgroundRender` / `LyricPlayer`），
+ * 宿主只提供定位容器——所以它们不"组合 shadcn 原语"，但同样不许自绘（见 lyrics-panel.test.mjs）。
+ */
+const AMLL_HOSTS = ["src/renderer/AmllBackground.tsx", "src/renderer/AmllLyricsPanel.tsx"];
+
+/** 全部"要么组合原语、要么把视觉交给官方组件"的界面文件。 */
+const ALL_UI_FILES = [...UI_FILES, ...AMLL_HOSTS];
 
 function stripComments(source) {
   return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
@@ -44,10 +56,16 @@ test("组合原语：每个界面文件都从 components/ui 引入 shadcn 原语
       `${relative} 必须组合 components/ui 下的 shadcn 原语（不许拿 div 拼视觉组件）`,
     );
   }
+  // AMLL 宿主的视觉来自官方包：它们不许组合 shadcn（也不许自绘），但要真的在挂官方组件
+  for (const relative of AMLL_HOSTS) {
+    const source = read(relative);
+    assert.match(source, /@applemusic-like-lyrics\/react/, `${relative} 必须用 AMLL 官方组件`);
+    assert.doesNotMatch(source, /components\/ui\//, `${relative} 不掺 shadcn 原语（视觉全交官方组件）`);
+  }
 });
 
 test("不自绘：无手写 svg/canvas/innerHTML（图形走 lucide-react 图标）", () => {
-  for (const relative of UI_FILES) {
+  for (const relative of ALL_UI_FILES) {
     const source = stripComments(read(relative));
     assert.doesNotMatch(source, /<svg[\s>]/, `${relative} 不得手写 <svg>（图标一律 lucide-react）`);
     assert.doesNotMatch(source, /<canvas[\s>]|getContext\(|createElement\(["']canvas/, `${relative} 不得自绘画布`);
@@ -57,7 +75,7 @@ test("不自绘：无手写 svg/canvas/innerHTML（图形走 lucide-react 图标
 });
 
 test("边界：渲染层不 import 协议层（业务 HTTP 只在 sidecar，界面只走 core_call）", () => {
-  for (const relative of UI_FILES) {
+  for (const relative of ALL_UI_FILES) {
     const source = read(relative);
     assert.doesNotMatch(source, /protocols\//, `${relative} 不得引用协议层（端点与凭据不在渲染层）`);
     assert.doesNotMatch(source, /\bfetch\s*\(|XMLHttpRequest|WebSocket/, `${relative} 不得自己发请求（唯一通道是 host-api 的 coreCall）`);
@@ -82,12 +100,15 @@ test("组件契约：TrackTable / PlayerBar / QueuePanel / GridSkeleton 都在 c
   assert.match(source, /aria-pressed=/, "收藏切换要有可读的按下状态（不是只有颜色）");
 });
 
-test("播放器栏只是占位：不接状态机、不出音频实例（R9 才接通）", () => {
+test("播放器栏已接通：data-state 由状态机给、UI 层不持有音频也不碰 core（R9 翻转）", () => {
   const source = read("src/renderer/components.tsx");
-  assert.doesNotMatch(source, /\bnew Audio\(|HTMLAudioElement|\.play\(\)|feature(?:s)?\/playback/, "播放状态机是 R9 的事");
-  assert.doesNotMatch(source, /amll|AMLL/, "歌词/背景是 R9/R12 的事");
-  assert.match(source, /data-state="placeholder"/, "占位态要有明确标记（源码扫描与 review 都按它认）");
-  assert.match(source, /disabled/, "占位按钮必须是禁用态（点了没反应比禁用更糟）");
+  const code = stripComments(source);
+  assert.doesNotMatch(code, /new\s+Audio\s*\(|HTMLAudioElement|\.play\(\)/, "音频只在 features/playback/audio-element.mjs 里");
+  assert.doesNotMatch(code, /coreCall\(|playback:resolve-url|PLAYBACK_RESOLVE_URL/, "地址只在运行时里取（UI 拿不到）");
+  assert.doesNotMatch(code, /amll|AMLL/i, "歌词组件是 R9 的宿主文件（Amll*.tsx），组件库不掺进来");
+  assert.match(code, /data-state=\{state\.status\}/, "占位态已翻转为真实状态（扫描与 review 都按它认）");
+  assert.match(code, /from\s+"\.\/components\/ui\/slider"/, "进度/音量走 shadcn 的 Slider");
+  assert.match(code, /disabled=/, "没有可播曲目时按钮仍是禁用的（点了没反应比禁用更糟）");
 });
 
 test("收藏页：常驻挂载 + IntersectionObserver 滚动加载 + 位置恢复锚点，且合并逻辑全部来自纯逻辑模块", () => {

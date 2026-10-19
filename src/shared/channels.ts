@@ -33,6 +33,19 @@ export const APP_NOTICE = "app:notice" as const;
  */
 export const AUTH_STATUS = "auth:status" as const;
 
-export const BROADCAST_CHANNELS = [APP_NOTICE, AUTH_STATUS] as const;
+/**
+ * 播放控制广播（R9 增补，**预登记**：真正的发送方是 R11 的托盘）。
+ *
+ * 语义：`{command: "play"|"pause"|"toggle"|"next"|"previous"}` —— 控制意图，不是状态。
+ * 为什么是广播而不是请求频道：托盘的菜单项在 **Rust 侧**响应（点一下要立刻有反馈），
+ * 它既不能调 `core_call`（那是主窗的通道），也不该为了发一条命令去起一趟请求/响应；
+ * 而状态回报（"现在在放哪首"）走渲染层自己的订阅，两条路互不冒充。
+ *
+ * 载荷形状由 `src/renderer/features/playback/player-commands.mjs` 的唯一真源校验：
+ * 认不出的命令**不执行也不猜**，与"点了没反应"相比，返回结构化错误才是可排查的。
+ */
+export const PLAYER_COMMAND = "player:command" as const;
+
+export const BROADCAST_CHANNELS = [APP_NOTICE, AUTH_STATUS, PLAYER_COMMAND] as const;
 
 export type BroadcastChannel = (typeof BROADCAST_CHANNELS)[number];

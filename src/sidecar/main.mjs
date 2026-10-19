@@ -16,6 +16,7 @@
 import { createBridge } from "../host/bridge.mjs";
 import { createDispatcher } from "../host/dispatcher.mjs";
 import { createLibraryHandlers } from "../host/library-handlers.mjs";
+import { createPlaybackHandlers } from "../host/playback-handlers.mjs";
 import { createRpc } from "../host/rpc.mjs";
 import { createHostServices } from "../host/host-services.mjs";
 import { createAuthManager } from "../main/auth-manager.ts";
@@ -41,6 +42,7 @@ function implementedBy(channel) {
   if (channel.startsWith("auth:")) return "R7 登录链路";
   if (channel.startsWith("settings:")) return "R6 设置与统一代理";
   if (channel.startsWith("library:")) return "R8 主界面";
+  if (channel.startsWith("playback:")) return "R9 播放器";
   return "后续任务";
 }
 
@@ -95,6 +97,15 @@ dispatcher.register(SETTINGS_SET, async (request) => {
 // 这是设计落点而不是坏掉：宁可说"没配"，也不给出一个看起来是空的收藏夹。
 const musicService = createMusicService({ settingsData: settings.data });
 for (const [channel, handler] of Object.entries(createLibraryHandlers({ api: musicService.api }))) {
+  dispatcher.register(channel, handler);
+}
+
+// —— 播放地址通道（R9）——
+//
+// 同一个 music 服务（同一张端点表）：`playback:resolve-url` 拿的是**当次**播放地址——
+// 处理器把地址原样放进这一次的应答，不写日志、不落盘（见 src/host/playback-handlers.mjs）。
+// 端点仍未配置 → 协议层如实回 `endpoint_unknown`，渲染层显示"接口尚未配置"。
+for (const [channel, handler] of Object.entries(createPlaybackHandlers({ api: musicService.api }))) {
   dispatcher.register(channel, handler);
 }
 

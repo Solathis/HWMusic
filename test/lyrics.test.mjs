@@ -116,5 +116,5 @@ test("禁止自绘：本模块必须复用 AMLL 官方 parseLrc，不得自带�
   const source = readFileSync(`${repoRoot}src/protocols/lyrics.mjs`, "utf8");
   assert.match(source, /@applemusic-like-lyrics\/lyric/, "必须 import AMLL 官方歌词包");
   assert.match(source, /parseLrc/, "必须调用官方 parseLrc");
-  assert.doesNotMatch(source, /\\d\{2\}:\d\{2\}/, "不得出现自写的时间戳正则（那是自绘解析）");
+  assert.doesNotMatch(source, /\\d\{2\}:\\d\{2\}/, "不得出现自写的时间戳正则（那是自绘解析）");
 });

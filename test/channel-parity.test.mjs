@@ -13,14 +13,25 @@
  * R8 的一处增补（同一流程：唯一真源增补 → Rust 镜像增补 → 本文件硬钉同步改）：
  * - 请求频道加 `library:*` 七条（主界面六个库页面的数据通道）。R8 之前渲染层没有任何
  *   业务请求频道，若只改一侧，`core_call` 会在 Rust 准入处被拒（用户看到"未知请求频道"）。
+ *
+ * R9 的两处增补（同一流程）：
+ * - 请求频道加 `playback:resolve-url`：拿**当次**播放地址。地址只作当次播放结果交给渲染层，
+ *   不写日志、不持久化（队列持久化只存曲目标识 + 索引）；
+ * - 广播频道加 `player:command`：大屏/托盘的播放控制**预登记**（托盘在 Rust 侧，R11 接线）。
+ *   预登记的理由与 R8 一次补齐 library 相同：白名单缺一项 = 那条广播被 Rust 的 FramePolicy
+ *   当作白名单外帧丢掉，托盘点了没反应，而错误只出现在日志里。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { HOST_REQUEST_CHANNELS, REQUEST_CHANNELS } from "../src/shared/request-channels.ts";
-import { BROADCAST_CHANNELS, CORE_EVENT } from "../src/shared/channels.ts";
+import {
+  HOST_REQUEST_CHANNELS,
+  PLAYBACK_RESOLVE_URL,
+  REQUEST_CHANNELS,
+} from "../src/shared/request-channels.ts";
+import { BROADCAST_CHANNELS, CORE_EVENT, PLAYER_COMMAND } from "../src/shared/channels.ts";
 import { CALL_TIMEOUT_MS } from "../src/host/bridge.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -72,8 +83,17 @@ const LIBRARY_CHANNELS = [
   "library:search",
 ];
 
-test("一致性：请求频道白名单（Node 共享常量 ↔ Rust commands.rs 全部 auth:/settings:/library: 字面量）", () => {
-  const rust = rustChannelLiterals(rustProduction(rustSource("commands.rs")), "(?:auth|settings|library):");
+/** R9 增补的播放请求频道（硬钉：多一条就等于白名单悄悄放宽了）。 */
+const PLAYBACK_CHANNELS = ["playback:resolve-url"];
+
+/** 广播频道硬钉内容（两侧一起写错也能过互比，所以内容必须钉死）。 */
+const BROADCAST_CHANNEL_NAMES = ["app:notice", "auth:status", "player:command"];
+
+test("一致性：请求频道白名单（Node 共享常量 ↔ Rust commands.rs 全部 auth:/settings:/library:/playback: 字面量）", () => {
+  const rust = rustChannelLiterals(
+    rustProduction(rustSource("commands.rs")),
+    "(?:auth|settings|library|playback):",
+  );
   assert.deepEqual(sorted(rust), sorted(REQUEST_CHANNELS));
   assert.deepEqual(sorted(REQUEST_CHANNELS), [
     "auth:cancel-login",
@@ -86,9 +106,20 @@ test("一致性：请求频道白名单（Node 共享常量 ↔ Rust commands.rs
     "library:playlist-detail",
     "library:playlists",
     "library:search",
+    "playback:resolve-url",
     "settings:get",
     "settings:set",
   ]);
+});
+
+test("一致性：playback:* 频道两侧逐条相等（R9 唯一的播放请求通道）", () => {
+  const rust = rustChannelLiterals(rustProduction(rustSource("commands.rs")), "playback:");
+  assert.deepEqual(sorted(rust), PLAYBACK_CHANNELS);
+  assert.deepEqual(
+    sorted(REQUEST_CHANNELS.filter((channel) => channel.startsWith("playback:"))),
+    PLAYBACK_CHANNELS,
+  );
+  assert.equal(PLAYBACK_RESOLVE_URL, "playback:resolve-url", "「拿当次播放地址」的频道名是契约");
 });
 
 test("一致性：library:* 频道两侧逐条相等（R8 主界面唯一的数据通道）", () => {
@@ -116,8 +147,22 @@ test("一致性：广播频道白名单（Node 共享常量 ↔ Rust bridge.rs �
   const rust = rustStringArray(rustSource("bridge.rs"), "BROADCAST_CHANNELS");
   assert.deepEqual(sorted(rust), sorted(BROADCAST_CHANNELS));
   // 内容硬钉：只做两侧互比的话，"两侧一起为空/一起写错"也能过（这正是上一轮漏掉的）
-  assert.deepEqual(sorted(rust), ["app:notice", "auth:status"]);
-  assert.deepEqual(sorted(BROADCAST_CHANNELS), ["app:notice", "auth:status"]);
+  assert.deepEqual(sorted(rust), BROADCAST_CHANNEL_NAMES);
+  assert.deepEqual(sorted(BROADCAST_CHANNELS), BROADCAST_CHANNEL_NAMES);
+});
+
+test("一致性：player:command 广播（R11 托盘控制的预登记：常量 + 字面量两侧逐字相等）", () => {
+  // 渲染层只认常量名；Rust 侧 `PLAYER_COMMAND` 是它的镜像副本（Rust 无法 import TS）
+  assert.equal(PLAYER_COMMAND, "player:command");
+  assert.equal(rustStringConst(rustSource("bridge.rs"), "PLAYER_COMMAND"), PLAYER_COMMAND);
+  assert.ok(
+    BROADCAST_CHANNELS.includes(PLAYER_COMMAND),
+    "player:command 必须在广播白名单里：不在的话 Rust 会把这条广播当成白名单外帧丢掉",
+  );
+  assert.ok(
+    rustStringArray(rustSource("bridge.rs"), "BROADCAST_CHANNELS").includes(PLAYER_COMMAND),
+    "Rust 侧白名单同样必须含 player:command（托盘广播就在 Rust 侧发出）",
+  );
 });
 
 test("一致性：漏斗事件名与调用超时两侧相等", () => {
@@ -146,7 +191,7 @@ test("反漂移：Node 运行期代码里不得出现频道名字面量（只有
   assert.ok(scanned.length >= 8, `扫描范围异常，只拿到 ${scanned.length} 个文件：${scanned.join(", ")}`);
 
   // 只认普通引号里的字面量：注释里用反引号写的频道名是说明文字，不是第二份清单
-  const literal = /["']((?:auth|settings|host|library):[a-z][a-z-]*)["']/g;
+  const literal = /["']((?:auth|settings|host|library|playback|player):[a-z][a-z-]*)["']/g;
   const offenders = [];
   for (const relative of scanned) {
     const source = readFileSync(`${repoRoot}${relative}`, "utf8");

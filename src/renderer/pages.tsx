@@ -111,17 +111,19 @@ function TrackListView({
   /** 空态文案由各页给：搜索的"查无所获"与"还没搜"不是同一句话 */
   emptyText: string
   resource: Resource<unknown[]>
-  onActivateTrack: (song: unknown) => void
+  onActivateTrack: (song: unknown, index: number, songs: unknown[]) => void
   onOpenAlbum: (albumId: string, song: unknown) => void
   onOpenArtist: (artistId: string, song: unknown) => void
 }) {
   if (resource.status === "loading") return <ListSkeleton />
   if (resource.status === "error") return <LoadFailed text={libraryFailureText(resource.failure)} />
+  const songs = resource.data ?? []
   return (
     <TrackTable
-      songs={resource.data ?? []}
+      songs={songs}
       emptyText={emptyText}
-      onActivate={onActivateTrack}
+      // 队列要用**整张列表**（只播一首会让"下一首"永远没有下一首）：列表只有页面手里有
+      onActivate={(song, index) => onActivateTrack(song, index, songs)}
       onOpenAlbum={onOpenAlbum}
       onOpenArtist={onOpenArtist}
     />
@@ -129,7 +131,8 @@ function TrackListView({
 }
 
 export interface PageNavigationProps {
-  onActivateTrack: (song: unknown) => void
+  /** 双击曲目：`songs` 是这一页当前的完整列表（播放器用它当队列） */
+  onActivateTrack: (song: unknown, index: number, songs: unknown[]) => void
   onOpenAlbum: (albumId: string, song: unknown) => void
   onOpenArtist: (artistId: string, song: unknown) => void
 }

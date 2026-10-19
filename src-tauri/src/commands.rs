@@ -23,6 +23,9 @@ use crate::MAIN_WINDOW_LABEL;
 ///
 /// R8 增补 `library:*` 七条：主界面六个库页面的唯一数据通道。少一条的后果是那个页面
 /// 的请求在**这里**就被拒（`unknown_channel`）——渲染层只会显示"加载失败"，很难看出是准入问题。
+///
+/// R9 增补 `playback:resolve-url`：拿**当次**播放地址（地址只作当次播放结果交给渲染层，
+/// 不写日志、不持久化）。少了它，播放器点播放只会拿到 `unknown_channel`。
 pub const REQUEST_CHANNELS: &[&str] = &[
     "auth:login",
     "auth:logout",
@@ -36,6 +39,7 @@ pub const REQUEST_CHANNELS: &[&str] = &[
     "library:album",
     "library:artist",
     "library:history",
+    "playback:resolve-url",
 ];
 
 /// core → 宿主 的宿主要求频道（与 src/shared/request-channels.ts 的 HOST_REQUEST_CHANNELS 同源）。

@@ -22,14 +22,17 @@ pub const CORE_EVENT: &str = "core:event";
 /// 广播频道白名单（src/shared/channels.ts 的 BROADCAST_CHANNELS 镜像，两侧由一致性测试钉住）。
 ///
 /// 集合内容：`app:notice`（宿主级提示，控制器裁决的初始集合）+ `auth:status`（R7 增补：
-/// 登录状态变化，渲染层门禁与 R8 主界面靠它决定"该显示哪一层"）。增补时两侧一起改。
+/// 登录状态变化，渲染层门禁与 R8 主界面靠它决定"该显示哪一层"）+ `player:command`
+/// （R9 增补的**预登记**：R11 托盘发出的播放控制意图）。增补时两侧一起改。
 ///
 /// 数组里保持**字面量**：`test/channel-parity.test.mjs` 直接扫这一行的字符串集合，
 /// 写成常量引用它会扫不到（`bridge_broadcast_channels_match_the_named_constants` 兜住这份重复）。
 pub const APP_NOTICE: &str = "app:notice";
 /// 登录状态广播频道（R7）：`{loggedIn: bool}`。
 pub const AUTH_STATUS: &str = "auth:status";
-pub const BROADCAST_CHANNELS: &[&str] = &["app:notice", "auth:status"];
+/// 播放控制广播频道（R9 预登记，发送方是 R11 的托盘）：`{command: "play"|"pause"|...}`。
+pub const PLAYER_COMMAND: &str = "player:command";
+pub const BROADCAST_CHANNELS: &[&str] = &["app:notice", "auth:status", "player:command"];
 
 /// 已答复 id 的保留上限：应答一次性守卫必须有界（超出按插入顺序淘汰）。
 pub const MAX_ANSWERED_IDS: usize = 4096;
@@ -524,9 +527,10 @@ mod tests {
     /// 广播频道白名单与它的具名常量是**同一份事实**（数组里必须是字面量，parity 测试才扫得到）。
     #[test]
     fn bridge_broadcast_channels_match_the_named_constants() {
-        assert_eq!(BROADCAST_CHANNELS, [APP_NOTICE, AUTH_STATUS]);
+        assert_eq!(BROADCAST_CHANNELS, [APP_NOTICE, AUTH_STATUS, PLAYER_COMMAND]);
         assert_eq!(APP_NOTICE, "app:notice");
         assert_eq!(AUTH_STATUS, "auth:status");
+        assert_eq!(PLAYER_COMMAND, "player:command");
     }
 
     /// 可读回的假写入端：断言"到底写出了什么帧"。
@@ -680,9 +684,9 @@ mod tests {
         // 生产路径用的是 FramePolicy::default()；集合为空时这里会退化成 Reject，
         // 无 id 的广播帧只能进日志——等于 sidecar 发出去的广播被静默丢弃。
         let default_policy = FramePolicy::default();
-        // R7 增补了 auth:status（登录状态）：初始集合是 app:notice，之后每加一个都在这里同步。
-        let expected: &[&str] = &["app:notice", "auth:status"];
-        assert_eq!(BROADCAST_CHANNELS, expected, "控制器裁决的广播集合（R7 起加上 auth:status）");
+        // R7 增补了 auth:status、R9 预登记了 player:command：每加一个都在这里同步。
+        let expected: &[&str] = &["app:notice", "auth:status", "player:command"];
+        assert_eq!(BROADCAST_CHANNELS, expected, "控制器裁决的广播集合（R9 起加上 player:command）");
 
         let frame = r#"{"channel":"app:notice","payload":{"text":"已复制"}}"#;
         match classify_line(frame, &default_policy) {
@@ -701,6 +705,17 @@ mod tests {
                 assert_eq!(payload, json!({"loggedIn": true}));
             }
             other => panic!("默认策略下 auth:status 必须分类为 Emit，实际 {other:?}"),
+        }
+
+        // R9 预登记的托盘播放控制：预登记的意义就在这条用例里——不预先放进白名单，
+        // R11 的托盘广播会被静默丢弃（用户点了没反应，日志里只有一条 Reject）。
+        let player_frame = r#"{"channel":"player:command","payload":{"command":"toggle"}}"#;
+        match classify_line(player_frame, &default_policy) {
+            LineOutcome::Effect(Effect::Emit { channel, payload }) => {
+                assert_eq!(channel, "player:command");
+                assert_eq!(payload, json!({"command": "toggle"}));
+            }
+            other => panic!("默认策略下 player:command 必须分类为 Emit，实际 {other:?}"),
         }
     }
 

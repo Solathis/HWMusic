@@ -218,17 +218,24 @@ function stripComments(source) {
   return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
 }
 
-test("视觉约束：无 <style> 标签；内联 style 只允许几何契约那一处", () => {
+test("视觉约束：无 <style> 标签；内联 style 只允许几何契约与 AMLL 尺寸两处", () => {
+  // AMLL 宿主（R9）的 100% 尺寸是第二个（也是最后一个）例外：AMLL 的渲染器按容器尺寸
+  // 建画布，官方文档要求给组件一个显式尺寸的盒子。例外的完整清单与"恰好两处"的计数
+  // 由 test/theme-tokens.test.mjs 钉死，这里只做同样的放行。
+  const AMLL_SIZE_STYLE_FILES = ["src/renderer/AmllBackground.tsx", "src/renderer/AmllLyricsPanel.tsx"];
+  const AMLL_SIZE_STYLE = 'style={{ width: "100%", height: "100%" }}';
+
   for (const relative of rendererFiles()) {
     if (relative.endsWith("amll-theme.css")) continue;
     const source = stripComments(read(relative));
     assert.doesNotMatch(source, /<style[\s>]/, `${relative} 不得内联 <style>（CSP script-src 'self' 会阻断内联脚本，样式也不走这条路）`);
 
     for (const match of source.matchAll(/style=\{\{[^}]*\}\}/g)) {
+      if (match[0] === AMLL_SIZE_STYLE && AMLL_SIZE_STYLE_FILES.includes(relative)) continue;
       assert.match(
         match[0],
         /^style=\{\{\s*height:\s*LOGIN_VIEW_TOP_INSET\s*\}\}$/,
-        `${relative} 的内联 style 只能是几何契约（高度=共享常量）：${match[0]}`,
+        `${relative} 的内联 style 只能是几何契约（高度=共享常量）或 AMLL 的 100% 尺寸：${match[0]}`,
       );
     }
   }

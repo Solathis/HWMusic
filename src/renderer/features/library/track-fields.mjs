@@ -38,17 +38,28 @@ export function trackIdOf(item) {
 }
 
 export function trackNameOf(item) {
-  if (!isObject(item)) return "未知歌曲";
+  return trackNameOrNull(item) ?? "未知歌曲";
+}
+
+/**
+ * 曲名（**取不到就是 null**，不造文案）。
+ *
+ * R9 增补：播放队列的持久化只存曲目标识，内存里的队列条目需要区分"标题未知"与"标题是
+ * 未知歌曲"——前者是数据层的事实，后者是界面上的说法。文案只该出现在 UI 层，
+ * 所以把"可空"的读取单独暴露出来，键候选表仍然只有这一份（`trackNameOf` 也走它）。
+ */
+export function trackNameOrNull(item) {
+  if (!isObject(item)) return null;
   for (const key of NAME_KEYS) {
     const value = textOf(item[key]);
     if (value !== null) return value;
   }
-  return "未知歌曲";
+  return null;
 }
 
-/** 艺人：可能是字符串、字符串数组、对象数组（`[{name}]`），也可能是嵌套的 `artist` 对象。 */
-export function trackArtistsOf(item) {
-  if (!isObject(item)) return "未知艺人";
+/** 艺人（字符串/字符串数组/对象数组/嵌套 artist 对象）；**取不到就是 null**。 */
+export function trackArtistsOrNull(item) {
+  if (!isObject(item)) return null;
 
   const fromList = (list) => {
     const names = [];
@@ -79,7 +90,12 @@ export function trackArtistsOf(item) {
     }
   }
 
-  return "未知艺人";
+  return null;
+}
+
+/** 艺人：可能是字符串、字符串数组、对象数组（`[{name}]`），也可能是嵌套的 `artist` 对象。 */
+export function trackArtistsOf(item) {
+  return trackArtistsOrNull(item) ?? "未知艺人";
 }
 
 export function trackAlbumOf(item) {
