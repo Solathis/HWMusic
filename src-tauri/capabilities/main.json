@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "主窗与桌面歌词窗的最小权限：事件、窗口拖动、全局快捷键注册。",
+  "windows": ["main", "lyrics"],
+  "permissions": [
+    "core:event:default",
+    "core:window:allow-start-dragging",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
+    "global-shortcut:allow-is-registered"
+  ]
+}

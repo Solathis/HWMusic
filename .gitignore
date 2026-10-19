@@ -6,6 +6,8 @@ out/
 dist/
 src-tauri/target/
 src-tauri/binaries/
+# Tauri 生成的 ACL/配置 schema（构建期自动重建，官方模板同样忽略）
+src-tauri/gen/schemas/
 
 # 本地临时与运行时数据（可能含真实账号凭据／音乐库数据）
 .tmp/

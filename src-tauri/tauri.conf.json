@@ -1,0 +1,31 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "华为音乐第三方客户端",
+  "version": "0.0.1",
+  "identifier": "org.hwmusicdesktop.unofficial.internal",
+  "build": {
+    "beforeDevCommand": "npm run dev:web",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "",
+    "frontendDist": "../out/renderer"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https://*.dbankcdn.cn https://*.tingmall.com https://*.kuke.com data:; media-src 'self' blob: https://*.dbankcdn.cn https://*.tingmall.com https://*.kuke.com; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      }
+    }
+  }
+}

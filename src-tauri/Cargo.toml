@@ -1,0 +1,46 @@
+[package]
+name = "huawei-music-desktop"
+version = "0.0.1"
+description = "华为音乐第三方桌面客户端（非官方）"
+license = "AGPL-3.0-only"
+edition = "2021"
+
+[lib]
+# R3+ 的集成测试与 R11 的托盘 mock 测试都按这个 lib 名引用
+name = "huawei_music_desktop_lib"
+crate-type = ["lib"]
+
+[[bin]]
+name = "huawei-music-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = "2"
+
+[dependencies]
+tauri = { version = "2.12.4", features = ["tray-icon", "image-png", "image-ico"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-log = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+base64 = "0.22"
+
+# DPAPI（CryptProtectData）与本地内存 API 仅 Windows 编译，由 R5 消费
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_System_Memory",
+] }
+
+# webview 的 --proxy-server 需要 macOS 14+，由 R6 消费
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri = { version = "2.12.4", features = ["macos-proxy"] }
+
+[dev-dependencies]
+tauri = { version = "2.12.4", features = ["test"] }
