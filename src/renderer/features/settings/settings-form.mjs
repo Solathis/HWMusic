@@ -179,12 +179,28 @@ export function proxyTestResultText(result) {
 export const CLOSE_BEHAVIORS = ["tray", "quit"];
 
 /**
- * 托盘可用性：R11 才交付托盘本体，在那之前它是 `false`。
+ * 托盘可用性的**兜底值**（R11 起它不再是"真相"，只是宿主没答上来时用的那一档）。
  *
- * 写死在渲染层是**如实**而不是偷懒：宿主侧现在没有任何"托盘在不在"的口子，
- * 编一个 true 就是在界面上承诺一个不存在的托盘。R11 接通后把这里换成从宿主读。
+ * R10 时它写死 `false` 是**如实**：宿主侧当时没有任何"托盘在不在"的口子，编一个 `true`
+ * 就是在界面上承诺一个不存在的托盘。R11 接通了 `core_get_tray_available`——
+ * 真值从宿主来，这个常量退化成"还没取到 / 取不到"时的保守回退。
+ *
+ * 为什么回退方向仍是 `false`：与 Rust 侧 `tray::decide_close` 的 fail-safe 同口径
+ * （托盘不可用时关窗就是真退出）。界面说"不可用"而实际能用，代价是用户少用一个便利；
+ * 反过来则是"界面说能用、关窗却退出了"，那才是撒谎。
  */
 export const TRAY_AVAILABLE = false;
+
+/**
+ * 宿主回执 → 可用性（**只认 `true`**）。
+ *
+ * 认不出的形状（`undefined`、`null`、`"true"`、`1`、对象……）一律按"不可用"处理：
+ * 抛异常那条路由页面接住并落同一个兜底值，所以"没答"与"答了假"在这里是同一个结果——
+ * 保守方向只需要一个落点。
+ */
+export function trayAvailabilityFromAnswer(answer) {
+  return answer === true;
+}
 
 export const CLOSE_BEHAVIOR_LABELS = {
   tray: "最小化到托盘（后台继续）",
@@ -219,12 +235,19 @@ export function closeBehaviorFromSettings(document) {
   return CLOSE_BEHAVIORS.includes(stored) ? stored : CLOSE_BEHAVIORS[0];
 }
 
-/** 关窗行为的说明文案（选了托盘但托盘不可用时，必须当场说清会回退成退出）。 */
+/**
+ * 关窗行为的说明文案。
+ *
+ * `trayAvailable` 由外壳从宿主查来（`core_get_tray_available` → `trayAvailabilityFromAnswer`）。
+ * 选了托盘但托盘不可用时**必须当场说清会回退成退出**：Rust 侧的 fail-safe 就是这么做的
+ * （`tray::decide_close`：托盘没装上就真退出），界面若含糊其辞，用户会以为"窗口藏起来了"，
+ * 然后去找一个不存在的托盘图标。
+ */
 export function closeBehaviorNotice(behavior, options = {}) {
   if (behavior !== "tray") return "关窗即退出应用（正在播放的音乐会停止）。";
   return options?.trayAvailable === true
     ? "关窗后应用继续在托盘运行：托盘菜单里可以退出。"
-    : "托盘尚未接入（R11）：现在关窗会直接退出，选「最小化到托盘」暂时等同于退出。";
+    : "托盘当前不可用（没装上或状态没取到，详情见运行日志）：现在关窗会直接退出，选「最小化到托盘」等同于退出。";
 }
 
 // ---------------------------------------------------------------------------

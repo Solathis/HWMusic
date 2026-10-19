@@ -1,5 +1,5 @@
 /**
- * 主窗外壳（R7 搭骨架，R8 接主界面）。
+ * 主窗外壳（R7 搭骨架，R8 接主界面，R11 接托盘联动）。
  *
  * **顺序是契约**：门禁判定在最前，未登录（含"还不知道"）绝不渲染 app-shell——
  * `test/login-gate.test.mjs` 扫源码钉住这个顺序（顺序反了就是把没登录的用户放进主界面，
@@ -12,7 +12,7 @@
  * （页面只有八个，路由库在这里只有依赖和"浏览器历史语义不适用"的麻烦）。
  * 唯一的例外是收藏页：它常驻挂载（切页不卸载），所以挂在 switch 之外、用 active 控制显隐。
  */
-import { useCallback, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import {
   HistoryIcon,
   HeartIcon,
@@ -24,6 +24,7 @@ import {
 } from "lucide-react"
 
 import { APP_BRAND_LABEL } from "../shared/app-name.mjs"
+import { APP_OPEN_SETTINGS } from "../shared/channels.ts"
 import { LoginGate, useAuthGate } from "./login-gate"
 import { Button } from "./components/ui/button"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "./components/ui/sheet"
@@ -69,6 +70,8 @@ import {
 import { libraryEmptyText } from "./features/library/library-state.mjs"
 import { playlistNameOf } from "./features/library/playlist-fields.mjs"
 import { trackAlbumOf, trackArtistsOf } from "./features/library/track-fields.mjs"
+import { getTrayAvailable, onCoreEvent } from "./host-api"
+import { TRAY_AVAILABLE, trayAvailabilityFromAnswer } from "./features/settings/settings-form.mjs"
 
 export function App() {
   const gate = useAuthGate()
@@ -102,6 +105,8 @@ const NAV_ICONS = {
 export function LibraryShell() {
   const [view, setView] = useState(() => createView(VIEW.favorites))
   const [stageOpen, setStageOpen] = useState(false)
+  // 托盘可用性：null = **还没取到**（不是"不可用"，也不是"可用"）
+  const [trayAvailable, setTrayAvailable] = useState<boolean | null>(null)
   const notices = useNoticeLog()
   // 播放运行时是模块级单例（音频/媒体会话/广播都只能有一份），hook 只负责订阅状态
   const { runtime, state: playback } = usePlayer()
@@ -109,6 +114,52 @@ export function LibraryShell() {
   const navigate = useCallback((next: unknown) => {
     setView(normalizeView(next))
   }, [])
+
+  /**
+   * 托盘可用性：启动时问宿主一次（R11）。
+   *
+   * 为什么要有这一步：设置页的关窗行为提示要么说"关窗后应用继续在托盘运行"，要么说
+   * "现在关窗会直接退出"——这两句话不能猜。R10 的 `TRAY_AVAILABLE` 常量现在是**兜底**：
+   * 查不到（宿主那条命令失败）就用它，落地的仍是保守的"不可用"。
+   */
+  useEffect(() => {
+    let alive = true
+    void (async () => {
+      try {
+        const answer = await getTrayAvailable()
+        if (alive) setTrayAvailable(trayAvailabilityFromAnswer(answer))
+      } catch {
+        // 查不到就落兜底常量（与 Rust 侧 fail-safe 同方向）：界面上不出现"托盘能用"的假话
+        if (alive) setTrayAvailable(TRAY_AVAILABLE)
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  /**
+   * 托盘的"设置…"（R11）：宿主发一条 `app:open-settings`，渲染层切到设置页。
+   *
+   * 没有这一条订阅，那个菜单项就是"点了没反应"——广播发出去没人接，从界面上看不出任何异常。
+   * 视图状态在渲染层，所以切页只能由渲染层自己做（宿主发的是意图，不是命令式的"你跳到某页"）。
+   */
+  useEffect(() => {
+    let alive = true
+    let stop: (() => void) | null = null
+    void (async () => {
+      const unlisten = await onCoreEvent(APP_OPEN_SETTINGS, () => {
+        navigate(createView(VIEW.settings))
+      })
+      // 订阅是异步拿到的：组件已经卸载就当场退订（不然监听器会留在宿主侧）
+      if (alive) stop = unlisten
+      else unlisten()
+    })()
+    return () => {
+      alive = false
+      if (stop) stop()
+    }
+  }, [navigate])
 
   /**
    * 双击一首歌 = **整张列表进队列**并从那一首开始。
@@ -163,8 +214,9 @@ export function LibraryShell() {
       case VIEW.history:
         return <HistoryPage {...navigation} />
       case VIEW.settings:
-        // 设置页只读地显示队列状态（管理队列在播放队列面板里）：状态由外壳交下去，页面不自己取
-        return <SettingsPage queue={playback} />
+        // 设置页只读地显示队列状态（管理队列在播放队列面板里）：状态由外壳交下去，页面不自己取；
+        // 托盘可用性同理（R11：查一次、交下去，页面不自己问宿主）
+        return <SettingsPage queue={playback} trayAvailable={trayAvailable ?? TRAY_AVAILABLE} />
       default:
         // 认不出的视图（正常不会发生）：给一句空态，绝不白屏
         return <EmptyState text={libraryEmptyText(view)} />

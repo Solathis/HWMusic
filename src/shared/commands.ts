@@ -31,3 +31,17 @@ export const CORE_RENDERER_READY = "core_renderer_ready";
 export const CORE_SET_AUTOSTART = "core_set_autostart";
 /** 读当前自启状态（设置页挂载时用；没有这条就只能靠猜）。 */
 export const CORE_GET_AUTOSTART = "core_get_autostart";
+
+/**
+ * 托盘可用性（R11 增补）。
+ *
+ * 为什么要有这条：设置页的关窗行为提示与文案都要知道"托盘到底在不在"。R10 把
+ * `TRAY_AVAILABLE = false` 写死在渲染层是**如实**（宿主侧当时根本没有这个口子），
+ * 但托盘装上之后那句写死的话就变成假话了。这条命令是那个事实的唯一来源
+ * （Rust 侧现问 tauri 的托盘表，不是自己记的镜像）。
+ *
+ * 回执是 `boolean`：**只认 `true`**（"确实装上了"）。渲染层用
+ * `trayAvailabilityFromAnswer` 投影，认不出的一律按"不可用"处理——与 Rust 侧
+ * `tray::decide_close` 的 fail-safe 同一个保守方向。
+ */
+export const CORE_GET_TRAY_AVAILABLE = "core_get_tray_available";

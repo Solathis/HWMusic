@@ -317,6 +317,14 @@ export interface SettingsPageProps {
    * 这里只是把"现在有几首、在放哪首"如实显示出来。
    */
   queue?: { entries?: unknown[]; track?: unknown } | null
+  /**
+   * 托盘是否真的可用（R11）：由外壳启动时查一次 `core_get_tray_available` 交下来。
+   *
+   * 默认值取那个保守常量（`TRAY_AVAILABLE = false`）：外壳还没查到时界面上说的是
+   * "托盘当前不可用"——这是**如实**（那一刻确实还没有答案，而 Rust 侧的 fail-safe
+   * 此刻也按"不可用"处理），比先画一个"能用"的饼再改口要好。
+   */
+  trayAvailable?: boolean
 }
 
 /**
@@ -329,7 +337,7 @@ export interface SettingsPageProps {
  * - 不冒充：没测过不给测试结论、读不到自启状态就说"未取到"、保存回执按 `restartRequired`
  *   如实说"要重启"，主机没通过清洗就说"仍是直连"。
  */
-export function SettingsPage({ queue = null }: SettingsPageProps) {
+export function SettingsPage({ queue = null, trayAvailable = TRAY_AVAILABLE }: SettingsPageProps) {
   const [form, setForm] = useState(() => proxyFormFromSettings(null))
   const [closeBehavior, setCloseBehavior] = useState(() => closeBehaviorFromSettings(null))
   const [loaded, setLoaded] = useState(false)
@@ -622,7 +630,8 @@ export function SettingsPage({ queue = null }: SettingsPageProps) {
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground">
-            {closeBehaviorNotice(closeBehavior, { trayAvailable: TRAY_AVAILABLE })}
+            {/* 可用性来自宿主（R11）：`trayAvailable` 由外壳启动时查一次交下来 */}
+            {closeBehaviorNotice(closeBehavior, { trayAvailable })}
           </p>
         </CardContent>
       </Card>

@@ -375,21 +375,7 @@ pub fn emit_envelope(channel: &str, payload: Value) -> EmitEnvelope {
 /// 效果落地：在效果线程上跑（`app.emit`、系统通知都不能占着阻塞读的帧泵线程）。
 pub fn apply_effect(app: &AppHandle, shared: &Arc<CoreShared>, effect: Effect) {
     match effect {
-        Effect::Emit { channel, payload } => {
-            let envelope = emit_envelope(&channel, payload);
-            match app.try_state::<Arc<CoreState>>() {
-                // 判定与入队是同一个加锁方法：不存在"判定说没就绪、入队时已经就绪"的缝，
-                // 也就不会有提示被塞进已经冲刷过的队列（那种提示再没人冲刷）。
-                Some(state) => match state.deliver_or_queue(envelope) {
-                    Some(envelope) => emit_now(app, envelope),
-                    None => log::info!(
-                        "渲染层未就绪：广播 {channel} 已排队（待冲刷 {} 条）",
-                        state.queued_notices()
-                    ),
-                },
-                _ => emit_now(app, envelope),
-            }
-        }
+        Effect::Emit { channel, payload } => emit_core_event(app, &channel, payload),
         Effect::HostRequest {
             id,
             channel,
@@ -402,8 +388,29 @@ pub fn apply_effect(app: &AppHandle, shared: &Arc<CoreShared>, effect: Effect) {
     }
 }
 
+/// 向渲染层广播一条漏斗事件：**事件信封的唯一构造点**。
+///
+/// 宿主侧模块（R11 的托盘）发广播只能经这里：信封形状（`{channel, payload}`）与
+/// **"渲染层没就绪就先排队"**两条规矩都收在这一个函数里。模块里直接写 `app.emit(` 等于绕开
+/// 启动期队列——启动期发出去的提示会直接发进空气（旧仓缺陷，R6 修复轮的 NoticeQueue 就是为它）。
+pub fn emit_core_event<R: tauri::Runtime>(app: &AppHandle<R>, channel: &str, payload: Value) {
+    let envelope = emit_envelope(channel, payload);
+    match app.try_state::<Arc<CoreState>>() {        // 判定与入队是同一个加锁方法：不存在"判定说没就绪、入队时已经就绪"的缝，
+        // 也就不会有提示被塞进已经冲刷过的队列（那种提示再没人冲刷）。
+        Some(state) => match state.deliver_or_queue(envelope) {
+            Some(envelope) => emit_now(app, envelope),
+            None => log::info!(
+                "渲染层未就绪：广播 {channel} 已排队（待冲刷 {} 条）",
+                state.queued_notices()
+            ),
+        },
+        // 托管状态还没登记（启动极早期，setup 里 core 状态登记之前）：没有队列可用，只能直接发
+        None => emit_now(app, envelope),
+    }
+}
+
 /// 立刻向渲染层广播漏斗事件（`core:event`）。
-fn emit_now(app: &AppHandle, envelope: EmitEnvelope) {
+fn emit_now<R: tauri::Runtime>(app: &AppHandle<R>, envelope: EmitEnvelope) {
     let channel = envelope.channel.clone();
     if let Err(source) = app.emit(CORE_EVENT, envelope) {
         log::warn!("向渲染层广播 {channel} 失败：{source}");
@@ -646,6 +653,26 @@ pub fn core_get_autostart(window: Window) -> Result<bool, CoreError> {
     read_autostart(manager.inner())
 }
 
+// ---------------------------------------------------------------------------
+// 托盘可用性（R11）
+// ---------------------------------------------------------------------------
+
+/// 托盘**是不是真的可用**（设置页的关窗行为提示与托盘文案要这一条）。
+///
+/// R10 之前渲染层的 `TRAY_AVAILABLE` 是写死的 `false`——那是**如实**（宿主侧当时没有"托盘在不在"
+/// 的口子），但托盘装上之后，那句写死的话就变成假话了。这条命令是那个口子的唯一来源。
+///
+/// **只认"确实装上了"这一个事实**（`tray::available` 现问 tauri 的托盘表）：
+/// 查不到就回 `false`——保守方向与 `tray::decide_close` 的 fail-safe 一致。
+/// 界面说"不可用"而实际能用，比反过来（界面说能用、关窗却退出了）代价小得多。
+///
+/// 与自启那两条同一个门（`require_main_window`）：登录子窗/歌词窗问不了这件事。
+#[tauri::command]
+pub fn core_get_tray_available(window: Window) -> Result<bool, CoreError> {
+    require_main_window(window.label())?;
+    Ok(crate::tray::available(window.app_handle()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -855,22 +882,56 @@ mod tests {
         assert_eq!(state.queued_notices(), 0, "就绪之后队列必须永远为空（否则那些提示再没人冲刷）");
     }
 
-    /// 源码扫描：广播分支只走 `deliver_or_queue` 这一个加锁入口，两步写法不许复活。
+    /// 源码扫描：广播分支只走 `emit_core_event` 这一个入口，而它内部只走 `deliver_or_queue`
+    /// 这一个加锁口子——「先读就绪标志、再入队」的两步写法不许复活。
+    ///
+    /// R11 之前这段是"从 apply_effect 扫到 emit_now"一整段；托盘也成了广播发送方之后
+    /// 把信封构造与投递收进 `emit_core_event`（唯一构造点），于是这条用例拆成两段：
+    /// 上一段管"效果分支必须经唯一入口"，下一段管"唯一入口内部必须是同一个加锁方法"。
     #[test]
     fn broadcast_effect_uses_the_single_locked_entry_point() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands.rs"))
             .expect("要能读到自己的源码");
-        let start = source.find("pub fn apply_effect").expect("找不到 apply_effect");
-        let end = source[start..]
-            .find("\nfn emit_now")
-            .map(|index| start + index)
-            .expect("找不到 apply_effect 的下一个函数");
-        let body = &source[start..end];
 
-        assert!(body.contains("deliver_or_queue("), "广播落地必须走唯一入口：{body}");
+        let effect = slice_between(&source, "pub fn apply_effect", "pub fn emit_core_event");
         assert!(
-            !body.contains("queue_notice(") && !body.contains("renderer_ready()"),
-            "不许再出现「先读就绪标志、再入队」的两步写法：{body}"
+            effect.contains("emit_core_event("),
+            "广播分支必须经唯一构造点（信封形状与启动期排队都在那里）：{effect}"
+        );
+
+        let emitter = slice_between(&source, "pub fn emit_core_event", "fn emit_now");
+        assert!(emitter.contains("deliver_or_queue("), "广播落地必须走唯一入口：{emitter}");
+        assert!(
+            !emitter.contains("queue_notice(") && !emitter.contains("renderer_ready()"),
+            "不许再出现「先读就绪标志、再入队」的两步写法：{emitter}"
+        );
+    }
+
+    /// 从 `start` 标记到 `end` 标记之间的一段源码（找不到就 panic：标记本身也是契约）。
+    fn slice_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let from = source.find(start).unwrap_or_else(|| panic!("找不到 {start}"));
+        let to = source[from..]
+            .find(end)
+            .map(|offset| from + offset)
+            .unwrap_or_else(|| panic!("找不到 {start} 之后的 {end}"));
+        &source[from..to]
+    }
+
+    /// 源码扫描：`core_get_tray_available` 是 tauri 命令、挂主窗来源守卫、且用的是**活的托盘事实**
+    /// （`tray::available` 现问 tauri 的托盘表），不是第二份自己记的镜像。
+    #[test]
+    fn tray_availability_command_is_guarded_and_reads_the_live_fact() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands.rs"))
+            .expect("要能读到自己的源码");
+        let body = slice_between(
+            &source,
+            "#[tauri::command]\npub fn core_get_tray_available",
+            "\n#[cfg(test)]",
+        );
+        assert!(body.contains("require_main_window("), "托盘可用性也要过主窗来源守卫：{body}");
+        assert!(
+            body.contains("crate::tray::available("),
+            "可用性必须现问托盘表（自己记一份镜像只会漂移）：{body}"
         );
     }
 

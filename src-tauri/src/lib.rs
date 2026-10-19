@@ -9,10 +9,12 @@
 //! `bridge` 与 `login` 是 `pub`：`tests/login_policy.rs` 直接钉登录窗策略（纯函数，不要 GUI）。
 
 pub mod bridge;
+pub mod close_behavior;
 mod commands;
 pub mod login;
 mod secure_store;
 mod sidecar;
+pub mod tray;
 mod webview_proxy;
 
 use std::path::{Path, PathBuf};
@@ -25,7 +27,7 @@ use tauri_plugin_window_state::StateFlags;
 pub const MAIN_WINDOW_LABEL: &str = "main";
 /// 桌面歌词窗 label。窗口本体由 R12 创建，这里先定义以固定 window-state 的过滤白名单。
 pub const LYRICS_WINDOW_LABEL: &str = "lyrics";
-/// 托盘 id 前缀（菜单项 id 形如 `tray:play`）；托盘本体由 R11 创建。
+/// 托盘**图标** id（菜单项 id 的前缀是 `tray:`，见 `tray::MENU_ID_PREFIX`；两件事别混）。
 pub const TRAY_ID: &str = "tray";
 /// 数据目录覆盖旋钮：只接受绝对路径，空值等同未设置（%APPDATA% 不可写时排障用）。
 pub const DATA_DIR_ENV: &str = "HWMUSIC_DATA_DIR";
@@ -129,6 +131,34 @@ pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std
     }
     let window = builder.build()?;
 
+    // 关窗 fail-safe（R11）：`closeBehavior = tray` **且托盘真的装上**才藏窗口，否则放行（真退出）。
+    //
+    // 回调里每件事都现读事实，不缓存：关窗行为现读盘（设置页改完立刻生效）、托盘可用性现问
+    // tauri 的托盘表——**没有第二份内存镜像可以漂移**。窗口藏起来之后，用户从托盘菜单
+    // "显示窗口"回来（`focus_main`）。藏不了（窗口都找不到了）就放行，绝不拦着不让走。
+    let close_app = app.clone();
+    window.on_window_event(move |event| {
+        let tauri::WindowEvent::CloseRequested { api, .. } = event else {
+            return;
+        };
+        let behavior = close_behavior::close_behavior_now(&close_app);
+        let action = tray::decide_close(behavior.hides_on_close(), tray::available(&close_app));
+        match (action, close_app.get_webview_window(MAIN_WINDOW_LABEL)) {
+            (tray::CloseAction::PreventAndHide, Some(window)) => {
+                api.prevent_close();
+                if let Err(error) = window.hide() {
+                    log::warn!("关窗：窗口没能藏起来（{error}）：应用仍在托盘里运行");
+                }
+            }
+            (tray::CloseAction::PreventAndHide, None) => {
+                log::warn!("关窗：托盘可用但找不到主窗，这次关闭按退出放行");
+            }
+            (tray::CloseAction::Quit, _) => {
+                log::info!("关窗即退出（行为={behavior}，托盘可用={}）", tray::available(&close_app));
+            }
+        }
+    });
+
     // 显式聚焦：Windows 下窗口刚建好时不保证在前台
     window.set_focus()?;
     Ok(webview_data)
@@ -155,7 +185,7 @@ pub fn proxy_url_argument(candidate: Option<String>) -> Option<tauri::Url> {
 }
 
 /// 第二个实例启动时把已有主窗拉到前台（single-instance 插件回调）。
-pub fn focus_main(app: &tauri::AppHandle) {
+pub fn focus_main<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         let _ = window.unminimize();
         let _ = window.show();
@@ -191,16 +221,44 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            let data_root = create_main_window(app.handle())?;
+            let handle = app.handle();
+
+            // 关窗行为**先于建窗**恢复：窗一建出来用户就可能关它，而那一刻读的就是这里恢复出来的
+            // 值。顺序反了 = 第一次关窗按默认走，用户会以为"设置没生效"（R11 的顺序契约）。
+            let data_root = webview_data_root(handle)?;
+            app.manage(close_behavior::CloseBehaviorState::restore(&data_root));
+
+            let data_root = create_main_window(handle)?;
             app.manage(WebviewDataRoot(data_root.clone()));
+
+            // core（sidecar）的托管状态**先于托盘安装**登记（R11 修复轮 1/5）：
+            // 启动提示的排队能力住在 `Arc<CoreState>` 里，而 `tray::install` 装不上时要发一条
+            // `app:notice`。登记晚于 install 的后果不是"少一条日志"——`emit_core_event` 在
+            // `try_state` 取到 None 时走 `None => emit_now` 直接 `app.emit`，而 setup 时刻的
+            // webview 还没跑 `listen()`：事件发进空气，"托盘未能启用…关窗会直接退出"这句降级
+            // 用户永远看不到（他会以为关窗后还在托盘跑）。顺序由
+            // `tray_is_installed_after_the_window_and_never_blocks_startup` 钉住。
+            //
+            // core（sidecar）起不来也不拦启动——core_call 会返回结构化 core_unavailable，
+            // 比"应用直接起不来"更好排查，也不静默。
+            app.manage(Arc::new(commands::CoreState::default()));
+
+            // 托盘（R11）：建窗**之后**安装（建窗失败就没必要装）。装不上不拦启动——
+            // 启动提示（`app:notice`）经上面登记好的队列扣到渲染层就绪再冲刷，
+            // 关窗行为同时退回"真退出"（`tray::decide_close` 的 fail-safe）。
+            match tray::install(handle) {
+                tray::TrayInstall::Installed(_) => log::info!("托盘已装上（id={TRAY_ID}）"),
+                tray::TrayInstall::Unavailable { reason } => {
+                    log::warn!("托盘未能启用（{reason}）：关窗一律直接退出")
+                }
+            }
 
             // 登录窗的独占状态：同一时刻只允许一次登录（R7）。登记在这里而不是懒初始化，
             // 免得"第一次登录时才发现没状态"要先写一段 fallback。
+            // （顺序无契约：它不在广播路径上——广播的排队能力只归 `Arc<CoreState>`。
+            //  真正要求"先登记"的是上面那条，别把两件事混起来。）
             app.manage(Arc::new(login::LoginState::default()));
 
-            // core（sidecar）：起不来也不拦启动——core_call 会返回结构化 core_unavailable，
-            // 比"应用直接起不来"更好排查，也不静默。
-            app.manage(Arc::new(commands::CoreState::default()));
             let knobs = sidecar::SidecarKnobs::from_env();
             let exe_dir = std::env::current_exe()
                 .ok()
@@ -227,7 +285,9 @@ pub fn run() {
             // R10：设置页的开机自启开关（读写都经主窗来源守卫；**不进 capabilities**——
             // 自定义命令不走 ACL，理由与前置条件见 commands.rs 的注释）
             commands::core_set_autostart,
-            commands::core_get_autostart
+            commands::core_get_autostart,
+            // R11：托盘可用性（R10 写死的 TRAY_AVAILABLE 占位改真查询的唯一来源）
+            commands::core_get_tray_available
         ])
         .build(tauri::generate_context!())
         .expect("Tauri 应用启动失败")
@@ -258,6 +318,39 @@ mod tests {
 
     fn abs_str(leaf: &str) -> String {
         abs(leaf).to_string_lossy().into_owned()
+    }
+
+    /// 源码扫描：`generate_handler!` 的注册块（只看那一块：整份扫的话本用例自己的字面量就满足了它）。
+    fn invoke_handler_block(source: &str) -> &str {
+        let start = source
+            .find("invoke_handler(tauri::generate_handler![")
+            .expect("找不到 generate_handler! 的注册处");
+        let end = source[start..]
+            .find("])")
+            .map(|offset| start + offset)
+            .expect("generate_handler! 没有闭合");
+        &source[start..end]
+    }
+
+    /// 源码扫描：`setup` 闭包体（接线顺序都在这段里）。
+    fn setup_block(source: &str) -> &str {
+        let start = source.find(".setup(|app| {").expect("找不到 setup");
+        let end = source[start..]
+            .find(".invoke_handler(")
+            .map(|offset| start + offset)
+            .expect("setup 之后应当紧跟 invoke_handler");
+        &source[start..end]
+    }
+
+    /// 只看生产代码：`#[cfg(test)]` 段里的字面量是测试夹具，整份扫的话用例会把自己满足掉。
+    fn production_source(source: &str) -> &str {
+        let cut = source.find("#[cfg(test)]").unwrap_or(source.len());
+        &source[..cut]
+    }
+
+    fn lib_source() -> String {
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+            .expect("要能读到自己的源码")
     }
 
     #[test]
@@ -410,17 +503,9 @@ mod tests {
     /// （要起一个真 app），而这条契约的关键就在"这一行有没有写"。
     #[test]
     fn autostart_commands_are_registered_in_the_invoke_handler() {
-        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
-            .expect("要能读到自己的源码");
+        let source = lib_source();
         // 只看 generate_handler! 那一块：整份扫的话，本用例自己的字面量就把它自己满足了
-        let start = source
-            .find("invoke_handler(tauri::generate_handler![")
-            .expect("找不到 generate_handler! 的注册处");
-        let end = source[start..]
-            .find("])")
-            .map(|offset| start + offset)
-            .expect("generate_handler! 没有闭合");
-        let registered = &source[start..end];
+        let registered = invoke_handler_block(&source);
 
         for name in ["commands::core_set_autostart", "commands::core_get_autostart"] {
             assert!(
@@ -428,5 +513,102 @@ mod tests {
                 "{name} 必须进 generate_handler!（否则 invoke 只会回 command not found）：{registered}"
             );
         }
+    }
+
+    /// R11：托盘可用性命令也必须进 `generate_handler!`——只定义不注册，设置页就会一直显示
+    /// 「托盘不可用」（那正是 R10 写死 false 的那种假话，只是换了个来源）。
+    #[test]
+    fn tray_availability_command_is_registered_in_the_invoke_handler() {
+        let source = lib_source();
+        let registered = invoke_handler_block(&source);
+        assert!(
+            registered.contains("commands::core_get_tray_available"),
+            "core_get_tray_available 必须进 generate_handler!：{registered}"
+        );
+    }
+
+    /// R11 的顺序契约一：**关窗行为恢复必须先于建窗**。
+    ///
+    /// 反过来的后果是"第一次关窗按默认走"：窗一建出来用户就可能关它，而那一刻读的就是恢复出来的值。
+    #[test]
+    fn close_behavior_is_restored_before_the_window_is_created() {
+        let source = lib_source();
+        let setup = setup_block(&source);
+
+        let restore = setup
+            .find("close_behavior::CloseBehaviorState::restore(")
+            .expect("setup 里必须按 settings.json 恢复关窗行为");
+        let register = setup[..restore]
+            .rfind("app.manage(")
+            .expect("恢复出来的状态必须登记进托管状态（否则关窗回调读不到它）");
+        let window = setup
+            .find("create_main_window(")
+            .expect("setup 里必须建主窗");
+        assert!(
+            restore < window,
+            "关窗行为恢复必须在建窗之前：关窗回调从窗建好那一刻就可能被触发（restore={restore}, create={window}）"
+        );
+        assert!(register < restore, "先拿托管状态再恢复（manage 要在 restore 之前）");
+    }
+
+    /// R11 的顺序契约二：托盘在**建窗之后**安装（建窗失败就别装了），且装不上不拦启动。
+    #[test]
+    fn tray_is_installed_after_the_window_and_never_blocks_startup() {
+        let source = lib_source();
+        let setup = setup_block(&source);
+
+        let window = setup.find("create_main_window(").expect("setup 里必须建主窗");
+        let install = setup
+            .find("tray::install(")
+            .expect("setup 里必须安装托盘（R11 的交付点）");
+        assert!(window < install, "托盘 install 要在建窗之后（建窗失败时不该已经装了个托盘）");
+        assert!(
+            !setup.contains("tray::install(handle)?"),
+            "托盘装不上绝不能把启动带崩：结论要 match 掉（失败落启动提示 + 关窗退回真退出）"
+        );
+        for outcome in ["tray::TrayInstall::Installed", "tray::TrayInstall::Unavailable"] {
+            assert!(setup.contains(outcome), "安装结论要显式处理：{outcome}");
+        }
+
+        // 顺序契约三（R11 修复轮 1/5）：**core 状态必须先登记**，`tray::install` 才能碰它。
+        //
+        // 启动提示的排队能力住在 `Arc<CoreState>` 的队列里：`emit_core_event` 拿 `try_state` 取到
+        // 它才走 `deliver_or_queue`（未就绪 → 扣住，等 `core_renderer_ready` 冲刷）；取不到就走
+        // `None => emit_now` 直接 `app.emit`——setup 时刻那个 webview 还没跑 `listen()`，
+        // 事件发进空气。于是"托盘装不上"的降级在用户侧**完全不可见**（只剩日志），
+        // 用户会以为关窗后还在托盘跑，下次关窗就再也找不回窗口。
+        let core_state = setup
+            .find("app.manage(Arc::new(commands::CoreState::default()))")
+            .expect("setup 里必须登记 core 状态（启动提示队列住在它里面）");
+        assert!(
+            core_state < install,
+            "core 状态登记必须先于 tray::install：托盘失败的提示要靠它的队列扣到渲染层就绪（core={core_state}, install={install}）"
+        );
+    }
+
+    /// R11 的关窗回调：`CloseRequested` → `tray::decide_close`（fail-safe 的唯一判据）
+    /// → 要么 `api.prevent_close()` + 藏窗口，要么放行（真退出）。回调里不许另写一份判断。
+    #[test]
+    fn close_requested_fails_safe_through_decide_close() {
+        let source = lib_source();
+        let production = production_source(&source);
+
+        assert!(production.contains("WindowEvent::CloseRequested"), "必须接住关窗事件");
+        assert!(
+            production.contains("tray::decide_close("),
+            "关窗决议只能来自 tray::decide_close（closeBehavior=tray **且**托盘真的装上才藏）"
+        );
+        assert!(production.contains("api.prevent_close()"), "藏窗口那一支要拦住这次关闭");
+        assert!(
+            production.contains("close_behavior::close_behavior_now("),
+            "行为要现读（设置页改完立刻生效），不是启动时冻住的那份"
+        );
+        assert!(
+            production.contains("tray::available("),
+            "可用性要现问托盘表（fail-safe 的第二半）"
+        );
+        // 两个分支都要写出来：只写 PreventAndHide 那一支，另一支就成了"忘了处理的默认"
+        assert!(production.contains("tray::CloseAction::PreventAndHide"));
+        assert!(production.contains("tray::CloseAction::Quit"));
     }
 }

@@ -23,7 +23,8 @@ pub const CORE_EVENT: &str = "core:event";
 ///
 /// 集合内容：`app:notice`（宿主级提示，控制器裁决的初始集合）+ `auth:status`（R7 增补：
 /// 登录状态变化，渲染层门禁与 R8 主界面靠它决定"该显示哪一层"）+ `player:command`
-/// （R9 增补的**预登记**：R11 托盘发出的播放控制意图）。增补时两侧一起改。
+/// （R9 增补的**预登记**：R11 托盘发出的播放控制意图）+ `lyrics:toggle` 与 `app:open-settings`
+/// （R11 增补：托盘"桌面歌词"勾选与"设置…"两项要发给渲染层的意图）。增补时两侧一起改。
 ///
 /// 数组里保持**字面量**：`test/channel-parity.test.mjs` 直接扫这一行的字符串集合，
 /// 写成常量引用它会扫不到（`bridge_broadcast_channels_match_the_named_constants` 兜住这份重复）。
@@ -32,7 +33,23 @@ pub const APP_NOTICE: &str = "app:notice";
 pub const AUTH_STATUS: &str = "auth:status";
 /// 播放控制广播频道（R9 预登记，发送方是 R11 的托盘）：`{command: "play"|"pause"|...}`。
 pub const PLAYER_COMMAND: &str = "player:command";
-pub const BROADCAST_CHANNELS: &[&str] = &["app:notice", "auth:status", "player:command"];
+/// 桌面歌词开关广播频道（R11）：`{checked: bool}` —— **目标态**（点完这一下之后应当是什么）。
+///
+/// 为什么是目标态而不是"切换一下"：消费方（R12 的歌词窗）要按它决定开还是关，
+/// 让消费方自己去猜"现在是开还是关"等于把状态分裂成两份。勾选态由托盘的 CheckMenuItem 镜像。
+pub const LYRICS_TOGGLE: &str = "lyrics:toggle";
+/// 打开设置页广播频道（R11）：`{view: "settings"}`（托盘菜单"设置…"）。
+///
+/// 托盘点不了渲染层的页面切换（视图状态在渲染层），所以发一条"去设置页"的意图，
+/// 由渲染层自己走它既有的 `navigate`（不新增任何 IPC 通道）。
+pub const APP_OPEN_SETTINGS: &str = "app:open-settings";
+pub const BROADCAST_CHANNELS: &[&str] = &[
+    "app:notice",
+    "auth:status",
+    "player:command",
+    "lyrics:toggle",
+    "app:open-settings",
+];
 
 /// 已答复 id 的保留上限：应答一次性守卫必须有界（超出按插入顺序淘汰）。
 pub const MAX_ANSWERED_IDS: usize = 4096;
@@ -527,10 +544,15 @@ mod tests {
     /// 广播频道白名单与它的具名常量是**同一份事实**（数组里必须是字面量，parity 测试才扫得到）。
     #[test]
     fn bridge_broadcast_channels_match_the_named_constants() {
-        assert_eq!(BROADCAST_CHANNELS, [APP_NOTICE, AUTH_STATUS, PLAYER_COMMAND]);
+        assert_eq!(
+            BROADCAST_CHANNELS,
+            [APP_NOTICE, AUTH_STATUS, PLAYER_COMMAND, LYRICS_TOGGLE, APP_OPEN_SETTINGS]
+        );
         assert_eq!(APP_NOTICE, "app:notice");
         assert_eq!(AUTH_STATUS, "auth:status");
         assert_eq!(PLAYER_COMMAND, "player:command");
+        assert_eq!(LYRICS_TOGGLE, "lyrics:toggle");
+        assert_eq!(APP_OPEN_SETTINGS, "app:open-settings");
     }
 
     /// 可读回的假写入端：断言"到底写出了什么帧"。
@@ -684,9 +706,15 @@ mod tests {
         // 生产路径用的是 FramePolicy::default()；集合为空时这里会退化成 Reject，
         // 无 id 的广播帧只能进日志——等于 sidecar 发出去的广播被静默丢弃。
         let default_policy = FramePolicy::default();
-        // R7 增补了 auth:status、R9 预登记了 player:command：每加一个都在这里同步。
-        let expected: &[&str] = &["app:notice", "auth:status", "player:command"];
-        assert_eq!(BROADCAST_CHANNELS, expected, "控制器裁决的广播集合（R9 起加上 player:command）");
+        // R7 增补了 auth:status、R9 预登记了 player:command、R11 增补了托盘那两条：每加一个都在这里同步。
+        let expected: &[&str] = &[
+            "app:notice",
+            "auth:status",
+            "player:command",
+            "lyrics:toggle",
+            "app:open-settings",
+        ];
+        assert_eq!(BROADCAST_CHANNELS, expected, "控制器裁决的广播集合（R11 起加上托盘那两条）");
 
         let frame = r#"{"channel":"app:notice","payload":{"text":"已复制"}}"#;
         match classify_line(frame, &default_policy) {
@@ -716,6 +744,26 @@ mod tests {
                 assert_eq!(payload, json!({"command": "toggle"}));
             }
             other => panic!("默认策略下 player:command 必须分类为 Emit，实际 {other:?}"),
+        }
+
+        // R11 增补的两条：托盘的"桌面歌词"勾选与"设置…"。白名单缺一条的后果与 player:command
+        // 完全一样——广播被静默丢掉，用户只看到"点了没反应"。
+        let lyrics_frame = r#"{"channel":"lyrics:toggle","payload":{"checked":true}}"#;
+        match classify_line(lyrics_frame, &default_policy) {
+            LineOutcome::Effect(Effect::Emit { channel, payload }) => {
+                assert_eq!(channel, "lyrics:toggle");
+                assert_eq!(payload, json!({"checked": true}));
+            }
+            other => panic!("默认策略下 lyrics:toggle 必须分类为 Emit，实际 {other:?}"),
+        }
+
+        let settings_frame = r#"{"channel":"app:open-settings","payload":{"view":"settings"}}"#;
+        match classify_line(settings_frame, &default_policy) {
+            LineOutcome::Effect(Effect::Emit { channel, payload }) => {
+                assert_eq!(channel, "app:open-settings");
+                assert_eq!(payload, json!({"view": "settings"}));
+            }
+            other => panic!("默认策略下 app:open-settings 必须分类为 Emit，实际 {other:?}"),
         }
     }
 

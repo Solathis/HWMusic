@@ -24,6 +24,11 @@
  * R10 的一处增补（同一流程）：
  * - 请求频道加 `settings:test-proxy`：设置页"测试连接"那条路（core 侧用独立 ProxyAgent 发一次
  *   请求）。不并进 `settings:set` 的理由见 src/shared/request-channels.ts。
+ *
+ * R11 的两处增补（同一流程）：
+ * - 广播频道加 `lyrics:toggle`：托盘"桌面歌词"勾选的目标态（歌词窗本体是 R12）；
+ * - 广播频道加 `app:open-settings`：托盘"设置…"（渲染层收到后切到设置页）。
+ *   两条都是 **Rust 侧发出**（托盘菜单在 Rust 里），所以白名单少一条的后果同样是"点了没反应"。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -35,7 +40,13 @@ import {
   PLAYBACK_RESOLVE_URL,
   REQUEST_CHANNELS,
 } from "../src/shared/request-channels.ts";
-import { BROADCAST_CHANNELS, CORE_EVENT, PLAYER_COMMAND } from "../src/shared/channels.ts";
+import {
+  APP_OPEN_SETTINGS,
+  BROADCAST_CHANNELS,
+  CORE_EVENT,
+  LYRICS_TOGGLE,
+  PLAYER_COMMAND,
+} from "../src/shared/channels.ts";
 import { CALL_TIMEOUT_MS } from "../src/host/bridge.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -93,8 +104,19 @@ const PLAYBACK_CHANNELS = ["playback:resolve-url"];
 /** R10 增补的设置请求频道（硬钉：设置页的"测试连接"唯一要用的那一条）。 */
 const SETTINGS_CHANNELS = ["settings:get", "settings:set", "settings:test-proxy"];
 
-/** 广播频道硬钉内容（两侧一起写错也能过互比，所以内容必须钉死）。 */
-const BROADCAST_CHANNEL_NAMES = ["app:notice", "auth:status", "player:command"];
+/**
+ * 广播频道硬钉内容（两侧一起写错也能过互比，所以内容必须钉死）。
+ *
+ * 按字典序写：下游断言走 `sorted(...)`（R11 加了 `lyrics:toggle` 与 `app:open-settings` 之后
+ * 顺序不再与"增补先后"一致，这里就按排序后的样子写，免得两边各自排序再比较）。
+ */
+const BROADCAST_CHANNEL_NAMES = [
+  "app:notice",
+  "app:open-settings",
+  "auth:status",
+  "lyrics:toggle",
+  "player:command",
+];
 
 test("一致性：请求频道白名单（Node 共享常量 ↔ Rust commands.rs 全部 auth:/settings:/library:/playback: 字面量）", () => {
   const rust = rustChannelLiterals(
@@ -182,8 +204,24 @@ test("一致性：player:command 广播（R11 托盘控制的预登记：常量 
   );
 });
 
-test("一致性：漏斗事件名与调用超时两侧相等", () => {
-  assert.equal(rustStringConst(rustSource("bridge.rs"), "CORE_EVENT"), CORE_EVENT);
+test("一致性：R11 托盘的两条广播（常量 + 字面量两侧逐字相等）", () => {
+  // 这两条都是 Rust 侧（托盘菜单）发出的：渲染层只认常量名，Rust 侧是镜像副本（Rust 无法 import TS）
+  assert.equal(LYRICS_TOGGLE, "lyrics:toggle");
+  assert.equal(APP_OPEN_SETTINGS, "app:open-settings");
+  assert.equal(rustStringConst(rustSource("bridge.rs"), "LYRICS_TOGGLE"), LYRICS_TOGGLE);
+  assert.equal(rustStringConst(rustSource("bridge.rs"), "APP_OPEN_SETTINGS"), APP_OPEN_SETTINGS);
+
+  const rustBroadcasts = rustStringArray(rustSource("bridge.rs"), "BROADCAST_CHANNELS");
+  for (const channel of [LYRICS_TOGGLE, APP_OPEN_SETTINGS]) {
+    assert.ok(
+      BROADCAST_CHANNELS.includes(channel),
+      `${channel} 必须在广播白名单里：不在的话 Rust 会把这条广播当成白名单外帧丢掉`,
+    );
+    assert.ok(rustBroadcasts.includes(channel), `Rust 侧白名单同样必须含 ${channel}`);
+  }
+});
+
+test("一致性：漏斗事件名与调用超时两侧相等", () => {  assert.equal(rustStringConst(rustSource("bridge.rs"), "CORE_EVENT"), CORE_EVENT);
   assert.equal(CORE_EVENT, "core:event");
   assert.equal(rustNumberConst(rustSource("bridge.rs"), "CALL_TIMEOUT_SECS") * 1000, CALL_TIMEOUT_MS);
   assert.equal(CALL_TIMEOUT_MS, 60_000);
@@ -208,7 +246,8 @@ test("反漂移：Node 运行期代码里不得出现频道名字面量（只有
   assert.ok(scanned.length >= 8, `扫描范围异常，只拿到 ${scanned.length} 个文件：${scanned.join(", ")}`);
 
   // 只认普通引号里的字面量：注释里用反引号写的频道名是说明文字，不是第二份清单
-  const literal = /["']((?:auth|settings|host|library|playback|player):[a-z][a-z-]*)["']/g;
+  // R11：`lyrics:` 与 `app:` 也纳进来（托盘那两条广播同样是"渲染层只许认常量"）
+  const literal = /["']((?:auth|settings|host|library|playback|player|lyrics|app):[a-z][a-z-]*)["']/g;
   const offenders = [];
   for (const relative of scanned) {
     const source = readFileSync(`${repoRoot}${relative}`, "utf8");

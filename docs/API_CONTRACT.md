@@ -245,7 +245,7 @@ Rust 镜像见 §3 的 parity 钉）：
 | 频道 | 方向 | 载荷 | 应答 / 语义 |
 |---|---|---|---|
 | `playback:resolve-url` | 渲染层 → core（请求） | `{trackId}` | `data` = `parsePlaybackPayload` 的产物 `{url, fileInfos, format, size, bitrate, duration, auditionLikely, signals, warnings}`；缺 `trackId` → `invalid_payload`；端点未配置 → `endpoint_unknown`；地址不在 CDN 白名单 → `unsafe_media_url`（文案只带域名） |
-| `player:command` | core → 渲染层（广播） | `{command}`，取值 `play`/`pause`/`toggle`/`next`/`previous` | R9 **预登记**（真正的发送方是 R11 的托盘）；渲染层 `features/playback/player-commands.mjs` 执行，认不出的命令回结构化 `invalid_command`，**拒绝且不猜** |
+| `player:command` | core → 渲染层（广播） | `{command}`，取值 `play`/`pause`/`toggle`/`next`/`previous` | R9 **预登记**、R11 起**真的有人在发**（Rust 侧托盘的播放三项：`toggle`/`previous`/`next`）；渲染层 `features/playback/player-commands.mjs` 执行，认不出的命令回结构化 `invalid_command`，**拒绝且不猜** |
 
 **播放地址的四条纪律**（R9 裁决，逐条在测试里钉住）：
 
@@ -320,16 +320,73 @@ commands 或 `src-tauri/permissions` 非空时才写入 `__app-acl__`，`src/acl
 （漏一条 = 暗色下有一处颜色留在亮色）。渲染层不得写 `dark` 类或存主题偏好（同文件扫描）。
 
 **关窗行为**：`settings:set` 的 `{patch:{closeBehavior}}`（枚举 `tray`/`quit`，§2.5 既有语义）。
-托盘本体是 R11；在那之前 `TRAY_AVAILABLE = false`，选了托盘当场说明"会回退成退出"。
+R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_tray_available`；
+渲染层的 `TRAY_AVAILABLE = false` 退化成"宿主没答上来"时的兜底（方向保守，见 §2.8）。
 
 **如实登记的已知限制（本任务）**：
 
-1. **托盘不存在**（R11）：桌面托盘、关窗时真正的最小化到托盘都还没有——选 `tray` 今天等同于退出；
+1. **托盘已在 R11 交付**（§2.8）：菜单、勾选镜像、关窗 fail-safe 都接上了——但**真机托盘点击与图标
+   显示未实测**（本任务环境起不了真窗），Linux 的 `libayatana-appindicator3` 依赖检查也留给 R15；
 2. **开机自启未经真机验证**：单测只覆盖判定逻辑（假 manager，**绝不写本机注册表**），
    真实注册表写入/读取未实测；Rust 侧的错误按结构化 `internal` 回，界面文案带原因；
 3. **代理改动要重启才生效**：回执照实回报 `restartRequired`（sidecar 的全局 dispatcher 与
    主窗的 `proxy_url` 都只在启动时装配一次）——设置页据此提示"重启后生效；登录窗口下次打开即生效"；
 4. **队列在设置页只读**（长度 + 当前曲），管理队列仍在播放队列面板。
+
+### 2.8 托盘与关窗 fail-safe（R11 落地）
+
+托盘本体在 Rust（`src-tauri/src/tray.rs`）：**9 槽位 / 7 项 / 2 条分隔线**
+（显示窗口 / — / 播放·暂停 / 上一首 / 下一首 / 桌面歌词（勾选）/ 设置… / — / 退出程序），
+菜单项 id 前缀 `tray:`（`lib.rs` 的 `TRAY_ID = "tray"` 是**托盘图标 id**，两件事别混）。
+槽位写成一张数据表（`MENU_SLOTS`），建菜单只是"翻译"它——**没有第二份条目清单**；
+认不出的菜单 id 只记一行日志（**不猜、不 panic**）。
+
+**广播频道增补两条**（唯一真源 `src/shared/channels.ts`，Rust 镜像 `bridge.rs`，由 parity 钉住）：
+
+| 频道 | 方向 | 载荷 | 语义 |
+|---|---|---|---|
+| `lyrics:toggle` | 宿主 → 渲染层（广播） | `{checked: boolean}` | 托盘"桌面歌词"勾选的**目标态**（`true` = 要开）。勾选态由托盘的 CheckMenuItem 自己镜像并翻转（不回问渲染层：那要等一个来回、菜单会闪）；**歌词窗本体是 R12**，勾选态与窗存在性的同步也在 R12 收口 |
+| `app:open-settings` | 宿主 → 渲染层（广播） | `{view: "settings"}` | 托盘"设置…"：视图状态在渲染层，宿主只发"去设置页"的意图，渲染层走既有的 `navigate`（不新增 IPC 通道） |
+
+**tauri 命令增补一条**（名字唯一真源 `src/shared/commands.ts`）：
+
+| 命令 | 载荷 | 回执 | 说明 |
+|---|---|---|---|
+| `core_get_tray_available` | 无 | `boolean` | 托盘是否**真的**可用（Rust 侧现问 tauri 的托盘表 `tray_by_id`，不维护第二份镜像）。过主窗来源守卫；渲染层用 `trayAvailabilityFromAnswer` **只认 `true`**，其余一律按"不可用"处理 |
+
+**关窗 fail-safe（本任务的核心）**：`decide_close(hide_on_close, tray_available)` —— 只有
+"设置里选了托盘" **且** "托盘真的装上"才 `prevent_close + hide`，否则放行（真退出）。
+反过来的后果是旧仓那类缺陷：托盘没装上却把窗口藏了，用户看到"窗口没了、托盘里也没有"，
+只能去任务管理器找进程。**退化方向刻意保守**。
+
+**关窗行为从哪来（读盘这侧在 Rust）**：`close_behavior.rs` 读的是**同一份** `settings.json`
+（与 `webview_proxy` 共用文件名与 schemaVersion 闸门），分三档：
+
+1. **文件不存在**（用户从没保存过设置）→ **core 的默认**（`DEFAULT_CLOSE_BEHAVIOR` = 枚举第一项 =
+   `tray`）：设置页此刻经 `settings:get` 拿到的也是它、显示"最小化到托盘"——两边必须同一句话，
+   否则就是"界面说藏起来、关窗却退出了"（与 `webview_proxy` 的"文件不在 = 没配"同款）；
+2. 文件在、形状认识 → 照读；
+3. 文件在但读不了（权限/IO）或**形状不认识**（非 JSON / 版本不是 1 / 缺 `data` /
+   `closeBehavior` 不在枚举里）→ `quit`：**绝不猜 `tray`**。写入路径产不出这些形状
+   （core 的 `settings:set` 会结构化拒绝越界值），所以"看不懂"只可能是有人动过盘——
+   这时藏窗口的代价（关一次窗再也找不回应用）远大于多退出一次。
+
+两处时点：
+
+- 启动时 `restore()` 读一次并记日志，**先于建窗**（窗一建出来用户就可能关它，那一刻读的就是它）；
+- 关窗前 `refresh()` **再读一次盘**：写盘的是设置页（core 的 `settings:set`，同目录临时文件 + rename，
+  原子落盘），所以设置页改完**立刻生效**，不需要重启、也不需要新增一条"通知宿主"的命令
+  （Rust 侧不维护会漂移的内存镜像）。
+
+**如实登记的未验证项（本任务）**：
+
+1. **真机托盘点击/图标显示未实测**（本任务环境起不了真窗）：菜单构造、事件映射、勾选翻转、
+   `decide_close` 矩阵都有单测，但"点下去真的发生什么"没有实机证据；
+2. **Linux**：需要 `libayatana-appindicator3`，且 `TrayIconEvent` 不派发（只有菜单可用）——
+   依赖检查与环境差异写进 `PLATFORM_DIFFERENCES` 是 R15 的事；
+3. **登录门禁期间**托盘"设置…"没有消费方：设置页在门禁之后才挂载，那时广播已经发出去且没人订阅
+   （渲染层的订阅在 `LibraryShell` 里）——不是丢事件，是那一刻本来就没有设置页可切；
+4. **勾选态与歌词窗存在性的同步**：R12 收口，本任务只保证广播的目标态正确（不建假同步）。
 
 ### 2.4 CDN 域（已确认可达）
 
@@ -354,7 +411,10 @@ commands 或 `src-tauri/permissions` 非空时才写入 `__app-acl__`，`src/acl
 | `QUEUE_SETTING_KEY` | `"queue"` | `src/renderer/features/playback/queue.mjs` | R9：播放队列的持久化键（`data.queue`，只存曲目标识 + 索引） |
 | `PROXY_TEST_URL` | `https://oauth-login1.cloud.huawei.com/` | `src/host/proxy-handlers.mjs` | R10：`settings:test-proxy` 的唯一目标（不接受调用方指定；业务端点仍待联调） |
 | `CORE_SET_AUTOSTART` / `CORE_GET_AUTOSTART` | `"core_set_autostart"` / `"core_get_autostart"` | `src/shared/commands.ts` | R10：命令名的唯一真源（渲染层只用常量；Rust 侧为镜像副本，由 `test/autostart.test.mjs` 钉住） |
-| `TRAY_AVAILABLE` | `false` | `src/renderer/features/settings/settings-form.mjs` | R10：R11 之前托盘不存在——写死在渲染层是如实，不是偷懒（宿主侧今天没有"托盘在不在"的口子） |
+| `CORE_GET_TRAY_AVAILABLE` | `"core_get_tray_available"` | `src/shared/commands.ts` | R11：托盘可用性的唯一来源（Rust 侧镜像由 `test/tray.test.mjs` 与 lib.rs 的注册扫描钉住） |
+| `TRAY_AVAILABLE` | `false` | `src/renderer/features/settings/settings-form.mjs` | R11：**兜底值**——宿主没答上来时用（真值来自 `core_get_tray_available`）。方向保守：界面说"不可用"而实际能用，比反过来代价小 |
+| `TRAY_ID` | `"tray"` | `src-tauri/src/lib.rs` | R11：托盘**图标** id（菜单项 id 前缀是 `tray:`，见 `tray::MENU_ID_PREFIX`）；`core_get_tray_available` 与关窗回调都按它现问托盘表 |
+| `MENU_SLOTS`（9 槽位/7 项/2 分隔线） | 见 `src-tauri/src/tray.rs` | `src-tauri/src/tray.rs` | R11：托盘菜单的唯一真源（顺序与文案由 Rust 内联单测 + `test/tray.test.mjs` 双向钉住） |
 
 ## 4. 红线（任何后续任务不得越过）
 
@@ -388,3 +448,9 @@ commands 或 `src-tauri/permissions` 非空时才写入 `__app-acl__`，`src/acl
   不做手动切换，两份令牌逐条一致由测试钉住）；关窗行为的托盘可用性口径；四条如实登记的限制。
   §3 增补三行常量。设置页**不显示账号标识**（`auth:status` 载荷里没有该字段，不为显示扩协议），
   登录状态只显示"已登录/未登录" + 退出按钮。
+- 2026-10-19（Task R11）：新增 §2.8——托盘（9 槽位菜单 / `tray:` id 前缀 / `include_bytes!` 图标）、
+  关窗 fail-safe（`decide_close`：选托盘 **且** 托盘真的装上才藏窗口）、`close_behavior.rs` 的读盘恢复
+  （与 `webview_proxy` 同款 schema 闸门，形状不认识一律 `quit`；启动恢复先于建窗 + 关窗前现读盘）、
+  两条广播增补（`lyrics:toggle`、`app:open-settings`）与命令 `core_get_tray_available`；
+  §2.7 的关窗行为口径与"托盘不存在"那条限制随之更新；§3 增补三行常量与 `TRAY_ID`/`MENU_SLOTS` 两行。
+  四条如实登记的未验证项（真机托盘点击/图标、Linux appindicator、门禁期间的"设置…"、歌词窗同步归 R12）。

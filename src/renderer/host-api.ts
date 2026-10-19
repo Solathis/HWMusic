@@ -1,5 +1,5 @@
 /**
- * 渲染层唯一的宿主桥封装（R3 交付封装与类型；R10 增补开机自启）。
+ * 渲染层唯一的宿主桥封装（R3 交付封装与类型；R10 增补开机自启；R11 增补托盘可用性）。
  *
  * 边界：渲染层拿到的是白名单方法，拿不到任何 Token——凭据与业务 HTTP 只在 sidecar/Rust。
  * 这里只做两件事：把 `core_call` 包成带类型的调用、把漏斗事件 `core:event` 包成按频道过滤的订阅。
@@ -7,7 +7,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import { CORE_CALL, CORE_GET_AUTOSTART, CORE_RENDERER_READY, CORE_SET_AUTOSTART } from "../shared/commands.ts";
+import { CORE_CALL, CORE_GET_AUTOSTART, CORE_GET_TRAY_AVAILABLE, CORE_RENDERER_READY, CORE_SET_AUTOSTART } from "../shared/commands.ts";
 import { CORE_EVENT } from "../shared/channels.ts";
 import type { CoreError } from "../shared/result.ts";
 import type { RequestChannel } from "../shared/request-channels.ts";
@@ -32,6 +32,8 @@ export interface DesktopBridge {
   setAutostart: (enabled: boolean) => Promise<boolean>;
   /** 开机自启：读当前状态（R10）。 */
   getAutostart: () => Promise<boolean>;
+  /** 托盘是否真的可用（R11）：设置页的关窗行为提示靠它说真话。 */
+  getTrayAvailable: () => Promise<boolean>;
 }
 
 export function isCoreError(value: unknown): value is CoreError {
@@ -93,6 +95,21 @@ export async function getAutostart(): Promise<boolean> {
 }
 
 /**
+ * 托盘是否真的可用（R11）。
+ *
+ * 回执只有 `true` 才算"可用"：命令失败、回执形状不对都按"不可用"处理
+ * （调用方用 `trayAvailabilityFromAnswer` 投影）——界面说"不可用"而实际能用，
+ * 比反过来（界面说能用、关窗却退出了）代价小得多。
+ */
+export async function getTrayAvailable(): Promise<boolean> {
+  try {
+    return await invoke<boolean>(CORE_GET_TRAY_AVAILABLE);
+  } catch (failure) {
+    throw normalizeFailure(failure);
+  }
+}
+
+/**
  * 订阅漏斗事件。
  *
  * 广播白名单（`src/shared/channels.ts` 的 `BROADCAST_CHANNELS`）初始只有 `app:notice`，
@@ -115,6 +132,7 @@ export const desktopBridge: DesktopBridge = {
   onCoreEvent,
   setAutostart,
   getAutostart,
+  getTrayAvailable,
 };
 
 /** 挂到 `window.desktop`（R8 起在 main.tsx 调用；本任务不接 UI）。 */

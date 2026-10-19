@@ -299,7 +299,7 @@ test("关窗行为：载荷只有枚举里的两项，越界值一律不写", ()
   assert.equal(typeof CLOSE_BEHAVIOR_LABELS.quit, "string");
 });
 
-test("关窗行为：选了托盘但托盘不可用，必须说清会回退成退出（R11 之前就是这种状态）", () => {
+test("关窗行为：选了托盘但托盘不可用，必须说清会回退成退出", () => {
   const fallback = closeBehaviorNotice("tray", { trayAvailable: false });
   assert.match(fallback, /托盘/, fallback);
   assert.match(fallback, /退出/, `要说清回退行为：${fallback}`);

@@ -10,7 +10,8 @@
  *    （各写一份的后果是"界面上有的选项 core 不认"，报错只在保存时才出现）；
  * 2. **越界值不静默写盘**：UI 侧回落到 `quit`（能真正退出的那一个），core 侧对越界值
  *    结构化报错——两边都不许"尽力猜一个"；
- * 3. **托盘可用性如实**：R11 之前托盘不存在，`TRAY_AVAILABLE` 必须是 `false`，
+ * 3. **托盘可用性如实**：可用性的真值来自宿主（R11 的 `core_get_tray_available`），
+ *    渲染层的 `TRAY_AVAILABLE = false` 只是**兜底**（宿主没答上来时用）；
  *    选了托盘要当场说清"会回退成退出"；
  * 4. **页面不自己拼载荷**：`{closeBehavior: ...}` 这个键只在 `closeBehaviorPatch` 里出现一次。
  *
@@ -86,11 +87,13 @@ test("越界值：UI 回落到 quit（能退出的那个），core 结构化报�
   );
 });
 
-test("托盘可用性：R11 之前必须是 false，且选了托盘当场说清会回退成退出", () => {
+test("托盘可用性：宿主没答/答不上来时落保守兜底 false，且选了托盘当场说清会回退成退出", () => {
+  // R11 起可用性的真值来自 core_get_tray_available（页面测试见 test/tray.test.mjs）；
+  // 这个常量退化成"还没取到 / 取不到"时的回退——方向必须是保守的那一个。
   assert.equal(
     TRAY_AVAILABLE,
     false,
-    "托盘是 R11 的交付：现在写 true 就是在界面上承诺一个不存在的托盘",
+    "兜底值必须是 false：宿主没答上来时界面说「托盘能用」就是在承诺一个不确定的东西",
   );
 
   const notice = closeBehaviorNotice("tray", { trayAvailable: TRAY_AVAILABLE });
@@ -130,7 +133,7 @@ test("页面接线：载荷只从 closeBehaviorPatch 来，提示只从 closeBeh
 
   assert.match(settingsPage, /closeBehaviorPatch\(/, "关窗行为的载荷必须经纯函数（一处真源）");
   assert.match(settingsPage, /closeBehaviorNotice\(/, "托盘可用性提示必须经纯函数");
-  assert.match(settingsPage, /TRAY_AVAILABLE/, "可用性来自那个常量（R11 接通时只改一处）");
+  assert.match(settingsPage, /TRAY_AVAILABLE/, "兜底值来自那个常量（真值由外壳查宿主后传下来）");
   assert.doesNotMatch(
     settingsPage,
     /closeBehavior\s*:\s*["']/,

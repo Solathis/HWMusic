@@ -14,6 +14,10 @@ export const CORE_EVENT = "core:event";
  * 初始集合由控制器裁决为 `app:notice`（R3 尚无真实广播，它是 R4+ 的第一个广播频道；
  * 白名单一旦为空，sidecar 的任何广播都会被当成白名单外帧丢掉）。R4+ 每新增一个广播频道
  * 都往这里增补，不另立清单。
+ *
+ * 注意这里也收 **Rust 侧直接发出**的广播（R9 的 `player:command`、R11 的 `lyrics:toggle` 与
+ * `app:open-settings`）：白名单是"渲染层可以收到的频道"这一份清单，Rust 侧 `bridge.rs` 的
+ * 同名数组是它的镜像副本（两侧由 `test/channel-parity.test.mjs` 钉住）。
  */
 export const APP_NOTICE = "app:notice" as const;
 
@@ -46,6 +50,32 @@ export const AUTH_STATUS = "auth:status" as const;
  */
 export const PLAYER_COMMAND = "player:command" as const;
 
-export const BROADCAST_CHANNELS = [APP_NOTICE, AUTH_STATUS, PLAYER_COMMAND] as const;
+/**
+ * 桌面歌词开关广播（R11 增补）：`{checked: boolean}` —— **目标态**（点完这一下之后应当是什么）。
+ *
+ * 发送方是托盘的那个 CheckMenuItem（Rust 侧）：勾选态由托盘自己镜像并翻转，
+ * 渲染层/R12 的歌词窗按这个目标态行动（`true` = 要开、`false` = 要关），不必猜"现在是开还是关"。
+ *
+ * 本任务只保证这条广播发得出去、发得对：**歌词窗本体是 R12**，勾选态与窗存在性的同步也在 R12 收口
+ * （这里不建假同步）。
+ */
+export const LYRICS_TOGGLE = "lyrics:toggle" as const;
+
+/**
+ * 打开设置页广播（R11 增补）：`{view: "settings"}`。
+ *
+ * 托盘菜单的"设置…"要切到设置页，而视图状态在渲染层（`App.tsx` 的 `view` 那一个 useState），
+ * 所以 Rust 只能发一条"去设置页"的意图，由渲染层自己走既有的 `navigate`——
+ * 不为这件事新开一条 IPC 请求通道（托盘既不能调 `core_call`，也不该为了切页起一趟请求/响应）。
+ */
+export const APP_OPEN_SETTINGS = "app:open-settings" as const;
+
+export const BROADCAST_CHANNELS = [
+  APP_NOTICE,
+  AUTH_STATUS,
+  PLAYER_COMMAND,
+  LYRICS_TOGGLE,
+  APP_OPEN_SETTINGS,
+] as const;
 
 export type BroadcastChannel = (typeof BROADCAST_CHANNELS)[number];
