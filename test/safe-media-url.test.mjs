@@ -131,6 +131,8 @@ test("CSP 一致性：常量后缀与 tauri.conf.json 的 img-src/media-src 白�
   assert.deepEqual(directive("connect-src"), ["'self'", "ipc:", "http://ipc.localhost"], "渲染层不得有对外直连通道");
 });
 
-test("广播频道：R4 不新增广播频道（app:notice 仍是唯一项）", () => {
-  assert.deepEqual([...BROADCAST_CHANNELS], ["app:notice"]);
+test("广播频道：R7 起是 app:notice + auth:status（每个新增都在共享常量表里，不另立清单）", () => {
+  // R4 落地时这里钉的是"只有 app:notice"；R7 增补 auth:status（登录状态）后同步改这一行——
+  // 硬钉的意义是"每次放宽都得有人签字"，不是"永远不许加"。
+  assert.deepEqual([...BROADCAST_CHANNELS], ["app:notice", "auth:status"]);
 });

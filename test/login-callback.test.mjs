@@ -376,3 +376,37 @@ test("runLoginFlow：宿主缺少必需方法 → 构造期就抛（不静默跑
   assert.throws(() => runLoginFlow({ authorizeUrl: "", expectedState: "S", host: fakeHost() }), TypeError);
   assert.throws(() => runLoginFlow({ authorizeUrl: "https://example.invalid/a", expectedState: "", host: fakeHost() }), TypeError);
 });
+
+/**
+ * R7 增补的两条收场入口：宿主（Rust 登录窗）自己定夺的结论要能落到流程上。
+ *
+ * 为什么必须是流程内部的方法：`timedOut` 与 `failed` 是 R4 已有的两个内部收场（计时器到点、
+ * 开窗失败），但宿主报来同一个结论时，外部**没有**办法让流程按这两个状态结算——只能伪装成
+ * cancel/close，那就把「扫码超时」谎报成「窗口被关」，上层再也分不清该劝用户重试还是重扫。
+ */
+test("runLoginFlow：宿主结论驱动 —— timedOut() 与 fail() 各自结算一次并清理（不伪装成 cancel/close）", async () => {
+  const hostTimedOut = flowOf();
+  assert.equal(hostTimedOut.flow.timedOut().ok, true);
+  const timedOutResult = await hostTimedOut.flow.settled;
+  assert.equal(timedOutResult.status, LOGIN_FLOW_STATUS.timedOut);
+  assert.equal(hostTimedOut.host.count("cleanup"), 1);
+  assert.equal(hostTimedOut.timer.pendingCount(), 0, "宿主报了超时就不留悬挂计时器");
+
+  const loadFailed = flowOf();
+  const failure = { message: "无法打开华为官方登录页面，请检查网络或代理后重试。", kind: "login_page_unavailable" };
+  assert.equal(loadFailed.flow.fail(failure).ok, true);
+  const failedResult = await loadFailed.flow.settled;
+  assert.equal(failedResult.status, LOGIN_FLOW_STATUS.failed);
+  assert.deepEqual(failedResult.error, failure, "宿主给的失败原因原样带出（文案要在 UI 上显示）");
+  assert.equal(loadFailed.host.count("cleanup"), 1);
+
+  // 一次性：已结算之后再来者一律 already_settled，且不再清理第二次
+  assert.equal(loadFailed.flow.timedOut().error.kind, LOGIN_ERROR_KINDS.alreadySettled);
+  assert.equal(loadFailed.flow.fail(failure).error.kind, LOGIN_ERROR_KINDS.alreadySettled);
+  assert.equal(loadFailed.flow.cancel().error.kind, LOGIN_ERROR_KINDS.alreadySettled);
+  assert.equal(loadFailed.host.count("cleanup"), 1, "已结算后不得再清理");
+
+  // 回调用宿主结论驱动的两条路都不许把结论改写成 closed
+  assert.notEqual(failedResult.status, LOGIN_FLOW_STATUS.closed);
+  assert.notEqual(timedOutResult.status, LOGIN_FLOW_STATUS.closed);
+});

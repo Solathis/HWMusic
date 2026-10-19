@@ -9,6 +9,8 @@
  * 3. `runLoginFlow`：把"开窗 → 等回调"编排成四收场（callback/cancelled/closed/timed_out）
  *    外加 failed，**任何收场都恰好结算一次、都必然清理**（清浏览数据与临时目录由注入的宿主动作完成，
  *    R7 的 Rust 侧实现）。计时器与宿主全部可注入，测试不碰真实时钟。
+ *    R7 补齐了两个**宿主结论**入口：`timedOut()` 与 `fail({message, kind})`——宿主（Rust 登录窗）
+ *    自己也会结算超时/首载失败，流程要能按对应状态收场，而不是把它们伪装成 cancel/close。
  *
  * **宿主契约（R7 必读）**：`runLoginFlow().consumeCallback` 可以安全地喂进登录窗的**每一个导航 URL**——
  * 宿主**不必**先用 `isCallback` 预滤（预滤也正确，只是白名单导航与拦截是两件事）。
@@ -226,8 +228,10 @@ function messageOf(cause) {
  *          host: {openLogin(url): unknown, closeLogin(): void, cleanup(): void},
  *          timeoutMs?: number, now?: () => number,
  *          setTimer?: Function, clearTimer?: Function}} options
- * @returns {{settled: Promise<object>, isSettled(): boolean, consumeCallback(url): object,
- *           cancel(): object, close(): object}}
+ * @returns {{settled: Promise<object>, isSettled(): boolean,
+ *           consumeCallback(url: string): {ok: true, data: {code: string, state: string}} | {ok: false, error: {message: string, kind: string}},
+ *           cancel(): {ok: boolean}, close(): {ok: boolean},
+ *           timedOut(): {ok: boolean}, fail(error?: {message: string, kind?: string}): {ok: boolean}}}
  */
 export function runLoginFlow(options = {}) {
   const {
@@ -339,6 +343,25 @@ export function runLoginFlow(options = {}) {
     },
     close() {
       return finish({ status: LOGIN_FLOW_STATUS.closed });
+    },
+    /**
+     * R7 增补：宿主报来的**总超时**收口（`timed_out`）。
+     *
+     * 计时器到点时走的就是这条收场（内部同一个 `finish`），但宿主（Rust 登录窗）自己也会在
+     * 10 分钟到点时结算并把它交回 Node——那时流程必须按"超时"结算，**不能伪装成 cancel/close**：
+     * 上层要能分清"窗口被关了"（用户主动）与"等超时了"（该劝用户重扫/查网络）。
+     */
+    timedOut() {
+      return finish({ status: LOGIN_FLOW_STATUS.timedOut });
+    },
+    /**
+     * R7 增补：宿主报来的**失败**收口（`failed` + 宿主给的 `{message, kind}`）。
+     *
+     * 用在"连官方页都没打开"这类宿主侧结论上（Rust 的首载 30 秒期限）：文案由宿主给，
+     * 上层原样显示——比笼统的"登录失败"更能告诉用户下一步该干什么（查网络还是查代理）。
+     */
+    fail(error) {
+      return finish({ status: LOGIN_FLOW_STATUS.failed, error: error ?? undefined });
     },
   };
 }

@@ -12,6 +12,7 @@ import { createDispatcher } from "../src/host/dispatcher.mjs";
 import { createRpc } from "../src/host/rpc.mjs";
 import { createHostServices } from "../src/host/host-services.mjs";
 import {
+  HOST_CANCEL_LOGIN,
   HOST_NOTIFY,
   HOST_OPEN_LOGIN,
   HOST_REQUEST_CHANNELS,
@@ -216,27 +217,31 @@ test("host-services：notify 走 host:notify 且文本透传", async () => {
   assert.deepEqual(calls, [{ channel: HOST_NOTIFY, payload: { text: "已复制链接" } }]);
 });
 
-test("host-services：open-login / secure-* 频道名正确、payload 透传、宿主 unimplemented 原样返回不抛", async () => {
+test("host-services：登录三频道 + secure-* 频道名正确、payload/选项透传、宿主错误原样返回不抛", async () => {
   const calls = [];
   const services = createHostServices({
-    callHost: async (channel, payload) => {
-      calls.push({ channel, payload });
-      return err("宿主要求由 R7 实现", "unimplemented");
+    callHost: async (channel, payload, options) => {
+      calls.push({ channel, payload, options });
+      return err("宿主不可用（e2e 没有真宿主）", "core_gone");
     },
   });
 
-  const login = await services.openLogin({ partition: "login-1" });
+  const login = await services.openLogin({ partition: "login-1" }, { timeoutMs: 660_000 });
+  const cancel = await services.cancelLogin({});
   const enc = await services.secureEncrypt({ plaintext: "x" });
   const dec = await services.secureDecrypt({ ciphertext: "y" });
 
-  for (const result of [login, enc, dec]) {
+  for (const result of [login, cancel, enc, dec]) {
     assert.equal(result.ok, false);
-    assert.equal(result.error.kind, "unimplemented");
+    assert.equal(result.error.kind, "core_gone");
   }
   assert.deepEqual(
     calls.map((call) => call.channel),
-    [HOST_OPEN_LOGIN, HOST_SECURE_ENCRYPT, HOST_SECURE_DECRYPT],
+    [HOST_OPEN_LOGIN, HOST_CANCEL_LOGIN, HOST_SECURE_ENCRYPT, HOST_SECURE_DECRYPT],
   );
   assert.deepEqual(calls[0].payload, { partition: "login-1" });
-  assert.deepEqual(HOST_REQUEST_CHANNELS.length, 4);
+  // 开窗是长轮询：调用超时必须能透传到桥上（默认 60 秒会把"还在扫码"判成超时）
+  assert.deepEqual(calls[0].options, { timeoutMs: 660_000 });
+  assert.deepEqual(calls[1].payload, {}, "取消没有载荷");
+  assert.deepEqual(HOST_REQUEST_CHANNELS.length, 5);
 });

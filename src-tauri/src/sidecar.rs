@@ -644,12 +644,14 @@ mod tests {
             .start_pump(move |effect| sink.lock().unwrap().push(effect))
             .expect("帧泵必须能起来");
 
-        // 真 sidecar 对白名单频道回结构化未实现错误（不是超时、不是挂起）
-        let error = process
+        // 真 sidecar 对白名单频道回**确定的答复**（不是超时、不是挂起）。
+        // `auth:login` 自 R7 起是长轮询：立刻回"已受理"，真正的结论经 `auth:status` 广播送达
+        // （渲染层那条 core_call 链路有 60 秒上限，等不了 10 分钟的扫码）。
+        let ack = process
             .shared()
             .call("auth:login", json!({}), Duration::from_secs(20))
-            .expect_err("R3 的 auth:login 必须回未实现错误");
-        assert_eq!(error.kind.as_deref(), Some("unimplemented"));
+            .expect("auth:login 必须立刻回「已受理」而不是挂起");
+        assert_eq!(ack.get("started"), Some(&json!(true)), "回执要说清「只是受理了」：{ack}");
 
         // 收尸：关写入端 → sidecar 自己 exit(0) → 帧泵 EOF → CoreGone{code: Some(0)}
         let started = Instant::now();

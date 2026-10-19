@@ -7,13 +7,14 @@ import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 
 import { APP_BRAND_LABEL } from "../shared/app-name.mjs"
-
-/** R1 只做最小挂载：真实页面在 R8 起接入（pages.tsx）。 */
-function App() {
-  return null
-}
+import { App } from "./App.tsx"
+import { installDesktopBridge } from "./host-api"
 
 document.title = APP_BRAND_LABEL
+
+// 宿主桥必须在渲染第一帧之前就位：门禁的订阅与 core_call 都走它。
+// （`rendererReady()` 由 useAuthGate 在**订阅之后**调用：Rust 侧的启动期广播是排队等冲刷的。）
+installDesktopBridge()
 
 const container = document.getElementById("root")
 

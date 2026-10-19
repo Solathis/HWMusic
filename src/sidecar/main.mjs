@@ -1,12 +1,13 @@
 /**
- * hwmusic-core：sidecar 入口编排（R3 最小实现；R6 接上设置与统一代理）。
+ * hwmusic-core：sidecar 入口编排（R3 最小实现；R6 接上设置与统一代理；R7 接上登录链路）。
  *
  * 职责边界：
  * - `process.stdout` 是协议通道：只写 NDJSON 帧，任何日志/报错一律走 stderr；
  * - 入向请求按频道白名单路由（src/shared/request-channels.ts）：`settings:*` 由 R6 实现，
- *   其余仍如实回 `{kind:"unimplemented"}`（auth:* 归 R7）；
- * - 出向宿主要求（host-services）与出向广播（`app:notice`）都已接好；
- * - **启动顺序**：定数据目录 → 读设置 → **装配代理** → 建调度器/桥。
+ *   `auth:*` 由 R7 实现（`auth:login` 会一直等到登录窗收场，但**不阻塞**别的请求：
+ *   等的是桥上的 pending，调度器与帧泵照常跑）；
+ * - 出向宿主要求（host-services）与出向广播（`app:notice` / `auth:status`）都已接好；
+ * - **启动顺序**：定数据目录 → 读设置 → **装配代理** → 建调度器/桥 → 装配登录链路 → 恢复会话。
  *   代理必须先于一切业务请求装好（R7 的 AuthManager.restore 就在其列），否则第一批请求会直连；
  *   test/proxy.test.mjs 用源码顺序扫描把这条钉死；
  * - **协议依赖**：stdin EOF → 收尸并 exit(0)。双向收尸不依赖单侧 kill：
@@ -16,12 +17,22 @@ import { createBridge } from "../host/bridge.mjs";
 import { createDispatcher } from "../host/dispatcher.mjs";
 import { createRpc } from "../host/rpc.mjs";
 import { createHostServices } from "../host/host-services.mjs";
+import { createAuthManager } from "../main/auth-manager.ts";
 import { dataDirFromArgv } from "../main/data-dir.mjs";
+import { createLoginHost } from "../main/huawei.ts";
 import { applyStartupProxy } from "../main/proxy.mjs";
+import { createSessionStore } from "../main/session-store.mjs";
 import { createSettingsHandlers, createSettingsStore } from "../main/settings.mjs";
 import { APP_NOTICE } from "../shared/channels.ts";
-import { REQUEST_CHANNELS, SETTINGS_GET, SETTINGS_SET } from "../shared/request-channels.ts";
-import { CORE_ERROR_KINDS, err } from "../shared/result.ts";
+import {
+  AUTH_CANCEL_LOGIN,
+  AUTH_LOGIN,
+  AUTH_LOGOUT,
+  REQUEST_CHANNELS,
+  SETTINGS_GET,
+  SETTINGS_SET,
+} from "../shared/request-channels.ts";
+import { CORE_ERROR_KINDS, err, ok } from "../shared/result.ts";
 
 /** 各请求频道的实现任务：按前缀归类，避免在入口里再抄一份频道名清单。 */
 function implementedBy(channel) {
@@ -34,6 +45,23 @@ function implementedBy(channel) {
 const log = (...parts) => {
   console.error("[hwmusic-core]", ...parts);
 };
+
+/**
+ * 没有数据目录时的会话存储替身：每个动作都结构化报错。
+ *
+ * 刻意**不回退到 cwd**（打包后当前目录不可预测，可能只读），也刻意不"静默当作没有会话"：
+ * 读不出来是一件事，"从来没登录过"是另一件事，用户看到的状态必须区分开。
+ */
+function unavailableSessionStore() {
+  const fail = () => {
+    const error = new Error(
+      "没有数据目录（宿主未传 --data-dir）：登录会话无法落盘，这是环境问题而不是「未登录」",
+    );
+    error.kind = CORE_ERROR_KINDS.internal;
+    throw error;
+  };
+  return { saveMusicSession: fail, loadMusicSession: fail, clearMusicSession: fail };
+}
 
 // —— 启动装配：数据目录 → 设置 → 代理（顺序是硬要求，见文件头说明）——
 const dataDir = dataDirFromArgv(process.argv.slice(2));
@@ -57,13 +85,6 @@ dispatcher.register(SETTINGS_SET, async (request) => {
   return answer;
 });
 
-for (const channel of REQUEST_CHANNELS) {
-  if (dispatcher.handlers().includes(channel)) continue;
-  dispatcher.register(channel, () =>
-    err(`请求频道 ${channel} 尚未实现（由${implementedBy(channel)}实现）`, CORE_ERROR_KINDS.unimplemented),
-  );
-}
-
 const bridge = createBridge({
   readable: process.stdin,
   writable: process.stdout,
@@ -76,6 +97,70 @@ const rpc = createRpc({ bridge, dispatcher });
 const hostServices = createHostServices({
   callHost: (channel, payload, options) => rpc.callHost(channel, payload, options),
 });
+
+// —— 登录链路（R7）：会话存储（DPAPI 信封）→ 登录宿主端口 → 认证状态机 ——
+//
+// 位置有意排在 rpc/hostServices 之后：它要经宿主要求开登录窗、要广播登录状态；
+// 而它**不在**任何业务请求之前，这正是 R6 要的装配顺序（代理先装，见文件头）。
+const sessionStore =
+  dataDir === null
+    ? unavailableSessionStore()
+    : createSessionStore({
+        dir: dataDir,
+        secureEncrypt: hostServices.secureEncrypt,
+        secureDecrypt: hostServices.secureDecrypt,
+        log,
+      });
+
+const authManager = createAuthManager({
+  host: createLoginHost({ hostServices, log }),
+  sessionStore,
+  broadcast: (channel, payload) => rpc.broadcast(channel, payload),
+  notify: (text) => {
+    log(`提示：${text}`);
+    rpc.broadcast(APP_NOTICE, { text });
+  },
+  log,
+  // 如实登记的缺口：会话验证要打收藏接口，而业务端点全部待确认（docs/API_CONTRACT.md §2.1），
+  // 所以这里**不注入**验证器——restore 会报 `verify_unavailable`（会话仍在、但没验过），
+  // 而不是谎报"未登录"或"已登录"。端点确认后在这里注入一个走 music.mjs 的验证器即可。
+});
+
+// auth:login 是**长轮询**：扫码可能要好几分钟，而渲染层那条调用链（Rust core_call）有 60 秒上限。
+// 所以这里立刻回"已受理"，真正的结论经 auth:status 广播送达（dispatcher 支持处理器自行答复后
+// return undefined，不再写第二帧——R3 就是为这条路留的口子）。
+dispatcher.register(AUTH_LOGIN, (request, respond) => {
+  respond(ok({ started: true, ...authManager.status() }));
+  void authManager
+    .login()
+    .then((result) => {
+      if (result !== null && typeof result === "object" && result.ok === false) {
+        log(`登录未完成：${result.error.message}（已通过 auth:status 广播告知渲染层）`);
+      }
+    })
+    .catch((cause) => {
+      // auth-manager 自己会把意外抛出收成结构化失败，这里只是最后一道兜底
+      log("登录过程抛出未预期异常：", cause);
+    });
+  return undefined;
+});
+dispatcher.register(AUTH_LOGOUT, () => authManager.logout());
+dispatcher.register(AUTH_CANCEL_LOGIN, () => authManager.cancelLogin());
+
+for (const channel of REQUEST_CHANNELS) {
+  if (dispatcher.handlers().includes(channel)) continue;
+  dispatcher.register(channel, () =>
+    err(`请求频道 ${channel} 尚未实现（由${implementedBy(channel)}实现）`, CORE_ERROR_KINDS.unimplemented),
+  );
+}
+
+// 启动恢复：读会话 → 验证 → 广播 auth:status（渲染层门禁靠它决定显示哪一层）。
+// 渲染层此刻可能还没订阅：Rust 侧的 NoticeQueue 会排队，就绪即冲刷（不会丢掉"已登录"这个事实）。
+const restored = await authManager.restore();
+log(
+  `登录状态恢复：${restored.loggedIn ? "已登录" : "未登录"}（${restored.reason}` +
+    `${restored.verified ? "" : "，未验证"}${restored.error ? `；${restored.error.message}` : ""}）`,
+);
 
 // 启动提示：代理是"环境变量兜底"来的（或环境变量写坏了被忽略），用户必须看得见——
 // 没人希望流量悄悄换了出口。桥已就绪才广播，发不出去也要留痕，不静默。

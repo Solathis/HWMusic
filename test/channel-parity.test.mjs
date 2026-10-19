@@ -5,6 +5,10 @@
  * 另有一条"反漂移"扫描：src/host、src/sidecar、src/renderer 内不得出现频道名字面量
  * （唯一真源只有 src/shared/*.ts，Rust 是刻意的镜像副本、由本文件钉住）。
  * 先写先看红。
+ *
+ * R7 的两处增补（走"增补进共享常量表 + 硬钉同步改"的既有流程，不另立清单）：
+ * - 宿主要求频道加 `host:cancel-login`（渲染层取消登录 → core_call auth:cancel-login → 宿主要求）；
+ * - 广播频道加 `auth:status`（登录状态变化：门禁与 R8 主界面靠它知道"该显示哪一层"）。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -69,6 +73,7 @@ test("一致性：宿主要求频道（Node 共享常量 ↔ Rust commands.rs �
   const rust = rustChannelLiterals(rustProduction(rustSource("commands.rs")), "(?:host):");
   assert.deepEqual(sorted(rust), sorted(HOST_REQUEST_CHANNELS));
   assert.deepEqual(sorted(HOST_REQUEST_CHANNELS), [
+    "host:cancel-login",
     "host:notify",
     "host:open-login",
     "host:secure-decrypt",
@@ -80,8 +85,8 @@ test("一致性：广播频道白名单（Node 共享常量 ↔ Rust bridge.rs �
   const rust = rustStringArray(rustSource("bridge.rs"), "BROADCAST_CHANNELS");
   assert.deepEqual(sorted(rust), sorted(BROADCAST_CHANNELS));
   // 内容硬钉：只做两侧互比的话，"两侧一起为空/一起写错"也能过（这正是上一轮漏掉的）
-  assert.deepEqual(sorted(rust), ["app:notice"]);
-  assert.deepEqual(sorted(BROADCAST_CHANNELS), ["app:notice"]);
+  assert.deepEqual(sorted(rust), ["app:notice", "auth:status"]);
+  assert.deepEqual(sorted(BROADCAST_CHANNELS), ["app:notice", "auth:status"]);
 });
 
 test("一致性：漏斗事件名与调用超时两侧相等", () => {

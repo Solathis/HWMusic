@@ -603,7 +603,7 @@ test("广播帧形状：{channel, payload}，没有 id 也没有 ok（Rust class
   assert.deepEqual(Object.keys(frame).sort(), ["channel", "payload"], `广播帧多/少了字段：${frames[0]}`);
   assert.equal(frame.channel, APP_NOTICE);
   assert.deepEqual(frame.payload, { text: "已启用代理" });
-  assert.deepEqual([...BROADCAST_CHANNELS], [APP_NOTICE], "app:notice 是广播白名单里的那一个");
+  assert.deepEqual([...BROADCAST_CHANNELS], [APP_NOTICE, "auth:status"], "R7 增补了 auth:status（登录状态）");
 });
 
 test("广播白名单外一律拒绝；桥已关闭时如实报错（不静默丢提示）", () => {

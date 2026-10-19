@@ -3,10 +3,14 @@
 //! R2 范围：窗口策略（1280×800 / min 960×640 / 显式 webview 数据目录）、最小权限
 //! capabilities、插件链编排。R3 增加 sidecar 桥（NDJSON stdio、命令白名单、宿主要求路由）。
 //! R5 增加 DPAPI 安全存储（`secure_store.rs`）并把数据根经 argv 传给 sidecar。
-//! 登录窗、托盘、歌词窗由后续任务加入。
+//! R7 增加登录子窗（`login.rs`：白名单导航/hms 拦截/双期限/四收场/一次性数据目录）。
+//! 托盘、歌词窗由后续任务加入。
+//!
+//! `bridge` 与 `login` 是 `pub`：`tests/login_policy.rs` 直接钉登录窗策略（纯函数，不要 GUI）。
 
-mod bridge;
+pub mod bridge;
 mod commands;
+pub mod login;
 mod secure_store;
 mod sidecar;
 mod webview_proxy;
@@ -189,6 +193,10 @@ pub fn run() {
         .setup(|app| {
             let data_root = create_main_window(app.handle())?;
             app.manage(WebviewDataRoot(data_root.clone()));
+
+            // 登录窗的独占状态：同一时刻只允许一次登录（R7）。登记在这里而不是懒初始化，
+            // 免得"第一次登录时才发现没状态"要先写一段 fallback。
+            app.manage(Arc::new(login::LoginState::default()));
 
             // core（sidecar）：起不来也不拦启动——core_call 会返回结构化 core_unavailable，
             // 比"应用直接起不来"更好排查，也不静默。

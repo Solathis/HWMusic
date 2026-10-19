@@ -21,10 +21,32 @@ function startSidecar() {
     stdio: ["pipe", "pipe", "pipe"],
   });
   const problems = [];
+  const hostRequests = [];
+  const frames = [];
+  let raw = "";
+  let hostResponder = null;
   let stderr = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => {
     stderr += chunk;
+  });
+
+  // 旁路收集 stdout 上的每一帧（广播没有 id，桥不会把它交给任何回调，只能自己看流）
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    raw += chunk;
+    for (;;) {
+      const newline = raw.indexOf("\n");
+      if (newline === -1) break;
+      const line = raw.slice(0, newline).trim();
+      raw = raw.slice(newline + 1);
+      if (line === "") continue;
+      try {
+        frames.push(JSON.parse(line));
+      } catch {
+        problems.push({ kind: "invalid_json_frame", line });
+      }
+    }
   });
 
   const bridge = createBridge({
@@ -34,14 +56,41 @@ function startSidecar() {
     onProtocolError: (problem) => problems.push(problem),
   });
 
+  // 假装成 Rust 宿主：把宿主要求记下来，按测试给的答复回帧（默认如实回"宿主不可用"）
+  bridge.onRequest((request, respond) => {
+    hostRequests.push(request);
+    if (hostResponder === null) {
+      respond({ ok: false, error: { message: "e2e 没有真宿主", kind: "core_gone" } });
+      return;
+    }
+    hostResponder(request, respond);
+  });
+
   const exited = new Promise((resolve) => {
     child.on("close", (code, signal) => resolve({ code, signal }));
   });
+
+  /** 等一条广播帧（auth:status 这类结论走广播，不走响应帧）。 */
+  async function waitForBroadcast(predicate, timeoutMs = 4000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const found = frames.find((frame) => frame.id === undefined && predicate(frame));
+      if (found) return found;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return null;
+  }
 
   return {
     child,
     bridge,
     problems,
+    frames,
+    hostRequests,
+    waitForBroadcast,
+    answerHostWith(responder) {
+      hostResponder = responder;
+    },
     exited,
     stderrText: () => stderr,
     async cleanup() {
@@ -54,27 +103,66 @@ function startSidecar() {
   };
 }
 
-test("端到端：auth:login 返回未实现的结构化错误（stdout 只有合法帧）", async (t) => {
+test("端到端：auth:login 立刻回「已受理」，结论经 auth:status 广播送达；宿主要求形状正确", async (t) => {
   const sidecar = startSidecar();
   t.after(() => sidecar.cleanup());
 
-  const result = await sidecar.bridge.call("auth:login", {});
-  assert.equal(result.ok, false);
-  assert.equal(result.error.kind, "unimplemented");
-  assert.ok(typeof result.error.message === "string" && result.error.message.length > 0);
+  // 宿主（Rust 侧）在登录窗收场后答复——这里直接回一个"取消"结论
+  sidecar.answerHostWith((_request, respond) => respond({ ok: true, data: { status: "cancelled" } }));
+
+  const started = await sidecar.bridge.call("auth:login", {});
+  assert.equal(started.ok, true, `auth:login 只回「已受理」：${JSON.stringify(started)}`);
+  assert.equal(started.data.started, true);
+
+  // 结论在广播里（渲染层那条 core_call 链路有 60 秒上限，等不了 10 分钟的扫码）
+  const status = await sidecar.waitForBroadcast(
+    (frame) => frame.channel === "auth:status" && frame.payload?.busy === false && frame.payload?.message,
+  );
+  assert.ok(status, `没有收到 auth:status 结论：${JSON.stringify(sidecar.frames)}`);
+  assert.equal(status.payload.loggedIn, false);
+  assert.match(status.payload.message, /取消/, "失败原因要能显示给用户");
+
+  // 宿主要求的形状：官方授权页 + 一次性 partition + 顶部内缩（Rust 侧还会再校验一遍）
+  const open = sidecar.hostRequests.find((request) => request.channel === "host:open-login");
+  assert.ok(open, `sidecar 没有发出 host:open-login：${JSON.stringify(sidecar.hostRequests)}`);
+  assert.match(open.payload.url, /^https:\/\/oauth-login1\.cloud\.huawei\.com\/oauth2\/v3\/authorize\?/);
+  assert.match(open.payload.partition, /^[A-Za-z0-9_-]{1,64}$/);
+  assert.equal(open.payload.topInset, 48, "顶部内缩来自共享常量");
   assert.deepEqual(sidecar.problems, [], `stdout 出现非法帧：${JSON.stringify(sidecar.problems)}`);
 });
 
-test("端到端：其余白名单频道同样给出结构化答复（不静默、不挂起）", async (t) => {
+test("端到端：宿主回结构化错误时，auth:status 把原始类别带出来（不改写成笼统 failed）", async (t) => {
   const sidecar = startSidecar();
   t.after(() => sidecar.cleanup());
 
-  // settings:* 已由 R6 实现（真答复在 test/proxy.test.mjs 里钉），这里只剩仍未实现的 auth:* 占位频道
-  for (const channel of ["auth:logout", "auth:cancel-login"]) {
-    const result = await sidecar.bridge.call(channel, {});
-    assert.equal(result.ok, false, `${channel} 不该成功`);
-    assert.equal(result.error.kind, "unimplemented", `${channel} 的错误类别不对`);
-  }
+  sidecar.answerHostWith((_request, respond) =>
+    respond({ ok: false, error: { message: "已有一次登录正在进行", kind: "login_in_progress" } }),
+  );
+
+  const started = await sidecar.bridge.call("auth:login", {});
+  assert.equal(started.ok, true);
+
+  const status = await sidecar.waitForBroadcast(
+    (frame) => frame.channel === "auth:status" && frame.payload?.busy === false && frame.payload?.message,
+  );
+  assert.ok(status, `没有收到 auth:status 结论：${JSON.stringify(sidecar.frames)}`);
+  assert.match(status.payload.message, /已有一次登录/, "宿主那句人话要原样留给用户");
+  assert.deepEqual(sidecar.problems, []);
+});
+
+test("端到端：auth:logout / auth:cancel-login 都给出结构化答复（不静默、不挂起）", async (t) => {
+  const sidecar = startSidecar();
+  t.after(() => sidecar.cleanup());
+
+  // 没有数据目录 → 会话清不掉，但答复必须是结构化的（不是未实现、也不是假成功）
+  const logout = await sidecar.bridge.call("auth:logout", {});
+  assert.equal(logout.ok, true, `logout 不该抛：${JSON.stringify(logout)}`);
+  assert.equal(typeof logout.data.sessionCleared, "boolean");
+
+  // 没有进行中的登录 → 什么都没取消，但这不是错误（用户的意图"别等了"已经满足）
+  const cancel = await sidecar.bridge.call("auth:cancel-login", {});
+  assert.equal(cancel.ok, true, `cancel 不该抛：${JSON.stringify(cancel)}`);
+  assert.equal(cancel.data.cancelled, false);
   assert.deepEqual(sidecar.problems, []);
 });
 

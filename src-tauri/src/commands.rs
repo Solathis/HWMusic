@@ -29,8 +29,16 @@ pub const REQUEST_CHANNELS: &[&str] = &[
 ];
 
 /// core → 宿主 的宿主要求频道（与 src/shared/request-channels.ts 的 HOST_REQUEST_CHANNELS 同源）。
-pub const HOST_REQUEST_CHANNELS: &[&str] =
-    &["host:open-login", "host:secure-encrypt", "host:secure-decrypt", "host:notify"];
+///
+/// R7 增补 `host:cancel-login`：渲染层的"取消登录"走 `core_call(auth:cancel-login)` → sidecar →
+/// 这条宿主要求，最终由 `login.rs` 把结论槽结算成 Cancelled。
+pub const HOST_REQUEST_CHANNELS: &[&str] = &[
+    "host:open-login",
+    "host:cancel-login",
+    "host:secure-encrypt",
+    "host:secure-decrypt",
+    "host:notify",
+];
 
 /// 主窗来源守卫：只有主窗能调 `core_call`（登录子窗、歌词窗、托盘一律拒绝）。
 pub fn require_main_window(label: &str) -> Result<(), CoreError> {
@@ -199,13 +207,11 @@ pub enum HostRoute {
     SecureEncrypt,
     /// DPAPI 解密（R5 已接通）
     SecureDecrypt,
-    /// 通道已留、实现留给后续任务（值 = 任务号）
-    Unimplemented(&'static str),
-    /// 已有人负责答复：绝不再写第二次（R7 起 open-login 会在登录窗关闭后才答复）。
-    ///
-    /// R3 里没有任何路由会走到它——这是刻意留出的扩展点，所以显式标注允许"暂时无构造点"。
-    #[allow(dead_code)]
-    Deferred,
+    /// 打开官方登录子窗（R7）：**长轮询性质**——答复发生在登录窗收场之后
+    OpenLogin,
+    /// 取消进行中的登录（R7）：把结论槽结算成 Cancelled
+    CancelLogin,
+    /// 路由表不认识这个频道
     Unknown,
 }
 
@@ -214,7 +220,8 @@ pub fn route_host_request(channel: &str) -> HostRoute {
         "host:notify" => HostRoute::Notify,
         "host:secure-encrypt" => HostRoute::SecureEncrypt,
         "host:secure-decrypt" => HostRoute::SecureDecrypt,
-        "host:open-login" => HostRoute::Unimplemented("R7"),
+        "host:open-login" => HostRoute::OpenLogin,
+        "host:cancel-login" => HostRoute::CancelLogin,
         _ => HostRoute::Unknown,
     }
 }
@@ -226,8 +233,14 @@ pub enum HostPlan {
     Notify { text: String, ack: ResponseFrame },
     /// 直接回一帧（结构化错误也走这里）
     Respond(ResponseFrame),
-    /// 已有人负责答复，调用方不得再写
+    /// 已有人负责答复：调用方不得再写第二帧。
+    ///
+    /// R7 唯一的构造点是 `host:open-login` 的合法载荷——答复由 `login-window` 线程在登录窗
+    /// 收场后写出（旧仓把"等扫码"做成了同步阻塞，效果线程被占住，随后的取消请求永远送不进来）。
     Deferred,
+    /// 取消登录（R7）：答复里要带"到底取消掉了没有"，那个答案只有 app 知道（计划阶段拿不到），
+    /// 所以由 `apply_host_request` 算完**立刻**答复。
+    CancelLogin,
 }
 
 pub fn plan_host_request(id: &str, channel: &str, payload: &Value) -> HostPlan {
@@ -261,14 +274,14 @@ pub fn plan_host_request(id: &str, channel: &str, payload: &Value) -> HostPlan {
             ("cipher", "plaintext"),
             crate::secure_store::decrypt,
         ),
-        HostRoute::Unimplemented(task) => HostPlan::Respond(ResponseFrame::err(
-            id,
-            CoreError::new(
-                "unimplemented",
-                format!("宿主要求 {channel} 尚未实现（由 {task} 实现），本任务只留了通道"),
-            ),
-        )),
-        HostRoute::Deferred => HostPlan::Deferred,
+        // 登录窗配置的校验是纯函数（无 GUI、无 app），所以计划阶段就能把坏载荷挡掉：
+        // 坏配置不该先起线程再失败（那样错误会晚一步到达，用户看到的是"点了没反应"）。
+        HostRoute::OpenLogin => match crate::login::parse_config(payload) {
+            Ok(_) => HostPlan::Deferred,
+            Err(error) => HostPlan::Respond(ResponseFrame::err(id, error)),
+        },
+        // 取消要读运行时状态（有没有进行中的登录），所以答复在 `apply_host_request` 里算。
+        HostRoute::CancelLogin => HostPlan::CancelLogin,
         HostRoute::Unknown => HostPlan::Respond(ResponseFrame::err(
             id,
             CoreError::new(
@@ -379,7 +392,7 @@ fn emit_now(app: &AppHandle, envelope: EmitEnvelope) {
     }
 }
 
-/// 宿主要求路由：系统通知与安全存储已接通；R7 的频道如实回结构化未实现（不 panic、不静默）。
+/// 宿主要求路由：系统通知与安全存储已接通；登录窗由 R7 的 `login.rs` 承接。
 pub fn apply_host_request(
     app: &AppHandle,
     shared: &Arc<CoreShared>,
@@ -404,7 +417,18 @@ pub fn apply_host_request(
             respond_frame(shared, ack);
         }
         HostPlan::Deferred => {
-            log::info!("宿主要求 {channel} 交由他人答复（本桥不再写第二次）");
+            // open-login：起登录窗线程，答复由它在**窗收场之后**写出（本桥不再写第二次）。
+            // 起不来（配置坏、线程起不来）才由这里立刻回结构化错误。
+            if let Err(error) = crate::login::open_login(app, shared, id, payload) {
+                respond_frame(shared, ResponseFrame::err(id, error));
+            }
+        }
+        HostPlan::CancelLogin => {
+            let frame = match crate::login::cancel_login(app) {
+                Ok(cancelled) => ResponseFrame::ok(id, Some(serde_json::json!({ "cancelled": cancelled }))),
+                Err(error) => ResponseFrame::err(id, error),
+            };
+            respond_frame(shared, frame);
         }
     }
 }
@@ -771,16 +795,36 @@ mod tests {
     }
 
     #[test]
-    fn plan_unimplemented_channels_are_structured_errors() {
+    fn plan_open_login_rejects_bad_config_before_touching_the_window() {
+        // 坏配置在**计划阶段**就被挡掉：不该先起线程再失败（用户看到的是"点了没反应"）
         match plan_host_request("r3", "host:open-login", &json!({})) {
             HostPlan::Respond(frame) => {
                 assert!(!frame.ok);
                 let error = frame.error.expect("必须带结构化错误");
-                assert_eq!(error.kind.as_deref(), Some("unimplemented"));
-                assert!(error.message.contains("R7"), "应指明由 R7 实现：{}", error.message);
+                assert_eq!(error.kind.as_deref(), Some("invalid_payload"));
+                assert!(
+                    error.message.contains("url") || error.message.contains("topInset"),
+                    "错误要指明缺了哪个字段：{}",
+                    error.message
+                );
             }
-            other => panic!("host:open-login 在 R3 必须回未实现，实际 {other:?}"),
+            other => panic!("坏配置必须在计划阶段被拒，实际 {other:?}"),
         }
+
+        // 合法配置 → Deferred：答复交给登录窗线程（它在窗收场之后写这一帧）
+        let good = json!({
+            "url": "https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize?client_id=101444301",
+            "partition": "p-1",
+            "topInset": 48,
+        });
+        assert_eq!(plan_host_request("r4", "host:open-login", &good), HostPlan::Deferred);
+    }
+
+    #[test]
+    fn plan_cancel_login_is_a_runtime_decision() {
+        // 取消的答复里要带"到底取消掉了没有"，那个答案要读运行时状态
+        assert_eq!(plan_host_request("r5", "host:cancel-login", &json!({})), HostPlan::CancelLogin);
+        assert_eq!(route_host_request("host:cancel-login"), HostRoute::CancelLogin);
     }
 
     #[test]

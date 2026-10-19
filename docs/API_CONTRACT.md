@@ -121,6 +121,50 @@ LOGIN_ALLOWED_URLS    = ["https://oauth-login1.cloud.huawei.com/oauth2/v3/loginC
   漏了预滤不会让登录流被一次普通导航杀死——这正是本表存在的理由。
 - Rust 侧 R7 若把 `isCallback` 当"必须先调"的前置条件，属于**超出契约的额外要求**，不要在 Rust 里依赖它。
 
+### 1.7 登录子窗 ↔ sidecar 的线上契约（R7 落地）
+
+**宿主要求（core → 宿主，payload 形状由两侧测试互钉）**
+
+| 频道 | 入 | 出 |
+|---|---|---|
+| `host:open-login` | `{url, partition, topInset}` | `{status, url?, message?}`，**在登录窗收场之后**才答复（长轮询） |
+| `host:cancel-login` | `{}` | `{cancelled: boolean}`（`cancelled:false` = 本来就没有进行中的登录，不是错误） |
+
+`status` 词表（Rust `LoginConclusion::status` ↔ Node `HOST_LOGIN_STATUS`，`test/login-parity.test.mjs` 互钉）：
+
+| status | 含义 | 附带的字段 |
+|---|---|---|
+| `callback` | 拦到 `hms://` 导航，URL **原样**交回（判真伪是 `consumeCallback` 的事） | `url` |
+| `cancelled` | 用户/渲染层取消（`host:cancel-login`） | — |
+| `closed` | 登录窗被关闭 | — |
+| `timed_out` | 总期限（10 分钟）到 | `message` |
+| `load_failed` | 首载期限（30 秒）内打不开官方页（网络/代理） | `message` |
+
+- 两条期限**文案不同**（处置方式不同）：打不开官方页 vs 扫码超时。文案两侧逐字一致，parity 互钉。
+- **双来源**（旧仓缺陷 C1）：Rust 侧"导航拦截"与"窗口关闭"两条路都能把结论交给等待方；
+  结论槽是 take-once 的（先到者胜、后到者不改写）。只接一条 = "扫码成功却等超时"。
+- **登录窗零命令权限**：`capabilities/main.json` 的 `windows` 只有 `main`/`lyrics`，且不给登录页注入任何
+  脚本（不订阅 `initialization_script`/`eval`）：白名单与回调**只靠导航事件**观测。
+
+**渲染层 ← sidecar 的登录状态广播（R7 增补的广播频道）**
+
+```
+auth:status → {loggedIn: boolean, busy: boolean, message?: string}
+```
+
+- 为什么结论走广播而不是 `core_call` 的返回值：渲染层那条调用链（Rust `core_call`）有 60 秒上限，
+  而扫码要等好几分钟。`auth:login` **立刻回 `{started:true,...}`**，真正的结论经 `auth:status` 送达。
+- 启动期恢复也会广播一条（`{loggedIn:false, busy:false}`）：渲染层还没订阅时由 Rust 的
+  `NoticeQueue` 排队，`core_renderer_ready` 时冲刷——"已登录"这个事实不会发进空气。
+
+**已知缺口（R7 如实登记，不硬绕）**：wry 0.57（tauri 2.12 的 webview 层）只注册 WebView2 的
+`NavigationStarting`（主框架级），**没有** `FrameNavigationStarting`。官方页若从 **iframe** 内部发起
+`hms://` 跳转，Rust 侧看不到（顶部框架跳转与 302 都能看到）。关闭它要么等上游提供帧级事件，
+要么注入脚本监听——后者是硬边界明令禁止的（登录页零注入）。兜底：总期限仍会收口，不会永久挂住。
+
+**未联调（untested）**：真实扫码登录（需要用户在场 + 真实账号）、音乐会话兑换（loginex，见 §1.5）、
+`tauri dev` 真窗验证（本环境的子进程沙箱里应用起不来：`tauri-plugin-log` 初始化 `os error 5`）。
+
 ## 2. 音乐业务接口
 
 ### 2.1 结论：**端点全部待确认**（K1 风险未消除，如实登记）
@@ -183,8 +227,10 @@ huawei/dbankcdn 等域名）。
 
 | 常量 | 值 | 唯一真源文件 | 消费方 |
 |---|---|---|---|
-| `LOGIN_VIEW_TOP_INSET` | `48`（CSS px） | `src/shared/login-inset.mjs` | R7：`huawei.ts` 与渲染层双侧 import |
-| `LOGIN_TIMEOUT_MS` | `10 * 60_000` | `src/protocols/login-callback.mjs` | Node 侧；Rust `LOGIN_TIMEOUT` 由 R7 镜像并由 parity 测试互钉 |
+| `LOGIN_VIEW_TOP_INSET` | `48`（CSS px） | `src/shared/login-inset.mjs` | R7：`huawei.ts` 与渲染层 `login-gate.tsx` 双侧 import；Rust `login.rs` 镜像并互钉 |
+| `LOGIN_TIMEOUT_MS` | `10 * 60_000` | `src/protocols/login-callback.mjs` | Node 侧；Rust `LOGIN_TIMEOUT_SECS = 600` 由 R7 镜像并由 parity 测试互钉 |
+| `LOGIN_LOAD_DEADLINE_SECS` | `30` | `src-tauri/src/login.rs` | 首载期限（Rust 独有：Node 侧没有对应的墙钟，只有"打不开官方页"这条结论） |
+| 两条期限文案 | 见 §1.7 | `src-tauri/src/login.rs` ↔ `src/main/huawei.ts` | 两侧逐字一致，parity 互钉 |
 
 ## 4. 红线（任何后续任务不得越过）
 
@@ -199,3 +245,7 @@ huawei/dbankcdn 等域名）。
 - 2026-10-19（Task R4 修复轮 1）：新增 §1.6 宿主契约——`consumeCallback` 可接收窗内每个导航 URL，
   `not_callback` / `state_mismatch` 只拒绝该次调用、**不结算**登录流（原先会被当成终局 `failed`，
   一次普通页面跳转即永久杀死登录）。
+- 2026-10-19（Task R7）：新增 §1.7——登录子窗 ↔ sidecar 的线上契约（`host:open-login` 长轮询、
+  `host:cancel-login` 增补、五个 `status` 词表、双期限文案）、`auth:status` 广播载荷与
+  "结论为什么走广播"、`FrameNavigationStarting` 缺口如实登记；§3 补两行常量。
+  `loginex` 仍为**待联调**（§1.5 未变）：本任务不猜它的 URL，默认实现直接回结构化「待联调」。

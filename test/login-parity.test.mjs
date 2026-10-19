@@ -13,6 +13,11 @@ import { fileURLToPath } from "node:url";
 
 import { LOGIN_VIEW_TOP_INSET } from "../src/shared/login-inset.mjs";
 import { LOGIN_ALLOWED_ORIGINS, LOGIN_ALLOWED_URLS, LOGIN_TIMEOUT_MS } from "../src/protocols/login-callback.mjs";
+import {
+  HOST_LOGIN_STATUS,
+  LOGIN_PAGE_UNAVAILABLE_MESSAGE,
+  LOGIN_TIMEOUT_MESSAGE,
+} from "../src/main/huawei.ts";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const read = (relative) => readFileSync(`${repoRoot}${relative}`, "utf8");
@@ -162,4 +167,36 @@ test("登录域名白名单：R7 的 Rust 导航白名单一旦落地，必须�
   const missing = [...LOGIN_ALLOWED_ORIGINS, ...LOGIN_ALLOWED_URLS].filter((entry) => !code.includes(entry));
   assert.deepEqual(missing, [], `Rust 侧导航白名单漏了 Node 侧的条目（旧仓"卡在 CAS 页"故障就是漏条目）：${missing.join(", ")}`);
   assert.doesNotMatch(code, /oauth-login2/, "Rust 侧同样不得默认放行 oauth-login2");
+});
+
+// ---------------------------------------------------------------------------
+// R7 增补：宿主结论的线上契约（Rust login.rs ↔ Node huawei.ts）
+// ---------------------------------------------------------------------------
+
+test("R7：宿主结论的 status 词表两侧互钉（Rust 交付 ↔ Node 解析）", () => {
+  const code = stripComments(read("src-tauri/src/login.rs"));
+  const missing = Object.values(HOST_LOGIN_STATUS).filter((status) => !code.includes(`"${status}"`));
+  assert.deepEqual(missing, [], `Rust 侧缺少 Node 会解析的结论 status：${missing.join(", ")}`);
+  assert.doesNotMatch(code, /"failed"/, "宿主结论不用 R4 的 failed（那是流程内部状态）：未知结论由 Node 归成结构化错误");
+});
+
+test("R7：两条期限文案两侧逐字一致，且「打不开官方页」≠「扫码超时」", () => {
+  const code = stripComments(read("src-tauri/src/login.rs"));
+  assert.ok(
+    code.includes(LOGIN_PAGE_UNAVAILABLE_MESSAGE),
+    `Rust 侧首载超时文案与 Node 侧不一致（用户两侧看到两句话）：${LOGIN_PAGE_UNAVAILABLE_MESSAGE}`,
+  );
+  assert.ok(
+    code.includes(LOGIN_TIMEOUT_MESSAGE),
+    `Rust 侧总超时文案与 Node 侧不一致：${LOGIN_TIMEOUT_MESSAGE}`,
+  );
+  assert.notEqual(LOGIN_PAGE_UNAVAILABLE_MESSAGE, LOGIN_TIMEOUT_MESSAGE);
+});
+
+test("R7：topInset 校验范围（Rust 0..=4096）必须容得下共享常量 48", () => {
+  const code = stripComments(read("src-tauri/src/login.rs"));
+  const max = code.match(/MAX_TOP_INSET\s*:[^=]*=\s*([0-9_.]+)/);
+  assert.ok(max, "login.rs 必须显式定义 topInset 的上界（越界值不许静默接受）");
+  assert.ok(Number(max[1].replaceAll("_", "")) >= LOGIN_VIEW_TOP_INSET, "上界必须容得下共享常量");
+  assert.match(code, /topInset/, "Rust 侧的错误里要指明字段名（不回显值）");
 });

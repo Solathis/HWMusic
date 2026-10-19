@@ -20,9 +20,16 @@ pub const CALL_TIMEOUT_SECS: u64 = 60;
 pub const CORE_EVENT: &str = "core:event";
 
 /// 广播频道白名单（src/shared/channels.ts 的 BROADCAST_CHANNELS 镜像，两侧由一致性测试钉住）。
-/// 控制器裁决的初始集合就是 `app:notice`：白名单为空会把 sidecar 的每一次广播都判成
-/// 白名单外帧，`Effect::Emit` 在生产路径上等于不存在。R4+ 增补时两侧一起改。
-pub const BROADCAST_CHANNELS: &[&str] = &["app:notice"];
+///
+/// 集合内容：`app:notice`（宿主级提示，控制器裁决的初始集合）+ `auth:status`（R7 增补：
+/// 登录状态变化，渲染层门禁与 R8 主界面靠它决定"该显示哪一层"）。增补时两侧一起改。
+///
+/// 数组里保持**字面量**：`test/channel-parity.test.mjs` 直接扫这一行的字符串集合，
+/// 写成常量引用它会扫不到（`bridge_broadcast_channels_match_the_named_constants` 兜住这份重复）。
+pub const APP_NOTICE: &str = "app:notice";
+/// 登录状态广播频道（R7）：`{loggedIn: bool}`。
+pub const AUTH_STATUS: &str = "auth:status";
+pub const BROADCAST_CHANNELS: &[&str] = &["app:notice", "auth:status"];
 
 /// 已答复 id 的保留上限：应答一次性守卫必须有界（超出按插入顺序淘汰）。
 pub const MAX_ANSWERED_IDS: usize = 4096;
@@ -514,6 +521,14 @@ mod tests {
 
     use serde_json::json;
 
+    /// 广播频道白名单与它的具名常量是**同一份事实**（数组里必须是字面量，parity 测试才扫得到）。
+    #[test]
+    fn bridge_broadcast_channels_match_the_named_constants() {
+        assert_eq!(BROADCAST_CHANNELS, [APP_NOTICE, AUTH_STATUS]);
+        assert_eq!(APP_NOTICE, "app:notice");
+        assert_eq!(AUTH_STATUS, "auth:status");
+    }
+
     /// 可读回的假写入端：断言"到底写出了什么帧"。
     #[derive(Clone, Default)]
     struct SharedWriter {
@@ -665,8 +680,9 @@ mod tests {
         // 生产路径用的是 FramePolicy::default()；集合为空时这里会退化成 Reject，
         // 无 id 的广播帧只能进日志——等于 sidecar 发出去的广播被静默丢弃。
         let default_policy = FramePolicy::default();
-        let expected: &[&str] = &["app:notice"];
-        assert_eq!(BROADCAST_CHANNELS, expected, "控制器裁决的初始广播集合");
+        // R7 增补了 auth:status（登录状态）：初始集合是 app:notice，之后每加一个都在这里同步。
+        let expected: &[&str] = &["app:notice", "auth:status"];
+        assert_eq!(BROADCAST_CHANNELS, expected, "控制器裁决的广播集合（R7 起加上 auth:status）");
 
         let frame = r#"{"channel":"app:notice","payload":{"text":"已复制"}}"#;
         match classify_line(frame, &default_policy) {
@@ -675,6 +691,16 @@ mod tests {
                 assert_eq!(payload, json!({"text": "已复制"}));
             }
             other => panic!("默认策略下 app:notice 必须分类为 Emit，实际 {other:?}"),
+        }
+
+        // R7 的登录状态广播同样必须被默认策略放行（否则渲染层永远等不到"已登录"）
+        let auth_frame = r#"{"channel":"auth:status","payload":{"loggedIn":true}}"#;
+        match classify_line(auth_frame, &default_policy) {
+            LineOutcome::Effect(Effect::Emit { channel, payload }) => {
+                assert_eq!(channel, "auth:status");
+                assert_eq!(payload, json!({"loggedIn": true}));
+            }
+            other => panic!("默认策略下 auth:status 必须分类为 Emit，实际 {other:?}"),
         }
     }
 
