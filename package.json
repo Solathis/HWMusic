@@ -12,7 +12,15 @@
     "dev": "tauri dev",
     "dev:web": "node node_modules/vite/bin/vite.js",
     "build:web": "node node_modules/vite/bin/vite.js build",
-    "typecheck": "node node_modules/typescript/bin/tsc --noEmit"
+    "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
+    "test": "node --test test/*.test.mjs",
+    "test:acceptance": "node scripts/acceptance.mjs",
+    "test:browser": "node scripts/test-browser.mjs",
+    "smoke:build": "node scripts/tauri-smoke.mjs",
+    "dist:sidecar": "node scripts/build-sidecar.mjs",
+    "dist:win": "node scripts/dist-win.mjs",
+    "check:nsis": "node scripts/check-nsis-package.mjs",
+    "release:checksums": "node scripts/release-checksums.mjs"
   },
   "dependencies": {
     "@applemusic-like-lyrics/core": "0.6.0",
@@ -45,6 +53,7 @@
     "@vitejs/plugin-react": "5.1.1",
     "esbuild": "^0.28.2",
     "playwright-core": "1.64.0",
+    "postject": "^1.0.0-alpha.6",
     "shadcn": "^4.22.0",
     "sharp": "^0.35.5",
     "tailwindcss": "^4.3.3",

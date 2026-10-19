@@ -1204,10 +1204,18 @@ mod tests {
     #[test]
     fn waiting_on_an_unsettled_session_times_out_instead_of_hanging() {
         let session = LoginSession::new();
-        let started = Instant::now();
+        // 断言的是**超时路径的返回语义**（返回 None + 槽未被这次等待动过 + 之后一切照旧），
+        // 不是挂钟耗时：下界卡在超时值本身会被 Windows 计时器粒度钳住而偶发打红
+        //（同 login_policy.rs 里同型断言的修法）。
         assert_eq!(session.wait(Duration::from_millis(20)), None);
-        assert!(started.elapsed() >= Duration::from_millis(20));
-        assert!(!session.is_loaded());
+        assert_eq!(session.conclusion(), None, "超时返回不得凭空写入结论");
+        assert!(!session.is_loaded(), "超时返回不得改动首载标志");
+        assert!(session.settle(LoginConclusion::Closed), "超时之后槽仍可结算");
+        assert_eq!(
+            session.wait(Duration::from_secs(5)),
+            Some(LoginConclusion::Closed),
+            "结算之后等待立刻拿到结论（控制权交回后一切照旧）"
+        );
     }
 
     /// 硬边界：登录页零注入（只靠导航事件）+ 只加载**外部**官方页。

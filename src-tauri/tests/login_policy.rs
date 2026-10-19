@@ -309,11 +309,25 @@ fn session_wait_returns_the_conclusion_and_never_stalls_on_a_settled_slot() {
     assert_eq!(session.wait(Duration::from_secs(5)), Some(LoginConclusion::Cancelled));
     assert!(started.elapsed() < Duration::from_secs(1), "已结算的槽必须立刻返回");
 
-    // 未结算：到点返回 None（由调用方用 deadline_conclusion 定夺），不永久挂住
+    // 未结算：到点返回 None（由调用方用 deadline_conclusion 定夺），不永久挂住。
+    //
+    // 这里断言的是**超时路径的返回语义**（返回 None + 控制权交回调用方 + 槽未被这次等待动过），
+    // 不是挂钟耗时：下界卡在超时值本身会被 Windows 计时器粒度钳住而偶发打红
+    //（实测 ~1/12），且"多久才算到点"的阈值语义已由纯函数 deadline_conclusion 的用例覆盖。
     let idle = LoginSession::new();
-    let started = std::time::Instant::now();
-    assert_eq!(idle.wait(Duration::from_millis(50)), None);
-    assert!(started.elapsed() >= Duration::from_millis(50));
+    assert_eq!(
+        idle.wait(Duration::from_millis(50)),
+        None,
+        "到点必须交出控制权（返回 None），不得永久挂住"
+    );
+    assert_eq!(idle.conclusion(), None, "超时返回不得凭空写入结论");
+    assert!(!idle.is_loaded(), "超时返回不得改动首载标志");
+    assert!(idle.settle(LoginConclusion::Closed), "超时之后槽仍可结算：生产者照常写入");
+    assert_eq!(
+        idle.wait(Duration::from_secs(5)),
+        Some(LoginConclusion::Closed),
+        "结算之后等待立刻拿到结论（控制权交回后一切照旧）"
+    );
 
     // 首载标志：只记第一次
     let loading = LoginSession::new();
