@@ -22,6 +22,12 @@ pub const NODE_BIN_ENV: &str = "HWMUSIC_NODE_BIN";
 /// sidecar 脚本覆盖旋钮：只接受绝对路径；空值/相对路径=未设置（排障用）。
 pub const SIDECAR_SCRIPT_ENV: &str = "HWMUSIC_SIDECAR_SCRIPT";
 
+/// sidecar 启动参数：应用数据目录（Node 侧 `src/main/data-dir.mjs` 读同一个字面量，测试互钉）。
+///
+/// 数据目录只由宿主解析（`HWMUSIC_DATA_DIR` → 应用数据目录 → 应用缓存目录），再经 argv 交给
+/// sidecar：让 sidecar 自己猜目录，打包后会落到不可写的位置（见 `lib.rs` 的 `DataRootError`）。
+pub const DATA_DIR_ARG: &str = "--data-dir";
+
 /// 打包后 sidecar 二进制的文件名主干：Tauri 复制 externalBin 时会剥掉三元组后缀。
 pub const SIDECAR_BIN_STEM: &str = "hwmusic-core";
 
@@ -101,6 +107,8 @@ pub enum LaunchError {
     Spawn { program: PathBuf, message: String },
     /// stdio 没接上管道
     NoPipe(&'static str),
+    /// 数据目录是相对路径：会随启动目录漂移，只收绝对路径（与 `HWMUSIC_DATA_DIR` 同一口径）
+    RelativeDataDir(PathBuf),
 }
 
 impl std::fmt::Display for LaunchError {
@@ -118,6 +126,11 @@ impl std::fmt::Display for LaunchError {
             LaunchError::NoPipe(which) => {
                 write!(formatter, "core sidecar 的 {which} 没有接上管道")
             }
+            LaunchError::RelativeDataDir(path) => write!(
+                formatter,
+                "sidecar 的数据目录必须是绝对路径（收到 {}）：相对路径会随启动目录漂移",
+                path.display()
+            ),
         }
     }
 }
@@ -153,13 +166,28 @@ fn absolute_path_override(raw: Option<&str>) -> Option<PathBuf> {
 }
 
 /// 启动计划：环境旋钮 → 打包后同目录二进制 → 开发期脚本；三者都没有就如实报错。
-pub fn resolve_launch(exe_dir: &Path, knobs: &SidecarKnobs) -> Result<LaunchPlan, LaunchError> {
+///
+/// `data_dir` 必须是绝对路径：它经 argv（[`DATA_DIR_ARG`]）交给 sidecar，相对路径会随启动目录漂移。
+pub fn resolve_launch(
+    exe_dir: &Path,
+    data_dir: &Path,
+    knobs: &SidecarKnobs,
+) -> Result<LaunchPlan, LaunchError> {
+    if !data_dir.is_absolute() {
+        return Err(LaunchError::RelativeDataDir(data_dir.to_path_buf()));
+    }
+    let data_dir_args = [
+        OsString::from(DATA_DIR_ARG),
+        data_dir.as_os_str().to_os_string(),
+    ];
     let node = node_program_override(knobs.node_bin.as_deref()).unwrap_or_else(|| "node".to_string());
 
     if let Some(script) = absolute_path_override(knobs.script.as_deref()) {
+        let mut args = vec![script.into_os_string()];
+        args.extend(data_dir_args);
         return Ok(LaunchPlan {
             program: PathBuf::from(node),
-            args: vec![script.into_os_string()],
+            args,
             source: LaunchSource::OverrideScript,
         });
     }
@@ -169,7 +197,7 @@ pub fn resolve_launch(exe_dir: &Path, knobs: &SidecarKnobs) -> Result<LaunchPlan
     if expected.is_file() {
         return Ok(LaunchPlan {
             program: expected,
-            args: Vec::new(),
+            args: data_dir_args.to_vec(),
             source: LaunchSource::PackagedSibling,
         });
     }
@@ -178,15 +206,17 @@ pub fn resolve_launch(exe_dir: &Path, knobs: &SidecarKnobs) -> Result<LaunchPlan
     if stem.is_file() {
         return Ok(LaunchPlan {
             program: stem,
-            args: Vec::new(),
+            args: data_dir_args.to_vec(),
             source: LaunchSource::PackagedSibling,
         });
     }
 
     if let Some(script) = knobs.dev_script.as_ref().filter(|path| path.is_file()) {
+        let mut args = vec![script.clone().into_os_string()];
+        args.extend(data_dir_args);
         return Ok(LaunchPlan {
             program: PathBuf::from(node),
-            args: vec![script.clone().into_os_string()],
+            args,
             source: LaunchSource::DevScript,
         });
     }
@@ -428,6 +458,17 @@ mod tests {
         path
     }
 
+    /// 测试用数据目录：绝对路径（sidecar 只接受绝对路径，相对路径会随启动目录漂移）。
+    fn temp_data_dir(label: &str) -> PathBuf {
+        let dir = test_tmp_root().join(format!("data-{label}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("测试数据目录必须能建");
+        dir
+    }
+
+    fn data_dir_args(dir: &Path) -> Vec<OsString> {
+        vec![OsString::from(DATA_DIR_ARG), dir.as_os_str().to_os_string()]
+    }
+
     fn cleanup(paths: &[&Path]) {
         for path in paths {
             if path.is_dir() {
@@ -442,29 +483,33 @@ mod tests {
     fn launch_override_script_uses_node_override() {
         let script = temp_dev_script("override");
         let node = test_tmp_root().join(if cfg!(windows) { "node.exe" } else { "node" });
+        let data = temp_data_dir("override");
         let knobs = SidecarKnobs {
             node_bin: Some(node.to_string_lossy().into_owned()),
             script: Some(script.to_string_lossy().into_owned()),
             dev_script: None,
         };
-        let plan = resolve_launch(&test_tmp_root(), &knobs).expect("覆盖旋钮必须生效");
+        let plan = resolve_launch(&test_tmp_root(), &data, &knobs).expect("覆盖旋钮必须生效");
 
         assert_eq!(plan.source, LaunchSource::OverrideScript);
         assert_eq!(plan.program, node);
-        assert_eq!(plan.args, vec![script.clone().into_os_string()]);
+        let mut expected = vec![script.clone().into_os_string()];
+        expected.extend(data_dir_args(&data));
+        assert_eq!(plan.args, expected, "数据目录必须跟在脚本后面传给 sidecar");
         cleanup(&[&script]);
     }
 
     #[test]
     fn launch_override_rejects_relative_or_blank_script() {
         let dev = temp_dev_script("relative");
+        let data = temp_data_dir("relative");
         for bad in ["", "   ", "src/sidecar/main.mjs", "./main.mjs", "..\\main.mjs"] {
             let knobs = SidecarKnobs {
                 node_bin: None,
                 script: Some(bad.to_string()),
                 dev_script: Some(dev.clone()),
             };
-            let plan = resolve_launch(Path::new("C:\\app"), &knobs)
+            let plan = resolve_launch(Path::new("C:\\app"), &data, &knobs)
                 .unwrap_or_else(|error| panic!("{bad:?} 应视为未设置并落到开发期脚本，实际 {error}"));
             assert_eq!(plan.source, LaunchSource::DevScript, "{bad:?} 不该被当成脚本路径");
         }
@@ -475,28 +520,34 @@ mod tests {
     fn launch_prefers_packaged_sibling_over_dev_script() {
         let dir = temp_exe_dir("sibling", true);
         let dev = temp_dev_script("sibling");
+        let data = temp_data_dir("sibling");
         let knobs = SidecarKnobs {
             node_bin: None,
             script: None,
             dev_script: Some(dev.clone()),
         };
-        let plan = resolve_launch(&dir, &knobs).expect("同目录二进制必须被选中");
+        let plan = resolve_launch(&dir, &data, &knobs).expect("同目录二进制必须被选中");
 
         assert_eq!(plan.source, LaunchSource::PackagedSibling);
         assert_eq!(plan.program, dir.join(sidecar_binary_name()));
-        assert!(plan.args.is_empty(), "打包后的 sidecar 不接受脚本参数");
+        assert_eq!(
+            plan.args,
+            data_dir_args(&data),
+            "打包后的 sidecar 唯一的参数就是数据目录"
+        );
         cleanup(&[&dir, &dev]);
     }
 
     #[test]
     fn launch_dev_fallback_points_at_real_sidecar_entry() {
         let dir = temp_exe_dir("dev", false);
+        let data = temp_data_dir("dev");
         let knobs = SidecarKnobs {
             node_bin: None,
             script: None,
             dev_script: Some(fallback_dev_script().expect("debug 构建必须有开发期脚本回退")),
         };
-        let plan = resolve_launch(&dir, &knobs).expect("开发期必须能落到仓库里的 sidecar 脚本");
+        let plan = resolve_launch(&dir, &data, &knobs).expect("开发期必须能落到仓库里的 sidecar 脚本");
 
         assert_eq!(plan.source, LaunchSource::DevScript);
         assert_eq!(plan.program, PathBuf::from("node"));
@@ -507,22 +558,43 @@ mod tests {
             "回退脚本应为 src/sidecar/main.mjs，实际 {}",
             script.display()
         );
+        assert_eq!(&plan.args[1..], data_dir_args(&data).as_slice());
         cleanup(&[&dir]);
     }
 
     #[test]
     fn launch_without_any_core_is_error() {
         let dir = temp_exe_dir("missing", false);
+        let data = temp_data_dir("missing");
         let knobs = SidecarKnobs {
             node_bin: None,
             script: None,
             dev_script: None,
         };
-        match resolve_launch(&dir, &knobs) {
+        match resolve_launch(&dir, &data, &knobs) {
             Ok(plan) => panic!("没有任何 core 可用时必须报错，实际 {plan:?}"),
             Err(error) => {
                 let text = error.to_string();
                 assert!(text.contains("hwmusic-core"), "错误要说清缺什么：{text}");
+            }
+        }
+        cleanup(&[&dir]);
+    }
+
+    #[test]
+    fn launch_rejects_relative_data_dir() {
+        let dir = temp_exe_dir("relative-data", true);
+        let knobs = SidecarKnobs {
+            node_bin: None,
+            script: None,
+            dev_script: None,
+        };
+        for bad in ["data", ".", "..\\data", "./data"] {
+            match resolve_launch(&dir, Path::new(bad), &knobs) {
+                Err(LaunchError::RelativeDataDir(path)) => {
+                    assert_eq!(path, Path::new(bad), "错误要原样带回那个相对路径");
+                }
+                other => panic!("{bad:?} 是相对路径，必须被拒（会随启动目录漂移），实际 {other:?}"),
             }
         }
         cleanup(&[&dir]);
@@ -552,7 +624,8 @@ mod tests {
             script: None,
             dev_script: Some(dev_script),
         };
-        let plan = match resolve_launch(&std::env::temp_dir(), &knobs) {
+        let data = temp_data_dir("pump");
+        let plan = match resolve_launch(&std::env::temp_dir(), &data, &knobs) {
             Ok(plan) => plan,
             Err(error) => panic!("开发期启动计划必须可解析：{error}"),
         };

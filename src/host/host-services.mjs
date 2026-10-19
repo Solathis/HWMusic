@@ -1,10 +1,14 @@
 /**
  * 宿主要求（core → 宿主）的业务封装。
  *
- * 频道名一律 import 共享常量；payload 形状由消费任务定义（本任务不替 R5/R7 拍板）：
- * - `host:notify`：R3 已在 Rust 侧接通系统通知，`{text}`；
- * - `host:open-login`（R7）、`host:secure-encrypt/decrypt`（R5）：宿主如实回
- *   `{kind:"unimplemented"}`，这里原样透传，不改写成成功、不吞错。
+ * 频道名一律 import 共享常量；payload 形状：
+ * - `host:notify`：`{text}`（R3 已在 Rust 侧接通系统通知）；
+ * - `host:secure-encrypt`：入 `{plaintext}` → 出 `{cipher}`（base64 的 DPAPI 信封，R5）；
+ * - `host:secure-decrypt`：入 `{cipher}` → 出 `{plaintext}`（R5）；
+ * - `host:open-login`（R7）：宿主如实回 `{kind:"unimplemented"}`。
+ *
+ * 返回值是帧内结果（`{ok:true,data}` / `{ok:false,error}`），这里原样透传：不改写成成功、不吞错。
+ * 消费方见 `src/main/session-store.mjs`（只认 `data.cipher` / `data.plaintext`）。
  */
 import {
   HOST_NOTIFY,

@@ -25,6 +25,12 @@ export const CORE_ERROR_KINDS = {
   forbiddenSource: "forbidden_source",
   /** 帧本身不合法 */
   invalidFrame: "invalid_frame",
+  /** 安全存储后端不可用（非 Windows / DPAPI 拒绝加密）：会话只留内存，绝不写明文（R5） */
+  secureStoreUnavailable: "secure_store_unavailable",
+  /** 密文不合法：不是本机本用户的 DPAPI 信封、或被破坏（R5） */
+  invalidCipher: "invalid_cipher",
+  /** 落盘信封不合法：不是合法 JSON / schemaVersion 不认识 / 缺 cipher 字段（R5） */
+  invalidEnvelope: "invalid_envelope",
 } as const;
 
 export interface CoreError {

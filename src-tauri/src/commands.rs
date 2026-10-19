@@ -1,5 +1,6 @@
 //! tauri 命令面：`core_call`（唯一业务通道 + 主窗来源守卫 + 请求频道准入）、`core_renderer_ready`
-//! （渲染层就绪钩子），以及宿主要求路由（`host:notify` 走系统通知；R5/R7 的频道如实回未实现）。
+//! （渲染层就绪钩子），以及宿主要求路由（`host:notify` 走系统通知；`host:secure-encrypt` /
+//! `host:secure-decrypt` 走 DPAPI 安全存储；R7 的频道如实回未实现）。
 //!
 //! 判定逻辑刻意抽成纯函数（`require_main_window` / `require_request_channel` / `plan_host_request`），
 //! 这样不依赖 `tauri::test` mock runtime 就能钉住来源守卫与路由表。
@@ -109,6 +110,10 @@ pub fn require_shared(state: &CoreState) -> Result<Arc<CoreShared>, CoreError> {
 pub enum HostRoute {
     /// 系统通知（R3 已实现）
     Notify,
+    /// DPAPI 加密（R5 已接通）
+    SecureEncrypt,
+    /// DPAPI 解密（R5 已接通）
+    SecureDecrypt,
     /// 通道已留、实现留给后续任务（值 = 任务号）
     Unimplemented(&'static str),
     /// 已有人负责答复：绝不再写第二次（R7 起 open-login 会在登录窗关闭后才答复）。
@@ -122,8 +127,9 @@ pub enum HostRoute {
 pub fn route_host_request(channel: &str) -> HostRoute {
     match channel {
         "host:notify" => HostRoute::Notify,
+        "host:secure-encrypt" => HostRoute::SecureEncrypt,
+        "host:secure-decrypt" => HostRoute::SecureDecrypt,
         "host:open-login" => HostRoute::Unimplemented("R7"),
-        "host:secure-encrypt" | "host:secure-decrypt" => HostRoute::Unimplemented("R5"),
         _ => HostRoute::Unknown,
     }
 }
@@ -158,6 +164,18 @@ pub fn plan_host_request(id: &str, channel: &str, payload: &Value) -> HostPlan {
                 )),
             }
         }
+        HostRoute::SecureEncrypt => secure_plan(
+            id,
+            payload,
+            ("plaintext", "cipher"),
+            crate::secure_store::encrypt,
+        ),
+        HostRoute::SecureDecrypt => secure_plan(
+            id,
+            payload,
+            ("cipher", "plaintext"),
+            crate::secure_store::decrypt,
+        ),
         HostRoute::Unimplemented(task) => HostPlan::Respond(ResponseFrame::err(
             id,
             CoreError::new(
@@ -173,6 +191,54 @@ pub fn plan_host_request(id: &str, channel: &str, payload: &Value) -> HostPlan {
                 format!("未知宿主要求频道：{channel}"),
             ),
         )),
+    }
+}
+
+/// 宿主要求里的必需字符串字段：缺失/空串/类型不对都是 `invalid_payload`，且**不回显内容**。
+fn required_string(payload: &Value, field: &str) -> Result<String, CoreError> {
+    match payload.get(field) {
+        Some(Value::String(value)) if !value.is_empty() => Ok(value.clone()),
+        Some(Value::String(_)) => Err(CoreError::new(
+            "invalid_payload",
+            format!("宿主要求的 {field} 不能是空串"),
+        )),
+        Some(_) => Err(CoreError::new(
+            "invalid_payload",
+            format!("宿主要求的 {field} 必须是字符串"),
+        )),
+        None => Err(CoreError::new(
+            "invalid_payload",
+            format!("宿主要求缺少字符串字段 {field}"),
+        )),
+    }
+}
+
+/// 安全存储类宿主要求的计划：先校验载荷，再交给 [`crate::secure_store`]，后端错误原样结构化返回。
+///
+/// 载荷形状（R5 定形；Node 侧 `src/main/session-store.mjs` 消费）：
+/// - `host:secure-encrypt`：入 `{plaintext}` → 出 `{cipher}`；
+/// - `host:secure-decrypt`：入 `{cipher}` → 出 `{plaintext}`。
+///
+/// 刻意不做任何"失败就降级成明文"的分支：后端不可用就如实回 `secure_store_unavailable`，
+/// 由上层决定保留内存会话（提示 UI 是 R7+ 的事）。
+fn secure_plan(
+    id: &str,
+    payload: &Value,
+    fields: (&'static str, &'static str),
+    operate: fn(&str) -> Result<String, CoreError>,
+) -> HostPlan {
+    let (in_field, out_field) = fields;
+    let input = match required_string(payload, in_field) {
+        Ok(input) => input,
+        Err(error) => return HostPlan::Respond(ResponseFrame::err(id, error)),
+    };
+    match operate(&input) {
+        Ok(value) => {
+            let mut data = serde_json::Map::new();
+            data.insert(out_field.to_string(), Value::String(value));
+            HostPlan::Respond(ResponseFrame::ok(id, Some(Value::Object(data))))
+        }
+        Err(error) => HostPlan::Respond(ResponseFrame::err(id, error)),
     }
 }
 
@@ -211,7 +277,7 @@ pub fn apply_effect(app: &AppHandle, shared: &Arc<CoreShared>, effect: Effect) {
     }
 }
 
-/// 宿主要求路由：系统通知已接通；R5/R7 的频道如实回结构化未实现（不 panic、不静默）。
+/// 宿主要求路由：系统通知与安全存储已接通；R7 的频道如实回结构化未实现（不 panic、不静默）。
 pub fn apply_host_request(
     app: &AppHandle,
     shared: &Arc<CoreShared>,
@@ -421,20 +487,121 @@ mod tests {
 
     #[test]
     fn plan_unimplemented_channels_are_structured_errors() {
-        for (channel, task) in [
-            ("host:open-login", "R7"),
-            ("host:secure-encrypt", "R5"),
-            ("host:secure-decrypt", "R5"),
-        ] {
-            match plan_host_request("r3", channel, &json!({})) {
-                HostPlan::Respond(frame) => {
-                    assert!(!frame.ok);
-                    let error = frame.error.expect("必须带结构化错误");
-                    assert_eq!(error.kind.as_deref(), Some("unimplemented"));
-                    assert!(error.message.contains(task), "{} 应指明由 {task} 实现", error.message);
-                }
-                other => panic!("{channel} 在 R3 必须回未实现，实际 {other:?}"),
+        match plan_host_request("r3", "host:open-login", &json!({})) {
+            HostPlan::Respond(frame) => {
+                assert!(!frame.ok);
+                let error = frame.error.expect("必须带结构化错误");
+                assert_eq!(error.kind.as_deref(), Some("unimplemented"));
+                assert!(error.message.contains("R7"), "应指明由 R7 实现：{}", error.message);
             }
+            other => panic!("host:open-login 在 R3 必须回未实现，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn host_secure_channels_route_to_secure_store() {
+        assert_eq!(route_host_request("host:secure-encrypt"), HostRoute::SecureEncrypt);
+        assert_eq!(route_host_request("host:secure-decrypt"), HostRoute::SecureDecrypt);
+    }
+
+    #[test]
+    fn plan_secure_requests_reject_bad_payload_before_touching_backend() {
+        for payload in [
+            json!({}),
+            json!({"plaintext": ""}),
+            json!({"plaintext": 42}),
+            json!({"plaintext": null}),
+        ] {
+            match plan_host_request("r5", "host:secure-encrypt", &payload) {
+                HostPlan::Respond(frame) => {
+                    assert!(!frame.ok, "坏 payload 不该成功：{payload}");
+                    let error = frame.error.expect("必须带结构化错误");
+                    assert_eq!(error.kind.as_deref(), Some("invalid_payload"), "payload={payload}");
+                    assert!(error.message.contains("plaintext"), "{}", error.message);
+                }
+                other => panic!("坏 payload 必须回结构化错误，实际 {other:?}"),
+            }
+        }
+
+        for payload in [json!({}), json!({"cipher": ""}), json!({"cipher": 42})] {
+            match plan_host_request("r5", "host:secure-decrypt", &payload) {
+                HostPlan::Respond(frame) => {
+                    assert!(!frame.ok, "坏 payload 不该成功：{payload}");
+                    let error = frame.error.expect("必须带结构化错误");
+                    assert_eq!(error.kind.as_deref(), Some("invalid_payload"), "payload={payload}");
+                    assert!(error.message.contains("cipher"), "{}", error.message);
+                }
+                other => panic!("坏 payload 必须回结构化错误，实际 {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn plan_secure_decrypt_reports_invalid_cipher_without_echoing_it() {
+        // 合法 base64、但不是 DPAPI 信封：解不开也不许 panic、不许回显
+        let foreign = "ZGVhZGJlZWYwMTAyMDM=";
+        match plan_host_request("r8", "host:secure-decrypt", &json!({ "cipher": foreign })) {
+            HostPlan::Respond(frame) => {
+                assert!(!frame.ok);
+                let error = frame.error.expect("必须带结构化错误");
+                assert!(
+                    matches!(
+                        error.kind.as_deref(),
+                        Some("invalid_cipher") | Some("secure_store_unavailable")
+                    ),
+                    "外来信封只能是 invalid_cipher 或（非 Windows）不可用：{:?}",
+                    error.kind
+                );
+                assert!(!error.message.contains(foreign), "错误里不能回显密文：{}", error.message);
+                assert!(!error.message.contains("ZGVh"), "错误里不能回显密文片段");
+            }
+            other => panic!("外来信封必须回结构化错误，实际 {other:?}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn plan_secure_encrypt_decrypt_round_trips_through_host_route() {
+        let secret = "{\"musicSession\":\"user$7f3a\"}";
+        let cipher = match plan_host_request("r6", "host:secure-encrypt", &json!({"plaintext": secret})) {
+            HostPlan::Respond(frame) => {
+                assert!(frame.ok, "Windows 上加密必须成功：{:?}", frame.error);
+                frame.data.expect("加密必须回数据")["cipher"]
+                    .as_str()
+                    .expect("加密响应必须带 cipher 字段")
+                    .to_string()
+            }
+            other => panic!("加密应直接回一帧，实际 {other:?}"),
+        };
+        assert_ne!(cipher, secret, "密文不能等于明文");
+        assert!(!cipher.contains("musicSession"), "密文里不该有明文片段");
+
+        match plan_host_request("r7", "host:secure-decrypt", &json!({"cipher": cipher})) {
+            HostPlan::Respond(frame) => {
+                assert!(frame.ok, "自己封的信封必须能解回来：{:?}", frame.error);
+                assert_eq!(
+                    frame.data.expect("解密必须回数据")["plaintext"],
+                    json!(secret),
+                    "往返必须还原原文"
+                );
+            }
+            other => panic!("解密应直接回一帧，实际 {other:?}"),
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn plan_secure_encrypt_is_unavailable_on_non_windows_without_plaintext_fallback() {
+        match plan_host_request("r6", "host:secure-encrypt", &json!({"plaintext": "secret"})) {
+            HostPlan::Respond(frame) => {
+                assert!(!frame.ok, "非 Windows 不允许'成功'");
+                assert_eq!(
+                    frame.error.expect("必须带结构化错误").kind.as_deref(),
+                    Some("secure_store_unavailable")
+                );
+                assert!(frame.data.is_none(), "失败帧不得携带任何数据（尤其不能是明文）");
+            }
+            other => panic!("非 Windows 必须回结构化不可用，实际 {other:?}"),
         }
     }
 

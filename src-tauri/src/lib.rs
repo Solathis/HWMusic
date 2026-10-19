@@ -2,10 +2,12 @@
 //!
 //! R2 范围：窗口策略（1280×800 / min 960×640 / 显式 webview 数据目录）、最小权限
 //! capabilities、插件链编排。R3 增加 sidecar 桥（NDJSON stdio、命令白名单、宿主要求路由）。
+//! R5 增加 DPAPI 安全存储（`secure_store.rs`）并把数据根经 argv 传给 sidecar。
 //! 登录窗、托盘、歌词窗由后续任务加入。
 
 mod bridge;
 mod commands;
+mod secure_store;
 mod sidecar;
 
 use std::path::{Path, PathBuf};
@@ -153,7 +155,7 @@ pub fn run() {
         )
         .setup(|app| {
             let data_root = create_main_window(app.handle())?;
-            app.manage(WebviewDataRoot(data_root));
+            app.manage(WebviewDataRoot(data_root.clone()));
 
             // core（sidecar）：起不来也不拦启动——core_call 会返回结构化 core_unavailable，
             // 比"应用直接起不来"更好排查，也不静默。
@@ -164,7 +166,7 @@ pub fn run() {
                 .and_then(|path| path.parent().map(Path::to_path_buf))
                 .unwrap_or_else(|| PathBuf::from("."));
 
-            match sidecar::resolve_launch(&exe_dir, &knobs)
+            match sidecar::resolve_launch(&exe_dir, &data_root, &knobs)
                 .and_then(|plan| sidecar::SidecarProcess::spawn(&plan))
             {
                 Ok(process) => {
