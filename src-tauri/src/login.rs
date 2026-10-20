@@ -36,25 +36,25 @@
 //! 7. **不阻塞效果线程**：`host:open-login` 立刻返回，真正的等待与收尾在 `login-view` 线程里
 //!    （阻塞效果线程会让随后的 `host:cancel-login` 永远送不进来）。
 //!
-//! **R27（用户三项之 1+2，2026-10-20）**：
+//! **R28（用户指令 2026-10-20，推翻 R26/R27 两项裁决）**：
 //!
-//! - 登录 webview 用 [`LOGIN_MOBILE_UA`]（HarmonyOS 移动 UA）：桌面 UA 下服务端把 `dark`
-//!   回落成 `red`，官方页**拿不到深色**；移动 UA 是唯一一条出真黑底的路（R27 探针实测
-//!   `index-dark.css` + body/root `rgb(0,0,0)`）。代价是页面换成移动版式（账号密码/短信
-//!   验证码表单，实测**没有可见的二维码入口**）——如实登记在 `docs/API_CONTRACT.md` §1.7
-//!   的 R27 段与 `docs/KNOWN_LIMITATIONS.md` B18；
-//! - 登录页**先摆在屏外**（[`offscreen_rect`]），首载完成或首载期限（30 秒）到才摆进内容区
-//!   （[`placement_due`]）：屏外这段时间门禁底下显示加载动画（`login-gate.tsx`），用户不再
-//!   看到几秒白屏。**屏外期间不跟随主窗几何**——跟随会把屏外那一份摆回内容区，用户就看见
-//!   白页了；浮动控件照常跟随（屏外期间它们是唯一可点的东西：「返回扫码登录」）；
-//! - **切主题 = 关掉重开**（[`reapply_login_theme`] → [`rebuild_login_view`]）：UA 与主题取值都在
-//!   **创建时**定死（`WebviewBuilder::user_agent`，运行期没有 setter），重建比事后改可靠，而
-//!   "关旧的 + 建新的"两步用的都是既有收尾/建页链（重建**不删数据目录**——同一个目录 = 复用同一个
-//!   WebView2 环境）。重建那一小段里"登录页不在"是预期的，由 [`LoginSession::begin_rebuild`]
-//!   挡住"页没了 → Closed"的兜底；重建**失败**则如实按 `Closed` 收场（不留一个没有页面的会话）；
-//!   收尾一律按 **label** 找**当前**那一份（[`shutdown_login_view`]），手里那个旧句柄不可信；
-//! - 主题三态**总是**给出一个具体值（[`login_theme_name`]）：移动 UA 下"不带参数"不再等于浅色
-//!   （页面会拿 `prefers-color-scheme` 去问服务端，系统深色就自己变黑）。
+//! - **官方登录页不再支持切换主题**：R26 立起、R27 改档的那一整套（把主题查询参数挂到授权页
+//!   URL 上；切主题时把已经开着的那一份关掉、按新参数重开一份）**整体移除**——官方页按它自己
+//!   的默认渲染，应用主题只影响自家 UI（门禁 / 两个浮动控件 / 主界面）。配套的东西一并删干净：
+//!   建窗参数（重建才用的那几样）、重建窗口、"页不在是不是预期"那一档，以及
+//!   `theme::set_theme` 里那一次"顺手把登录页按新主题重来一遍"——**改主题现在不碰登录页**，
+//!   `crate::theme` 只广播。历史证据与用户指令见 `docs/API_CONTRACT.md` §1.7 的
+//!   R26/R27/R28 三段；那条链在 R27 上踩过的坑（重建丢表单、重建窗口的兜底）随代码一起没了；
+//! - **UA 回到宿主默认**：登录 webview 建窗时**不设 UA**（R27 那条移动 UA 已删），
+//!   WebView2 用自己的默认桌面 UA；
+//! - **摆进要等静默窗**（[`LOGIN_QUIET_WINDOW_MS`]，用户三项之 3）：登录页**先摆在屏外**
+//!   （[`offscreen_rect`]），每次加载 `Finished` 起一个静默窗；窗内出现新导航就**撤窗**、
+//!   等下一次 `Finished`；窗内没有新导航才摆进内容区（[`placement_due`]）。R27 那一版是
+//!   "首载 `Finished` 就摆"——而首载多半只是 authorize 中间页，后面还有 CAS 重定向在加载，
+//!   用户看到的是"动画结束了、页面还没好"。静默窗与链路多长无关，30 秒首载期限兜底不变。
+//!   屏外这段时间门禁底下显示加载动画（`login-gate.tsx`），用户不再看到几秒白屏。
+//!   **屏外期间不跟随主窗几何**——跟随会把屏外那一份摆回内容区，用户就看见白页了；
+//!   浮动控件照常跟随（屏外期间它们是唯一可点的东西：「返回扫码登录」）。
 //!
 //! **已知缺口（不硬绕）**：wry 0.57（tauri 2.12 的 webview 层）只注册 WebView2 的
 //! `NavigationStarting`（主框架级），**没有** `FrameNavigationStarting`。官方页若从 **iframe**
@@ -77,7 +77,6 @@ use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
 use tauri::{AppHandle, Manager, Webview, WebviewUrl};
 
 use crate::bridge::{CoreError, CoreShared, Effect, APP_NOTICE};
-use crate::theme::ThemeChoice;
 use crate::{MAIN_WINDOW_LABEL, WebviewDataRoot};
 
 /// 登录页那个 **webview** 的 label（R23 起：它是主窗的子 webview，不再是窗口）。
@@ -87,20 +86,6 @@ use crate::{MAIN_WINDOW_LABEL, WebviewDataRoot};
 /// 2. 它与主窗的 label（`main`）**必须不同**：同窗之后 `window.label()` 恒为 `main`，命令层唯一能区分
 ///    "这一帧是登录页发的还是主窗发的"的东西就是这个 **webview label**（见 `commands::require_main_webview`）。
 pub const LOGIN_WEBVIEW_LABEL: &str = "login";
-
-/// 登录页那个 webview 的 **UA**（R27 用户指令 / 控制器裁决）：HarmonyOS 移动 UA。
-///
-/// 为什么必须伪装（R26 的"不伪装 UA"裁决被本轮用户指令推翻）：服务端 `getBaseSwitchInfo`
-/// 对**桌面 UA** 只放 {red, huawei, blue, lightred}，`dark` 一律回落 `red` → 官方页拿不到深色。
-/// R27 探针（`node scripts/probe-login-mobile-ua.mjs`，摘要 `.probe/r27-mobile-ua-probe.json`）
-/// 实测这一条 UA：服务端认 `dark`、页面真的加载 `index-dark.css`、body/root 计算背景
-/// `rgb(0, 0, 0)`（真黑底），而链路的每一跳与桌面 UA 逐跳相同（没有新主机 → 白名单不需要改）。
-///
-/// 两条如实登记（详见 `docs/KNOWN_LIMITATIONS.md` B18）：
-/// - 这个 UA 会让页面按 `_utils.isMobileWap()` 换成**移动版式**：账号密码 / 短信验证码表单
-///   （探针实测 8 个输入框），页面上**没有可见的二维码入口**（原来那个桌面门户页有）；
-/// - "移动 UA 下登录能不能走完 `hms://` 回调"没有实测（要真实账号，探针只到公开页面为止）。
-pub const LOGIN_MOBILE_UA: &str = "Mozilla/5.0 (Phone; HarmonyOS 4.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36";
 
 /// 左上角那个「返回扫码登录」浮动控件的 label（R25）。
 ///
@@ -408,98 +393,6 @@ pub fn login_data_dir(data_root: &Path, partition: &str) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// 官方登录页的主题（纯函数 + 一次重载；R26 用户四项之 1+2）
-// ---------------------------------------------------------------------------
-
-/// 官方登录页认的那个查询参数名（CAS 门户页按它挑主题 CSS）。
-///
-/// probe 实测（可复现证据登记在 `docs/API_CONTRACT.md` §1.7 的 R26 段）：
-/// 页面加载的第一个脚本会 `_utils.getThemeFilePath(flowFilePath, null)`，值取自
-/// `themeName || _hwidFrontEndConfig.themeName || getUrlParam("themeName")`，最终选
-/// `.../vuebuild/css/login/portal/index-<theme>[-small].css`。
-pub const LOGIN_THEME_PARAM: &str = "themeName";
-
-/// 深色档要挂上去的值（CAS 的主题名之一，对应 `index-dark.css`）。
-///
-/// **R27 起这个值真的出深色了**：登录 webview 换 [`LOGIN_MOBILE_UA`] 之后，服务端认 `dark`
-/// （R27 探针：`getBaseSwitchInfo` 回 `dark`，页面加载 `index-dark.css`，body/root 计算背景
-/// `rgb(0,0,0)`）。R26 那句"桌面 UA 下服务端只放 {red, huawei, blue, lightred}、`dark` 一律
-/// 回落 `red`"仍然成立——它描述的是**桌面 UA**那一档，登记在 `docs/API_CONTRACT.md` §1.7。
-pub const LOGIN_THEME_NAME_DARK: &str = "dark";
-
-/// 浅色档要挂上去的值（对应 `index-huawei.css`，R27 探针实测白底 `rgb(255,255,255)`）。
-///
-/// **为什么浅色档也要显式给值**（R26 那一版是"浅色档不动这个参数"）：移动 UA 下"不带参数"
-/// 不再等于浅色——页面脚本会拿 `prefers-color-scheme` 去问服务端，系统是深色时它自己就变黑
-/// （R27 探针实测：移动 UA + 无参数 + 系统深色 → `index-dark.css` + `rgb(0,0,0)`，而应用当时
-/// 处于浅色档——那会变成"应用是浅的、登录页是黑的"）。`huawei` 是移动 UA 下服务端的**回落值**
-/// （认不出的值一律回落它），实测白底；选它而不是 `red`：`red` 是桌面档的主题名，移动 UA 下
-/// 认不出的值已经回落到 `huawei`，显式写它等于把"移动档的默认浅色"钉死。
-pub const LOGIN_THEME_NAME_LIGHT: &str = "huawei";
-
-/// 应用主题三态 → 登录页 URL 上的 `themeName`（**总是**给出一个具体值）。
-///
-/// | 档位 | 值 | 为什么 |
-/// |---|---|---|
-/// | `light` | `huawei` | 移动 UA 下服务端没有"默认浅色"这回事（见 [`LOGIN_THEME_NAME_LIGHT`]），必须显式钉住 |
-/// | `dark` | `dark` | 唯一一处"我们比服务端默认更想要深色"的地方（探针实测真黑底） |
-/// | `system` | 系统深色 → `dark`；否则 `huawei` | 打开登录页、切主题重开各取一次系统读数（不做实时监听） |
-///
-/// R27 之前这个函数返回 `Option<&str>`（`None` = 不动这个参数）。改成"总是有值"是 UA 切换的
-/// **必然**结果：三条档位各自都要一个确定的页面，靠"服务端默认"不再能表达浅色。
-pub fn login_theme_name(choice: ThemeChoice, system_dark: bool) -> &'static str {
-    match choice {
-        ThemeChoice::Dark => LOGIN_THEME_NAME_DARK,
-        ThemeChoice::Light => LOGIN_THEME_NAME_LIGHT,
-        ThemeChoice::System if system_dark => LOGIN_THEME_NAME_DARK,
-        ThemeChoice::System => LOGIN_THEME_NAME_LIGHT,
-    }
-}
-
-/// 把 `themeName` 挂到一条 URL 上（已存在就**替换**，绝不留两个同名参数）。
-///
-/// `None` = 这条 URL 解析不了（调用方原样用，不硬拼一个字符串——那会把一条能开的登录页
-/// 弄成一条开不了的东西）。
-pub fn with_theme_name(url: &str, theme_name: &str) -> Option<String> {
-    let mut parsed = tauri::Url::parse(url).ok()?;
-    let others: Vec<(String, String)> = parsed
-        .query_pairs()
-        .filter(|(name, _)| name != LOGIN_THEME_PARAM)
-        .map(|(name, value)| (name.into_owned(), value.into_owned()))
-        .collect();
-    {
-        let mut query = parsed.query_pairs_mut();
-        query.clear();
-        for (name, value) in &others {
-            query.append_pair(name, value);
-        }
-        query.append_pair(LOGIN_THEME_PARAM, theme_name);
-    }
-    Some(parsed.to_string())
-}
-
-/// 主题变了之后该把登录页重开到哪（`None` = 什么都不做）。
-///
-/// 三道闸门（R27 起 `desired` 不再是 `Option`：三态总会给出一个具体值，见 [`login_theme_name`]）：
-/// 1. 目标与**当前这一条**一模一样 → 不做（值没变却重开一次，等于白丢用户已经输进去的东西）；
-/// 2. 目标不在导航白名单里 → 不做（导航闸门对"我们自己发起的重开"同样有效）；
-/// 3. URL 解析不了 → 不做。
-///
-/// R27：调用方是 [`rebuild_login_view`]，喂进来的 `current` 是"**这一份页面当初是按哪个主题建出来的**"
-/// 那一条（`base_url` + 那一份的主题名），不是 webview 此刻的 URL——那一刻它多半已经跳到 CAS
-/// 门户页了，拿它当重开的地址是拿一个中间落地页当入口。于是三道闸门一条不少地复用在这里。
-pub fn theme_reload_target(current: &str, desired: &str) -> Option<String> {
-    let target = with_theme_name(current, desired)?;
-    if target == current {
-        return None;
-    }
-    match navigation_for(&target) {
-        Navigation::Allow => Some(target),
-        _ => None,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // 双期限与结论
 // ---------------------------------------------------------------------------
 
@@ -566,13 +459,14 @@ pub fn deadline_conclusion(elapsed: Duration, loaded: bool) -> Option<LoginConcl
 // R27：屏外 → 内容区（切换网页登录时的加载动画那一半）
 // ---------------------------------------------------------------------------
 
-/// 登录页此刻摆在哪一档（R27）。
+/// 登录页此刻摆在哪一档（R27 立、R28 只改"什么时候进 `InContent`"）。
 ///
 /// `Offscreen` 是**建出来之后的初始档**：官方页在客户区左沿之外加载，用户在门禁页上看到的是
-/// 加载动画；`PageLoadEvent::Finished`（首载完成）或首载期限到（页面可能还在转）才进 `InContent`。
+/// 加载动画；**静默窗走完**（[`LOGIN_QUIET_WINDOW_MS`]，页面真的安静下来了）或首载期限到
+/// （页面可能还在转）才进 `InContent`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Placement {
-    /// 屏外（客户区左沿之外）：还在等首载
+    /// 屏外（客户区左沿之外）：还在加载（或者刚又起了一次导航）
     Offscreen,
     /// 内容区里（铺满客户区）：跟随主窗几何
     InContent,
@@ -601,67 +495,104 @@ pub fn offscreen_rect(target: Rect) -> Rect {
     }
 }
 
+/// 静默窗的长度（毫秒，R28 用户三项之 3）：每次加载 `Finished` 之后这么久内**没有新导航**，
+/// 才算"页面真的加载完了"。
+///
+/// 为什么需要它（用户真机反馈）：点「在网页中打开登录」之后，第一个 `Finished` 落的是
+/// **authorize 中间页**——后面还有 CAS 重定向在加载。R27 那一版拿"首载 `Finished`"当"页面好了"
+/// 的信号，于是加载动画提前结束，用户看着一个"动画已经结束、页面还没好"的空窗。
+///
+/// 为什么是 1.5 秒：它量的是"两次导航之间有没有下一跳"，而不是"页面什么时候画完"——
+/// 重定向链的每一跳都在毫秒到数百毫秒级，1.5 秒足以把"还有下一跳"和"页面安静下来了"分开；
+/// 代价是最快也要多看 1.5 秒动画，而 30 秒首载期限那条兜底一个字没动（到点即摆）。
+pub const LOGIN_QUIET_WINDOW_MS: u64 = 1_500;
+
+/// 静默满一整个窗了吗？（纯函数）
+pub fn quiet_window_passed(quiet_for: Duration) -> bool {
+    quiet_for >= Duration::from_millis(LOGIN_QUIET_WINDOW_MS)
+}
+
 /// 该把登录页摆进内容区了吗？（纯函数）
 ///
 /// 两档为真，两条来路都是"用户不该再盯着加载动画了"：
-/// 1. **首载完成**（`page_ready`）：页面能看了，摆进来；
+/// 1. **`page_quiet`**：最近一次 `Finished` 之后一整窗没有新导航（页面真的安静了），摆进来；
 /// 2. **首载期限到**（[`LOGIN_LOAD_DEADLINE_SECS`]，30 秒）：页面**可能还在转**，但让人对着
 ///    一个转圈的门禁页等下去更糟——摆进来，让它自己把状态显示给用户（同一刻那条
 ///    [`deadline_conclusion`] 的首载失败结论照旧结算，两条互不影响：结论说"打不开"，
 ///    摆放说"别藏着了"）。
-pub fn placement_due(page_ready: bool, elapsed: Duration) -> bool {
-    page_ready || elapsed >= Duration::from_secs(LOGIN_LOAD_DEADLINE_SECS)
+pub fn placement_due(page_quiet: bool, elapsed: Duration) -> bool {
+    page_quiet || elapsed >= Duration::from_secs(LOGIN_LOAD_DEADLINE_SECS)
 }
 
 /// 登录页没了 = 该判 [`LoginConclusion::Closed`] 吗？（纯函数）
 ///
 /// R23 起"登录页没了"是等待方的一条兜底来路（同窗宿主里用户没有可关的窗，所以它实际意味着
-/// "那个 webview 被拆掉了"）。R27 多了一档**预期**的"不在"：切主题的**重建窗口**里，旧的那一份
-/// 已经关掉、新的那一份还没建出来——那一刻判 Closed 会把一次正常的主题切换变成"登录被关掉了"。
-/// 于是判据是两件事：**页不在** 且 **不在重建中**。
-pub fn vanish_conclusion(webview_present: bool, rebuilding: bool) -> Option<LoginConclusion> {
-    if webview_present || rebuilding {
+/// "那个 webview 被拆掉了"）。R27 曾多出一档**预期**的"页不在"（切主题的重建窗口），R28 把那条
+/// 链删掉之后判据回到一件事：**页不在**就如实判 Closed。
+pub fn vanish_conclusion(webview_present: bool) -> Option<LoginConclusion> {
+    if webview_present {
         None
     } else {
         Some(LoginConclusion::Closed)
     }
 }
 
-/// 一次登录尝试的结论槽（take-once）+ 首载标志 + 摆放/重建状态。
+/// 一次登录尝试的结论槽（take-once）+ 首载标志 + 摆放状态。
 ///
 /// **双来源就在这里收口**：导航拦截、窗口关闭事件、关闭轮询兜底、期限判定、渲染层取消——
 /// 五个生产者共用一个槽，谁先到谁算，后到的返回 `false` 且**不改写**已有结论。
 /// 这样"扫码成功"与"窗被关掉"不会再各写各的，等待方也不必猜哪个是真的。
 ///
-/// R27 追加三格（都由 [`SessionState`] 一把锁护着，因为它们说的是同一件事的连续几步）：
-/// **这一版 webview 的首载完成了没**、**摆进内容区了没**、**在不在重建窗口里**。
+/// R27 追加、R28 改语义的两格（都由 [`SessionState`] 一把锁护着，因为它们说的是同一件事的
+/// 连续几步）：**页面从哪一刻开始静默**（`Finished` 起窗、新导航撤窗）与**摆进内容区了没**。
 pub struct LoginSession {
     state: Mutex<SessionState>,
     changed: Condvar,
 }
 
-#[derive(Default)]
 struct SessionState {
     conclusion: Option<LoginConclusion>,
     /// 首载完成（**整个登录期间只记第一次**）：解除首载期限，见 [`deadline_conclusion`]。
     loaded: bool,
-    /// 这一版 webview 的首载完成（重建会重置）：摆放判据读它，见 [`placement_due`]。
-    page_ready: bool,
-    /// 已经摆进内容区了没（重建会重置）。
+    /// 最近一次 `Finished` 的时刻（`None` = 还没有 `Finished`，或刚被新导航**撤窗**）。
+    quiet_since: Option<Instant>,
+    /// 已经摆进内容区了没（摆放是一次性的：摆进来之后页面再怎么导航都不再动它）。
     placed: bool,
-    /// 这一版 webview 从哪一刻开始等首载（切主题重建时重新计时）。
-    placement_since: Option<Instant>,
-    /// 重建窗口的深度（[`LoginSession::begin_rebuild`] / [`LoginSession::end_rebuild`]）。
-    rebuilding: usize,
+    /// 这一份 webview 从哪一刻开始等（= 建出来的那一刻）：首载期限那条兜底从这里算。
+    placement_since: Instant,
+}
+
+impl SessionState {
+    /// 页面此刻是不是"静默满一整窗"了（`now` 由调用方给：测试注入确定的时间）。
+    ///
+    /// 没有静默窗（还没 `Finished` 过，或刚被新导航撤掉）→ 一律**不是**静默：宁可多看一会儿动画，
+    /// 也不要在一个"还在加载"的页面上把动画收掉（那正是用户报的那个现象）。
+    fn is_quiet_at(&self, now: Instant) -> bool {
+        self.quiet_since
+            .map(|since| quiet_window_passed(now.saturating_duration_since(since)))
+            .unwrap_or(false)
+    }
 }
 
 impl LoginSession {
     pub fn new() -> Arc<Self> {
+        Self::new_at(Instant::now())
+    }
+
+    /// 建一份会话，**起点由调用方给**（生产走 [`LoginSession::new`]，测试注入一个确定的时间）。
+    ///
+    /// 为什么起点要能注入：静默窗与首载期限都是"过了多久"的判定，而"过了多久"用 sleep 是钉不
+    /// 出来的（1.5 秒的窗，睡出来的读数是最不可靠的那种测试）。测试拿一个 `base` 之后，
+    /// `_at` 变体就能把整套时序矩阵钉在确定的时间上。
+    pub fn new_at(origin: Instant) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(SessionState {
-                // 建出来的那一刻就开始等首载：屏外那一份的摆放期限从这里算
-                placement_since: Some(Instant::now()),
-                ..SessionState::default()
+                conclusion: None,
+                loaded: false,
+                quiet_since: None,
+                placed: false,
+                // 建出来的那一刻就开始等：屏外那一份的首载期限从这里算
+                placement_since: origin,
             }),
             changed: Condvar::new(),
         })
@@ -700,24 +631,47 @@ impl LoginSession {
         lock(&self.state).loaded
     }
 
-    /// 这一版 webview 的首载完成（只记这一版的第一次）：摆放判据解除。
+    /// **一次加载完成**（`PageLoadEvent::Finished`）：起一个静默窗（R28 用户三项之 3）。
     ///
-    /// 与 [`LoginSession::mark_loaded`] 的区别：那个是"这次登录期间**曾经**加载成功过"
-    /// （首载期限一旦解除就不再回来），这个是"**当前这一份**页面能看了"——切主题重建会把它
-    /// 重置（新那一份要从屏外重新等一次首载）。
-    pub fn mark_page_ready(&self) -> bool {
-        let mut state = lock(&self.state);
-        if state.page_ready {
-            return false;
-        }
-        state.page_ready = true;
-        drop(state);
+    /// 与 [`LoginSession::mark_loaded`] 的分工：那个是"这次登录期间**曾经**加载成功过"
+    /// （首载期限一旦解除就不再回来），这个是"页面上一次加载在**这一刻**收尾了"——
+    /// 摆放判据从这一刻起算静默窗，而每一次 `Finished` 都会把它重新起表（authorize 中间页、
+    /// CAS 门户页各来一条）。
+    pub fn note_page_finished_at(&self, at: Instant) {
+        lock(&self.state).quiet_since = Some(at);
         self.changed.notify_all();
-        true
     }
 
-    pub fn is_page_ready(&self) -> bool {
-        lock(&self.state).page_ready
+    /// 见 [`LoginSession::note_page_finished_at`]（用当下这个时刻）。
+    pub fn note_page_finished(&self) {
+        self.note_page_finished_at(Instant::now());
+    }
+
+    /// **页面上起了新导航**（开始加载）：撤掉静默窗，等下一次 `Finished`（R28 用户三项之 3）。
+    ///
+    /// `true` = 这一次真的撤掉了一个窗（调用方值得记一句"撤窗"）；`false` = 本来就没在等
+    /// （已经撤过、或还没 `Finished` 过）——那再撤一次没有新信息。
+    ///
+    /// 为什么它必须存在：用户报的现象正是"第一个 `Finished`（authorize 中间页）之后还有 CAS
+    /// 重定向在加载"。有这一条，那个中间页的静默窗会被重定向当场撤掉，动画因此不会提前结束。
+    ///
+    /// 没有时刻参数：撤窗是"把那一格清掉"，与什么时候清无关（起窗的时刻由 `Finished` 那一条记）。
+    pub fn note_navigation_started(&self) -> bool {
+        let had_window = lock(&self.state).quiet_since.take().is_some();
+        if had_window {
+            self.changed.notify_all();
+        }
+        had_window
+    }
+
+    /// 页面此刻是不是"静默满一整窗"了（纯读；日志与测试用）。
+    pub fn is_quiet(&self) -> bool {
+        self.is_quiet_at(Instant::now())
+    }
+
+    /// 见 [`LoginSession::is_quiet`]（时刻由调用方给）。
+    pub fn is_quiet_at(&self, now: Instant) -> bool {
+        lock(&self.state).is_quiet_at(now)
     }
 
     /// 这一版 webview 摆进内容区了吗？——**跟随主窗几何的前置条件**（屏外期间不跟随）。
@@ -735,38 +689,16 @@ impl LoginSession {
         true
     }
 
-    /// 现在该摆进内容区了吗？（首载完成，或这一版的摆放期限到——见 [`placement_due`]）
+    /// 现在该摆进内容区了吗？（静默窗走完，或首载期限到——见 [`placement_due`]）
     pub fn placement_due(&self) -> bool {
+        self.placement_due_at(Instant::now())
+    }
+
+    /// 见 [`LoginSession::placement_due`]（时刻由调用方给：测试注入确定的时间）。
+    pub fn placement_due_at(&self, now: Instant) -> bool {
         let state = lock(&self.state);
-        let elapsed = state
-            .placement_since
-            .map(|since| since.elapsed())
-            .unwrap_or_default();
-        placement_due(state.page_ready, elapsed)
-    }
-
-    /// 进入重建窗口（切主题：关掉旧的那一份、按新参数重开一份）。
-    ///
-    /// 三格一起重置是刻意的：新的那一份页面要从**屏外**重新等一次首载，而这一小段里
-    /// "登录页不在"是预期的（[`vanish_conclusion`] 因此不会把它判成 Closed）。
-    pub fn begin_rebuild(&self) {
-        let mut state = lock(&self.state);
-        state.rebuilding = state.rebuilding.saturating_add(1);
-        state.page_ready = false;
-        state.placed = false;
-        state.placement_since = Some(Instant::now());
-    }
-
-    /// 退出重建窗口。**成败都要调**：失败时放开这一格，兜底判定才能如实把它判成 Closed。
-    pub fn end_rebuild(&self) {
-        let mut state = lock(&self.state);
-        state.rebuilding = state.rebuilding.saturating_sub(1);
-        drop(state);
-        self.changed.notify_all();
-    }
-
-    pub fn is_rebuilding(&self) -> bool {
-        lock(&self.state).rebuilding > 0
+        let elapsed = now.saturating_duration_since(state.placement_since);
+        placement_due(state.is_quiet_at(now), elapsed)
     }
 
     /// 当前该摆在哪一档（等待方每 tick 读它决定"跟不跟随"）。
@@ -796,52 +728,20 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// 一次登录尝试的**建窗参数**（R27：切主题要按新主题把登录页**重开**一份，重建需要原样的
-/// 数据根、数据目录、授权页 URL 与"这一份是哪个主题"，而 webview 建出来之后 tauri 不提供
-/// `data_directory()`/`user_agent()` 之类的读取口）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoginBuildSpec {
-    /// 数据根：代理按 label 解析要用它（与首次建页同一条 [`crate::webview_proxy::resolve_for_webview`]）
-    pub data_root: PathBuf,
-    /// 这一份登录页的一次性 webview 数据目录。
-    ///
-    /// 重建**复用同一个**（不换 partition）：tauri 的 `WebContextStore` 按数据目录缓存 WebView2
-    /// 环境，同一个目录 = 复用同一个环境；换一个目录就要在多建一棵一次性目录的同时，
-    /// 冒"旧环境还没释放就又建一个新的"的风险（WebView2 的 `ERROR_BUSY`，0x800700AA）。
-    pub login_data: PathBuf,
-    /// **未挂主题参数**的官方授权页 URL（`host:open-login` 收到的那一条）。
-    ///
-    /// 重建按它 + 新主题名重新挂一次参数：拿 webview 此刻的 URL 当重开的地址是不行的
-    /// （那一刻它多半已经跳到 CAS 门户页 `/CAS/portal/loginAuth.html?…`）。
-    pub base_url: String,
-    /// 这一份页面建出来时用的主题名（[`login_theme_name`] 的取值）。
-    ///
-    /// "值没变就不重开"这条闸门比的就是它（见 [`theme_reload_target`]）——`base_url` 上
-    /// 那个参数是挂出来的结果，比"当初用了哪个值"更容易被别的东西改坏。
-    pub theme: &'static str,
-}
-
-/// 正在进行的那一次登录：会话 + 它的建窗参数。
-#[derive(Clone)]
-struct ActiveLogin {
-    session: Arc<LoginSession>,
-    spec: LoginBuildSpec,
-}
-
 /// 登录独占状态：同一时刻只允许一次登录（并排第二次只聚焦既有窗）。
 #[derive(Default)]
 pub struct LoginState {
-    active: Mutex<Option<ActiveLogin>>,
+    active: Mutex<Option<Arc<LoginSession>>>,
 }
 
 impl LoginState {
     /// 登记一次登录。`false` = 已有进行中的登录（调用方聚焦既有窗 + 报结构化错误）。
-    pub fn begin(&self, session: Arc<LoginSession>, spec: LoginBuildSpec) -> bool {
+    pub fn begin(&self, session: Arc<LoginSession>) -> bool {
         let mut active = lock(&self.active);
         if active.is_some() {
             return false;
         }
-        *active = Some(ActiveLogin { session, spec });
+        *active = Some(session);
         true
     }
 
@@ -851,22 +751,7 @@ impl LoginState {
     }
 
     pub fn session(&self) -> Option<Arc<LoginSession>> {
-        lock(&self.active).as_ref().map(|active| Arc::clone(&active.session))
-    }
-
-    /// 这一次登录的建窗参数（切主题重建用；没有进行中的登录时是 `None`）。
-    pub fn spec(&self) -> Option<LoginBuildSpec> {
-        lock(&self.active).as_ref().map(|active| active.spec.clone())
-    }
-
-    /// 记下"现在这一份页面用的是哪个主题"（切主题重开**成功之后**调，R27）。
-    ///
-    /// 为什么必须回写：下一次切主题时"值没变就不重开"这条闸门读的就是它；不回写的话
-    /// 第二次切回同一个档位会再白重开一次（用户已经输进去的东西又丢一遍）。
-    pub fn set_theme(&self, theme: &'static str) {
-        if let Some(active) = lock(&self.active).as_mut() {
-            active.spec.theme = theme;
-        }
+        lock(&self.active).as_ref().map(Arc::clone)
     }
 
     pub fn is_active(&self) -> bool {
@@ -1042,25 +927,10 @@ pub fn open_login(
     request_id: &str,
     payload: &Value,
 ) -> Result<(), CoreError> {
-    let mut config = parse_config(payload)?;
-    // R26 立、R27 改（用户四项之 1+2）：按**当前**主题给登录页 URL 挂上 `themeName`。
-    // R27 起三态**总是**给出一个具体值（浅色档挂 `huawei`，理由见 [`login_theme_name`]）：
-    // 移动 UA 下"不带参数"不再等于浅色（页面会拿 prefers-color-scheme 去问服务端）。
-    // 白名单校验在上面已经过了：多一个查询参数不改变 origin/path，它仍然是那条能开的授权地址。
-    let theme_name = effective_login_theme(app);
-    // R27：**未挂主题参数**的那一条先留一份——切主题重建要按它 + 新主题名重新挂一次
-    //（webview 建出来之后读不回 URL，那一刻它也已经跳到 CAS 门户页了）。
-    let base_url = config.url.clone();
-    match with_theme_name(&config.url, theme_name) {
-        Some(decorated) => {
-            log::info!(
-                "登录页按应用主题挂上 {LOGIN_THEME_PARAM}={theme_name}（打开时取的主题；移动 UA 下的服务端裁决见 §1.7 的 R27 段）"
-            );
-            config.url = decorated;
-        }
-        // 解析不了就原样用：宁可少一个主题参数，也不能让这次登录开不起来
-        None => log::warn!("登录页 URL 解析不了，{LOGIN_THEME_PARAM} 没挂上（登录照常）"),
-    }
+    // R28 用户指令（推翻 R26/R27 裁决）：**打开的就是服务端给的那一条 URL**——不挂主题查询参数、
+    // 不复用任何"按主题重开"的机制（那套东西已经整体删掉）。官方页按它自己的默认渲染，
+    // 应用主题只影响自家 UI；白名单校验照旧（`parse_config` 已经过了，一个字都没变）。
+    let config = parse_config(payload)?;
     let data_root = app
         .try_state::<WebviewDataRoot>()
         .map(|state| state.0.clone())
@@ -1072,15 +942,7 @@ pub fn open_login(
 
     let login_data = login_data_dir(&data_root, &config.partition);
     let session = LoginSession::new();
-    // R27：建窗参数与这次登录一起登记——切主题重建要按同一份数据根/数据目录把页面重开一份，
-    // 并按 `base_url` + 新主题名重新挂一次参数（webview 建出来之后读不回这些）。
-    let spec = LoginBuildSpec {
-        data_root: data_root.clone(),
-        login_data: login_data.clone(),
-        base_url,
-        theme: theme_name,
-    };
-    if !state.begin(Arc::clone(&session), spec) {
+    if !state.begin(Arc::clone(&session)) {
         focus_login_view(app);
         return Err(CoreError::new("login_in_progress", LOGIN_IN_PROGRESS_MESSAGE));
     }
@@ -1166,9 +1028,8 @@ fn run_login_view(
         }
     };
 
-    // 建页交付的句柄只用来"知道建成了"。**收尾不拿它**：R27 起切主题会把登录页关掉重开一份，
-    // 手里这个旧句柄指向的是那一份已经不在了的页面——收尾一律按 label 找**当前**那一份
-    //（见 [`shutdown_login_view`]），否则重建之后每一次收尾都会拿死句柄去 close 而误报"残留"。
+    // 建页交付的句柄只用来"知道建成了"。**收尾不拿它**：收尾一律按 label 找**当前**那一份
+    //（见 [`shutdown_login_view`]），免得拿一个可能的死句柄去 close 而误报"残留"。
     let _built = webview;
 
     let conclusion = wait_for_conclusion(&app, &session);
@@ -1206,14 +1067,15 @@ fn wait_for_conclusion(app: &AppHandle, session: &Arc<LoginSession>) -> LoginCon
         }
         // 登录页没了而结论槽还空着：兜底判 Closed（事件路径之外的第二条来源，绝不让等待方挂到超时）。
         // 同窗宿主里这不是"用户关了窗"，而是"那个 webview 被拆掉了"（应用退出 / 收尾先行）。
-        // R27：切主题的重建窗口里"页不在"是**预期**的（旧那份已关、新那份还没建出来）——
-        // 那一刻判 Closed 会把一次正常的主题切换变成"登录被关掉了"（见 [`vanish_conclusion`]）。
         let present = app.get_webview(LOGIN_WEBVIEW_LABEL).is_some();
-        if let Some(conclusion) = vanish_conclusion(present, session.is_rebuilding()) {
+        if let Some(conclusion) = vanish_conclusion(present) {
             session.settle(conclusion.clone());
             return session.conclusion().unwrap_or(conclusion);
         }
-        // R27：屏外 → 内容区的那一次摆放（首载完成，或首载期限到）。
+        // R27 立、R28 改判据：屏外 → 内容区的那一次摆放（**静默窗走完**，或首载期限到）。
+        //
+        // 每 tick 现问一次"页面静默满 1.5 秒了吗"：静默窗是"最近一次 `Finished` 之后没有新导航"
+        // 这一件事，而新导航（CAS 重定向）随时可能把窗撤掉——所以判据不缓存，一次一处地算。
         //
         // **排在期限判定之前**：两条来路都盯着同一个 30 秒（[`placement_due`] 与
         // [`deadline_conclusion`]），同一 tick 里先"摆出来给用户看"、再按既有契约结算首载失败
@@ -1224,7 +1086,7 @@ fn wait_for_conclusion(app: &AppHandle, session: &Arc<LoginSession>) -> LoginCon
                     placement_note.observe(FollowState::Applied); // 摆成了：把"摆不动"那条记录复位
                     if session.mark_placed() {
                         log::info!(
-                            "登录页摆进内容区（首载完成或首载期限到）：rect=({},{},{},{})——此前一直摆在屏外，门禁页上的加载动画到此为止",
+                            "登录页摆进内容区（静默窗走完或首载期限到）：rect=({},{},{},{})——此前一直摆在屏外，门禁页上的加载动画到此为止",
                             target.x,
                             target.y,
                             target.width,
@@ -1299,7 +1161,7 @@ fn wait_for_conclusion(app: &AppHandle, session: &Arc<LoginSession>) -> LoginCon
     }
 }
 
-/// 把**屏外**的登录页摆进内容区（首载完成，或首载期限到——两条来路共用这一处）。
+/// 把**屏外**的登录页摆进内容区（静默窗走完，或首载期限到——两条来路共用这一处）。
 ///
 /// 几何用的是**那一刻**的客户区读数（不是创建时那一份）：屏外期间用户可能已经把主窗拖大/缩小，
 /// 而屏外期间我们刻意没跟随过登录页。
@@ -1323,18 +1185,14 @@ fn place_login_view(app: &AppHandle) -> Result<Rect, CoreError> {
 
 /// 建登录页（投到主线程执行：webview 的创建要在事件循环线程上）。
 ///
-/// R27：`url` 是**已经挂好主题参数**的那一条（`open_login` 挂的 / 重建时现挂的），不再是整个
-/// config——切主题重建时调用方手里只有"目标 URL + 数据根 + 数据目录"三样（见 [`rebuild_login_view`]）。
-///
-/// R27 起对运行时泛型（`R`）：切主题那一条路的入口 [`reapply_login_theme`] 是泛型的
-/// （`theme::set_theme<R>` 调它），它要能走到这条既有的建页链上，而不是另写一份。
-fn create_login_view<R: tauri::Runtime>(
-    app: &AppHandle<R>,
+/// `url` 是 `host:open-login` 收到的那一条（R28 起**原样**打开：不挂主题参数、不重开）。
+fn create_login_view(
+    app: &AppHandle,
     url: &str,
     data_root: &Path,
     login_data: &Path,
     session: &Arc<LoginSession>,
-) -> Result<Webview<R>, CoreError> {
+) -> Result<Webview, CoreError> {
     let url = tauri::Url::parse(url)
         .map_err(|_| invalid_payload("url 解析不了（parse_config 之后不该发生）"))?;
 
@@ -1436,7 +1294,7 @@ fn create_login_view<R: tauri::Runtime>(
 /// 无人等待的孤儿页更好；页真的建出来了的话，交付守卫也会连目录一起清掉。
 ///
 /// R25：浮动控件与登录页同生同灭，这条路也要连它们一起收（见 [`close_login_chrome`]）。
-fn discard_pending_login_view<R: tauri::Runtime>(app: &AppHandle<R>) {
+fn discard_pending_login_view(app: &AppHandle) {
     let Some(webview) = app.get_webview(LOGIN_WEBVIEW_LABEL) else {
         return; // 还没建出来：闭包侧的交付守卫会接住它
     };
@@ -1455,7 +1313,7 @@ fn discard_pending_login_view<R: tauri::Runtime>(app: &AppHandle<R>) {
 /// `core_login_chrome` 的来源资格（守卫按 label 放行），留着就是留一个多余的命令入口。
 ///
 /// 幂等：标签不在表里就是"本来就没有"（正常路径上它们与登录页一起收，这里只是兜底）。
-pub fn close_login_chrome<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+pub fn close_login_chrome(app: &AppHandle) -> Result<(), String> {
     let mut problems = Vec::new();
     for label in LOGIN_CHROME_LABELS {
         let Some(webview) = app.get_webview(label) else {
@@ -1485,14 +1343,14 @@ pub fn close_login_chrome<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<(), S
 ///   没有它用户就被困在一个没有出口的登录页上（宁可结构化失败，也不要一个关不掉的登录页）；
 /// - `login-theme` 失败只是少了主题控件（登录本身照常），留一行 warn。
 #[allow(clippy::too_many_arguments)]
-fn build_on_main_thread<R: tauri::Runtime>(
-    app: &AppHandle<R>,
+fn build_on_main_thread(
+    app: &AppHandle,
     url: tauri::Url,
     login_data: PathBuf,
     proxy: Option<tauri::Url>,
     nav_session: Arc<LoginSession>,
     load_session: Arc<LoginSession>,
-) -> Result<Webview<R>, CoreError> {
+) -> Result<Webview, CoreError> {
     let main = app.get_window(MAIN_WINDOW_LABEL).ok_or_else(|| {
         CoreError::new(
             "internal",
@@ -1532,10 +1390,10 @@ fn build_on_main_thread<R: tauri::Runtime>(
         }
     };
     let chrome = chrome_rects(area.width, area.height, area.trusted_scale());
-    // R27：登录页**先摆在屏外**（客户区左沿之外）等首载——门禁页底下显示加载动画，用户不再
-    // 对着一个还在加载的白页。首载完成或首载期限到，等待方把它摆进下面这个 `target`
-    //（见 [`placement_due`] / [`place_login_view`]）。浮动控件**照常摆在客户区里**：屏外那一段
-    // 里它们是唯一可点的东西（「返回扫码登录」/ 主题三档），没有它们用户就只能干等。
+    // R27 立、R28 改判据：登录页**先摆在屏外**（客户区左沿之外）加载——门禁页底下显示加载动画，
+    // 用户不再对着一个还在加载的白页。**静默窗走完**或首载期限到，等待方把它摆进下面这个
+    // `target`（见 [`placement_due`] / [`place_login_view`]）。浮动控件**照常摆在客户区里**：
+    // 屏外那一段里它们是唯一可点的东西（「返回扫码登录」/ 主题三档），没有它们用户就只能干等。
     let offscreen = offscreen_rect(target);
 
     // R16：把这次登录要打开的地址记下来（**只记形状**：origin+path+参数名，见 describe_navigation_for_log）。
@@ -1544,7 +1402,7 @@ fn build_on_main_thread<R: tauri::Runtime>(
     // R25：`topInset` 那一格退休（登录页铺满整窗），换成两个浮动控件的矩形。
     // R27：登录页那一格记的是**屏外**的 rect，内容区目标 rect 同时在行里（摆放那一步会再记一条）。
     log::info!(
-        "登录页创建（主窗内第二 webview；先摆在屏外等首载）：url={} partition={} {} 屏外=({},{},{},{}) 内容区目标=({},{},{},{}) 浮动控件=返回({},{},{},{})/主题({},{},{},{})",
+        "登录页创建（主窗内第二 webview；先摆在屏外等静默窗）：url={} partition={} {} 屏外=({},{},{},{}) 内容区目标=({},{},{},{}) 浮动控件=返回({},{},{},{})/主题({},{},{},{})",
         describe_navigation_for_log(url.as_str()),
         config_partition_hint(&login_data),
         area.describe(),
@@ -1566,10 +1424,8 @@ fn build_on_main_thread<R: tauri::Runtime>(
         chrome[1].height
     );
 
+    // R28 用户指令：**不设 UA**——WebView2 用自己的默认桌面 UA（R27 那条移动 UA 已删）。
     let mut builder = WebviewBuilder::new(LOGIN_WEBVIEW_LABEL, WebviewUrl::External(url))
-        // R27：**HarmonyOS 移动 UA**——桌面 UA 下服务端不给深色（`dark` 回落 `red`），
-        // 移动 UA 是唯一一条出真黑底的路（探针证据见 [`LOGIN_MOBILE_UA`]）。
-        .user_agent(LOGIN_MOBILE_UA)
         .data_directory(login_data.clone())
         // 白名单 + hms:// 拦截全部走导航事件（登录页零注入：不订阅 initialization_script 那条路）
         .on_navigation(move |url| {
@@ -1583,7 +1439,18 @@ fn build_on_main_thread<R: tauri::Runtime>(
                 Navigation::Callback(_) => {
                     log::info!("登录页收到登录回调：{described}（交给 core 判定真伪）")
                 }
-                Navigation::Allow => log::debug!("登录页导航放行：{described}"),
+                // R28：放行的导航**当场撤掉静默窗**——这正是用户报的那条链上的那一跳
+                //（authorize 中间页 `Finished` 之后，CAS 重定向是**新的一次导航**）。
+                // 拦下的两条不撤：它们不会加载任何东西，没有"还在加载"可言。
+                Navigation::Allow => {
+                    if nav_session.note_navigation_started() {
+                        log::info!(
+                            "登录页起了一次新导航：{described}（撤掉上一次的静默窗，等这一次加载完成）"
+                        );
+                    } else {
+                        log::debug!("登录页导航放行：{described}");
+                    }
+                }
             }
             match decision {
                 Navigation::Callback(original) => {
@@ -1599,18 +1466,28 @@ fn build_on_main_thread<R: tauri::Runtime>(
         // 首载/失败都要记：只认 Finished 的话，"页面开始加载了但一直没完成"这件事在日志里
         // 就是一片空白（首载 30 秒超时那条结论到了，却没人知道卡在哪一页）。
         //
-        // R27：`Finished` 还负责**这一版 webview 的首载完成**标志——等待方据此把它从屏外摆进
-        // 内容区（真正的 `set_position` 由等待方那一侧做：它是唯一拿着客户区读数的地方，
-        // 而本回调跑在主线程上，不该在这儿再算一次几何）。后续导航（CAS 跳转、重开）也会各自
-        // 来一条 Finished：`page_ready` 只认第一次，多来几条不影响。
+        // R27 立、R28 改判据：`Finished` **起一个静默窗**，等待方据此把它从屏外摆进内容区
+        //（真正的 `set_position` 由等待方那一侧做：它是唯一拿着客户区读数的地方，而本回调跑在
+        // 主线程上，不该在这儿再算一次几何）。每一次加载各自来一条 `Finished`（authorize 中间页、
+        // CAS 门户页……），所以这里的判据不是"第一次"，而是"最近一次"——中途有新导航就撤窗。
         .on_page_load(move |_webview, payload| {
             let described = describe_navigation_for_log(payload.url().as_str());
             match payload.event() {
-                PageLoadEvent::Started => log::info!("登录页开始加载：{described}"),
+                // 内容真的开始加载了：撤窗（与 on_navigation 那一条同一个动作，两道防线都留着
+                // ——导航事件与加载事件在 wry 里是两条独立的回调，任一条到了都算"还在加载"）
+                PageLoadEvent::Started => {
+                    if load_session.note_navigation_started() {
+                        log::info!("登录页开始加载：{described}（撤掉上一次的静默窗）");
+                    } else {
+                        log::info!("登录页开始加载：{described}");
+                    }
+                }
                 PageLoadEvent::Finished => {
-                    log::info!("登录页加载完成：{described}");
+                    log::info!(
+                        "登录页加载完成：{described}（起一个静默窗：窗内没有新导航才摆进内容区）"
+                    );
                     load_session.mark_loaded();
-                    load_session.mark_page_ready();
+                    load_session.note_page_finished();
                 }
             }
         });
@@ -1684,8 +1561,8 @@ fn build_on_main_thread<R: tauri::Runtime>(
 ///
 /// 导航闸门：控件手里握着 `core_login_chrome` 的来源资格（守卫按 label 放行），所以它**只许**
 /// 停在应用自己的本地页面上——任何别的导航一律拦下（见 [`chrome_navigation_allowed`]）。
-fn build_chrome_on_main_thread<R: tauri::Runtime>(
-    main: &tauri::Window<R>,
+fn build_chrome_on_main_thread(
+    main: &tauri::Window,
     label: &str,
     kind: &str,
     login_data: &Path,
@@ -1757,7 +1634,7 @@ fn config_partition_hint(dir: &Path) -> String {
 /// 单位真相见 [`ClientArea`]：客户区尺寸是**物理**像素、`scale` 是 DPI 缩放比——R24 已按 vendored
 /// 源码核实（tao `GetClientRect` + `GetDpiForWindow`；`add_child`/`set_position`/`set_size` 收的也是
 /// 物理像素、相对父窗客户区，wry `webview2/mod.rs:1553-1560`），**原本就没有被谁除过**。
-fn read_client_area<R: tauri::Runtime>(main: &tauri::Window<R>) -> Result<ClientArea, CoreError> {
+fn read_client_area(main: &tauri::Window) -> Result<ClientArea, CoreError> {
     let scale = main.scale_factor().unwrap_or(1.0);
     let size = main
         .inner_size()
@@ -1983,8 +1860,10 @@ pub fn shutdown_failures(outcome: &ShutdownOutcome) -> Vec<ShutdownFailure> {
 /// wry 关掉 WebView2 控制器）。于是 [`ShutdownOutcome::destroy`] 这一格的含义变成"**再关一次**"：
 /// `close()` 之后表里还有它，说明第一次没成功，重试是仅剩的手段（幂等，失败才算真残留）。
 ///
-/// **R27 起按 label 找当前那一份**（不再收调用方手里的句柄）：切主题会把登录页关掉重开一份，
-/// 旧句柄指的是那一份已经不在了的页面——拿死句柄去 close 会把每一次收尾都误报成"残留"。
+/// **按 label 找当前那一份**（不收调用方手里的句柄）：建页交付的那个句柄只说明"建成了"，
+/// 而收尾与建页之间隔着整次登录（用户可能在页面上点了任何东西、页面也可能已经自己换了文档）
+/// ——按 label 找当下真实存在的那一份，免得拿一个可能的死句柄去 close 而把每一次收尾都误报成
+/// "残留"。
 pub fn shutdown_login_view(app: &AppHandle, data_dir: &Path) -> Vec<ShutdownFailure> {
     let closed = close_login_view_now(app);
     let data_dir = remove_dir_with_backoff(data_dir);
@@ -2006,16 +1885,11 @@ struct CloseOutcome {
     destroy: Result<(), String>,
 }
 
-/// 关掉当前的登录页与两个浮动控件，**不动数据目录**。
+/// 关掉当前的登录页与两个浮动控件，**不动数据目录**（目录归 [`shutdown_login_view`] 删）。
 ///
-/// 两条调用者：
-/// - [`shutdown_login_view`]（收尾：后面接着删目录）；
-/// - [`rebuild_login_view`]（切主题重开：目录**必须留着**——同一个目录 = 复用同一个 WebView2
-///   环境，见 [`LoginBuildSpec::login_data`]）。
-///
-/// 页本来就不在（重建窗口、或收尾先行）时，前三格如实记 `Ok`：那一步确实没有失败可言
+/// 页本来就不在（收尾先行）时，前三格如实记 `Ok`：那一步确实没有失败可言
 /// ——"没什么可关"不是"关不掉"。只有 `close` 之后表里**还有**它才算真残留。
-fn close_login_view_now<R: tauri::Runtime>(app: &AppHandle<R>) -> CloseOutcome {
+fn close_login_view_now(app: &AppHandle) -> CloseOutcome {
     let Some(webview) = app.get_webview(LOGIN_WEBVIEW_LABEL) else {
         // 页不在了：清浏览数据与关闭都无从谈起（浮动控件照旧要收）
         let chrome = close_login_chrome(app);
@@ -2057,7 +1931,7 @@ pub trait DiscardableWindow {
     fn discard(&self) -> Result<(), String>;
 }
 
-impl<R: tauri::Runtime> DiscardableWindow for Webview<R> {
+impl DiscardableWindow for Webview {
     fn discard(&self) -> Result<(), String> {
         self.close().map_err(|source| source.to_string())
     }
@@ -2196,162 +2070,6 @@ fn focus_login_view(app: &AppHandle) {
         let _ = webview.show();
         let _ = webview.set_focus();
     }
-}
-
-/// 系统此刻是不是深色（只有 `system` 档才问这一句）。
-///
-/// 读数来自主窗（tao 在 Windows 上读的是系统"应用模式"）。**读不到就按浅色处理**：这是保守的
-/// 一侧——拿不到系统读数时不该替用户把登录页变成深色，而深色今天在桌面 UA 下本来也拿不到
-/// （见 [`LOGIN_THEME_NAME_DARK`]）。
-fn system_is_dark<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
-    match app.get_window(MAIN_WINDOW_LABEL).map(|window| window.theme()) {
-        Some(Ok(tauri::Theme::Dark)) => true,
-        Some(Ok(tauri::Theme::Light)) => false,
-        _ => {
-            log::warn!("读不到系统深浅：跟随系统这一档按浅色处理（不替用户把登录页变成深色）");
-            false
-        }
-    }
-}
-
-/// 当前**生效**的登录页主题名。打开登录页、切主题重开两处都走这一个入口，
-/// 两处因此不可能算出两个答案。
-///
-/// R27 起返回 `&'static str`（不再是 `Option`）：三态**总是**给出一个具体值
-/// （浅色档也有值，理由见 [`LOGIN_THEME_NAME_LIGHT`]），所以"没有值"这一档不存在了。
-/// `system` 档在这里读一次系统深浅（打开登录页、切主题重开各取一次，不做实时监听）。
-fn effective_login_theme<R: tauri::Runtime>(app: &AppHandle<R>) -> &'static str {
-    let choice = crate::theme::current_theme(app);
-    let system_dark = matches!(choice, ThemeChoice::System) && system_is_dark(app);
-    login_theme_name(choice, system_dark)
-}
-
-/// 主题改了之后，把**已经开着**的登录页**关掉、按新的主题参数重开一份**（R27 用户三项之 1）。
-///
-/// 什么时候什么都不做：
-/// - 没有进行中的登录（登录页没开着）——主题只影响**下一次**打开；
-/// - 算出来的目标与"这一份当初是按哪个主题建的"一模一样（见 [`theme_reload_target`] 的三道闸门）。
-///
-/// **为什么是重建而不是导航**（R26 那一版导航到新 URL）：`user_agent` 是**建 webview 时**的属性
-/// （`WebviewBuilder`，运行期没有 setter），而"移动 UA"本身就是 R27 的深色前提——一条改不动 UA
-/// 的通路在切主题这件事上迟早要绕回来重建，不如现在就走那条可靠的路。
-///
-/// 为什么另起一条线程：调用方是 [`crate::theme::set_theme`]，而它由**同步**命令
-/// `core_login_chrome` 在主线程上执行；建页那一链（`run_on_main_thread` → `add_child`）要在主线程
-/// 上跑完，在主线程上同步等它 = 自锁。回执不受这里影响：重开失败只是"官方页还是旧主题"，
-/// 而"主题改了"这件事已经成立。
-pub fn reapply_login_theme<R: tauri::Runtime>(app: &AppHandle<R>) {
-    let app = app.clone();
-    let spawned = std::thread::Builder::new()
-        .name("login-theme".to_string())
-        .spawn(move || rebuild_login_view(&app));
-    if let Err(source) = spawned {
-        log::warn!("登录页主题重开线程起不来（{source}）：官方页保持原样，主题本身已经改了");
-    }
-}
-
-/// 切主题的正体：关掉当前那一份 → 按新主题重开一份（同一个数据目录、同一条收尾链）。
-///
-/// 四步的顺序都是硬要求：
-/// 1. **先算目标再关旧的**：重开的地址由 `base_url` + 新主题名算出来（不是读旧 webview 的
-///    URL——那一刻它多半已经跳到 CAS 门户页了）；
-/// 2. **进重建窗口**（[`LoginSession::begin_rebuild`]）：这一小段里"登录页不在"是**预期**的，
-///    不挡住等待方那条"页没了 → `Closed`"的兜底，一次正常的主题切换会被判成"登录被关掉了"；
-/// 3. **关掉旧的**（登录页 + 两个浮动控件，**不删数据目录**）：label 是同名的，旧的还在就建不出
-///    新的（`WebviewLabelAlreadyExists`）；同一个数据目录 = 复用同一个 WebView2 环境；
-/// 4. **失败就把这次登录如实收场**（`Closed`）：重建失败意味着登录页**真的没了**，
-///    留一个没有页面的会话只会让用户对着门禁页干等到总期限。收尾那一链是既有的，不另写一份。
-///
-/// 成败都要退出重建窗口（[`LoginSession::end_rebuild`]）：失败时放开这一格，兜底判定才能
-/// 如实把它判成 `Closed`。
-fn rebuild_login_view<R: tauri::Runtime>(app: &AppHandle<R>) {
-    let Some(state) = app.try_state::<Arc<LoginState>>() else {
-        return; // 状态没登记：登录也开不起来，这里更无事可做
-    };
-    if !state.is_active() {
-        return; // 没有进行中的登录：主题只影响下一次打开
-    }
-    let Some(spec) = state.spec() else {
-        return;
-    };
-    let Some(session) = state.session() else {
-        return;
-    };
-    let desired = effective_login_theme(app);
-    // "这一份当初是按哪个主题建的"那一条：与 `theme_reload_target` 比的就是它
-    let Some(current) = with_theme_name(&spec.base_url, spec.theme) else {
-        log::warn!("登录页主题重开：这一份的授权页 URL 解析不了：官方页保持原样，登录照常");
-        return;
-    };
-    let Some(target) = theme_reload_target(&current, desired) else {
-        // 值没变 / 白名单外 / 解析不了：三种情况在这一处收口，都是"不做"
-        log::debug!("登录页主题重开：不需要（目标与当前一致，或它不在导航白名单里）");
-        return;
-    };
-    // 白名单闸门在上面 [`theme_reload_target`] 里已经过了（它是这一条链上唯一的闸门）：
-    // 这里只做"能交给建页链的 URL"这一件事。
-    let Ok(url) = tauri::Url::parse(&target) else {
-        log::warn!("登录页主题重开：目标 URL 解析不了：官方页保持原样");
-        return;
-    };
-
-    session.begin_rebuild();
-    let outcome = reopen_login_view(app, &url, &spec, &session, &state);
-    session.end_rebuild();
-
-    match outcome {
-        Ok(()) => {
-            state.set_theme(desired);
-            log::info!(
-                "登录页按新主题重开：{LOGIN_THEME_PARAM}={desired}（关掉旧那一份 → {}；同一个数据目录，旧页里已输入的账号密码会随之清空）",
-                describe_navigation_for_log(&target)
-            );
-        }
-        Err(reason) => {
-            log::warn!("登录页主题重开失败（{reason}）：这次登录按「登录页没了」收场，用户可以重新打开");
-            session.settle(LoginConclusion::Closed);
-        }
-    }
-}
-
-/// 关掉旧那一份 → 按 `url` 建新那一份（[`rebuild_login_view`] 的第 3 步）。
-///
-/// 关不干净就**不建**：label 同名，旧的还挂着时 `add_child` 必然撞
-/// `WebviewLabelAlreadyExists`，那时新页建不出来、旧页也已经被拆了一半——比"重开失败"更糟。
-///
-/// 建出来之后还要看一眼"这次登录是不是已经收场了"：重建要几百毫秒，用户完全可能在这段时间里
-/// 点了「返回扫码登录」——那一刻收尾链已经按 label 找过一遍了（它找到的是**旧**那一份），
-/// 找不到这一份刚建出来的。放着不管就是把一份没人等的官方页留在主窗上（而且它那个一次性数据
-/// 目录是在收尾之后被 `create_dir_all` 重新建出来的，里面会有新的 cookie）——所以走既有的
-/// [`discard_orphan_login_window`]（关页 + 退避删目录），与"建页超时留下的孤儿页"同一条纪律。
-fn reopen_login_view<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-    url: &tauri::Url,
-    spec: &LoginBuildSpec,
-    session: &Arc<LoginSession>,
-    state: &Arc<LoginState>,
-) -> Result<(), String> {
-    let closed = close_login_view_now(app);
-    if closed.still_present {
-        return Err(format!(
-            "旧那一份登录页没能关掉（{}）：不敢在同一个 label 上再建一份",
-            closed
-                .destroy
-                .err()
-                .or(closed.close.err())
-                .unwrap_or_else(|| "原因未知".to_string())
-        ));
-    }
-    let built = create_login_view(app, url.as_str(), &spec.data_root, &spec.login_data, session)
-        .map_err(|error| error.message)?;
-    // 建出来之后这次登录可能已经收场了（见本函数的说明）：就地按孤儿页处理
-    if !state.is_active() {
-        log::warn!("登录页重开建出来时这次登录已经收场（用户多半在这段时间里点了「返回扫码登录」）：就地关掉这一份，不留在主窗上");
-        if let Err(reason) = discard_orphan_login_window(&built, &spec.login_data) {
-            log::warn!("重开那一份孤儿登录页没能清干净（{reason}）：它可能还铺在主窗上");
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -2547,7 +2265,7 @@ mod tests {
             .find("WebviewBuilder::new(LOGIN_WEBVIEW_LABEL")
             .expect("登录页要由 WebviewBuilder 建");
         let chrome_builder = production
-            .find("fn build_chrome_on_main_thread<")
+            .find("fn build_chrome_on_main_thread(")
             .expect("浮动控件的建窗要有具名函数");
         let login_section = &production[login_builder..chrome_builder];
         assert!(
@@ -2884,7 +2602,7 @@ mod tests {
 
         // 透明 + 本地页面 + 导航闸门：三条都在建控件那一个函数里
         let chrome_builder = production
-            .find("fn build_chrome_on_main_thread<")
+            .find("fn build_chrome_on_main_thread(")
             .expect("浮动控件的建窗要有一个具名函数");
         let body = &production[chrome_builder..];
         let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
@@ -2999,110 +2717,20 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // R26：官方登录页的主题（用户四项之 1+2）· R27 改档
+    // R27 立、R28 改判据：登录页先摆在**屏外**加载，静默窗走完才摆进内容区
     //
-    // 用户反馈："切换深色后嵌入官方页仍是白色"。R26 probe 实测（证据登记在
-    // docs/API_CONTRACT.md §1.7 的 R26 段）：官方页的主题 CSS 由 **URL 上的 themeName**
-    // 经 CAS 链选出来（`getThemeFilePath`：`login/portal/index-<theme>.css`），
-    // 但**服务端对桌面 UA 只放 {red, huawei, blue, lightred}**——`dark` 会被回落成 `red`。
-    //
-    // R27（控制器裁决 + 用户指令）：登录 webview 换 **HarmonyOS 移动 UA**，`dark` 真的出深色
-    //（R27 probe 实测 `index-dark.css` + body/root `rgb(0,0,0)`）。改档带来两处**必然**变化：
-    // 1. 三态**总是**给出一个具体值（移动 UA 下"不带参数"不再等于浅色）；
-    // 2. 切主题从"导航到新 URL"改成"**关掉重开**"（`user_agent` 是建 webview 时的属性，
-    //    运行期没有 setter —— 重建比事后改可靠）。
+    // 历史：R26 让官方页跟随应用主题（URL 上的主题查询参数），R27 换成移动 UA + 切主题关掉重开。
+    // **R28 用户指令（2026-10-20）把这两条整体推翻**：官方页按它自己的默认渲染、UA 回到宿主默认、
+    // 主题那套机制删干净（见本模块末尾那两条 R28 钉子）。留下的这一半是"加载动画要等到页面真的
+    // 加载完"——判据从"首载 Finished"改成"静默窗"（矩阵见
+    // `the_login_page_is_placed_only_after_a_quiet_window`）。
     // -----------------------------------------------------------------------
 
-    /// 三态 → 一个**具体**的主题名（R27 起不再是 `Option`，理由见 [`login_theme_name`]）。
-    #[test]
-    fn the_login_theme_name_always_gives_a_concrete_value_for_the_three_states() {
-        assert_eq!(LOGIN_THEME_PARAM, "themeName");
-        assert_eq!(LOGIN_THEME_NAME_DARK, "dark");
-        assert_eq!(LOGIN_THEME_NAME_LIGHT, "huawei");
-
-        assert_eq!(login_theme_name(ThemeChoice::Dark, false), "dark");
-        assert_eq!(login_theme_name(ThemeChoice::Dark, true), "dark", "强制深色与系统深浅无关");
-        assert_eq!(
-            login_theme_name(ThemeChoice::Light, true),
-            LOGIN_THEME_NAME_LIGHT,
-            "浅色档**也要显式给值**：移动 UA 下不带参数时页面会拿 prefers-color-scheme 去问服务端，系统深色就自己变黑"
-        );
-        assert_eq!(login_theme_name(ThemeChoice::Light, false), LOGIN_THEME_NAME_LIGHT);
-        assert_eq!(login_theme_name(ThemeChoice::System, true), "dark", "跟随系统=深色时挂深色");
-        assert_eq!(
-            login_theme_name(ThemeChoice::System, false),
-            LOGIN_THEME_NAME_LIGHT,
-            "跟随系统=浅色时也要钉住浅色（同一个理由）"
-        );
-    }
-
-    /// R27 用户三项之 1：登录 webview 伪装成 HarmonyOS 移动浏览器。
+    /// R27 立、R28 保留：登录页**先摆在屏外**（客户区左沿之外），门禁底下显示加载动画。
     ///
-    /// 这是本轮唯一一条能拿到真黑底的路（R26 probe 已证桌面 UA 拿不到），所以那份 UA 必须
-    /// **真的是移动 UA**：带 `HarmonyOS` 与 `Mobile`、不含任何桌面 token。写错一个 token
-    /// 就等于悄悄退回"深色档看不到深色"那个现象，而它不会有任何报错。
+    /// 几何那几条一个字没变——R28 只改"什么时候摆进来"（那是静默窗那条用例的事）。
     #[test]
-    fn the_login_webview_pretends_to_be_a_harmonyos_mobile_browser() {
-        assert!(LOGIN_MOBILE_UA.contains("HarmonyOS"), "必须是 HarmonyOS 家族：{LOGIN_MOBILE_UA}");
-        assert!(LOGIN_MOBILE_UA.contains("Mobile"), "必须带 Mobile：{LOGIN_MOBILE_UA}");
-        for desktop_token in ["Windows", "Macintosh", "X11"] {
-            assert!(
-                !LOGIN_MOBILE_UA.contains(desktop_token),
-                "不许出现桌面 token {desktop_token}（那正是拿不到深色的那一档）：{LOGIN_MOBILE_UA}"
-            );
-        }
-    }
-
-    #[test]
-    fn with_theme_name_replaces_the_param_and_keeps_every_other_one() {
-        let source = "https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize?response_type=code&client_id=101444301&state=S";
-        let decorated = with_theme_name(source, "dark").expect("能解析的 URL 要能挂上");
-        assert!(decorated.starts_with("https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize?"));
-        assert!(decorated.contains("themeName=dark"));
-        assert!(
-            decorated.contains("response_type=code") && decorated.contains("state=S"),
-            "其余参数一个都不许丢：{decorated}"
-        );
-
-        // 已经有 themeName（服务端自己给的那一份）：**替换**，不许出现两个
-        let replaced = with_theme_name(&decorated, "huawei").expect("替换也要能成");
-        assert_eq!(
-            replaced.matches("themeName=").count(),
-            1,
-            "只许有一个 themeName（两个的话读哪个由服务端定，不猜）：{replaced}"
-        );
-        assert!(replaced.contains("themeName=huawei"));
-
-        assert_eq!(with_theme_name("not a url", "dark"), None, "解析不了就如实说，不硬拼一个字符串");
-    }
-
-    #[test]
-    fn the_reload_target_only_exists_when_it_would_really_change_an_allowed_page() {
-        let current = "https://id1.cloud.huawei.com/CAS/portal/loginAuth.html?lang=zh-cn&themeName=red";
-        let target = theme_reload_target(current, "dark").expect("red → dark 是一次真的变化");
-        assert!(target.contains("themeName=dark"));
-        assert!(navigation_for(&target) == Navigation::Allow, "重开的目标仍然要在白名单里");
-
-        assert_eq!(
-            theme_reload_target(current, "red"),
-            None,
-            "值没变就不重开：否则切一次主题就白丢用户已经输进去的东西"
-        );
-        assert_eq!(
-            theme_reload_target("https://evil.example.com/login?themeName=red", "dark"),
-            None,
-            "白名单外的页面绝不重开（导航闸门对我们自己发起的重开同样有效）"
-        );
-        assert_eq!(theme_reload_target("about:blank", "dark"), None, "解析不了的 URL 不重开");
-    }
-
-    // -----------------------------------------------------------------------
-    // R27：屏外加载（用户三项之 2）+ 切主题=关掉重开（用户三项之 1 的收尾链）
-    // -----------------------------------------------------------------------
-
-    /// R27 用户三项之 2：登录页**先摆在屏外**等首载，门禁底下显示加载动画。
-    #[test]
-    fn the_login_page_is_built_offscreen_and_placed_when_the_first_load_finishes() {
+    fn the_login_page_is_built_offscreen_out_of_the_client_area() {
         let target = layout_target(1280.0, 800.0);
         let offscreen = offscreen_rect(target);
         assert!(
@@ -3118,153 +2746,42 @@ mod tests {
         // 尺寸退化（NaN）也不许交出 NaN 几何
         let degenerate = offscreen_rect(Rect { x: 0.0, y: 0.0, width: f64::NAN, height: 100.0 });
         assert!(degenerate.x.is_finite() && degenerate.x < 0.0, "{degenerate:?}");
-
-        // 摆放判据的两条来路（同一个 30 秒）
-        assert!(!placement_due(false, Duration::ZERO), "首载没完成、期限也没到 → 留在屏外");
-        assert!(placement_due(true, Duration::ZERO), "首载完成 → 摆进来");
-        assert!(
-            !placement_due(false, Duration::from_secs(LOGIN_LOAD_DEADLINE_SECS - 1)),
-            "差一秒到期限也不摆"
-        );
-        assert!(
-            placement_due(false, Duration::from_secs(LOGIN_LOAD_DEADLINE_SECS)),
-            "首载期限到 → 也摆进来（页面可能还在转，但让人对着加载动画干等更糟）"
-        );
     }
 
-    /// R27：会话在"屏外 → 内容区 → （切主题）屏外"之间的走位，以及重建窗口的兜底语义。
+    /// 摆进内容区之前一直算"屏外"，摆进来之后才算"内容区"——跟随主窗几何的前置条件。
+    /// 首载标志（解除首载期限）与摆放标志是**两件事**：前者管期限，后者管几何。
     #[test]
-    fn the_login_session_walks_from_offscreen_into_the_content_area_and_back_on_a_rebuild() {
+    fn the_session_stays_offscreen_until_it_is_placed() {
         let session = LoginSession::new();
-        assert_eq!(session.placement(), Placement::Offscreen, "刚建出来时摆在屏外等首载");
-        assert!(!session.is_page_ready() && !session.is_placed());
-        assert!(!session.placement_due(), "首载没完成、期限也没到 → 不摆");
+        assert_eq!(session.placement(), Placement::Offscreen, "刚建出来时摆在屏外等加载");
+        assert!(!session.is_placed());
+        assert!(!session.is_quiet(), "还没 Finished 过：谈不上静默");
 
         assert!(session.mark_loaded(), "首载完成：解除首载期限（整个登录期间只记第一次）");
-        assert!(session.mark_page_ready(), "首载完成：这一版页面能看了");
-        assert!(
-            !session.mark_page_ready(),
-            "再登记不算新事（后续导航各自也会来一条 Finished）"
-        );
-        assert!(session.placement_due(), "首载完成 → 该摆进内容区了");
+        assert!(!session.mark_loaded(), "重复上报不是新的首载");
+        assert!(session.is_loaded());
+
         assert!(session.mark_placed());
         assert!(!session.mark_placed(), "幂等");
         assert_eq!(session.placement(), Placement::InContent, "摆进来之后才跟随主窗几何");
+    }
 
-        // 切主题重建：新的那一份要从屏外**重新**等一次首载，而这一小段"页不在"是预期的
-        session.begin_rebuild();
-        assert!(session.is_rebuilding());
-        assert_eq!(session.placement(), Placement::Offscreen, "重建那一份也从屏外开始");
-        assert!(!session.is_page_ready() && !session.is_placed());
-        assert!(
-            session.is_loaded(),
-            "重建**不**重置「曾经加载成功过」：首载期限不该在切主题时重新武装起来把一次正常登录判死"
-        );
+    /// **页不在**就如实判 `Closed`（R27 那档"预期的页不在"随重建链一起删了）。
+    #[test]
+    fn a_missing_login_page_is_a_closed_conclusion() {
+        assert_eq!(vanish_conclusion(true), None, "页还在就没有「没了」这回事");
         assert_eq!(
-            vanish_conclusion(false, session.is_rebuilding()),
-            None,
-            "重建窗口里页不在是预期的，不许判 Closed"
-        );
-        session.end_rebuild();
-        assert!(!session.is_rebuilding());
-        assert_eq!(
-            vanish_conclusion(false, session.is_rebuilding()),
+            vanish_conclusion(false),
             Some(LoginConclusion::Closed),
-            "重建窗口退出后页还是不在 → 如实判 Closed"
-        );
-        assert_eq!(vanish_conclusion(true, false), None, "页还在就没有「没了」这回事");
-    }
-
-    /// R27 用户三项之 1 的收尾链：切主题 = **关掉重开**，不是导航到新 URL。
-    ///
-    /// 为什么不是导航：`user_agent` 是**建 webview 时**的属性（`WebviewBuilder`，运行期没有
-    /// setter），所以"换 UA"这件事只能靠重建；而重建与导航的收尾链是两条不同的代码路径，
-    /// 这里把它钉住，免得下一个人"顺手改回 navigate"。
-    #[test]
-    fn a_theme_change_reopens_the_page_instead_of_navigating_the_old_one() {
-        let production = production_source();
-        let reapply = production
-            .find("pub fn reapply_login_theme<")
-            .expect("切主题要有具名入口");
-        let block = &production[reapply..];
-
-        assert!(
-            block.contains("std::thread::Builder::new()"),
-            "必须另起线程（`core_login_chrome` 是同步命令，占着主线程等建页 = 自锁）：{block}"
-        );
-        assert!(
-            block.contains("begin_rebuild(") && block.contains("end_rebuild("),
-            "重建窗口要挡住「页没了 → Closed」的兜底：{block}"
-        );
-        assert!(
-            block.contains("create_login_view("),
-            "重开走的是既有的建页链（不另写一份建页代码）：{block}"
-        );
-        assert!(
-            block.contains("effective_login_theme("),
-            "重开与打开登录页必须走同一个入口算主题名（两处各算一遍早晚会漂移）"
-        );
-        assert!(
-            block.contains("theme_reload_target("),
-            "三道闸门（值没变 / 白名单外 / 解析不了）复用同一个纯函数"
-        );
-        assert!(
-            !block.contains(".navigate("),
-            "R27 起不改 UA：切主题是关掉重开一份，不是把旧那一份导航到新 URL"
-        );
-        assert!(
-            block.contains("close_login_view_now("),
-            "重开前必须收掉旧那一份（登录页 + 两个浮动控件）——label 同名，旧的还挂着就建不出新的"
-        );
-        assert!(
-            !block.contains("remove_dir_with_backoff("),
-            "重开**不删数据目录**：同一个目录 = 复用同一个 WebView2 环境（换目录要冒 ERROR_BUSY）"
+            "页不在了：如实判 Closed（等待方绝不该挂到总期限）"
         );
     }
 
-    /// R27：建窗参数要留下重建需要的两样——**未挂主题**的授权页 URL 与这一份用的主题名。
-    ///
-    /// 为什么不用"读回当前 webview 的 URL"来重建：那一刻它多半已经跳到 CAS 门户页
-    /// （`/CAS/portal/loginAuth.html?…`），拿它当重开的地址是拿一个中间落地页当入口。
-    /// 主题名留在这一份里，是因为"值没变就不重开"这条闸门要比的就是它。
+    /// 摆放那一支要**只在状态翻转时说话**：主窗最小化时 `place_login_view` 会一直失败到主窗回来，
+    /// 每 250ms 一条警告刷到总期限（10 分钟）就是几千行废话。
     #[test]
-    fn the_login_build_spec_carries_what_a_rebuild_needs() {
+    fn the_placement_branch_only_speaks_when_the_state_changes() {
         let production = production_source();
-        let open = production
-            .find("pub fn open_login(")
-            .expect("open_login 是登录页的唯一入口");
-        let block = &production[open..];
-        let block = &block[..block.find("\npub fn cancel_login(").expect("cancel_login 紧随其后")];
-        assert!(
-            block.contains("base_url") && block.contains("theme:"),
-            "建窗参数里要有未挂主题的授权页 URL 与这一份的主题名：{block}"
-        );
-
-        // 规格本身按值传递（重建线程要用一整份）
-        let spec = LoginBuildSpec {
-            data_root: PathBuf::from("C:\\root"),
-            login_data: PathBuf::from("C:\\root\\webview2\\login\\p1"),
-            base_url: "https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize?client_id=1"
-                .to_string(),
-            theme: LOGIN_THEME_NAME_DARK,
-        };
-        assert_eq!(spec.clone(), spec, "要能整份传进重建线程");
-        assert_eq!(spec.theme, LOGIN_THEME_NAME_DARK);
-    }
-
-    /// R27（自审补丁）：重建要几百毫秒，而等待方随时可能收场——两条边界都要有兜底。
-    ///
-    /// 1. **摆放那一支只在状态翻转时说话**：主窗最小化时 `place_login_view` 会一直失败到主窗
-    ///    回来，每 250ms 一条警告刷到总期限（10 分钟）就是几千行废话；
-    /// 2. **重开建出来的页可能已经没人要了**：用户在这几百毫秒里点了「返回扫码登录」→ 收尾链
-    ///    按 label 找的是**旧**那一份（找不到刚建出来的这一份）→ 必须就地按孤儿页处理
-    ///    （关页 + 退避删目录），否则主窗上会留一份没人管的官方页，而它那个一次性数据目录
-    ///    还是收尾之后由 `create_dir_all` 重新建出来的（里面会有新的 cookie）。
-    #[test]
-    fn the_rebuild_chain_and_the_placement_branch_both_clean_up_after_themselves() {
-        let production = production_source();
-
-        // 1. 摆放支的"只翻转时说一次"
         let wait = production
             .find("fn wait_for_conclusion(")
             .expect("等待方的正体要还在");
@@ -3274,39 +2791,196 @@ mod tests {
             wait.contains("placement_note.observe("),
             "摆放那一支也要只在状态翻转时说话（否则最小化期间每 250ms 一条警告）：{wait}"
         );
-
-        // 2. 重开之后可能已经收场 → 孤儿页处理
-        let rebuild = production
-            .find("fn reopen_login_view<")
-            .expect("重建的中段要有一个具名函数");
-        let block = &production[rebuild..];
-        let block = &block[..block.find("\n#[cfg(test)]").unwrap_or(block.len())];
-        assert!(
-            block.contains("is_active()"),
-            "建出来之后要再看一眼这次登录还在不在：{block}"
-        );
-        assert!(
-            block.contains("discard_orphan_login_window("),
-            "已经收场了的话，把刚建出来的这一份按孤儿页处理（关页 + 退避删目录）：{block}"
-        );
     }
 
-    /// 打开登录页时就把主题挂上去（这是**唯一**一条官方页主题通路：URL 参数 → CAS 链 → 主题 CSS）。
+    /// R28 用户三项之 3 的**接线**：静默窗的两个生产者必须真的接在页面的加载/导航事件上。
+    ///
+    /// 纯函数与矩阵都对、却没人调用它，就等于这个修复不存在——这条钉子扫的就是那几处调用点：
+    /// 1. `PageLoadEvent::Finished` → 起窗（[`LoginSession::note_page_finished`]）；
+    /// 2. `PageLoadEvent::Started` → 撤窗（[`LoginSession::note_navigation_started`]）；
+    /// 3. **放行的导航** → 也撤窗（用户报的那条链上，CAS 重定向正是从导航事件上看见的）。
     #[test]
-    fn opening_the_login_page_puts_the_current_theme_on_the_url() {
+    fn the_quiet_window_is_wired_to_the_page_load_and_navigation_events() {
         let production = production_source();
-        let open = production
-            .find("pub fn open_login(")
-            .expect("open_login 是登录页的唯一入口");
-        let block = &production[open..];
-        let block = &block[..block.find("\npub fn cancel_login(").expect("cancel_login 紧随其后")];
+
+        let page_load = production.find(".on_page_load(").expect("页面加载回调还在");
+        let page_load = &production[page_load..];
+        let started = page_load
+            .find("PageLoadEvent::Started")
+            .expect("Started 那一支还在");
+        let finished = page_load
+            .find("PageLoadEvent::Finished")
+            .expect("Finished 那一支还在");
+        assert!(started < finished, "两个分支的顺序不该被改（这条钉子按它切段）");
         assert!(
-            block.contains("effective_login_theme(") && block.contains("with_theme_name("),
-            "打开登录页时要按当前主题把 {LOGIN_THEME_PARAM} 挂到 URL 上：{block}"
+            page_load[started..finished].contains("note_navigation_started("),
+            "`Started` 那一支里要撤窗（新的一次加载开始了）：{}",
+            &page_load[started..finished]
         );
         assert!(
-            block.contains("config.url ="),
-            "挂上去的那一份 URL 才是真正被打开的那一条（不是只在日志里好看）"
+            page_load[finished..].contains("note_page_finished("),
+            "`Finished` 那一支里要起窗：{}",
+            &page_load[finished..]
+        );
+
+        let navigation = production.find(".on_navigation(").expect("导航回调还在");
+        let navigation = &production[navigation..];
+        let navigation =
+            &navigation[..navigation.find(".on_new_window(").unwrap_or(navigation.len())];
+        assert!(
+            navigation.contains("note_navigation_started("),
+            "放行的导航也要撤窗（那是用户报的那条链上的那一跳）：{navigation}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // R28：撤销官方页主题机制与移动 UA（用户指令 2026-10-20，**推翻 R26/R27 两项裁决**）
+    //
+    // 用户指令：① 官方登录页不再支持切换主题——R26 立起、R27 改档的那一整套（URL 上的主题
+    // 查询参数 + 切主题关掉重开）整体移除，官方页按它自己的默认渲染；② 改回之前的 UA（删掉
+    // R27 那条 HarmonyOS 移动 UA，WebView2 用自己的默认桌面 UA）。
+    //
+    // 下面两条钉的是**生产代码那一段**（`#[cfg(test)]` 之前），所以注释里也不许写那些标识符
+    // ——要指名道姓的地方在 `docs/API_CONTRACT.md` §1.7 的 R26/R27/R28 三段里。
+    // -----------------------------------------------------------------------
+
+    /// R28 用户指令之 1：**官方登录页一个主题机制都不许剩**。
+    ///
+    /// 这条同时挡住两件事：改动没删干净（半迁移状态会留下"没人调用的注入函数"，下一个人以为它还在用），
+    /// 以及下一个人顺手把 R26 那一套加回来。判据是"生产代码里一个相关标识符都不出现"——
+    /// 主题那套东西一旦只剩注释，说明代码路径真的没了。
+    #[test]
+    fn the_official_login_page_carries_no_theme_mechanism_at_all() {
+        let production = production_source();
+        for forbidden in [
+            "themeName",
+            "LOGIN_THEME_PARAM",
+            "LOGIN_THEME_NAME_",
+            "with_theme_name",
+            "login_theme_name",
+            "effective_login_theme",
+            "system_is_dark",
+            "reapply_login_theme",
+            "rebuild_login_view",
+            "reopen_login_view",
+            "begin_rebuild",
+            "end_rebuild",
+            "LoginBuildSpec",
+            "ThemeChoice",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "R28 用户指令：官方页不再跟随应用主题，这套机制要删干净——生产代码里不许再有 {forbidden}"
+            );
+        }
+        // 主题控件那个浮动 webview（R25 的 `login-theme`）**不在这条禁令里**：它是自家 UI 的一部分，
+        // 官方页不再跟随主题之后它照样跟着应用主题走（那是应用主题唯一的用处之一）。
+        assert!(
+            production.contains("LOGIN_THEME_WEBVIEW_LABEL"),
+            "主题浮动控件与官方页的主题机制是两件事：前者留着（自家 UI），后者删掉"
+        );
+    }
+
+    /// R28 用户指令之 2：**改回之前的 UA**（删移动 UA，用 WebView2 默认桌面 UA）。
+    ///
+    /// 删的是**建窗时那一句**（不设 user_agent = 用宿主默认）：只在测试里断言"没有那一句"是不够的，
+    /// 还要挡住"把那条 UA 挪到别处再设一次"——所以是"生产代码里一个移动 UA 的字面量都不许有"。
+    #[test]
+    fn the_login_webview_keeps_the_host_default_user_agent() {
+        let production = production_source();
+        assert!(
+            !production.contains(".user_agent("),
+            "R28 用户指令：不再伪装 UA——建窗时不设 user_agent，WebView2 走自己的默认桌面 UA"
+        );
+        for forbidden in ["LOGIN_MOBILE_UA", "HarmonyOS", "Mobile Safari"] {
+            assert!(
+                !production.contains(forbidden),
+                "移动 UA 要删干净（{forbidden} 一个都不许留）"
+            );
+        }
+    }
+
+    /// R28 用户三项之 3：**摆进要等"静默窗"**——不是"某一次 Finished 到了"。
+    ///
+    /// 用户报的现象（真机，R27 交出去的那一版）：点「在网页中打开登录」之后加载动画在**首载
+    /// Finished** 就结束了，可那一刻落的是 authorize 中间页——后面还有 CAS 重定向在加载，
+    /// 于是用户看到的是"动画已经结束、页面还没好"。修法与链路多长无关，只钉**静默**：
+    ///
+    /// - 每次 `Finished` 起一个 [`LOGIN_QUIET_WINDOW_MS`] 的静默窗；
+    /// - 窗内出现新导航（开始加载）→ **撤窗**，等下一次 `Finished`（用户报的正是这一档）；
+    /// - 窗内没有新导航 → 页面真的安静了 → 摆进内容区；
+    /// - 30 秒首载期限那条兜底**不变**（到点就摆，页面可能还在转——那条如实结算首载失败）。
+    ///
+    /// 时间全部**注入**（[`LoginSession::new_at`] 与 `_at` 变体）：这条矩阵要钉在确定的时间上，
+    /// 靠 sleep 钉不出来（1.5 秒的窗，睡出来的读数是最不可靠的那种测试）。
+    #[test]
+    fn the_login_page_is_placed_only_after_a_quiet_window() {
+        let base = Instant::now();
+        let after = |ms: u64| base + Duration::from_millis(ms);
+        let window = LOGIN_QUIET_WINDOW_MS;
+
+        // 纯函数那一层：静默满一整窗才算"页面安静下来了"（差一毫秒都不算）
+        assert!(!quiet_window_passed(Duration::from_millis(window - 1)), "差一毫秒不算静默");
+        assert!(quiet_window_passed(Duration::from_millis(window)));
+        assert!(placement_due(true, Duration::ZERO), "静默窗走完 → 摆进");
+        assert!(
+            !placement_due(false, Duration::from_secs(LOGIN_LOAD_DEADLINE_SECS - 1)),
+            "既不静默、期限也没到 → 留在屏外"
+        );
+        assert!(
+            placement_due(false, Duration::from_secs(LOGIN_LOAD_DEADLINE_SECS)),
+            "首载期限到 → 也摆进来（页面可能还在转，但让人对着加载动画干等更糟）"
+        );
+
+        // 用户报的那条链：authorize 中间页 Finished → **窗内**来了新导航（CAS 重定向）
+        let session = LoginSession::new_at(base);
+        assert_eq!(session.placement(), Placement::Offscreen, "刚建出来时摆在屏外等加载");
+        assert!(!session.placement_due_at(base), "一个字都还没加载：不摆");
+        assert!(!session.is_quiet_at(after(1_000)), "还没 Finished 过：谈不上静默");
+
+        session.note_page_finished_at(after(1_000)); // authorize 中间页 Finished
+        assert!(!session.placement_due_at(after(1_000 + window - 1)), "静默窗还没走完：不摆");
+        assert!(
+            session.note_navigation_started(),
+            "窗内出现新导航（CAS 重定向起）→ 撤窗"
+        );
+        assert!(
+            !session.note_navigation_started(),
+            "同一个导航只撤一次（没有窗可撤时不重复报）"
+        );
+        assert!(!session.is_quiet_at(after(3_000)), "撤窗之后不再算静默");
+        assert!(
+            !session.placement_due_at(after(1_000 + window + 500)),
+            "撤窗之后即使过了 1.5 秒也不摆——等的是**下一次** Finished（这正是用户报的那个提前结束）"
+        );
+
+        // CAS 页自己 Finished → 一整窗没有新导航 → 这才是"页面真的好了"，摆进
+        session.note_page_finished_at(after(2_000));
+        assert_eq!(
+            session.placement(),
+            Placement::Offscreen,
+            "静默窗走完之前一直留在屏外（动画继续转）"
+        );
+        assert!(!session.placement_due_at(after(2_000 + window - 1)), "差一毫秒也不摆");
+        assert!(
+            session.placement_due_at(after(2_000 + window)),
+            "静默窗走完 → 该摆进内容区了"
+        );
+        assert!(!session.is_placed());
+        assert!(session.mark_placed());
+        assert!(!session.mark_placed(), "幂等");
+        assert_eq!(session.placement(), Placement::InContent, "摆进来之后才跟随主窗几何");
+
+        // 期限兜底（不变）：一个 Finished 都没来也到点就摆
+        let never = LoginSession::new_at(base);
+        assert!(
+            !never.placement_due_at(base + Duration::from_secs(LOGIN_LOAD_DEADLINE_SECS - 1)),
+            "差一秒到期限也不摆"
+        );
+        assert!(
+            never.placement_due_at(base + Duration::from_secs(LOGIN_LOAD_DEADLINE_SECS)),
+            "到点即摆（页面可能还在转）"
+        );
+    }
+
 }

@@ -274,11 +274,10 @@ pub fn set_theme<R: tauri::Runtime>(
         crate::bridge::THEME_CHANGED,
         json!({ "theme": applied.setting() }),
     );
-    // R26（用户四项之 1+2）立、R27 改落点：登录页开着的时候，官方页的主题要跟着走。
-    // R26 是"导航到同一条 URL + 新 themeName"，**R27 改成"关掉重开一份"**
-    // （`user_agent` 是建 webview 时的属性，运行期没有 setter——切 UA 只能靠重建，
-    //  详见 `login::reapply_login_theme`）。这一步**不改回执**：登录页重开失败不该让"改主题"看起来失败了。
-    crate::login::reapply_login_theme(app);
+    // R28（用户指令 2026-10-20，**推翻 R26/R27 裁决**）：改主题**不再碰官方登录页**。
+    // R26 起这里会把已经开着的官方页按新主题重来一次（R27 改成"关掉重开一份"），现在整条通路撤了：
+    // 官方页按它自己的默认渲染，应用主题只影响自家 UI（主窗 + 两个浮动控件——上面那条广播就是
+    // 它们全部的依据）。所以这个函数到广播为止，后面**刻意**什么都不做。
     Ok(applied)
 }
 
@@ -463,16 +462,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// R26（用户四项之 1+2）立、R27 改落点：改主题之后要把**已经开着**的登录页按新主题重来一次
-    /// （否则用户得自己关掉重开才看得到），而且**它不改回执**——登录页重开失败不该让
-    /// 「改主题」看起来失败了。
+    /// R28（用户指令 2026-10-20，**推翻 R26/R27 裁决**）：**改主题不再动官方登录页**。
     ///
-    /// 源码钉子：这一条链路横跨两个模块（`theme::set_theme` 是主题的唯一写入口，
-    /// 重开落在 `login::reapply_login_theme`），所以在这里扫主题侧那一半。
-    /// R27 那一半（"关掉重开"+ 重建窗口）扫在 `login.rs` 的
-    /// `a_theme_change_reopens_the_page_instead_of_navigating_the_old_one` 里。
+    /// R26 起 `set_theme` 末尾会把已经开着的官方页按新主题重来一次（R27 改成"关掉重开一份"）。
+    /// 用户指令把这条通路整体撤掉：官方页按它自己的默认渲染，应用主题只影响自家 UI
+    /// （主窗 + 两个浮动控件）——所以这里钉的正是**没有**那条调用，同时钉住广播还在
+    /// （自家 UI 该跟着变的一处都不许少）。
     #[test]
-    fn changing_the_theme_reapplies_it_to_an_open_login_page() {
+    fn changing_the_theme_leaves_the_official_login_page_alone() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/theme.rs"))
             .expect("要能读到自己的源码");
         let production = match source.find("#[cfg(test)]") {
@@ -483,13 +480,19 @@ mod tests {
             .find("pub fn set_theme<")
             .expect("set_theme 是主题的唯一写入口");
         let block = &production[set..];
+        for forbidden in ["crate::login::", "reapply_login_theme"] {
+            assert!(
+                !block.contains(forbidden),
+                "R28 用户指令：官方页不再跟随应用主题，改主题不许再去碰登录页（不许有 {forbidden}）：{block}"
+            );
+        }
         assert!(
-            block.contains("crate::login::reapply_login_theme("),
-            "改完主题要把已开着的登录页按新主题重来一次：{block}"
+            block.contains("THEME_CHANGED"),
+            "广播一条不少：改完主题主窗与两个浮动控件的 `<html>` 类照旧一起变：{block}"
         );
         assert!(
             block.contains("Ok(applied)"),
-            "登录页重开不改回执（回执是**实际生效**的档位，与它成功与否无关）：{block}"
+            "回执仍是**实际生效**的档位：{block}"
         );
     }
 }
