@@ -122,12 +122,18 @@ test("端到端：auth:login 立刻回「已受理」，结论经 auth:status �
   assert.equal(status.payload.loggedIn, false);
   assert.match(status.payload.message, /取消/, "失败原因要能显示给用户");
 
-  // 宿主要求的形状：官方授权页 + 一次性 partition + 顶部内缩（Rust 侧还会再校验一遍）
+  // 宿主要求的形状：官方授权页 + 一次性 partition（Rust 侧还会再校验一遍）。
+  // R25 起载荷里**没有** topInset：官方登录页铺满整个主窗（用户四项之 3），
+  // 顶部不再让出那一条，"返回扫码登录"改成浮在网页之上的浮动控件。
   const open = sidecar.hostRequests.find((request) => request.channel === "host:open-login");
   assert.ok(open, `sidecar 没有发出 host:open-login：${JSON.stringify(sidecar.hostRequests)}`);
   assert.match(open.payload.url, /^https:\/\/oauth-login1\.cloud\.huawei\.com\/oauth2\/v3\/authorize\?/);
   assert.match(open.payload.partition, /^[A-Za-z0-9_-]{1,64}$/);
-  assert.equal(open.payload.topInset, 48, "顶部内缩来自共享常量");
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(open.payload, "topInset"),
+    false,
+    "topInset 已退休（登录页铺满整窗）",
+  );
   assert.deepEqual(sidecar.problems, [], `stdout 出现非法帧：${JSON.stringify(sidecar.problems)}`);
 });
 

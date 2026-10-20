@@ -57,6 +57,13 @@ pub const LYRICS_DOCUMENT: &str = "lyrics:document";
 pub const LYRICS_PROGRESS: &str = "lyrics:progress";
 /// 歌词窗配置广播频道（R12）：`{config, visible}` —— 字号/颜色/模式/锁定/点透（会话内）。
 pub const LYRICS_STATE: &str = "lyrics:state";
+/// 主题变化广播频道（R25）：`{theme: "light"|"dark"|"system"}` —— **目标态**。
+///
+/// 发送方是 Rust 侧（`theme::set_theme`，由 `core_login_chrome` 的 `theme` 动作触发）：
+/// 主题状态归 Rust 持有（`settings.json` 的 `theme` 键），改它的入口有三个
+/// （gate 里的控件、浮动 `login-theme` 控件、将来的设置页），而它们活在三个不同的 webview 里
+/// ——各存一份必然漂移。一条广播让主窗与两个浮动控件的 `<html>` 类一起变。
+pub const THEME_CHANGED: &str = "theme:changed";
 pub const BROADCAST_CHANNELS: &[&str] = &[
     "app:notice",
     "auth:status",
@@ -67,6 +74,7 @@ pub const BROADCAST_CHANNELS: &[&str] = &[
     "lyrics:document",
     "lyrics:progress",
     "lyrics:state",
+    "theme:changed",
 ];
 
 /// 已答复 id 的保留上限：应答一次性守卫必须有界（超出按插入顺序淘汰）。
@@ -595,7 +603,8 @@ mod tests {
                 APP_OPEN_SETTINGS,
                 LYRICS_DOCUMENT,
                 LYRICS_PROGRESS,
-                LYRICS_STATE
+                LYRICS_STATE,
+                THEME_CHANGED
             ]
         );
         assert_eq!(APP_NOTICE, "app:notice");
@@ -607,6 +616,7 @@ mod tests {
         assert_eq!(LYRICS_DOCUMENT, "lyrics:document");
         assert_eq!(LYRICS_PROGRESS, "lyrics:progress");
         assert_eq!(LYRICS_STATE, "lyrics:state");
+        assert_eq!(THEME_CHANGED, "theme:changed");
     }
 
     /// 可读回的假写入端：断言"到底写出了什么帧"。
@@ -761,7 +771,7 @@ mod tests {
         // 无 id 的广播帧只能进日志——等于 sidecar 发出去的广播被静默丢弃。
         let default_policy = FramePolicy::default();
         // R7 增补了 auth:status、R9 预登记了 player:command、R11 增补了托盘那两条、
-        // R12 增补了歌词窗那三条（文档/进度/配置）：每加一个都在这里同步。
+        // R12 增补了歌词窗那三条（文档/进度/配置）、R25 增补了主题那一条：每加一个都在这里同步。
         let expected: &[&str] = &[
             "app:notice",
             "auth:status",
@@ -772,6 +782,7 @@ mod tests {
             "lyrics:document",
             "lyrics:progress",
             "lyrics:state",
+            "theme:changed",
         ];
         assert_eq!(BROADCAST_CHANNELS, expected, "控制器裁决的广播集合（R16 起加上二维码那条）");
 

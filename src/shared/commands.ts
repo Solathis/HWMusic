@@ -67,3 +67,24 @@ export const CORE_LYRICS_TOGGLE = "core_lyrics_toggle";
 export const CORE_LYRICS_CONFIGURE = "core_lyrics_configure";
 export const CORE_LYRICS_DOCUMENT = "core_lyrics_document";
 export const CORE_LYRICS_PROGRESS = "core_lyrics_progress";
+
+/**
+ * 登录体验的浮动控件（R25 增补）：**登录相关控件的唯一命令**。
+ *
+ * 为什么不能复用 `core_call`：浮动控件是主窗里的**另外两个子 webview**
+ * （label `login-return` / `login-theme`），而 `core_call` 的来源守卫
+ * （`commands::require_main_webview`）只认主窗那一个 label——放宽它等于把业务频道
+ * 交给登录页与浮动控件，那是身份边界上的退让。所以这里另开一条**专用命令**，
+ * 守卫只放行 `main` / `login-return` / `login-theme` 三个来源，
+ * 官方登录页（label `login`）与歌词窗仍然一律拒绝。
+ *
+ * 载荷形状（`{action, theme?}`）：
+ * - `{action:"return"}` → 取消登录（与 `auth:cancel-login` 落到同一个结论槽）；
+ * - `{action:"theme"}` → **读回**当前主题（浮动控件挂载时用，不需要第二条命令）；
+ * - `{action:"theme", theme:"light"|"dark"|"system"}` → 改主题（Rust 持有 + 落盘 + 广播
+ *   `theme:changed`）。
+ *
+ * 回执统一是 `{theme}`（改主题那条）或 `{cancelled}`（取消那条）：调用方拿到的都是**事实**，
+ * 不是"请求已受理"。
+ */
+export const CORE_LOGIN_CHROME = "core_login_chrome";

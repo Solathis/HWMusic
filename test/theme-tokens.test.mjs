@@ -197,7 +197,12 @@ test("不得挂载 next-themes 的 ThemeProvider（CSP 会拦它的防闪烁内�
     assert.doesNotMatch(read(relative), /<ThemeProvider/, `${relative} 不得挂载 ThemeProvider`);
   }
   for (const relative of rendererCodeFiles().filter((file) => !file.endsWith("components/ui/sonner.tsx"))) {
-    assert.doesNotMatch(read(relative), /next-themes/, `${relative} 不得引入 next-themes（shadcn 生成的 sonner.tsx 除外）`);
+    // 只扫代码：注释里写"不引 next-themes（它的内联脚本会被 CSP 拦）"是说明文字，不是引入
+    assert.doesNotMatch(
+      stripComments(read(relative)),
+      /from\s+["']next-themes["']|require\(["']next-themes["']\)/,
+      `${relative} 不得引入 next-themes（shadcn 生成的 sonner.tsx 除外）`,
+    );
   }
 });
 
@@ -213,12 +218,13 @@ test("控制台只剩错误路径：渲染层不得有 console.log/info/debug", 
 });
 
 /**
- * R10 裁决：**主题只跟系统**（`prefers-color-scheme`），不做手动切换。
+ * R10 裁决：**主题只跟系统**（`prefers-color-scheme`），不做手动切换。R25 按用户指令**推翻了一半**：
+ * 三态（浅色 / 深色 / 跟随系统）有了手动档，但那条 R10 的**技术**理由仍然成立——
+ * 不引 next-themes（它的防闪烁内联脚本会被 CSP 拦），状态的唯一归属是 Rust 侧
+ * （`settings.json` 的 `theme` 键 + `theme:changed` 广播），渲染层只把类落到 `<html>` 上。
  *
- * 最省的接法：把 `.dark` 那套令牌照原样接到 `@media (prefers-color-scheme: dark)` 的 `:root` 上
- * ——不引 next-themes（它的防闪烁内联脚本会被 CSP 拦）、不写 JS、不引入第二套配色。
- * 代价是令牌写了两份，所以**两份必须逐条一致**由测试钉住：漏一条，暗色下就有一处颜色
- * 悄悄留在亮色（这种差别在 review 里几乎看不出来）。
+ * 令牌仍然只有两份（`.dark` 与媒体查询），且必须逐条一致；R25 只多了一条"强制浅色"的排除规则
+ *（媒体查询的选择器是 `:root:not(.light)`，见 test/login-chrome.test.mjs）。
  */
 
 /** 取 `from` 之后第一个 `{...}` 块的内容（按大括号配对，能处理嵌套）。 */
@@ -254,6 +260,12 @@ test("主题跟随系统：prefers-color-scheme 的 :root 令牌与 .dark 逐条
   const mediaBlock = blockAfter(styles, mediaMatch.index);
   const rootAt = mediaBlock.indexOf(":root");
   assert.ok(rootAt !== -1, "系统暗色要改的是 :root 上的令牌（不是挑个别组件改颜色）");
+  // R25：选择器是 `:root:not(.light)`（强制浅色时整块不生效），令牌本身照旧
+  assert.match(
+    mediaBlock.slice(0, mediaBlock.indexOf("{")),
+    /:root:not\(\.light\)/,
+    "系统暗色只该在没有强制浅色时生效（R25 的三态：light / dark / system）",
+  );
   const systemTokens = declarations(blockAfter(mediaBlock, rootAt));
 
   const darkMatch = styles.match(/^\.dark\s*\{/m);
@@ -281,17 +293,34 @@ test("主题跟随系统：dark: 变体也认系统偏好（上游原语的暗�
   const next = rest.indexOf("\n@", 1);
   const variant = next === -1 ? rest : rest.slice(0, next);
   assert.match(variant, /prefers-color-scheme/, "dark: 工具类必须跟着系统暗色（否则只有令牌换了，原语的暗色微调没换）");
-  assert.match(variant, /\.dark/, "保留 .dark 类的路径（shadcn 默认写法，将来要做手动切换时直接可用）");
+  assert.match(variant, /\.dark/, "保留 .dark 类的路径（手动强制暗色走它）");
 });
 
-test("不做手动切换：渲染层不写 dark 类、不存主题偏好（裁决：手动切换非目标）", () => {
+/**
+ * R25（用户指令）：三态主题有了**手动档**，但切类只许有**一处**——
+ * `src/renderer/features/theme/theme.mjs` 的 `applyThemeChoice`。
+ *
+ * 各写一份的后果不是风格问题：两个 webview（主窗 + 浮动控件）各切一次，
+ * 迟早出现"主窗跟着新档位、浮动控件还停在旧档位"，而两边看起来都"没错"。
+ * 同时**不许**出现第二份存储（R10 那条技术理由仍在：状态归 Rust，经 `theme:changed` 广播下来）。
+ */
+test("手动切换只许一处：只有 features/theme/theme.mjs 动 html 的 class，且没有第二份存储", () => {
+  const offenders = [];
   for (const relative of rendererCodeFiles()) {
+    if (relative === "src/renderer/features/theme/theme.mjs") continue;
     const source = stripComments(read(relative));
-    assert.doesNotMatch(
-      source,
-      /classList\.(?:add|remove|toggle)\(\s*["'`]dark/,
-      `${relative} 不许自己切 dark 类（主题由系统决定）`,
-    );
-    assert.doesNotMatch(source, /localStorage[^\n]*theme/i, `${relative} 不许存主题偏好（没有手动切换这回事）`);
+    if (/classList\s*\.\s*(?:add|remove|toggle)\s*\(\s*["'`](?:dark|light)["'`]/.test(source)) {
+      offenders.push(`${relative}: 自己切主题类`);
+    }
+    if (/documentElement\.className\s*=/.test(source)) offenders.push(`${relative}: 直接写 documentElement.className`);
   }
+  assert.deepEqual(
+    offenders,
+    [],
+    `主题类只能由 features/theme/theme.mjs 一处切换：\n${offenders.join("\n")}`,
+  );
+
+  const theme = stripComments(read("src/renderer/features/theme/theme.mjs"));
+  assert.match(theme, /export function applyThemeChoice/, "那唯一的入口必须真的存在");
+  assert.doesNotMatch(theme, /localStorage|next-themes/, "主题状态归 Rust 持有：渲染层不许有第二份存储");
 });

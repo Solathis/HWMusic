@@ -67,11 +67,43 @@ use crate::{MAIN_WINDOW_LABEL, WebviewDataRoot};
 ///    "这一帧是登录页发的还是主窗发的"的东西就是这个 **webview label**（见 `commands::require_main_webview`）。
 pub const LOGIN_WEBVIEW_LABEL: &str = "login";
 
-/// 顶部内缩（物理像素会按主窗缩放比换算）。
+/// 左上角那个「返回扫码登录」浮动控件的 label（R25）。
 ///
-/// 唯一真源是 Node/渲染层共享的 `src/shared/login-inset.mjs`（48）；Rust 无法 import .mjs，
-/// 只能镜像这一份字面量，由 `test/login-parity.test.mjs` 两侧互钉——**改任何一侧都要同步改另一侧**。
-pub const LOGIN_VIEW_TOP_INSET: f64 = 48.0;
+/// 它是主窗里的**第三个** webview，建在登录页之后（后建的子窗在 z 序上面，wry 用
+/// `SetWindowPos(.., HWND_TOP, ..)` 建子窗），所以它浮在官方页之上。
+/// 尺寸只有控件那么大：透明子窗**仍然会吃掉落在它矩形里的鼠标**，所以"够用就好"是
+/// 一条硬约束（见 [`CHROME_MARGIN`] / [`RETURN_CHROME_SIZE`]）。
+pub const LOGIN_RETURN_WEBVIEW_LABEL: &str = "login-return";
+
+/// 右上角那个主题控件（浅色 / 深色 / 跟随系统）浮动 webview 的 label（R25）。
+pub const LOGIN_THEME_WEBVIEW_LABEL: &str = "login-theme";
+
+/// 两个浮动控件的 label（顺序 = 建窗顺序 = 左右顺序；也是收尾时要关掉的全部）。
+pub const LOGIN_CHROME_LABELS: [&str; 2] = [
+    LOGIN_RETURN_WEBVIEW_LABEL,
+    LOGIN_THEME_WEBVIEW_LABEL,
+];
+
+/// 浮动控件的本地页面（唯一真源 `src/shared/login-chrome.mjs`，Rust 镜像 + parity 测试互钉）。
+pub const LOGIN_CHROME_ENTRY: &str = "login-chrome.html";
+/// `?kind=` 的两个取值（同上，与渲染层的 `LOGIN_CHROME_KIND` 逐字相同）。
+pub const LOGIN_CHROME_KIND_RETURN: &str = "return";
+pub const LOGIN_CHROME_KIND_THEME: &str = "theme";
+
+/// 浮动控件与主窗客户区边缘的距离（CSS 像素，按缩放比换算成物理像素）。
+pub const CHROME_MARGIN: f64 = 8.0;
+/// 「返回扫码登录」控件的盒子（CSS 像素：宽、高）。
+///
+/// 盒子 = 控件本身那么大（渲染层那份 `LoginReturnControl` 是一个 `size="sm"` 的
+/// shadcn Button 加 2px 内缩）。留够"返回扫码登录"六个字 + 内边距的余量，再多就是白白多挡一块网页。
+pub const RETURN_CHROME_SIZE: (f64, f64) = (124.0, 34.0);
+/// 主题控件的盒子（CSS 像素：宽、高）：三个小按钮 + 边框 + 内缩。
+pub const THEME_CHROME_SIZE: (f64, f64) = (184.0, 34.0);
+
+/// 浮动控件要加载的地址：`login-chrome.html?kind=…`（与渲染层的 `loginChromeUrl` 同一拼法）。
+pub fn chrome_url(kind: &str) -> String {
+    format!("{LOGIN_CHROME_ENTRY}?kind={kind}")
+}
 
 /// 总登录期限（秒）：与 Node `LOGIN_TIMEOUT_MS` 互钉（`LOGIN_TIMEOUT_SECS × 1000 == LOGIN_TIMEOUT_MS`）。
 pub const LOGIN_TIMEOUT_SECS: u64 = 600;
@@ -91,13 +123,10 @@ pub const LOGIN_IN_PROGRESS_MESSAGE: &str = "已有一次登录正在进行（�
 /// 回调 scheme 的镜像（Node 唯一真源是 `auth.mjs` 的 `OAUTH_REDIRECT_URI`）。
 pub const CALLBACK_SCHEME: &str = "hms";
 
-/// `topInset` 的合法上界：越界值静默接受会把登录页摆到客户区之外，不如结构化拒掉。
-pub const MAX_TOP_INSET: f64 = 4096.0;
-
 /// `partition` 的字符集与长度（进文件系统之前必须过这一关）。
 pub const PARTITION_MAX_LEN: usize = 64;
 
-/// 几何钳制下限：主窗被外部压到退化尺寸时也不交出负高度（`set_bounds` 会失败或建出畸形块）。
+/// 几何钳制下限：主窗被外部压到退化尺寸时也不交出负尺寸（`set_bounds` 会失败或建出畸形块）。
 ///
 /// R24：这条下限只适用于"**量得到**但很小"的主窗。量不到（最小化时 `inner_size()` 是 `(0,0)`）
 /// 那一档由 [`layout_for`] 挡在门外——真机上正是这两条下限把 `(0,0)` 凑成了 `320×160`。
@@ -272,8 +301,6 @@ pub struct LoginConfig {
     pub url: String,
     /// 一次性随机分区（`[A-Za-z0-9_-]{1,64}`）：独立 webview 数据目录的目录名
     pub partition: String,
-    /// 顶部让出的高度（CSS 像素；两侧同一常量，但允许调用方显式指定）
-    pub top_inset: f64,
 }
 
 fn invalid_payload(message: impl Into<String>) -> CoreError {
@@ -322,24 +349,7 @@ pub fn parse_config(payload: &Value) -> Result<LoginConfig, CoreError> {
         )));
     }
 
-    let top_inset = match object.get("topInset") {
-        Some(value) => value
-            .as_f64()
-            .filter(|inset| inset.is_finite())
-            .ok_or_else(|| invalid_payload("topInset 必须是有限数字"))?,
-        None => return Err(invalid_payload("登录页配置缺少 topInset")),
-    };
-    if !(0.0..=MAX_TOP_INSET).contains(&top_inset) {
-        return Err(invalid_payload(format!(
-            "topInset 必须在 0..={MAX_TOP_INSET} 之间（单位：CSS 像素）"
-        )));
-    }
-
-    Ok(LoginConfig {
-        url,
-        partition,
-        top_inset,
-    })
+    Ok(LoginConfig { url, partition })
 }
 
 /// `partition` 的字符集闸门：它要当目录名，所以只收 `[A-Za-z0-9_-]`。
@@ -607,45 +617,82 @@ pub enum Layout {
     HostUnmeasurable,
 }
 
-/// 客户区读数 → 这次该把登录页摆成什么（**唯一**的单位换算点）。
+/// 客户区读数 → 这次该把登录页摆成什么（**唯一**的决策点）。
 ///
-/// 单位只有两条，别混：客户区尺寸是**物理**像素（原样用），`top_inset` 是 **CSS** 像素
-/// （唯一真源 [`LOGIN_VIEW_TOP_INSET`]，与渲染层共享 48）——**只有它**乘缩放比。
-pub fn layout_for(area: &ClientArea, top_inset: f64) -> Layout {
+/// R25（用户四项之 3）：登录页**铺满整个客户区**（`(0, 0, w, h)`）。
+/// R7–R24 那套"顶部让出 [`LOGIN_VIEW_TOP_INSET`]（48 CSS px）"的几何**对登录页退役**：
+/// 用户要的是网页不被挤压，于是"返回扫码登录"与主题控件改成浮在网页**之上**的两个小 webview
+/// （见 [`chrome_rects`]），不再从客户区里挖掉一条。`topInset` 这个字段连同它的上界
+/// 校验（`MAX_TOP_INSET`）一起从 `host:open-login` 的载荷里删掉——留一个永远只能是 0 的旋钮，
+/// 下一个人只会拿它去摆错页面。
+pub fn layout_for(area: &ClientArea) -> Layout {
     if !area.is_measurable() {
         return Layout::HostUnmeasurable;
     }
-    Layout::Target(layout_target(
-        area.width,
-        area.height,
-        top_inset * area.trusted_scale(),
-    ))
+    Layout::Target(layout_target(area.width, area.height))
 }
 
-/// 登录页的目标几何：铺满主窗**客户区**，顶部让出 `top_inset`——**客户区相对坐标**。
+/// 登录页的目标几何：**铺满主窗客户区**——客户区相对坐标、物理像素。
 ///
-/// 入参是主窗客户区的**物理像素**尺寸（不是屏幕坐标：同窗 webview 的坐标原点就是客户区左上角，
+/// 入参是主窗客户区的**物理**像素尺寸（不是屏幕坐标：同窗 webview 的坐标原点就是客户区左上角，
 /// 跨窗那套"屏幕位置 + 缩放比换算"在这里根本不存在——R7 的真机几何偏差就出在那条路上）。
-/// 输出恒以 `x = 0` 为左边界、`y = top_inset` 为顶边（上面那一条留给应用自己的 header，
-/// 「返回扫码登录」就在那儿，它必须始终可见可点）。
+/// 输出恒为 `(0, 0, 客户区宽, 客户区高)`。
 ///
 /// **前提（R24 写死）**：尺寸是量得到的——调用方一律走 [`layout_for`]，它把"量不到"（`(0,0)`，
 /// 主窗最小化时就是这样）挡在门外。这个函数只回答"量得到的话摆成什么"。
 ///
 /// 钳制两条（主窗**真的**被压到退化尺寸时才会碰到）：
-/// - 高度下限 [`MIN_LOGIN_HEIGHT`] / 宽度下限 [`MIN_LOGIN_WIDTH`]：绝不把负值或零交给 `set_bounds`；
+/// - 宽度下限 [`MIN_LOGIN_WIDTH`] / 高度下限 [`MIN_LOGIN_HEIGHT`]：绝不把零或负值交给 `set_size`；
 /// - 非有限/负输入按 0 处理：合成器偶发退化值不该变成 NaN 几何。
-pub fn layout_target(client_width: f64, client_height: f64, top_inset: f64) -> Rect {
+pub fn layout_target(client_width: f64, client_height: f64) -> Rect {
     let sane = |value: f64| if value.is_finite() && value > 0.0 { value } else { 0.0 };
-    let inset = sane(top_inset);
-    let width = sane(client_width);
-    let height = sane(client_height);
     Rect {
         x: 0.0,
-        y: inset,
-        width: width.max(MIN_LOGIN_WIDTH),
-        height: (height - inset).max(MIN_LOGIN_HEIGHT),
+        y: 0.0,
+        width: sane(client_width).max(MIN_LOGIN_WIDTH),
+        height: sane(client_height).max(MIN_LOGIN_HEIGHT),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 浮动控件（R25）：返回 / 主题两个小 webview 的几何
+// ---------------------------------------------------------------------------
+
+/// 浮动控件的目标矩形：`[返回（左上）, 主题（右上）]`——客户区相对物理像素。
+///
+/// 两条纪律：
+/// - **盒子就是控件本身那么大**（尺寸常量 × 缩放比）：透明子窗也会吃掉落在它矩形里的鼠标，
+///   所以"够用就好"不是审美问题，是"别挡住官方页上用户要点的地方"；
+/// - **贴边留 [`CHROME_MARGIN`]**：贴死客户区边缘时圆角与描边会被裁掉一像素。
+///
+/// 主窗窄到放不下两个控件时把宽度夹进客户区（而不是把控件推到客户区之外——那样它就点不到了）。
+pub fn chrome_rects(client_width: f64, client_height: f64, scale: f64) -> [Rect; 2] {
+    let sane = |value: f64| if value.is_finite() && value > 0.0 { value } else { 0.0 };
+    let trusted_scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    let width = sane(client_width);
+    let height = sane(client_height);
+    let margin = CHROME_MARGIN * trusted_scale;
+
+    let fit = |wanted: (f64, f64)| {
+        let max_width = (width - margin * 2.0).max(0.0);
+        let max_height = (height - margin).max(0.0);
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: (wanted.0 * trusted_scale).min(max_width).max(1.0),
+            height: (wanted.1 * trusted_scale).min(max_height).max(1.0),
+        }
+    };
+
+    let mut back = fit(RETURN_CHROME_SIZE);
+    back.x = margin;
+    back.y = margin;
+
+    let mut theme = fit(THEME_CHROME_SIZE);
+    theme.x = (width - margin - theme.width).max(margin);
+    theme.y = margin;
+
+    [back, theme]
 }
 
 // ---------------------------------------------------------------------------
@@ -760,7 +807,7 @@ fn run_login_view(
         }
     };
 
-    let conclusion = wait_for_conclusion(&app, &session, config.top_inset);
+    let conclusion = wait_for_conclusion(&app, &session);
 
     // **先答复、再拆登录页**（顺序是硬要求）：拆要删目录、要退避重试，可能失败；
     // 若因为拆失败而不答复，Node 侧就变成"扫码成功却等超时"——旧仓缺陷 C1 的另一种写法。
@@ -782,7 +829,7 @@ fn run_login_view(
 }
 
 /// 等结论：结论槽 + 登录页消失兜底 + 双期限 + 每 tick 跟随主窗几何。
-fn wait_for_conclusion(app: &AppHandle, session: &Arc<LoginSession>, top_inset: f64) -> LoginConclusion {
+fn wait_for_conclusion(app: &AppHandle, session: &Arc<LoginSession>) -> LoginConclusion {
     let started = Instant::now();
     let mut layout_warned = false;
     // R24：跟随每 250ms 一次，只在"量得到/量不到"翻转的那一次说话。
@@ -807,7 +854,7 @@ fn wait_for_conclusion(app: &AppHandle, session: &Arc<LoginSession>, top_inset: 
         if session.wait(FOLLOW_TICK).is_some() {
             continue; // 回到循环顶部统一"读槽"，省得两条返回路径
         }
-        match follow_main_window(app, top_inset) {
+        match follow_main_window(app) {
             Ok(FollowOutcome::Applied(target)) => {
                 if follow_note.observe(false) {
                     log::info!(
@@ -871,7 +918,6 @@ fn create_login_view(
     let login_data_for_discard = login_data.to_path_buf();
     let nav_session = Arc::clone(session);
     let load_session = Arc::clone(session);
-    let top_inset = config.top_inset;
 
     app.run_on_main_thread(move || {
         let built = build_on_main_thread(
@@ -881,20 +927,33 @@ fn create_login_view(
             proxy,
             nav_session,
             load_session,
-            top_inset,
         );
         // 交付守卫：等待方可能已经走了（`BUILD_TIMEOUT` 超时，或它先返回了 Err）。那时 `send` 会把
         // 刚建出来的登录页**原样还回来**——必须关掉，否则这个晚到的闭包会留下一个无人等待、无人管理的
         // 登录页（`LoginState` 已 finish，用户再点登录只会撞 duplicate-label）。
+        //
+        // R25：浮动控件与登录页在**同一个闭包里**建出来，所以孤儿清理要连它们一起收
+        //（只关登录页会留下两个浮在空窗上的小控件，而且它们手里握着 `core_login_chrome` 的来源资格）。
         match deliver_build_result(sender.send(built), |webview| {
-            discard_orphan_login_window(&webview, &login_data_for_discard)
+            let mut problems = Vec::new();
+            if let Err(reason) = discard_orphan_login_window(&webview, &login_data_for_discard) {
+                problems.push(reason);
+            }
+            if let Err(reason) = close_login_chrome(&app_for_build) {
+                problems.push(reason);
+            }
+            if problems.is_empty() {
+                Ok(())
+            } else {
+                Err(problems.join("；"))
+            }
         }) {
             BuildDelivery::Delivered | BuildDelivery::NothingBuilt => {}
             BuildDelivery::OrphanDiscarded => log::warn!(
-                "登录页建出来了，但等待方已收场（多半是建页超时）：已关掉这个没人等的登录页并删掉它的数据目录"
+                "登录页建出来了，但等待方已收场（多半是建页超时）：已关掉这个没人等的登录页、它的浮动控件与数据目录"
             ),
             BuildDelivery::OrphanLeftBehind(reason) => log::warn!(
-                "登录页建出来了但等待方已收场，且没能清干净（{reason}）：登录页或数据目录可能残留"
+                "登录页建出来了但等待方已收场，且没能清干净（{reason}）：登录页/浮动控件或数据目录可能残留"
             ),
         }
     })
@@ -934,6 +993,8 @@ fn create_login_view(
 /// 目录由 [`run_login_view`] 的 Err 支用退避删除兜底（那里对"删不掉"仍按 [`ShutdownFailure::DataDir`]
 /// 分级——目录里可能真有 cookie）；并发删的最坏结果是那个晚到的闭包建不出登录页，而那比留下一个
 /// 无人等待的孤儿页更好；页真的建出来了的话，交付守卫也会连目录一起清掉。
+///
+/// R25：浮动控件与登录页同生同灭，这条路也要连它们一起收（见 [`close_login_chrome`]）。
 fn discard_pending_login_view(app: &AppHandle) {
     let Some(webview) = app.get_webview(LOGIN_WEBVIEW_LABEL) else {
         return; // 还没建出来：闭包侧的交付守卫会接住它
@@ -941,13 +1002,47 @@ fn discard_pending_login_view(app: &AppHandle) {
     if let Err(source) = webview.discard() {
         log::warn!("建页超时留下的孤儿登录页未能关掉（{source}）：它可能还挂在主窗上");
     }
+    if let Err(reason) = close_login_chrome(app) {
+        log::warn!("建页超时留下的孤儿浮动控件未能清干净（{reason}）：它们可能还浮在主窗上");
+    }
+}
+
+/// 关掉两个浮动控件（R25）。返回 `Err(原因)` = 还有没关掉的。
+///
+/// 为什么必须跟着登录页一起收：它们浮在**官方登录页之上**。登录页收场而控件留下，用户会看到
+/// 两个孤零零的小控件浮在一个已经回到二维码态的门禁页上；更糟的是它们手里握着
+/// `core_login_chrome` 的来源资格（守卫按 label 放行），留着就是留一个多余的命令入口。
+///
+/// 幂等：标签不在表里就是"本来就没有"（正常路径上它们与登录页一起收，这里只是兜底）。
+pub fn close_login_chrome(app: &AppHandle) -> Result<(), String> {
+    let mut problems = Vec::new();
+    for label in LOGIN_CHROME_LABELS {
+        let Some(webview) = app.get_webview(label) else {
+            continue;
+        };
+        if let Err(source) = webview.close() {
+            problems.push(format!("关掉 {label} 失败（{source}）"));
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("；"))
+    }
 }
 
 /// 真正调用 tauri 建登录页（在主线程上跑）。
 ///
 /// 宿主是**主窗的第二个 webview**：几何在**建的时候就定死**（`add_child` 的 position/size 参数），
 /// 之后由 [`follow_main_window`] 每 tick 重算——同窗 webview 不会随父窗自动长大，也不需要
-/// （`auto_resize` 是比例缩放，会把 header 那条 48px 一起缩掉）。
+/// （`auto_resize` 是比例缩放，会把浮动控件一起缩掉）。
+///
+/// R25：登录页建完之后**紧接着**建两个浮动控件（返回 / 主题）。顺序是硬要求——
+/// wry 用 `SetWindowPos(.., HWND_TOP, ..)` 建子窗，后建的在上，所以只有"建在登录页之后"
+/// 它们才浮在官方页之上。控件建失败分两档处置：
+/// - `login-return` **失败 = 这次登录失败**：官方页铺满整窗时它是用户唯一的回退路径，
+///   没有它用户就被困在一个没有出口的登录页上（宁可结构化失败，也不要一个关不掉的登录页）；
+/// - `login-theme` 失败只是少了主题控件（登录本身照常），留一行 warn。
 #[allow(clippy::too_many_arguments)]
 fn build_on_main_thread(
     app: &AppHandle,
@@ -956,7 +1051,6 @@ fn build_on_main_thread(
     proxy: Option<tauri::Url>,
     nav_session: Arc<LoginSession>,
     load_session: Arc<LoginSession>,
-    top_inset: f64,
 ) -> Result<Webview, CoreError> {
     let main = app.get_window(MAIN_WINDOW_LABEL).ok_or_else(|| {
         CoreError::new(
@@ -974,7 +1068,7 @@ fn build_on_main_thread(
     // 登录页是主窗的**子 webview**，主窗不可见时它也没有可显示的地方；这与并排第二次登录用的
     // [`focus_login_view`]（同一动作 [`crate::focus_main`]：unminimize + show + set_focus）同一条纪律。
     let mut area = read_client_area(&main)?;
-    if layout_for(&area, top_inset) == Layout::HostUnmeasurable {
+    if layout_for(&area) == Layout::HostUnmeasurable {
         log::warn!(
             "登录页创建时主窗量不到客户区（{}）：先把主窗恢复/拉到前台再量一次",
             area.describe()
@@ -982,7 +1076,7 @@ fn build_on_main_thread(
         crate::focus_main(app);
         area = read_client_area(&main)?;
     }
-    let target = match layout_for(&area, top_inset) {
+    let target = match layout_for(&area) {
         Layout::Target(target) => target,
         // 恢复之后仍然量不到：宁可用结构化错误收场，也不建一个钳制下限凑出来的假盒子
         //（真机 2026-10-20T09:03:52Z 那条 `rect=(0,48,320,160)` 就是这么来的）。
@@ -996,24 +1090,33 @@ fn build_on_main_thread(
             ));
         }
     };
+    let chrome = chrome_rects(area.width, area.height, area.trusted_scale());
 
     // R16：把这次登录要打开的地址记下来（**只记形状**：origin+path+参数名，见 describe_navigation_for_log）。
     // 真机"登录页空白"当天，日志里缺的正是这一行：没有任何一条记录说得出"页面上到底停在哪一页"。
     // R24：再加客户区的**原始读数**——只有它能回答"当时主窗量到了多大"，钳制下限凑出的 rect 回答不了。
+    // R25：`topInset` 那一格退休（登录页铺满整窗），换成两个浮动控件的矩形。
     log::info!(
-        "登录页创建（主窗内第二 webview）：url={} partition={} topInset={} {} rect=({},{},{},{})",
+        "登录页创建（主窗内第二 webview）：url={} partition={} {} rect=({},{},{},{}) 浮动控件=返回({},{},{},{})/主题({},{},{},{})",
         describe_navigation_for_log(url.as_str()),
         config_partition_hint(&login_data),
-        top_inset,
         area.describe(),
         target.x,
         target.y,
         target.width,
-        target.height
+        target.height,
+        chrome[0].x,
+        chrome[0].y,
+        chrome[0].width,
+        chrome[0].height,
+        chrome[1].x,
+        chrome[1].y,
+        chrome[1].width,
+        chrome[1].height
     );
 
     let mut builder = WebviewBuilder::new(LOGIN_WEBVIEW_LABEL, WebviewUrl::External(url))
-        .data_directory(login_data)
+        .data_directory(login_data.clone())
         // 白名单 + hms:// 拦截全部走导航事件（登录页零注入：不订阅 initialization_script 那条路）
         .on_navigation(move |url| {
             let decision = navigation_for(url.as_str());
@@ -1074,7 +1177,108 @@ fn build_on_main_thread(
     if let Err(source) = webview.set_focus() {
         log::warn!("登录页没能拿到焦点（{source}）：用户可能要自己点一下页面");
     }
+
+    // R25：官方页之后紧接着建两个浮动控件（后建 = 在上）。返回控件是**硬要求**：
+    // 它建不出来时把这次登录按结构化错误收场，而不是留一个没有出口的官方页。
+    if let Err(error) = build_chrome_on_main_thread(
+        &main,
+        LOGIN_RETURN_WEBVIEW_LABEL,
+        LOGIN_CHROME_KIND_RETURN,
+        &login_data,
+        chrome[0],
+    ) {
+        // 已经建出来的两个 webview 由调用方（`run_login_view` 的 Err 支 / 交付守卫）收，
+        // 这里只把登录页也关掉：否则会留下一个盖着门禁的官方页（用户看不到二维码，也没法返回）。
+        if let Err(source) = webview.discard() {
+            log::warn!("返回控件建不起来，且登录页没能收掉（{source}）：它可能还铺在主窗上");
+        }
+        return Err(error);
+    }
+    if let Err(error) = build_chrome_on_main_thread(
+        &main,
+        LOGIN_THEME_WEBVIEW_LABEL,
+        LOGIN_CHROME_KIND_THEME,
+        &login_data,
+        chrome[1],
+    ) {
+        // 主题控件只是少一个便利入口：登录本身照常（留痕即可，不打扰用户）。
+        log::warn!("主题浮动控件建不起来（{error}）：这次登录没有右上角的主题控件");
+    }
+
     Ok(webview)
+}
+
+/// 建一个浮动控件 webview（返回 / 主题，R25）。
+///
+/// 三条与登录页不同的地方：
+/// 1. **加载本地页面**（`login-chrome.html?kind=…`），不是外部官方页；
+/// 2. **透明背景**（`background_color` 的 alpha = 0）：控件浮在官方页之上，铺底色会盖住网页一块；
+/// 3. **与登录页共用同一个 webview 数据目录**：tauri 的 `WebContextStore` 是**按数据目录缓存**的
+///    （`tauri-runtime-wry` `lib.rs:4714-4730`：`web_context.entry(webview_attributes.data_directory)`），
+///    同一个目录 ⇒ 复用同一个 WebView2 环境。另起目录要多建/多删一棵一次性目录，
+///    而"一次性隔离"这件事登录页那份已经做全了。
+///
+/// 导航闸门：控件手里握着 `core_login_chrome` 的来源资格（守卫按 label 放行），所以它**只许**
+/// 停在应用自己的本地页面上——任何别的导航一律拦下（见 [`chrome_navigation_allowed`]）。
+fn build_chrome_on_main_thread(
+    main: &tauri::Window,
+    label: &str,
+    kind: &str,
+    login_data: &Path,
+    target: Rect,
+) -> Result<(), CoreError> {
+    let builder = WebviewBuilder::new(label, WebviewUrl::App(chrome_url(kind).into()))
+        .data_directory(login_data.to_path_buf())
+        // 透明：浮在官方页之上，不铺任何底色（wry 在 Windows 上把 alpha=0 交给
+        // WebView2 的 `SetDefaultBackgroundColor`，只有 0 才是透明——非 0 会被强制成不透明）
+        .background_color(tauri::webview::Color(0, 0, 0, 0))
+        .on_navigation(|url| {
+            let allowed = chrome_navigation_allowed(url.as_str());
+            if !allowed {
+                log::warn!(
+                    "浮动控件拦下一次不该有的导航：{}（它只许停在应用自己的本地页面上）",
+                    describe_navigation_for_log(url.as_str())
+                );
+            }
+            allowed
+        })
+        // 弹窗一律拒（这个页面里没有链接，也没有开新窗的理由）
+        .on_new_window(|_url, _features| NewWindowResponse::Deny);
+
+    main.add_child(
+        builder,
+        tauri::PhysicalPosition::new(target.x.round() as i32, target.y.round() as i32),
+        tauri::PhysicalSize::new(target.width.round() as u32, target.height.round() as u32),
+    )
+    .map(|_| ())
+    .map_err(|source| {
+        CoreError::new(
+            "internal",
+            format!("{label} 浮动控件建不起来（{source}）"),
+        )
+    })
+}
+
+/// 浮动控件只许停在应用自己的本地页面上（生产 `tauri://localhost` / `http://tauri.localhost`，
+/// 开发 `http://localhost:<devUrl 端口>`）。
+///
+/// 为什么值得一道闸门：这两个 webview 的来源 label 在 `core_login_chrome` 的允许集合里
+/// （守卫只能按 label 判，见 `commands::require_login_chrome_source`）。一旦它们能被导航到
+/// 任意网页，那个网页就自动获得了"改主题 / 取消登录"的资格。登录页那条白名单管的是外部官方域，
+/// 这里管的是相反的一侧：**只许本地**。
+pub fn chrome_navigation_allowed(raw: &str) -> bool {
+    let Ok(url) = tauri::Url::parse(raw.trim()) else {
+        return false;
+    };
+    match url.scheme() {
+        // 生产：前端经自定义协议加载（tauri://localhost/login-chrome.html）
+        "tauri" => true,
+        "http" | "https" => matches!(
+            url.host_str(),
+            Some("localhost") | Some("tauri.localhost") | Some("127.0.0.1")
+        ),
+        _ => false,
+    }
 }
 
 /// 日志里的分区名（一次性数据目录的最后一段）：只为让"这次登录用的是哪个目录"可追。
@@ -1124,41 +1328,62 @@ impl FollowNote {
     }
 }
 
-/// 把登录页摆到主窗客户区（顶部让出 header 那一条）。
-fn apply_layout(app: &AppHandle, webview: &Webview, top_inset: f64) -> Result<FollowOutcome, CoreError> {
+/// 把登录页**铺满**主窗客户区，两个浮动控件摆到左上 / 右上（R25）。
+///
+/// 三个 webview 一起摆是刻意的：它们说的是同一个客户区读数（同一次 `read_client_area`），
+/// 分两次量就会出现"登录页按新尺寸、控件按旧尺寸"的错位。
+fn apply_layout(app: &AppHandle) -> Result<FollowOutcome, CoreError> {
     let main = app
         .get_window(MAIN_WINDOW_LABEL)
         .ok_or_else(|| CoreError::new("internal", "主窗不在了：无法计算登录页几何"))?;
     let area = read_client_area(&main)?;
 
-    let Layout::Target(target) = layout_for(&area, top_inset) else {
+    let Layout::Target(target) = layout_for(&area) else {
         // 量不到就**什么都不改**：把 (0,0) 钳成 320×160 再写回去，正是真机上"登录页缩成左上角一个
         // 小盒子"那条路——同一个进程里创建时刚摆对过 1280×752，主窗一最小化就被跟随改成了 320×160。
         // 登录页此刻本来也看不见（主窗最小化），等主窗回来那一 tick 自然重新摆对。
         return Ok(FollowOutcome::HostUnmeasurable(area));
     };
 
+    let webview = app
+        .get_webview(LOGIN_WEBVIEW_LABEL)
+        .ok_or_else(|| CoreError::new("internal", "登录页已拆掉：无需跟随"))?;
+    set_webview_rect(&webview, target, "登录页")?;
+
+    // 浮动控件跟主窗走（主窗一变大，右上角那个要跟着挪）。失败**只留痕**：
+    // 它们是浮在网页上的便利入口，摆不动不该让整次登录的跟随停下（登录页那一摆是硬要求）。
+    let rects = chrome_rects(area.width, area.height, area.trusted_scale());
+    for (label, rect) in LOGIN_CHROME_LABELS.iter().zip(rects) {
+        let Some(chrome) = app.get_webview(label) else {
+            continue;
+        };
+        if let Err(error) = set_webview_rect(&chrome, rect, label) {
+            log::debug!("浮动控件 {label} 未能跟随主窗几何：{error}");
+        }
+    }
+    Ok(FollowOutcome::Applied(target))
+}
+
+/// 把一个子 webview 摆到客户区相对的矩形上。
+fn set_webview_rect(webview: &Webview, target: Rect, what: &str) -> Result<(), CoreError> {
     webview
         .set_position(tauri::PhysicalPosition::new(
             target.x.round() as i32,
             target.y.round() as i32,
         ))
-        .map_err(|source| CoreError::new("internal", format!("摆放登录页失败：{source}")))?;
+        .map_err(|source| CoreError::new("internal", format!("摆放{what}失败：{source}")))?;
     webview
         .set_size(tauri::PhysicalSize::new(
             target.width.round() as u32,
             target.height.round() as u32,
         ))
-        .map_err(|source| CoreError::new("internal", format!("设置登录页尺寸失败：{source}")))?;
-    Ok(FollowOutcome::Applied(target))
+        .map_err(|source| CoreError::new("internal", format!("设置{what}尺寸失败：{source}")))?;
+    Ok(())
 }
 
-/// 跟随主窗几何（登录页"铺在主窗客户区上"：主窗一动就要重算）。
-pub fn follow_main_window(app: &AppHandle, top_inset: f64) -> Result<FollowOutcome, CoreError> {
-    let webview = app
-        .get_webview(LOGIN_WEBVIEW_LABEL)
-        .ok_or_else(|| CoreError::new("internal", "登录页已拆掉：无需跟随"))?;
-    apply_layout(app, &webview, top_inset)
+/// 跟随主窗几何（登录页铺在主窗客户区上、两个浮动控件贴角：主窗一动就要重算）。
+pub fn follow_main_window(app: &AppHandle) -> Result<FollowOutcome, CoreError> {
+    apply_layout(app)
 }
 
 /// 收尾各步的原始结果（拆成数据就是为了让分级判定成为**纯函数**，不依赖真 GUI 也能测）。
@@ -1276,6 +1501,10 @@ pub fn shutdown_login_view(
     } else {
         Ok(())
     };
+    // R25：两个浮动控件**与登录页同生同灭**——它们浮在官方页之上，登录页没了就该一起走
+    //（留着就是两个孤零零的小控件浮在门禁页上，而且握着 core_login_chrome 的来源资格）。
+    // 失败并入 `close` 那一档（同样是"关不掉"这一类，分级与提示语一致）。
+    let close = close.and_then(|()| close_login_chrome(app));
     let data_dir = remove_dir_with_backoff(data_dir);
 
     shutdown_failures(&ShutdownOutcome {
@@ -1441,12 +1670,59 @@ fn focus_login_view(app: &AppHandle) {
 mod tests {
     use super::*;
 
+    /// R25 用户四项之 1/2/4：登录体验的浮动控件（返回 / 主题）与它们的入口地址。
     #[test]
-    fn top_inset_mirror_is_48_and_inside_the_allowed_range() {
-        // 镜像值的唯一意义是"与 src/shared/login-inset.mjs 相等"，parity 测试扫源码钉住这里；
-        // 这条用例再钉一次数值本身，免得改成 47.9 也能过（源码扫描会把 48.0 读成 48）。
-        assert_eq!(LOGIN_VIEW_TOP_INSET, 48.0);
-        assert!((0.0..=MAX_TOP_INSET).contains(&LOGIN_VIEW_TOP_INSET));
+    fn the_login_chrome_widgets_are_two_distinct_labels_on_one_entry_page() {
+        assert_eq!(LOGIN_RETURN_WEBVIEW_LABEL, "login-return");
+        assert_eq!(LOGIN_THEME_WEBVIEW_LABEL, "login-theme");
+        assert_eq!(
+            LOGIN_CHROME_LABELS,
+            [LOGIN_RETURN_WEBVIEW_LABEL, LOGIN_THEME_WEBVIEW_LABEL]
+        );
+
+        // 两个控件与登录页、主窗的 label 必须两两不同：守卫就是按 label 判来源的
+        for label in LOGIN_CHROME_LABELS {
+            assert_ne!(label, LOGIN_WEBVIEW_LABEL, "控件与官方登录页的 label 不许相同");
+            assert_ne!(label, crate::MAIN_WINDOW_LABEL, "控件与主窗的 label 不许相同");
+        }
+        assert_ne!(LOGIN_RETURN_WEBVIEW_LABEL, LOGIN_THEME_WEBVIEW_LABEL);
+
+        // 入口与 kind（与 src/shared/login-chrome.mjs 逐字相同，由 Node 侧 parity 用例互钉）
+        assert_eq!(LOGIN_CHROME_ENTRY, "login-chrome.html");
+        assert_eq!(LOGIN_CHROME_KIND_RETURN, "return");
+        assert_eq!(LOGIN_CHROME_KIND_THEME, "theme");
+        assert_eq!(chrome_url(LOGIN_CHROME_KIND_RETURN), "login-chrome.html?kind=return");
+        assert_eq!(chrome_url(LOGIN_CHROME_KIND_THEME), "login-chrome.html?kind=theme");
+    }
+
+    /// 浮动控件的导航闸门：只许停在应用自己的本地页面上。
+    ///
+    /// 这条闸门是**安全**前提：两个控件的 label 在 `require_login_chrome_source` 的允许集合里，
+    /// 一旦它们能被导航到任意网页，那个网页就自动获得了"改主题 / 取消登录"的资格。
+    #[test]
+    fn a_chrome_widget_may_only_stay_on_the_apps_own_pages() {
+        for allowed in [
+            "tauri://localhost/login-chrome.html?kind=return",
+            "http://localhost:1420/login-chrome.html?kind=theme",
+            "http://tauri.localhost/login-chrome.html?kind=theme",
+            "https://localhost/login-chrome.html?kind=return",
+            "  http://127.0.0.1:1420/login-chrome.html  ",
+        ] {
+            assert!(chrome_navigation_allowed(allowed), "本地页面应当放行：{allowed}");
+        }
+        for blocked in [
+            "https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize",
+            "https://evil.example.com/",
+            "http://localhost.evil.com/login-chrome.html",
+            "file:///C:/Windows/System32/drivers/etc/hosts",
+            "javascript:alert(1)",
+            "data:text/html,<script>1</script>",
+            "",
+            "   ",
+            "不是 URL",
+        ] {
+            assert!(!chrome_navigation_allowed(blocked), "只许本地：{blocked} 必须拦下");
+        }
     }
 
     #[test]
@@ -1555,6 +1831,10 @@ mod tests {
     ///
     /// 扫的是**生产代码那一段**（`#[cfg(test)]` 之前）：本用例自己的字面量也在同一文件里，
     /// 不切掉就等于在扫自己。
+    ///
+    /// R25：`WebviewUrl::App(` 现在**合法地**出现在这个文件里（两个浮动控件加载本地页面），
+    /// 所以那条禁令改成"**建登录页那一段**里不许出现它"——登录页一旦挂上本地页面，
+    /// 就变成「自绘登录页」，等于自实现登录协议。
     #[test]
     fn the_login_window_never_injects_scripts_into_the_official_page() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/login.rs"))
@@ -1573,8 +1853,17 @@ mod tests {
             production.contains("WebviewUrl::External("),
             "登录窗加载的是外部官方页（不是本地 App 页面）"
         );
+
+        // 建登录页那一段（从 WebviewBuilder::new(LOGIN_WEBVIEW_LABEL) 到建浮动控件之前）
+        let login_builder = production
+            .find("WebviewBuilder::new(LOGIN_WEBVIEW_LABEL")
+            .expect("登录页要由 WebviewBuilder 建");
+        let chrome_builder = production
+            .find("fn build_chrome_on_main_thread(")
+            .expect("浮动控件的建窗要有具名函数");
+        let login_section = &production[login_builder..chrome_builder];
         assert!(
-            !production.contains("WebviewUrl::App("),
+            !login_section.contains("WebviewUrl::App("),
             "登录窗不得挂本地页面：那会变成「自绘登录页」，等于自实现登录协议"
         );
     }
@@ -1630,26 +1919,68 @@ mod tests {
         );
     }
 
-    /// 几何：同窗 webview 的坐标原点是**主窗客户区左上角**，所以 x 恒为 0、屏幕坐标不参与。
+    /// 几何（R25 用户四项之 3）：**登录页铺满整个客户区**——网页不再被挤压，
+    /// 顶部那条 48px 的让位对登录页退役。
     ///
     /// 前提（R24 写死）：入参是**量得到**的客户区尺寸。主窗最小化时客户区是 (0,0)，
     /// 那一档根本不该走到这里——由 [`layout_for`] 挡在门外（见本模块 R24 那一段）。
     #[test]
-    fn layout_target_is_client_relative_and_reserves_the_header() {
-        let target = layout_target(1280.0, 800.0, LOGIN_VIEW_TOP_INSET);
+    fn layout_target_fills_the_whole_client_area() {
+        let target = layout_target(1280.0, 800.0);
         assert_eq!(target.x, 0.0, "同窗 webview 里不存在屏幕 x 偏移");
-        assert_eq!(target.y, LOGIN_VIEW_TOP_INSET, "顶部让出 header 那一条");
+        assert_eq!(target.y, 0.0, "R25：顶部不再让出那一条（官方页铺满整窗）");
         assert_eq!(target.width, 1280.0, "宽度铺满客户区");
-        assert_eq!(target.height, 800.0 - LOGIN_VIEW_TOP_INSET, "高度铺满剩下的客户区");
+        assert_eq!(target.height, 800.0, "高度铺满客户区（不再是 800-48）");
 
-        // 客户区**真的小**（量得到，只是小）时仍然钳制：绝不交出负高度（set_size 会失败/建出畸形块）
-        let squashed = layout_target(1.0, 1.0, LOGIN_VIEW_TOP_INSET);
+        // 客户区**真的小**（量得到，只是小）时仍然钳制：绝不交出零尺寸（set_size 会失败/建出畸形块）
+        let squashed = layout_target(1.0, 1.0);
         assert_eq!(squashed.width, MIN_LOGIN_WIDTH);
         assert_eq!(squashed.height, MIN_LOGIN_HEIGHT);
         for bad in [f64::NAN, f64::INFINITY, -5.0] {
-            let target = layout_target(bad, bad, bad);
+            let target = layout_target(bad, bad);
             assert!(target.x.is_finite() && target.y.is_finite());
             assert!(target.width >= MIN_LOGIN_WIDTH && target.height >= MIN_LOGIN_HEIGHT);
+        }
+    }
+
+    /// 浮动控件的几何矩阵（R25 用户四项之 2/4）：左上 / 右上、贴边留 8px、尺寸按缩放比放大。
+    #[test]
+    fn chrome_widgets_sit_in_the_two_top_corners() {
+        let [back, theme] = chrome_rects(1280.0, 800.0, 1.0);
+        assert_eq!((back.x, back.y), (CHROME_MARGIN, CHROME_MARGIN), "返回控件在左上角");
+        assert_eq!((back.width, back.height), RETURN_CHROME_SIZE, "盒子就是控件那么大");
+        assert_eq!(theme.y, CHROME_MARGIN, "主题控件贴着上沿");
+        assert_eq!(
+            theme.x,
+            1280.0 - CHROME_MARGIN - THEME_CHROME_SIZE.0,
+            "主题控件贴右沿（右上角）"
+        );
+        assert_eq!((theme.width, theme.height), THEME_CHROME_SIZE);
+
+        // 两个控件不许重叠（窗口宽到放得下时）
+        assert!(
+            back.x + back.width <= theme.x,
+            "两个控件不许叠在一起：{:?} vs {:?}",
+            back,
+            theme
+        );
+
+        // 200% 缩放：尺寸与边距一起翻倍（它们是 CSS 像素，几何要物理像素）
+        let [back2, theme2] = chrome_rects(1280.0, 800.0, 2.0);
+        assert_eq!(back2.width, RETURN_CHROME_SIZE.0 * 2.0);
+        assert_eq!(back2.x, CHROME_MARGIN * 2.0);
+        assert_eq!(theme2.width, THEME_CHROME_SIZE.0 * 2.0);
+        assert_eq!(theme2.x, 1280.0 - CHROME_MARGIN * 2.0 - THEME_CHROME_SIZE.0 * 2.0);
+
+        // 缩放比不可信时按 1 算（与 ClientArea::trusted_scale 同一条纪律）
+        let [fallback, _] = chrome_rects(1280.0, 800.0, f64::NAN);
+        assert_eq!(fallback.width, RETURN_CHROME_SIZE.0);
+
+        // 窗口窄到放不下：夹进客户区，且仍然是正尺寸（不许摆到客户区之外——那样就点不到了）
+        let [narrow_back, narrow_theme] = chrome_rects(200.0, 800.0, 1.0);
+        for rect in [narrow_back, narrow_theme] {
+            assert!(rect.width >= 1.0 && rect.height >= 1.0, "退化尺寸也要是正的：{rect:?}");
+            assert!(rect.x >= 0.0 && rect.x + rect.width <= 200.0, "不许越过客户区右沿：{rect:?}");
         }
     }
 
@@ -1664,8 +1995,9 @@ mod tests {
     //   构造 `rect=(0,48,1280,752)` ← 主窗可测量（1280×800 物理）时的正确结果。
     // 后者证明**单位换算本来就是对的**（客户区物理像素 + topInset×scale），前者说明缺的是
     // "量不到"这一档：它既不是尺寸，也不该被钳。
+    // R25：登录页改成铺满整窗之后，那条正确值就是 `(0,0,1280,800)`（不再减 topInset）。
 
-    /// 量得到：客户区物理尺寸 + topInset（CSS 像素）×缩放比 → 客户区相对矩形。
+    /// 量得到：客户区物理尺寸 → 客户区相对矩形（**不减任何 inset**）。
     #[test]
     fn a_measurable_client_area_converts_to_the_client_relative_rect() {
         let area = ClientArea {
@@ -1675,32 +2007,32 @@ mod tests {
             minimized: false,
         };
         assert_eq!(
-            layout_for(&area, LOGIN_VIEW_TOP_INSET),
+            layout_for(&area),
             Layout::Target(Rect {
                 x: 0.0,
-                y: LOGIN_VIEW_TOP_INSET,
+                y: 0.0,
                 width: 1280.0,
-                height: 752.0,
+                height: 800.0,
             }),
-            "真机日志里那条正确的 rect=(0,48,1280,752) 就是它"
+            "R25：登录页铺满整个客户区（真机 1280×800 → rect=(0,0,1280,800)）"
         );
 
-        // 200% 缩放：客户区尺寸是**物理**像素（不缩放），topInset 是 CSS 像素（要缩放）
+        // 200% 缩放：客户区尺寸是**物理**像素（原样用，不缩放）
         let hidpi = ClientArea { scale: 2.0, ..area };
         assert_eq!(
-            layout_for(&hidpi, LOGIN_VIEW_TOP_INSET),
+            layout_for(&hidpi),
             Layout::Target(Rect {
                 x: 0.0,
-                y: 96.0,
+                y: 0.0,
                 width: 1280.0,
-                height: 704.0,
+                height: 800.0,
             })
         );
     }
 
     /// 量不到：主窗最小化时 `inner_size()` 是 (0,0)（tao 直接 `GetClientRect`，
     /// `tao-0.37.1/src/platform_impl/windows/window.rs:219`；真机窗口树里那个 Tauri Window
-    /// `iconic=True client=0x0` 就是它）。这一档**没有几何**，不许拿钳制下限凑一个。
+    /// `iconic=true client=0x0` 就是它）。这一档**没有几何**，不许拿钳制下限凑一个。
     #[test]
     fn an_unmeasurable_client_area_is_not_a_size() {
         let minimized = ClientArea {
@@ -1709,7 +2041,7 @@ mod tests {
             scale: 1.0,
             minimized: true,
         };
-        assert_eq!(layout_for(&minimized, LOGIN_VIEW_TOP_INSET), Layout::HostUnmeasurable);
+        assert_eq!(layout_for(&minimized), Layout::HostUnmeasurable);
 
         // 半边为 0、非有限、负数同样是"量不到"（合成器偶发退化值不当尺寸用）
         for (width, height) in [
@@ -1726,7 +2058,7 @@ mod tests {
                 minimized: false,
             };
             assert_eq!(
-                layout_for(&area, LOGIN_VIEW_TOP_INSET),
+                layout_for(&area),
                 Layout::HostUnmeasurable,
                 "({width},{height}) 不是尺寸"
             );
@@ -1734,22 +2066,18 @@ mod tests {
 
         // 缩放比不可信时按 1 算（与 R23 的 `.max(0.1)` 同一条纪律）——客户区量得到就照摆
         let no_scale = ClientArea {
-            scale: f64::NAN,
-            ..minimized.clone()
-        };
-        let no_scale = ClientArea {
             width: 1280.0,
             height: 800.0,
+            scale: f64::NAN,
             minimized: false,
-            ..no_scale
         };
         assert_eq!(
-            layout_for(&no_scale, LOGIN_VIEW_TOP_INSET),
+            layout_for(&no_scale),
             Layout::Target(Rect {
                 x: 0.0,
-                y: LOGIN_VIEW_TOP_INSET,
+                y: 0.0,
                 width: 1280.0,
-                height: 752.0,
+                height: 800.0,
             })
         );
     }
@@ -1764,10 +2092,22 @@ mod tests {
             minimized: false,
         };
         assert_eq!(
-            layout_for(&tiny, LOGIN_VIEW_TOP_INSET),
+            layout_for(&tiny),
             Layout::Target(Rect {
                 x: 0.0,
-                y: LOGIN_VIEW_TOP_INSET,
+                y: 0.0,
+                width: MIN_LOGIN_WIDTH,
+                height: 180.0,
+            }),
+            "宽度低于下限要钳到 320；高度 180 在下限之上，照原样"
+        );
+
+        let smaller = ClientArea { width: 100.0, height: 100.0, ..tiny };
+        assert_eq!(
+            layout_for(&smaller),
+            Layout::Target(Rect {
+                x: 0.0,
+                y: 0.0,
                 width: MIN_LOGIN_WIDTH,
                 height: MIN_LOGIN_HEIGHT,
             })
@@ -1824,6 +2164,83 @@ mod tests {
         assert!(
             production.contains("HostUnmeasurable"),
             "跟随路把「量不到」当一档结果：保持登录页现有几何，不用钳制下限覆盖它"
+        );
+    }
+
+    /// R25 源码钉子：浮动控件**建在登录页之后**（后建的子窗在上），
+    /// 与登录页**同生同灭**（收尾、孤儿、建页超时三条路都要收它们）。
+    #[test]
+    fn the_chrome_widgets_are_built_after_the_login_page_and_torn_down_with_it() {
+        let production = production_source();
+
+        // 顺序：`add_child` 建登录页那一段必须**排在**两个控件的建窗调用之前
+        //（用 kind 字面量定位调用点：label 常量在文件开头的数组里也出现过）
+        let login_child = production
+            .find("WebviewBuilder::new(LOGIN_WEBVIEW_LABEL")
+            .expect("登录页要由 WebviewBuilder 建");
+        let return_chrome = production
+            .find("LOGIN_CHROME_KIND_RETURN,")
+            .expect("返回控件的建窗调用要在生产代码里");
+        let theme_chrome = production
+            .find("LOGIN_CHROME_KIND_THEME,")
+            .expect("主题控件的建窗调用要在生产代码里");
+        assert!(
+            login_child < return_chrome && login_child < theme_chrome,
+            "浮动控件必须建在登录页**之后**：后建的子窗在 z 序上面，否则它们会沉到官方页底下"
+        );
+
+        // 透明 + 本地页面 + 导航闸门：三条都在建控件那一个函数里
+        let chrome_builder = production
+            .find("fn build_chrome_on_main_thread(")
+            .expect("浮动控件的建窗要有一个具名函数");
+        let body = &production[chrome_builder..];
+        let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+        assert!(
+            body.contains("tauri::webview::Color(0, 0, 0, 0)"),
+            "浮动控件要透明（铺底色会盖住官方页一块）：{body}"
+        );
+        assert!(
+            body.contains("WebviewUrl::App("),
+            "浮动控件加载的是应用自己的本地页面（不是外部网页）"
+        );
+        assert!(
+            body.contains("chrome_navigation_allowed("),
+            "浮动控件的导航闸门必须接上（它手里握着 core_login_chrome 的来源资格）"
+        );
+
+        // 同生同灭：收尾那一条链里必须出现 close_login_chrome
+        assert!(
+            production.matches("close_login_chrome(").count() >= 3,
+            "收尾、孤儿清理、建页超时三条路都要收掉浮动控件"
+        );
+        assert!(
+            production.contains("close_login_chrome"),
+            "收尾要连浮动控件一起收"
+        );
+    }
+
+    /// R25：返回控件建不起来 = 这次登录结构化失败（官方页铺满整窗时它是唯一的回退路径）。
+    #[test]
+    fn a_missing_return_widget_fails_the_login_instead_of_trapping_the_user() {
+        let production = production_source();
+        let build = production
+            .find("if let Err(error) = build_chrome_on_main_thread(")
+            .expect("返回控件的建窗要单独处置");
+        let block = &production[build..];
+        let block = &block[..block.find("\n    if let Err(error) = build_chrome_on_main_thread(").unwrap_or(block.len())];
+        assert!(
+            block.contains("return Err(error)"),
+            "返回控件失败要按结构化错误收场（否则用户被困在一个没有出口的登录页上）：{block}"
+        );
+
+        // 主题控件相反：失败只留痕（登录照常）
+        let theme = production
+            .rfind("if let Err(error) = build_chrome_on_main_thread(")
+            .expect("主题控件的建窗也要单独处置");
+        let theme_block = &production[theme..];
+        assert!(
+            theme_block.contains("log::warn!") && !theme_block.contains("return Err(error)"),
+            "主题控件失败不该让登录失败（它只是少一个便利入口）"
         );
     }
 

@@ -42,6 +42,12 @@
  *   二维码，也没有任何报错。这条频道把"现在的状态是什么"变成一次**有应答的确定性查询**
  *   （与托盘可用性查询同款模式：挂载时主动问一次）。少了它的后果与 R16 那条一样直白，
  *   只是表现成"门禁卡住"而不是"频道未知"。
+ *
+ * R25 的一处增补（同一流程）：
+ * - 广播频道加 `theme:changed`：主题三态（浅色 / 深色 / 跟随系统）的**目标态**。发送方是
+ *   Rust 侧（`theme::set_theme`，由浮动控件的专用命令 `core_login_chrome` 触发），
+ *   消费方是三个 webview（主窗 + 两个浮动控件）。少了它，用户点了主题只在自己那个控件上生效，
+ *   别的 webview 停在旧配色——而日志里什么都看不出来（广播被当白名单外帧丢掉）。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -66,6 +72,7 @@ import {
   LYRICS_STATE,
   LYRICS_TOGGLE,
   PLAYER_COMMAND,
+  THEME_CHANGED,
 } from "../src/shared/channels.ts";
 import { CALL_TIMEOUT_MS } from "../src/host/bridge.mjs";
 
@@ -146,6 +153,7 @@ const BROADCAST_CHANNEL_NAMES = [
   "lyrics:state",
   "lyrics:toggle",
   "player:command",
+  "theme:changed",
 ];
 
 test("一致性：请求频道白名单（Node 共享常量 ↔ Rust commands.rs 全部 auth:/settings:/library:/playback: 字面量）", () => {
@@ -272,8 +280,7 @@ test("一致性：R12 桌面歌词窗的三条广播（常量 + 字面量两侧�
   }
 });
 
-test("一致性：漏斗事件名与调用超时两侧相等", () => {  assert.equal(rustStringConst(rustSource("bridge.rs"), "CORE_EVENT"), CORE_EVENT);
-  assert.equal(CORE_EVENT, "core:event");
+test("一致性：漏斗事件名与调用超时两侧相等", () => {  assert.equal(rustStringConst(rustSource("bridge.rs"), "CORE_EVENT"), CORE_EVENT);  assert.equal(CORE_EVENT, "core:event");
   assert.equal(rustNumberConst(rustSource("bridge.rs"), "CALL_TIMEOUT_SECS") * 1000, CALL_TIMEOUT_MS);
   assert.equal(CALL_TIMEOUT_MS, 60_000);
 });
@@ -298,7 +305,8 @@ test("反漂移：Node 运行期代码里不得出现频道名字面量（只有
 
   // 只认普通引号里的字面量：注释里用反引号写的频道名是说明文字，不是第二份清单
   // R11：`lyrics:` 与 `app:` 也纳进来（托盘那两条广播同样是"渲染层只许认常量"）
-  const literal = /["']((?:auth|settings|host|library|playback|player|lyrics|app):[a-z][a-z-]*)["']/g;
+  // R25：`theme:` 同理（主题广播也是 Rust 侧发出的）
+  const literal = /["']((?:auth|settings|host|library|playback|player|lyrics|app|theme):[a-z][a-z-]*)["']/g;
   const offenders = [];
   for (const relative of scanned) {
     const source = readFileSync(`${repoRoot}${relative}`, "utf8");
@@ -338,5 +346,17 @@ test("一致性：R19 auth:get-status 请求频道（常量 + Rust 字面量 + �
   assert.ok(
     rustChannelLiterals(rustProduction(rustSource("commands.rs")), "auth:").includes(AUTH_GET_STATUS),
     "Rust 侧命令白名单同样必须含 auth:get-status（否则 core_call 在准入处就回 unknown_channel）",
+  );
+});
+
+test("一致性：R25 theme:changed 广播频道（常量 + Rust 镜像 + 白名单三处逐字相等）", () => {
+  // 发送方是 Rust 侧（浮动控件的 `core_login_chrome` → `theme::set_theme`），消费方是三个 webview。
+  // 少了任何一个环节，用户在浮动控件上改的主题就只在那个控件里生效（别的 webview 停在旧配色）。
+  assert.equal(THEME_CHANGED, "theme:changed");
+  assert.equal(rustStringConst(rustSource("bridge.rs"), "THEME_CHANGED"), THEME_CHANGED);
+  assert.ok(BROADCAST_CHANNELS.includes(THEME_CHANGED), "theme:changed 必须在广播白名单里");
+  assert.ok(
+    rustStringArray(rustSource("bridge.rs"), "BROADCAST_CHANNELS").includes(THEME_CHANGED),
+    "Rust 侧白名单同样必须含 theme:changed（它就是发送方）",
   );
 });

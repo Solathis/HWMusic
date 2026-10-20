@@ -96,6 +96,72 @@ pub fn require_main_webview(label: &str) -> Result<(), CoreError> {
     ))
 }
 
+/// `core_login_chrome` 的来源守卫（R25）：**只有**主窗与两个浮动控件能调这条命令。
+///
+/// 为什么另开一份而不是放宽 [`require_main_webview`]：那条守卫管的是 `core_call`（**全部业务频道**），
+/// 放宽它等于把库/播放/设置的请求面交给登录体验的浮动控件。这里收的是一条**只有两个动作**
+///（取消登录 / 改主题）的专用命令，允许集合就那三个 label：
+///
+/// - `main`：gate 视图右上角那个主题控件就在主窗里（与浮动那份是同一个 React 组件）；
+/// - `login-return` / `login-theme`：两个浮动控件（[`crate::login`]）。
+///
+/// **官方登录页（label `login`）不在集合里**，歌词窗、托盘同理：它们拿不到"改主题 / 取消登录"的口子。
+/// 判的仍然是 **webview label**（同窗宿主里窗口 label 恒为 `main`，按窗口判等于把守卫让出去）。
+pub fn require_login_chrome_source(label: &str) -> Result<(), CoreError> {
+    if label == MAIN_WINDOW_LABEL || crate::login::LOGIN_CHROME_LABELS.contains(&label) {
+        return Ok(());
+    }
+    Err(CoreError::new(
+        "forbidden_source",
+        format!("core_login_chrome 只接受主窗与登录浮动控件调用（来源 webview：{label}）"),
+    ))
+}
+
+/// `core_login_chrome` 的动作（**纯数据**：解析与执行分开，判定就能单测）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginChromeAction {
+    /// 取消进行中的登录（浮动「返回扫码登录」）
+    Cancel,
+    /// 读回当前主题（控件挂载时用：不需要第二条命令）
+    ReadTheme,
+    /// 改主题（Rust 持有状态 + 落盘 + 广播 `theme:changed`）
+    SetTheme(crate::theme::ThemeChoice),
+}
+
+/// `core_login_chrome` 的载荷 → 动作（纯函数；坏形状一律结构化 `invalid_payload`）。
+///
+/// 载荷形状只有三种，由 `action` 加"有没有带 `theme`"决定：
+/// - `{action:"return"}`；
+/// - `{action:"theme"}`（**没有** `theme` = 读回当前档位，与 `core_lyrics_configure` 的
+///   "空补丁 = 读回"同一条纪律：再开一条命令只会多一个要同步的地方）；
+/// - `{action:"theme", theme:"light"|"dark"|"system"}`。
+///
+/// 认不出的动作/档位**不猜**（宁可回结构化错误，也不要"点了没反应"）。
+pub fn parse_login_chrome_action(payload: &Value) -> Result<LoginChromeAction, CoreError> {
+    let invalid =
+        |message: &str| CoreError::new("invalid_payload", format!("core_login_chrome {message}"));
+    let object = payload
+        .as_object()
+        .ok_or_else(|| invalid("需要对象载荷 {action: \"return\"|\"theme\", theme?}"))?;
+
+    match object.get("action").and_then(Value::as_str) {
+        Some("return") => Ok(LoginChromeAction::Cancel),
+        Some("theme") => match object.get("theme") {
+            None | Some(Value::Null) => Ok(LoginChromeAction::ReadTheme),
+            Some(Value::String(raw)) => crate::theme::ThemeChoice::from_setting(Some(raw))
+                .map(LoginChromeAction::SetTheme)
+                .ok_or_else(|| {
+                    invalid("的 theme 只接受 light / dark / system（认不出的档位不猜）")
+                }),
+            Some(_) => Err(invalid("的 theme 必须是字符串（或省略 = 读回当前档位）")),
+        },
+        Some(other) => Err(invalid(&format!(
+            "不认得的 action：{other}（只接受 return / theme）"
+        ))),
+        None => Err(invalid("缺少 action（只接受 return / theme）")),
+    }
+}
+
 /// 请求频道准入：白名单外的频道在到达 sidecar 之前就被拒。
 pub fn require_request_channel(channel: &str) -> Result<(), CoreError> {
     if REQUEST_CHANNELS.contains(&channel) {
@@ -706,6 +772,50 @@ pub fn core_get_tray_available(webview: Webview) -> Result<bool, CoreError> {
     Ok(crate::tray::available(webview.app_handle()))
 }
 
+// ---------------------------------------------------------------------------
+// 登录体验的浮动控件（R25）
+// ---------------------------------------------------------------------------
+
+/// 登录体验的控件命令：**取消登录**与**主题三态**两条动作。
+///
+/// 为什么需要它（而不是复用 `core_call`）：两个浮动控件是主窗里的**另外两个子 webview**
+/// （label `login-return` / `login-theme`），而 `core_call` 的来源守卫只认主窗那一个 label
+/// （[`require_main_webview`]）——放宽它等于把**全部业务频道**交给登录体验的浮动控件。
+/// 这条命令的守卫（[`require_login_chrome_source`]）只放行 `main` 与那两个 label。
+///
+/// 回执是**事实**：
+/// - `{action:"return"}` → `{cancelled: bool}`：与 `auth:cancel-login` 落到**同一个结论槽**
+///   （[`crate::login::cancel_login`]），之后 sidecar 的登录流程照常收场并广播带文案的
+///   `auth:status`，门禁据此回到二维码态——R18 那条链一个字都没改；
+/// - `{action:"theme"}` → `{theme: "light"|"dark"|"system"}`：读回当前档位；
+/// - `{action:"theme", theme}` → 落盘 + 更新内存 + 广播 `theme:changed`，回执是**实际生效**的档位。
+///
+/// 同步命令：三件事都不需要主线程往返（写盘是文件 IO、广播是 `app.emit`）。
+#[tauri::command]
+pub fn core_login_chrome(
+    app: AppHandle,
+    webview: Webview,
+    payload: Option<Value>,
+) -> Result<Value, CoreError> {
+    require_login_chrome_source(webview.label())?;
+    let action = parse_login_chrome_action(payload.as_ref().unwrap_or(&Value::Null))?;
+    match action {
+        LoginChromeAction::Cancel => {
+            let cancelled = crate::login::cancel_login(&app)?;
+            Ok(serde_json::json!({ "cancelled": cancelled }))
+        }
+        LoginChromeAction::ReadTheme => {
+            let theme = crate::theme::current_theme(&app);
+            Ok(serde_json::json!({ "theme": theme.setting() }))
+        }
+        LoginChromeAction::SetTheme(choice) => {
+            let applied = crate::theme::set_theme(&app, choice)?;
+            log::info!("主题已改为 {}", applied.describe());
+            Ok(serde_json::json!({ "theme": applied.setting() }))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,6 +829,106 @@ mod tests {
             assert_eq!(error.kind.as_deref(), Some("forbidden_source"));
             assert!(error.message.contains(label), "错误应指明来源：{}", error.message);
         }
+    }
+
+    /// R25：浮动控件的专用命令守卫。允许集合恰好是三个 label，其余一律拒——
+    /// **官方登录页（`login`）不在里面**（它手里不该多一个"改主题 / 取消登录"的口子），
+    /// 歌词窗与托盘同理。
+    #[test]
+    fn the_login_chrome_guard_allows_exactly_the_main_window_and_the_two_widgets() {
+        for label in [
+            crate::MAIN_WINDOW_LABEL,
+            crate::login::LOGIN_RETURN_WEBVIEW_LABEL,
+            crate::login::LOGIN_THEME_WEBVIEW_LABEL,
+        ] {
+            assert!(require_login_chrome_source(label).is_ok(), "{label} 应当被放行");
+        }
+
+        for label in [
+            crate::login::LOGIN_WEBVIEW_LABEL, // 官方登录页：零命令权限是硬边界
+            crate::LYRICS_WINDOW_LABEL,
+            crate::TRAY_ID,
+            "login-return ",
+            "LOGIN-RETURN",
+            "",
+        ] {
+            let error = require_login_chrome_source(label).expect_err("非允许来源必须被拒绝");
+            assert_eq!(error.kind.as_deref(), Some("forbidden_source"), "来源：{label}");
+            assert!(error.message.contains(label), "错误应指明来源：{}", error.message);
+        }
+    }
+
+    /// 载荷解析（纯函数）：三种合法形状 + 认不出的一律结构化拒绝（不猜）。
+    #[test]
+    fn login_chrome_payloads_are_parsed_without_guessing() {
+        assert_eq!(
+            parse_login_chrome_action(&json!({"action": "return"})),
+            Ok(LoginChromeAction::Cancel)
+        );
+        assert_eq!(
+            parse_login_chrome_action(&json!({"action": "theme"})),
+            Ok(LoginChromeAction::ReadTheme),
+            "没带 theme = 读回当前档位（不需要第二条命令）"
+        );
+        assert_eq!(
+            parse_login_chrome_action(&json!({"action": "theme", "theme": null})),
+            Ok(LoginChromeAction::ReadTheme)
+        );
+        for (raw, expected) in [
+            ("light", crate::theme::ThemeChoice::Light),
+            ("dark", crate::theme::ThemeChoice::Dark),
+            ("system", crate::theme::ThemeChoice::System),
+        ] {
+            assert_eq!(
+                parse_login_chrome_action(&json!({"action": "theme", "theme": raw})),
+                Ok(LoginChromeAction::SetTheme(expected)),
+                "{raw} 是合法档位"
+            );
+        }
+
+        for bad in [
+            json!({}),
+            json!({"action": "open"}),
+            json!({"action": "return-"}),
+            json!({"action": 7}),
+            json!({"action": "theme", "theme": "auto"}),
+            json!({"action": "theme", "theme": "Light"}),
+            json!({"action": "theme", "theme": 1}),
+            json!([]),
+            json!("return"),
+            Value::Null,
+        ] {
+            let error = parse_login_chrome_action(&bad).expect_err("坏载荷必须结构化拒掉");
+            assert_eq!(error.kind.as_deref(), Some("invalid_payload"), "载荷：{bad}");
+        }
+    }
+
+    /// 源码钉子：这条命令必须挂在**专用**来源守卫后面，且判的是 webview label。
+    #[test]
+    fn the_login_chrome_command_is_guarded_by_its_own_source_check() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands.rs"))
+            .expect("要能读到自己的源码");
+        let production = match source.find("#[cfg(test)]") {
+            Some(cut) => &source[..cut],
+            None => &source[..],
+        };
+        let start = production
+            .find("pub fn core_login_chrome(")
+            .expect("找不到命令本体");
+        let end = production[start..]
+            .find("\n}\n")
+            .map(|offset| start + offset)
+            .expect("命令本体没有闭合");
+        let body = &production[start..end];
+
+        assert!(
+            body.contains("require_login_chrome_source(webview.label())"),
+            "浮动控件的命令必须过**专用**守卫并判 webview label：{body}"
+        );
+        assert!(
+            !body.contains("require_main_webview("),
+            "它不能用 core_call 那条守卫：浮动控件的 label 不是 main（用了就等于永远拒绝）"
+        );
     }
 
     /// R23 的关键钉子（同窗宿主的**安全前提**）：登录页与主窗共用同一个窗口，

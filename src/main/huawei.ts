@@ -5,9 +5,11 @@
  * 线上契约（Rust `src-tauri/src/login.rs` ↔ 本模块，两侧由 `test/login-parity.test.mjs` 互钉）：
  *
  * ```
- * host:open-login  入 {url, partition, topInset}          → 出 {status, url?, message?}
+ * host:open-login  入 {url, partition}                     → 出 {status, url?, message?}
  * host:cancel-login 入 {}                                  → 出 {cancelled: boolean}
  * ```
+ *
+ * R25：`topInset` 从 `host:open-login` 的载荷里**退休**（登录页铺满整窗，不再让出顶部那一条）。
  *
  * 三条要点：
  * 1. **`host:open-login` 是长轮询**：答复发生在登录窗**收场之后**（扫码可能要好几分钟），
@@ -20,7 +22,6 @@
 import { randomBytes } from "node:crypto";
 
 import { LOGIN_TIMEOUT_MS } from "../protocols/login-callback.mjs";
-import { LOGIN_VIEW_TOP_INSET } from "../shared/login-inset.mjs";
 import { CORE_ERROR_KINDS, err, ok } from "../shared/result.ts";
 
 import type { CoreResult } from "../shared/result.ts";
@@ -78,8 +79,6 @@ export interface OpenLoginParams {
   url: string;
   /** 一次性随机分区；缺省由 [`createPartition`] 生成 */
   partition?: string;
-  /** 顶部内缩（CSS 像素）；缺省取共享常量 [`LOGIN_VIEW_TOP_INSET`] */
-  topInset?: number;
 }
 
 /** 宿主要求封装（`src/host/host-services.mjs` 的子集：本模块只用到这两个）。 */
@@ -214,10 +213,12 @@ export function createLoginHost({
 
   return {
     async openLoginPage(params: OpenLoginParams) {
+      // R25：`topInset` 从载荷里退休——官方登录页**铺满整个主窗**（用户四项之 3），
+      // "返回扫码登录"与主题控件改成浮在网页之上的两个小 webview（`login.rs`），
+      // 不再从客户区里挖掉一条 header。留一个永远只能是 0 的旋钮只会让下一个人摆错页面。
       const payload = {
         url: params.url,
         partition: params.partition ?? partition(),
-        topInset: params.topInset ?? LOGIN_VIEW_TOP_INSET,
       };
       const reply = await hostServices.openLogin(payload, { timeoutMs: openTimeoutMs });
       const conclusion = parseHostConclusion(reply);

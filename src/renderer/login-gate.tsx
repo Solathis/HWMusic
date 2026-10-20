@@ -57,13 +57,25 @@
  * R19：挂载时除了订阅 `auth:status`，还要**主动查一次** `auth:get-status`。`auth:status` 只在
  * sidecar 启动时播一次（Rust 的排队冲刷也只发生一次），渲染层 reload/崩溃重启之后就再也收不到
  * ——门禁会永久停在 checking。查询的应答与广播喂同一个 `statusEventOf` 映射。
+ *
+ * R25（用户指令 2026-10-20，登录体验四项改造）在这一页上又改了四处：
+ * 1. **过期遮罩只有两行**：「二维码已过期」/「点击刷新」（[`QR_EXPIRED_BOX_HINT`]）；
+ * 2. **过期态那个「刷新二维码」按钮删掉**——二维码容器本身就是刷新控件（R20 起可点），
+ *    它一直可点，不需要第二个入口；
+ * 3. **右上角放主题控件**（[`ThemeControl`]，浅色 / 深色 / 跟随系统；用户四项之 4 的 gate 侧）；
+ * 4. **「返回扫码登录」搬出门禁**：官方页 R25 起铺满整个主窗，这一层整个在它底下，
+ *    那个控件现在由浮动 webview `login-return` 渲染（`login-chrome.tsx`）。
+ *    于是这一页不再 import `AUTH_CANCEL_LOGIN`，也不再暴露 `backToQr`——
+ *    取消登录只剩**一条**入口（浮动控件 → `core_login_chrome {action:"return"}`）。
+ *
+ * 顶部那条 header（高度仍 = [`LOGIN_VIEW_TOP_INSET`]）现在只是门禁自己的标题区：
+ * R25 起登录页**不再**从它下面开始（官方页铺满整窗），它不再是"给子窗让位"的几何契约。
  */
 import { useCallback, useEffect, useRef, useState } from "react"
 
 import { AUTH_QR, AUTH_STATUS } from "../shared/channels.ts"
 import { LOGIN_VIEW_TOP_INSET } from "../shared/login-inset.mjs"
 import {
-  AUTH_CANCEL_LOGIN,
   AUTH_LOGIN,
   AUTH_GET_STATUS,
   AUTH_QR_START,
@@ -76,10 +88,10 @@ import {
   LOGIN_GATE_TITLE,
   QR_COUNTDOWN_TESTID,
   QR_COUNTDOWN_TICK_MS,
+  QR_EXPIRED_BOX_HINT,
   QR_EXPIRED_BOX_TEXT,
   QR_GATE_STATUS,
   QR_HINT_TEXT,
-  QR_REFRESH_ACTION_TESTID,
   QR_REFRESH_LABEL,
   QR_REFRESH_TESTID,
   canRefreshQr,
@@ -93,6 +105,7 @@ import {
   webLoginEntry,
 } from "./features/auth/login-gate-logic.mjs"
 import { QR_SIZE_PX, paintQrCanvas } from "./features/auth/qr-canvas.mjs"
+import { ThemeControl } from "./theme-control"
 
 /** `auth:status` 广播的载荷（与 src/shared/channels.ts 的说明同源）。 */
 export interface AuthStatusPayload {
@@ -114,10 +127,14 @@ export interface AuthGate {
   state: ReturnType<typeof initialGateState>
   /** 发起 / 重新发起二维码（自动开始、二维码容器点击、"重试"都走这一条） */
   startQr: () => void
-  /** 次要入口（打开形态）：打开华为官方登录窗（既有的 auth:login 路径；sidecar 会先停掉二维码会话） */
+  /**
+   * 次要入口（打开形态）：打开华为官方登录页（既有的 auth:login 路径；sidecar 会先停掉二维码会话）。
+   *
+   * R25：「返回扫码登录」**不在这里**——它浮在官方页之上（浮动 webview `login-return`），
+   * 走的是专用命令 `core_login_chrome {action:"return"}`（见 `login-chrome.tsx`）。
+   * 门禁这一层在官方页开着时整个被盖住，在这儿留一条取消路径等于留一条点不到的路径。
+   */
   startLogin: () => void
-  /** 次要入口（返回形态，R20）：关掉官方登录窗（auth:cancel-login），之后自动回到二维码态 */
-  backToQr: () => void
 }
 
 /**
@@ -257,30 +274,13 @@ export function useAuthGate(): AuthGate {
   }, [])
 
   /**
-   * 「返回扫码登录」（R20）：把官方登录窗关掉。
+   * 「返回扫码登录」（R20）在 R25 里**搬出了这个文件**：它现在浮在官方页**之上**
+   * （浮动 webview `login-return` → `login-chrome.tsx` → 专用命令 `core_login_chrome{action:"return"}`）。
    *
-   * 界面**不自己做状态跳转**：窗在 Rust 手里，"关掉了"这件事只有宿主知道。取消成功之后
-   * sidecar 的登录流程收场（结论 cancelled）→ `failWith` 播一条 `busy:false` **带文案**的
-   * `auth:status` → 渲染层按 R18 的判据（带话的收场）回到二维码态并重新发码
-   * （`isOfficialFinish` / `returnToQr`，见 login-gate-logic）。
-   *
-   * 这一条调用**失败**时才本地收场（`failed` 在 official 那条路上同样走 `returnToQr`）：
-   * 卡在"已在网页中打开登录"上等一条永不到来的广播，用户就真的没有出路了。
+   * 为什么不能留在这一层：官方页 R25 起铺满整个主窗，门禁这棵子树整个在它底下——
+   * 在这儿渲染的"返回"用户看得见才怪。搬走同时消掉了第二条取消路径
+   *（原来是 `auth:cancel-login`，现在是同一条命令落到**同一个结论槽** `login::cancel_login`）。
    */
-  const backToQr = useCallback(() => {
-    void (async () => {
-      try {
-        await coreCall(AUTH_CANCEL_LOGIN, null)
-      } catch (failure) {
-        setState((current) =>
-          reduceGateState(current, {
-            type: LOGIN_GATE_EVENT.failed,
-            message: isCoreError(failure) ? failure.message : "返回扫码登录失败（详情见日志）",
-          }),
-        )
-      }
-    })()
-  }, [])
 
   // 自动发起：四条件齐备才发起（见 login-gate-logic.mjs）；界面上没有任何按钮做这件事。
   //
@@ -311,7 +311,7 @@ export function useAuthGate(): AuthGate {
     return () => clearInterval(timer)
   }, [expiresAt])
 
-  return { state, startQr, startLogin, backToQr }
+  return { state, startQr, startLogin }
 }
 
 /** 二维码画布：内容换一张就重画（编码与纠错全交给库，这里不碰二维码算法）。 */
@@ -338,7 +338,7 @@ function QrCanvas({ content }: { content: string }) {
 
 /** 引导页本体。 */
 export function LoginGate({ gate }: { gate: AuthGate }) {
-  const { state, startQr, startLogin, backToQr } = gate
+  const { state, startQr, startLogin } = gate
   const status = loginGateStatusLine(state)
   const content = qrContentOf(state)
   const countdown = qrCountdownText(state)
@@ -346,17 +346,20 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
   const entry = webLoginEntry(state)
 
   /**
-   * 次要入口（**只有一处定义**，两种形态共用）。
+   * 次要入口（**只有一处定义**）。
    *
-   * `open`：打开官方登录窗（既有的 auth:login）。
-   * `back`（R20）：关掉它（auth:cancel-login）——窗铺满内容区时，它是用户**唯一**能点到的控件。
+   * `open`：打开官方登录页（既有的 auth:login）。
+   * `back`（R20）：**R25 起不再由这里渲染**——「返回扫码登录」要浮在官方页**之上**
+   * （用户指令：不独占一行、不挤压网页），落点是浮动 webview `login-return`
+   * （`login-chrome.tsx`，文案与锚点是同一份常量）。gate 这一层此刻整个被官方页盖着，
+   * 在这儿画它等于画在别人的地板底下。
    */
   const entryButton = (
     <Button
       variant="link"
       size="sm"
       className="text-xs text-muted-foreground"
-      onClick={entry.form === "back" ? backToQr : startLogin}
+      onClick={startLogin}
       disabled={entry.disabled}
       data-testid={entry.testid}
     >
@@ -366,11 +369,12 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
 
   return (
     <div className="flex h-full w-full flex-col bg-background text-foreground">
-      {/* 几何契约：这条的高度就是 Rust 登录子窗顶部让出的那一块（同一共享常量）。
-          R20：品牌（与窗口标题栏重复的那句）已删——没有子窗时它是一条空占位；
-          子窗铺满内容区时它是**唯一**还看得见、点得到的一条，所以"返回扫码登录"落在它里面。 */}
+      {/* 顶部那条仍然是页面自己的 header（高度 = 共享常量 `LOGIN_VIEW_TOP_INSET`）。
+          R25：登录页**不再**让出这一条（它铺满整窗），所以这条不再是"给子窗让位"的几何契约，
+          而是门禁自己的标题区；右上角放主题控件（用户四项之 4：gate 视图也要有）。
+          它被官方页盖住时不可见也无碍——那一刻主题控件由浮动 `login-theme` webview 顶上。 */}
       <header className="flex items-center justify-end px-4" style={{ height: LOGIN_VIEW_TOP_INSET }}>
-        {entry.form === "back" ? entryButton : null}
+        <ThemeControl />
       </header>
 
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
@@ -381,7 +385,9 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
             界面不跳、用户知道"马上就来"。R20 起容器本身可点（换一张新码）；R21 起过期态
             也点得动——**那是唯一的换码路径**（sidecar 不再自动换新）。
             过期时给的是"已过期"占位而不是 Skeleton：Skeleton 读起来像"马上就来"，而这一档
-            要等的是用户点一下。canvas 撤下 → 屏上没有任何可扫的东西。 */}
+            要等的正是用户点一下。canvas 撤下 → 屏上没有任何可扫的东西。
+            R25（用户指令）：过期占位**只有两行**——「二维码已过期」/「点击刷新」；原来那个显著的
+            「刷新二维码」按钮删掉（容器自己就是那个控件，它一直可点）。 */}
         <Button
           variant="ghost"
           className="h-auto rounded-lg border-border bg-card p-3 hover:bg-card"
@@ -392,8 +398,9 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
         >
           {content === null ? (
             expired ? (
-              <div className="flex h-52 w-52 items-center justify-center rounded-md border border-dashed border-border">
+              <div className="flex h-52 w-52 flex-col items-center justify-center gap-1 rounded-md border border-dashed border-border">
                 <span className="text-sm text-muted-foreground">{QR_EXPIRED_BOX_TEXT}</span>
+                <span className="text-sm text-muted-foreground">{QR_EXPIRED_BOX_HINT}</span>
               </div>
             ) : (
               <Skeleton className="h-52 w-52 rounded-md" />
@@ -416,20 +423,16 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
           {status}
         </p>
 
-        {/* R21：过期态那个**显著**的刷新入口。sidecar 不再自动换新，所以它是这一档唯一的
-            出路（容器也能点，但一个看得见的按钮才说得清"接下来该做什么"）。 */}
-        {expired ? (
-          <Button variant="secondary" size="sm" onClick={startQr} data-testid={QR_REFRESH_ACTION_TESTID}>
-            {QR_REFRESH_LABEL}
-          </Button>
-        ) : null}
-
         {canRetryQr(state) ? (
           <Button variant="secondary" size="sm" onClick={startQr}>
             重试
           </Button>
         ) : null}
 
+        {/* R25：正文里只剩「在网页中打开登录」这一种形态。「返回扫码登录」**不再由 gate 渲染**
+            ——它要浮在官方页**之上**（用户指令：不独占一行、不挤压网页），落点是浮动 webview
+            `login-return`（`login-chrome.tsx`，文案与锚点是同一份常量）。gate 这一层此刻整个
+            被官方页盖着，在这儿画它等于画在别人的地板底下。 */}
         {entry.form === "open" ? entryButton : null}
       </div>
     </div>

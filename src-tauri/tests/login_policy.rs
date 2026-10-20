@@ -13,12 +13,13 @@ use std::time::Duration;
 use huawei_music_desktop_lib::bridge::CoreError;
 use huawei_music_desktop_lib::login::{
     abandon_build_data_dir, abandon_build_data_dir_with,
-    deadline_conclusion, deliver_build_result, layout_for, layout_target, login_data_dir,
+    chrome_navigation_allowed, chrome_rects, deadline_conclusion, deliver_build_result, layout_for,
+    layout_target, login_data_dir,
     navigation_for, parse_config, shutdown_failures, BuildDelivery, ClientArea, DiscardableWindow,
     Layout, LoginConclusion, LoginSession, LoginState, Navigation, Rect, ShutdownFailure,
-    ShutdownOutcome, LOGIN_ALLOWED_ORIGINS,
+    ShutdownOutcome, CHROME_MARGIN, LOGIN_ALLOWED_ORIGINS,
     LOGIN_ALLOWED_URLS, LOGIN_LOAD_DEADLINE_SECS, LOGIN_LOAD_TIMEOUT_MESSAGE, LOGIN_TIMEOUT_SECS,
-    LOGIN_TOTAL_TIMEOUT_MESSAGE, LOGIN_VIEW_TOP_INSET, MAX_TOP_INSET, MIN_LOGIN_HEIGHT,
+    LOGIN_TOTAL_TIMEOUT_MESSAGE, MIN_LOGIN_HEIGHT,
     MIN_LOGIN_WIDTH, PARTITION_MAX_LEN,
 };
 use serde_json::json;
@@ -133,7 +134,7 @@ fn parse_config_rejects_bad_payloads_without_echoing_them() {
         String::new(),
     ];
     for bad_url in bad_urls {
-        let error = error_of(json!({"url": bad_url.clone(), "partition": "p1", "topInset": 48}));
+        let error = error_of(json!({"url": bad_url.clone(), "partition": "p1"}));
         assert_eq!(error.kind.as_deref(), Some("invalid_payload"), "url={bad_url}");
         assert!(!error.message.contains(secrets), "错误里回显了 url 里的敏感参数：{}", error.message);
         assert!(
@@ -143,12 +144,11 @@ fn parse_config_rejects_bad_payloads_without_echoing_them() {
         );
     }
 
-    // topInset 越界/非数（JSON 里没有 NaN/Infinity：非有限值只可能来自 Rust 侧调用，见下面的几何用例）
-    for bad_inset in [json!(-1), json!(MAX_TOP_INSET + 0.5), json!("48"), json!(null), json!(true)] {
-        let error = error_of(json!({"url": AUTHORIZE, "partition": "p1", "topInset": bad_inset}));
-        assert_eq!(error.kind.as_deref(), Some("invalid_payload"), "topInset={bad_inset}");
-        assert!(error.message.contains("topInset"), "应指明是哪个字段：{}", error.message);
-    }
+    // R25：`topInset` 已从载荷里退休——多给的字段**不是错误**（前向兼容：老调用方多传一个键
+    // 不该让登录起不来），但它也不改变任何几何（登录页铺满整窗，见 §8）。
+    let config = config_of(json!({"url": AUTHORIZE, "partition": "p1", "topInset": 48}));
+    assert_eq!(config.url, AUTHORIZE);
+    assert_eq!(config.partition, "p1");
 
     // partition：路径穿越与非法字符必须在进入文件系统之前被拒
     let too_long = "x".repeat(PARTITION_MAX_LEN + 1);
@@ -164,7 +164,7 @@ fn parse_config_rejects_bad_payloads_without_echoing_them() {
         "",
         too_long.as_str(),
     ] {
-        let error = error_of(json!({"url": AUTHORIZE, "partition": bad_partition, "topInset": 48}));
+        let error = error_of(json!({"url": AUTHORIZE, "partition": bad_partition}));
         assert_eq!(error.kind.as_deref(), Some("invalid_payload"), "partition={bad_partition:?}");
         assert!(error.message.contains("partition"), "应指明是哪个字段：{}", error.message);
         // 不复述调用方给的写法（尤其路径穿越那几种）；范围文本里的 "1..=64" 是规则说明，不算复述
@@ -182,18 +182,12 @@ fn parse_config_rejects_bad_payloads_without_echoing_them() {
 
 #[test]
 fn parse_config_accepts_the_documented_shape() {
-    let config = config_of(json!({"url": AUTHORIZE, "partition": "aB0_-Z9", "topInset": 48}));
+    let config = config_of(json!({"url": AUTHORIZE, "partition": "aB0_-Z9"}));
     assert_eq!(config.url, AUTHORIZE);
     assert_eq!(config.partition, "aB0_-Z9");
-    assert_eq!(config.top_inset, LOGIN_VIEW_TOP_INSET);
-
-    // topInset 的边界值两端都收（0 与上限）
-    assert_eq!(config_of(json!({"url": AUTHORIZE, "partition": "p", "topInset": 0})).top_inset, 0.0);
-    let max = config_of(json!({"url": AUTHORIZE, "partition": "p", "topInset": MAX_TOP_INSET}));
-    assert_eq!(max.top_inset, MAX_TOP_INSET);
 
     // 回调 URL 不是合法入参（登录窗只铺官方授权页）
-    let error = error_of(json!({"url": "hms://redirect_uri?code=C", "partition": "p", "topInset": 48}));
+    let error = error_of(json!({"url": "hms://redirect_uri?code=C", "partition": "p"}));
     assert_eq!(error.kind.as_deref(), Some("invalid_payload"));
 }
 
@@ -212,7 +206,7 @@ fn login_data_dir_stays_under_the_data_root() {
 
     for partition in ["p1", "aB0_-Z9", long_partition.as_str()] {
         // 只有过了 parse_config 的 partition 才会走到这里（校验面与建目录面是同一道门）
-        config_of(json!({"url": AUTHORIZE, "partition": partition, "topInset": 48}));
+        config_of(json!({"url": AUTHORIZE, "partition": partition}));
         let dir = login_data_dir(root, partition);
         assert!(dir.starts_with(root), "登录数据目录必须落在数据根之下：{dir:?}");
         assert!(dir.ends_with(partition), "目录名就是 partition：{dir:?}");
@@ -378,45 +372,90 @@ fn login_state_is_exclusive() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. 几何（R23：登录页是**同窗** webview ⇒ 坐标是客户区相对的，没有屏幕坐标、也没有跨窗换算）
+// 8. 几何（R23：登录页是**同窗** webview ⇒ 坐标是客户区相对的，没有屏幕坐标、也没有跨窗换算。
+//    R25：登录页**铺满整个客户区**——用户四项之 3"不挤压网页"）
 // ---------------------------------------------------------------------------
 
 #[test]
-fn layout_target_fills_the_main_client_area_below_the_header() {
+fn layout_target_fills_the_whole_main_client_area() {
     // 输入是**主窗客户区尺寸**（物理像素）：同窗 webview 的坐标原点就是客户区左上角，
-    // 所以 x 恒为 0、y 恒为 topInset——屏幕坐标（旧宿主用的 `inner_position`）不参与。
-    let target = layout_target(1280.0, 800.0, LOGIN_VIEW_TOP_INSET);
+    // 所以 x/y 恒为 0——屏幕坐标（旧宿主用的 `inner_position`）不参与。
+    let target = layout_target(1280.0, 800.0);
 
     assert_eq!(target.x, 0.0, "同窗 webview 不存在屏幕 x 偏移");
-    assert_eq!(target.y, LOGIN_VIEW_TOP_INSET, "顶部让出 header 那一条（返回控件在那儿）");
+    assert_eq!(target.y, 0.0, "R25：顶部不再让出那一条（官方页铺满整窗）");
     assert_eq!(target.width, 1280.0, "宽度铺满客户区");
-    assert_eq!(target.height, 800.0 - LOGIN_VIEW_TOP_INSET, "高度铺满剩下的客户区");
+    assert_eq!(target.height, 800.0, "高度铺满客户区（不再是 800-48）");
     assert!(target.y + target.height <= 800.0, "不得溢出客户区");
 
-    // 主窗被外部压到退化尺寸时钳制：绝不交出负高度（set_size 会失败/建出畸形块）
-    let squashed = layout_target(10.0, 20.0, LOGIN_VIEW_TOP_INSET);
+    // 主窗被外部压到退化尺寸时钳制：绝不交出零尺寸（set_size 会失败/建出畸形块）
+    let squashed = layout_target(10.0, 20.0);
     assert_eq!(squashed.height, MIN_LOGIN_HEIGHT);
     assert_eq!(squashed.width, MIN_LOGIN_WIDTH);
     assert!(squashed.height > 0.0 && squashed.width > 0.0);
 
-    // 非有限/负输入按 0 处理（合成器偶发退化值），仍然不产出负尺寸
+    // 非有限/负输入按 0 处理（合成器偶发退化值），仍然不产出零/负尺寸
     for bad in [f64::NAN, f64::INFINITY, -5.0] {
-        let target = layout_target(bad, bad, LOGIN_VIEW_TOP_INSET);
+        let target = layout_target(bad, bad);
         assert!(target.x.is_finite() && target.y.is_finite());
         assert!(target.width >= MIN_LOGIN_WIDTH && target.height >= MIN_LOGIN_HEIGHT);
     }
+}
 
-    // topInset 为 0 时整块客户区归登录页
-    let flush = layout_target(1024.0, 768.0, 0.0);
-    assert_eq!(flush.x, 0.0);
-    assert_eq!(flush.y, 0.0);
-    assert_eq!(flush.height, 768.0);
+/// R25：浮动控件的几何（用户四项之 2/4）——左上角「返回扫码登录」、右上角主题控件，
+/// 贴边留 8px、尺寸按缩放比换算，且**不会越过客户区**（越界就等于点不到）。
+#[test]
+fn chrome_widgets_are_anchored_to_the_two_top_corners() {
+    let [back, theme] = chrome_rects(1280.0, 800.0, 1.0);
+    assert_eq!((back.x, back.y), (CHROME_MARGIN, CHROME_MARGIN), "返回控件在左上角");
+    assert_eq!(theme.y, CHROME_MARGIN);
+    assert_eq!(theme.x, 1280.0 - CHROME_MARGIN - theme.width, "主题控件贴右沿");
+    assert!(
+        back.x + back.width <= theme.x,
+        "宽窗口里两个控件不许重叠：{back:?} vs {theme:?}"
+    );
+    for rect in [back, theme] {
+        assert!(rect.width >= 1.0 && rect.height >= 1.0, "{rect:?}");
+        assert!(rect.x >= 0.0 && rect.x + rect.width <= 1280.0, "不许越过客户区：{rect:?}");
+    }
+
+    // CSS 像素 → 物理像素：200% 缩放时尺寸与边距一起翻倍
+    let [back2, theme2] = chrome_rects(1280.0, 800.0, 2.0);
+    assert_eq!(back2.width, back.width * 2.0);
+    assert_eq!(back2.x, back.x * 2.0);
+    assert_eq!(theme2.width, theme.width * 2.0);
+
+    // 缩放比不可信时按 1 算（与 ClientArea 的纪律一致）
+    assert_eq!(chrome_rects(1280.0, 800.0, f64::NAN)[0].width, back.width);
+
+    // 窄窗口：夹进客户区，仍然是正尺寸
+    for rect in chrome_rects(200.0, 800.0, 1.0) {
+        assert!(rect.width >= 1.0 && rect.height >= 1.0, "{rect:?}");
+        assert!(rect.x >= 0.0 && rect.x + rect.width <= 200.0, "不许越过客户区右沿：{rect:?}");
+    }
+}
+
+/// R25：浮动控件只许停在应用自己的本地页面上（它们握着 `core_login_chrome` 的来源资格）。
+#[test]
+fn chrome_widgets_may_only_navigate_within_the_app() {
+    assert!(chrome_navigation_allowed("tauri://localhost/login-chrome.html?kind=theme"));
+    assert!(chrome_navigation_allowed("http://localhost:1420/login-chrome.html?kind=return"));
+    for blocked in [
+        "https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize",
+        "https://evil.example.com/",
+        "file:///C:/Windows/System32/drivers/etc/hosts",
+        "javascript:alert(1)",
+        "",
+        "不是 URL",
+    ] {
+        assert!(!chrome_navigation_allowed(blocked), "{blocked} 必须拦下");
+    }
 }
 
 /// R24：几何的**输入**也可能"量不到"——真机 2026-10-20 同一个进程里那两行日志就是这个契约的两端：
-/// 主窗可测量 → `rect=(0,48,1280,752)`；主窗最小化（`inner_size()` 是 `(0,0)`）→ **没有几何**，
-/// 而不是 `rect=(0,48,320,160)`（那是两条钳制下限凑出来的假盒子：登录页真的被摆成了 320×160，
-/// 创建日志一次、跟随每 250ms 又一次）。
+/// 主窗可测量 → `rect=(0,48,1280,752)`（R25 起是 `(0,0,1280,800)`）；主窗最小化
+/// （`inner_size()` 是 `(0,0)`）→ **没有几何**，而不是 `rect=(0,48,320,160)`
+///（那是两条钳制下限凑出来的假盒子：登录页真的被摆成了 320×160，创建日志一次、跟随每 250ms 又一次）。
 #[test]
 fn an_unmeasurable_client_area_has_no_geometry() {
     let measurable = ClientArea {
@@ -426,14 +465,14 @@ fn an_unmeasurable_client_area_has_no_geometry() {
         minimized: false,
     };
     assert_eq!(
-        layout_for(&measurable, LOGIN_VIEW_TOP_INSET),
+        layout_for(&measurable),
         Layout::Target(Rect {
             x: 0.0,
-            y: LOGIN_VIEW_TOP_INSET,
+            y: 0.0,
             width: 1280.0,
-            height: 800.0 - LOGIN_VIEW_TOP_INSET,
+            height: 800.0,
         }),
-        "真机日志里那条正确的 rect=(0,48,1280,752)"
+        "R25：真机那台 1280×800 的主窗 ⇒ rect=(0,0,1280,800)"
     );
     assert_eq!(
         measurable.describe(),
@@ -449,7 +488,7 @@ fn an_unmeasurable_client_area_has_no_geometry() {
         minimized: true,
     };
     assert_eq!(
-        layout_for(&minimized, LOGIN_VIEW_TOP_INSET),
+        layout_for(&minimized),
         Layout::HostUnmeasurable,
         "量不到不是尺寸：不许钳成 MIN_LOGIN_WIDTH×MIN_LOGIN_HEIGHT"
     );
@@ -464,7 +503,7 @@ fn an_unmeasurable_client_area_has_no_geometry() {
             minimized: false,
         };
         assert_eq!(
-            layout_for(&area, LOGIN_VIEW_TOP_INSET),
+            layout_for(&area),
             Layout::HostUnmeasurable,
             "({width},{height}) 不是尺寸"
         );

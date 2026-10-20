@@ -191,24 +191,44 @@ DNS  api-drcn.music.dbankcloud.cn                  → 2407:c080:1400:61:40a0:d5
   漏了预滤不会让登录流被一次普通导航杀死——这正是本表存在的理由。
 - Rust 侧 R7 若把 `isCallback` 当"必须先调"的前置条件，属于**超出契约的额外要求**，不要在 Rust 里依赖它。
 
-### 1.7 登录页宿主 ↔ sidecar 的线上契约（R7 落地 · R23 换宿主）
+### 1.7 登录页宿主 ↔ sidecar 的线上契约（R7 落地 · R23 换宿主 · R25 铺满整窗）
 
 **宿主形态（R23，用户指令"不开新窗口、在程序中跳转"）**：官方授权页是**主窗里的第二个 webview**
 （`tauri::webview::WebviewBuilder` + `Window::add_child`，label `login`），不是独立子窗。
-于是应用自己的 header（含「返回扫码登录」）**始终**在主窗 webview 上、始终可见可点——它是
-`LOGIN_VIEW_TOP_INSET`（48 CSS px）让出来的那一条，登录页铺在它下面。几何是**客户区相对**物理像素
-（`login::layout_for(客户区读数, topInset)`：客户区尺寸是**物理**像素、只有 `topInset` 乘缩放比，
-`x` 恒为 0），没有屏幕坐标、没有跨窗换算。**R24 追加一条前提**：客户区**量不到**时没有几何——
-主窗最小化时 `Window::inner_size()` 是 `(0,0)`（tao 直接 `GetClientRect`），这一档**不许**被钳成
-`MIN_LOGIN_WIDTH×MIN_LOGIN_HEIGHT`：创建路先把主窗恢复（`focus_main`）再量一次、仍量不到就结构化失败，
-跟随路保持登录页现有几何、等主窗回来那一 tick 重新摆。
-"返回" = 关掉这个 webview（`shutdown_login_view`），主窗一动不动。
+几何是**客户区相对**物理像素（`login::layout_for(客户区读数)`，`x`/`y` 恒为 0），
+没有屏幕坐标、没有跨窗换算。
+
+**R25（用户指令"不挤压网页"）**：登录页**铺满整个客户区** `(0, 0, w, h)`——R7–R24 那套
+"顶部让出 48 CSS px"的几何**对登录页退役**，`host:open-login` 的载荷里也不再带 `topInset`。
+原来落在那条上的两个控件改由**浮动 webview** 承载（同一窗、建在登录页**之后** ⇒ 在 z 序上面）：
+
+| label | 位置 | 内容 | 页面 |
+|---|---|---|---|
+| `login` | `(0,0,w,h)` | 华为官方授权页（外部 URL） | — |
+| `login-return` | 左上角（margin 8 CSS px） | 「返回扫码登录」 | `login-chrome.html?kind=return` |
+| `login-theme` | 右上角（margin 8 CSS px） | 浅色 / 深色 / 跟随系统 | `login-chrome.html?kind=theme` |
+
+- 两个浮动控件的盒子**只有控件那么大**（`RETURN_CHROME_SIZE` 124×34 / `THEME_CHROME_SIZE` 184×34，
+  CSS 像素 × 缩放比）：透明子窗**仍然会吃掉落在它矩形里的鼠标**，所以"够用就好"是硬约束；
+- 背景透明（`background_color(Color(0,0,0,0))` → WebView2 `SetDefaultBackgroundColor` 的 alpha=0），
+  页面 `body` 也走 `bg-transparent`；它们与登录页**共用同一个 webview 数据目录**
+  （tauri 的 `WebContextStore` 按数据目录缓存环境，见 §变更记录 R25 的出处），随登录页**同生同灭**；
+- 浮动控件只许停在应用自己的本地页面上（`login::chrome_navigation_allowed`）：它们的 label 在
+  `core_login_chrome` 的允许集合里，被导航到任意网页就等于把那个口子交出去；
+- `login-return` **建不起来 = 这次登录结构化失败**（官方页铺满整窗时它是用户唯一的回退路径）；
+  `login-theme` 建不起来只是少一个便利入口（留日志，登录照常）。
+
+**R24 追加一条前提**：客户区**量不到**时没有几何——主窗最小化时 `Window::inner_size()` 是 `(0,0)`
+（tao 直接 `GetClientRect`），这一档**不许**被钳成 `MIN_LOGIN_WIDTH×MIN_LOGIN_HEIGHT`：
+创建路先把主窗恢复（`focus_main`）再量一次、仍量不到就结构化失败，跟随路保持现有几何、
+等主窗回来那一 tick 重新摆（三个 webview 一起摆，用的是同一次读数）。
+"返回" = 关掉登录页与两个浮动控件（`shutdown_login_view`），主窗一动不动。
 
 **宿主要求（core → 宿主，payload 形状由两侧测试互钉）**
 
 | 频道 | 入 | 出 |
 |---|---|---|
-| `host:open-login` | `{url, partition, topInset}` | `{status, url?, message?}`，**在登录页收场之后**才答复（长轮询） |
+| `host:open-login` | `{url, partition}`（R25 起**无** `topInset`） | `{status, url?, message?}`，**在登录页收场之后**才答复（长轮询） |
 | `host:cancel-login` | `{}` | `{cancelled: boolean}`（`cancelled:false` = 本来就没有进行中的登录，不是错误） |
 
 `status` 词表（Rust `LoginConclusion::status` ↔ Node `HOST_LOGIN_STATUS`，`test/login-parity.test.mjs` 互钉）：
@@ -216,7 +236,7 @@ DNS  api-drcn.music.dbankcloud.cn                  → 2407:c080:1400:61:40a0:d5
 | status | 含义 | 附带的字段 |
 |---|---|---|
 | `callback` | 拦到 `hms://` 导航，URL **原样**交回（判真伪是 `consumeCallback` 的事） | `url` |
-| `cancelled` | 用户/渲染层取消（`host:cancel-login`，即 header 那条「返回扫码登录」） | — |
+| `cancelled` | 用户/渲染层取消（浮动控件的 `core_login_chrome {action:"return"}`；`host:cancel-login` 落到同一个结论槽） | — |
 | `closed` | 登录页没了（应用退出 / 收尾先行；同窗宿主里用户没有可关的窗） | — |
 | `timed_out` | 总期限（10 分钟）到 | `message` |
 | `load_failed` | 首载期限（30 秒）内打不开官方页（网络/代理） | `message` |
@@ -227,9 +247,13 @@ DNS  api-drcn.music.dbankcloud.cn                  → 2407:c080:1400:61:40a0:d5
 - **登录页零命令权限**：`capabilities/main.json` 的 `windows` 只有 `main`/`lyrics`（不含 `login`），
   且不给登录页注入任何脚本（不订阅 `initialization_script`/`eval`）：白名单与回调**只靠导航事件**观测。
 - **来源守卫判 webview label**（R23 的安全性前提）：同窗之后 `window.label()` 对登录页**恒为 `main`**，
-  按窗口 label 判来源等于把守卫让给官方页。命令面因此一律取 `tauri::Webview` 并判 `webview.label()`
-  （`commands::require_main_webview`；`commands.rs` 5 条 + `lyrics_window.rs` 4 条，共 9 条命令全过这道门）。
-  第二层：官方页是**远程来源**，`Webview::on_message` 对远程来源一律要求 ACL 条目
+  按窗口 label 判来源等于把守卫让给官方页。命令面因此一律取 `tauri::Webview` 并判 `webview.label()`。
+  两档守卫：
+  1. `commands::require_main_webview`——**只放主窗**，管 `core_call` 与其余 8 条命令（共 9 条）；
+  2. `commands::require_login_chrome_source`（R25 增补）——**只放 `main` / `login-return` / `login-theme`**，
+     管 `core_login_chrome` 这一条（两个动作：取消登录 / 改主题）。**官方登录页（`login`）不在里面**，
+     歌词窗与托盘也不在——放宽 `core_call` 那条守卫等于把全部业务频道交给登录体验的浮动控件。
+  第三层：官方页是**远程来源**，`Webview::on_message` 对远程来源一律要求 ACL 条目
   （tauri-2.12.4 `src/webview/mod.rs:2080`），而本应用没有 app 级 ACL manifest、`main.json` 也没有
   `remote` 字段 → 远程来源连自定义命令都到不了（`src/ipc/authority.rs:57-67` 的 `Origin::matches`）。
 - **构建代价（如实登记）**：`add_child`/`WebviewBuilder` 在 tauri 2.12.4 里要 `unstable` Cargo feature
@@ -237,6 +261,22 @@ DNS  api-drcn.music.dbankcloud.cn                  → 2407:c080:1400:61:40a0:d5
   （tauri-runtime-wry `src/lib.rs:4596-4615`），主窗/歌词窗由"自动铺满父窗"改成"显式 bounds + 比例跟随"
   （同文件 `4922-4933`/`4273-4293`）——这是 Tauri 支持的既有模式（`WebviewWindow` 在两种模式下都工作），
   但真机观感需要用户验收（见 `KNOWN_LIMITATIONS.md` B16）。
+
+**登录体验的浮动控件命令（R25 增补）**
+
+```
+core_login_chrome {action:"return"}                       → {cancelled: boolean}
+core_login_chrome {action:"theme"}                        → {theme: "light"|"dark"|"system"}   （读回）
+core_login_chrome {action:"theme", theme:"light"|...}     → {theme: ...}                        （改 + 广播）
+```
+
+- 回执是**事实**（不是"已受理"）：取消那条读的就是结论槽是否真的收口了一次进行中的登录；
+  改主题那条回的是**实际生效**的档位（落盘失败走结构化错误，不静默改档）。
+- 认不出的 `action`/档位一律结构化 `invalid_payload`（不猜）。
+- 主题状态归 **Rust** 持有（`settings.json` 的 `theme` 键），改完广播 `theme:changed`
+  （`{theme}` 目标态）——主窗与两个浮动控件各自把类落到 `<html>` 上（`features/theme/theme.mjs`）。
+  写盘只动 `theme` 一个键、原子替换、**认不出的文件绝不覆盖**（与 `settings.mjs` 同一条纪律）；
+  文件不存在时造出来的那份**自带 `closeBehavior` 的默认值**（否则会把它悄悄读成保守值）。
 
 **渲染层 ← sidecar 的登录状态广播（R7 增补的广播频道）**
 
@@ -851,7 +891,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 |---|---|---|---|---|
 | `auth:login` | 无 | `{started:true, loggedIn, epoch, loginInFlight}` | — | R4/R7 |
 | `auth:logout` | 无 | `{sessionCleared, cacheCleared, notes[]}` | 清不干净**不改写成成功**，原因进 `notes` | R4/R7 |
-| `auth:cancel-login` | 无 | `{cancelled}`（`false` = 本来就没有进行中的登录，**不是错误**） | — | R7 |
+| `auth:cancel-login` | 无 | `{cancelled}`（`false` = 本来就没有进行中的登录，**不是错误**） | — | R7（R25 起渲染层不再直接调它：浮动控件的「返回扫码登录」走 `core_login_chrome`，落到**同一个结论槽**） |
 | `auth:qr-start` | 无 | `{content, expiresInMs}`（二维码内容 + 有效期；之后的状态变化走 `auth:qr` 广播） | 建单失败 → 结构化类别 + `auth:qr{failed}` | R16 |
 | `auth:get-status` | 无 | `{loggedIn, busy}`（**与 `auth:status` 广播同形状**；不触发广播、不带 `message`） | 频道不可用即结构化错误（渲染层**不据此猜档位**，只把原因说到状态行上） | R19 |
 | `settings:get` | 无 | `{settings}` = 归一后的完整文档 | 读不到/读坏了 → 回默认文档（代理当没配）+ 一条日志，**不抛、不砸文件** | R6 |
@@ -903,10 +943,17 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 
 | 常量 | 值 | 唯一真源文件 | 消费方 |
 |---|---|---|---|
-| `LOGIN_VIEW_TOP_INSET` | `48`（CSS px） | `src/shared/login-inset.mjs` | R7：`huawei.ts` 与渲染层 `login-gate.tsx` 双侧 import；Rust `login.rs` 镜像并互钉 |
+| `LOGIN_VIEW_TOP_INSET` | `48`（CSS px） | `src/shared/login-inset.mjs` | **R25 起只有门禁自己那条 header 读它**（`login-gate.tsx`）：登录页铺满整窗，不再是"给子窗让位"的几何契约，Rust 侧也**不再镜像**它（`test/login-parity.test.mjs` 反向钉住） |
 | `LOGIN_TIMEOUT_MS` | `10 * 60_000` | `src/protocols/login-callback.mjs` | Node 侧；Rust `LOGIN_TIMEOUT_SECS = 600` 由 R7 镜像并由 parity 测试互钉 |
 | `LOGIN_LOAD_DEADLINE_SECS` | `30` | `src-tauri/src/login.rs` | 首载期限（Rust 独有：Node 侧没有对应的墙钟，只有"打不开官方页"这条结论） |
 | `LOGIN_WEBVIEW_LABEL` | `"login"` | `src-tauri/src/login.rs` | R23：登录页那个**子 webview** 的 label（不再是窗口 label）。它是命令层唯一能区分"这一帧是登录页发的还是主窗发的"的东西（`require_main_webview`），必须 ≠ `main` |
+| `LOGIN_RETURN_WEBVIEW_LABEL` / `LOGIN_THEME_WEBVIEW_LABEL` | `"login-return"` / `"login-theme"` | `src-tauri/src/login.rs` | R25：两个浮动控件的 label（返回 / 主题）。`core_login_chrome` 的来源守卫按它们放行，两者都必须 ≠ `main` ≠ `login` |
+| `LOGIN_CHROME_ENTRY` / `LOGIN_CHROME_KIND` | `"login-chrome.html"` / `"return"`、`"theme"` | `src/shared/login-chrome.mjs`（Rust 侧 `login.rs` 镜像，parity 互钉） | R25：两个浮动控件共用一个本地入口，`?kind=` 决定渲染哪一个 |
+| `CHROME_MARGIN` / `RETURN_CHROME_SIZE` / `THEME_CHROME_SIZE` | `8` / `124×34` / `184×34`（CSS px） | `src-tauri/src/login.rs` | R25：浮动控件贴边留白与盒子尺寸（× 缩放比）。透明子窗仍会吃掉落在它矩形里的鼠标，所以盒子"够用就好" |
+| `CORE_LOGIN_CHROME` | `"core_login_chrome"` | `src/shared/commands.ts` | R25：浮动控件与 gate 主题控件的唯一命令（两个动作：取消登录 / 主题三态）。来源守卫只放 `main`/`login-return`/`login-theme` |
+| `THEME_CHANGED` | `"theme:changed"` | `src/shared/channels.ts`（Rust `bridge.rs` 镜像，parity 互钉） | R25：主题目标态广播 `{theme}`；Rust 持有状态（`settings.json` 的 `theme` 键），三个 webview 各自应用 class |
+| `THEME_CHOICE` / `THEME_LABELS` / `THEME_DEFAULT` | `light`/`dark`/`system`；`浅色`/`深色`/`跟随系统`；默认 `system` | `src/renderer/features/theme/theme.mjs`（Rust `theme.rs` 镜像同值） | R25：主题三态的唯一真源；`applyThemeChoice` 是全项目**唯一**切类入口（扫描钉住），认不出的档位按系统档 |
+| `THEME_KEY` | `"theme"` | `src-tauri/src/theme.rs` | R25：`settings.json` 的 `data.theme`。Rust 读+写这一个键（原子替换、认不出的文件绝不覆盖）；sidecar 的 `settings:get/set` 对它透传（`data` 层未知键原样保留） |
 | 两条期限文案 | 见 §1.7 | `src-tauri/src/login.rs` ↔ `src/main/huawei.ts` | 两侧逐字一致，parity 互钉 |
 | `LYRICS_SEEK_WINDOW_MS` | `200` | `src/renderer/features/lyrics/lyric-sync.mjs` | R9：歌词的 `isSeeking` 窗口（拖动时歌词跟着手走、手停 200ms 后自动收窗）；组件里不许再写这个数字（扫描钉住） |
 | `QUEUE_SETTING_KEY` | `"queue"` | `src/renderer/features/playback/queue.mjs` | R9：播放队列的持久化键（`data.queue`，只存曲目标识 + 索引） |
@@ -933,12 +980,12 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `QR_HINT_TEXT` | `"手机「控制中心」>「扫一扫」或者系统「设置」>「华为账号」>「扫一扫」。"` | `src/renderer/features/auth/login-gate-logic.mjs` | R16 立、**R18 按用户指令改文案**：引导页那**一句**提示文字（界面与测试读同一份真源；状态行不再复述它） |
 | `LOGIN_GATE_TITLE` | `"华为账号登录"` | `src/renderer/features/auth/login-gate-logic.mjs` | R18：引导页标题的唯一真源（居中放在二维码正上方；header 里那份已移除，全页只出现一次） |
 | `WEB_LOGIN_ENTRY_TEXT` / `WEB_LOGIN_ENTRY_TESTID` | `"在网页中打开登录"` / `"login-open-web"` | `src/renderer/features/auth/login-gate-logic.mjs` | R18：**常驻**次要入口的文案与测试锚点（走 R7 的 `auth:login` 开窗路径；与二维码互斥，见 §1.8） |
-| `WEB_LOGIN_BACK_TEXT` / `WEB_LOGIN_BACK_TESTID` | `"返回扫码登录"` / `"login-back-to-qr"` | `src/renderer/features/auth/login-gate-logic.mjs` | R20：网页登录窗开着时入口**变形的文案与锚点**（走 `auth:cancel-login` 关窗；`webLoginEntry(state)` 是形态的唯一判据）。这一档挪进 header——子窗铺满内容区（顶部只留 48px）时那是唯一可达的地方 |
-| `QR_REFRESH_LABEL` / `QR_REFRESH_TESTID` | `"刷新二维码"` / `"login-qr-refresh"` | `src/renderer/features/auth/login-gate-logic.mjs` | R20：二维码容器（`<button>`）的**可达名字**与锚点；点击 = `startQr`（换一张新码）。R21：这个名字同时是过期态那个显著按钮的**文案**（同一个动作、同一句话，不再各写一份） |
-| `QR_EXPIRED_NOTICE` / `QR_EXPIRED_BOX_TEXT` | `"二维码已过期，点击刷新。"` / `"二维码已过期"` | `src/renderer/features/auth/login-gate-logic.mjs` | R21：过期态的两句话——状态行（该做什么）与二维码原位占位（这块地方现在是什么）。**替代** R20 的 `QR_REFRESH_NOTICE`（「二维码已刷新，请重新扫码。」随自动换新一起删除） |
+| `WEB_LOGIN_BACK_TEXT` / `WEB_LOGIN_BACK_TESTID` | `"返回扫码登录"` / `"login-back-to-qr"` | `src/renderer/features/auth/login-gate-logic.mjs` | R20 立、**R25 改落点**：`webLoginEntry(state)` 仍是形态的唯一判据，但那个控件**不再由 gate 渲染**——它浮在官方页之上（浮动 webview `login-return`，`login-chrome.tsx`），点击走 `core_login_chrome {action:"return"}`（与 `auth:cancel-login` 落到同一个结论槽） |
+| `QR_REFRESH_LABEL` / `QR_REFRESH_TESTID` | `"刷新二维码"` / `"login-qr-refresh"` | `src/renderer/features/auth/login-gate-logic.mjs` | R20：二维码容器（`<button>`）的**可达名字**与锚点；点击 = `startQr`（换一张新码）。R25：它**就是**唯一的换码控件（过期态那个显著按钮已删） |
+| `QR_EXPIRED_NOTICE` / `QR_EXPIRED_BOX_TEXT` / `QR_EXPIRED_BOX_HINT` | `"二维码已过期，点击刷新。"` / `"二维码已过期"` / `"点击刷新"` | `src/renderer/features/auth/login-gate-logic.mjs` | R21 立、**R25 改成两行**：过期占位只写「二维码已过期」/「点击刷新」两行（用户指令），原来那个显著的「刷新二维码」按钮删掉——容器自己就是那个控件 |
 | `QR_EXPIRING_TEXT` | `"正在确认过期…"` | `src/renderer/features/auth/login-gate-logic.mjs` | R21：本地倒计时**数到 0** 时那一行。本地钟不是权威（服务端 `expired` 广播才是），所以这一档说的是"在等确认"，不是"已过期" |
 | `QR_COUNTDOWN_TICK_MS` / `QR_COUNTDOWN_TESTID` | `1000` / `"login-qr-countdown"` | `src/renderer/features/auth/login-gate-logic.mjs` | R21：倒计时的步长（秒级）与那一行的测试锚点；文案由 `qrCountdownText(state)` 从"到期时刻 − 渲染层的钟"算出 |
-| `QR_REFRESH_ACTION_TESTID` | `"login-qr-refresh-action"` | `src/renderer/features/auth/login-gate-logic.mjs` | R21：过期态那个显著「刷新二维码」按钮的锚点（`expired` 是终止档，手动刷新是唯一的换码路径） |
+| ~~`QR_REFRESH_ACTION_TESTID`~~ | ~~`"login-qr-refresh-action"`~~ | — | **R25 删除**（用户指令：过期遮罩只两行、删掉过期态那个刷新按钮，容器是唯一换码入口） |
 | `QR_CANVAS_OPTIONS` / `QR_SIZE_PX` | `{width: 208, margin: 1, errorCorrectionLevel: "L"}` / `208` | `src/renderer/features/auth/qr-canvas.mjs` | R18：二维码画布的唯一画法（内容一换即重画；`npm run verify:live` 按 208×208 与墨迹占比复核） |
 | `QR_DEFAULT_INTERVAL_MS` / `QR_DEFAULT_MAX_POLL_FAILURES` | `2000` / `3` | `src/protocols/qr-login.mjs` | R16：轮询间隔兜底（真值由服务端下发）与连续失败几次收口 |
 | `QR_DEFAULT_MAX_UNKNOWN_CODES` | `5` | `src/protocols/qr-login.mjs` | R22：连续几个**认不出**的 `resultCode` 就熔断成 `failed`（`unknown_result_code`）。陌生码当成功是最严重的误判，但"一直陌生"同样致命：协议真变了时它会 2 秒一次打到总期限，用户全程停在等待态、日志里什么都没有 |
@@ -1129,3 +1176,30 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
      （`inner_size=(1280,800) scale=1 minimized=false`），事后不再只能看到钳过的结果。
   测试：cargo 204+1 → **211 pass + 1 ignored**（lib 184→190、login_policy 16→17）；node/tsc/vite/
   acceptance 不变。真机复验项见 `KNOWN_LIMITATIONS.md` B16。
+- 2026-10-20（Task R25）：**用户四项指令**——① 过期遮罩只两行「二维码已过期」/「点击刷新」、
+  删掉过期态那个刷新按钮（点二维码容器刷新保留）；②「返回扫码登录」悬浮在网页左上角
+  （不独占一行、不挤压网页）；③ 登录 webview 铺满主窗（不再让出 48px）；
+  ④ 登录页右上角加「黑白主题 + 系统默认」（浅色 / 深色 / 跟随系统）——gate 视图与嵌入官方页
+  打开时都要有。四条都落在 §1.7 与 §3：
+  1. **几何**：`layout_target(client_width, client_height)` = `(0, 0, w, h)`；`host:open-login`
+     的载荷与 Rust 的 `LoginConfig` **不再有 `topInset`**（`MAX_TOP_INSET` 一并删除），
+     `LOGIN_VIEW_TOP_INSET` 只剩门禁自己那条 header 消费（Rust 不再镜像，parity 反向钉住）；
+  2. **两个浮动 webview**（建在登录页之后 ⇒ z 序在上、透明背景 `Color(0,0,0,0)`、
+     与登录页共用 webview 数据目录、随它同生同灭、只许停在本地页面上）：
+     `login-return` 左上 / `login-theme` 右上，共用一个本地入口 `login-chrome.html?kind=`；
+     `login-return` 建不起来 = 这次登录结构化失败（它是唯一的回退路径），
+     `login-theme` 失败只留痕；
+  3. **专用命令 `core_login_chrome`**（`{action:"return"|"theme", theme?}`，两条动作）+
+     **专用来源守卫** `require_login_chrome_source`（只放 `main`/`login-return`/`login-theme`；
+     **官方登录页不在里面**）。`core_call` 那条守卫一个字未放宽——它管的是全部业务频道；
+  4. **主题三态**（`theme.rs` + `settings.json` 的 `theme` 键 + `theme:changed` 广播 +
+     `.light`/`.dark` 两个类）：状态归 Rust 持有，三个 webview 各自把类落到 `<html>` 上，
+     切类只有 `features/theme/theme.mjs` 一处；CSS 侧媒体查询改成 `:root:not(.light)`，
+     `dark:` 变体的媒体分支改成 `&:not(.light, .light *)`（强制浅色时不许漏进暗色工具类）；
+     渲染层的主题控件（`theme-control.tsx`）在 gate 与浮动控件里**是同一个组件**；
+  5. **过期态**：占位只有两行（`QR_EXPIRED_BOX_TEXT` + `QR_EXPIRED_BOX_HINT`），
+     `QR_REFRESH_ACTION_TESTID` 与那个按钮一起删除；`QR_REFRESH_ACTION_TESTID` 在 §3 里划掉。
+  测试：cargo 211+1 → **229 pass + 1 ignored**（lib 190→206、login_policy 17→19；
+  新增 theme.rs 6 条 / login.rs 4 条 / commands.rs 3 条 / lib.rs 2 条）；
+  node 674 → **689 / 0 fail**（新增 `test/login-chrome.test.mjs` 11 条 + 各处同步）；
+  tsc 0 错、vite 三入口构建通过、acceptance 6/0/0。真机复验项见 `KNOWN_LIMITATIONS.md` B17。

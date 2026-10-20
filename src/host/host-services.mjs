@@ -5,7 +5,8 @@
  * - `host:notify`：`{text}`（R3 已在 Rust 侧接通系统通知）；
  * - `host:secure-encrypt`：入 `{plaintext}` → 出 `{cipher}`（base64 的 DPAPI 信封，R5）；
  * - `host:secure-decrypt`：入 `{cipher}` → 出 `{plaintext}`（R5）；
- * - `host:open-login`（R7）：入 `{url, partition, topInset}` → 出登录结论（长轮询：窗收场后才答复）；
+ * - `host:open-login`（R7；R25 起载荷为 `{url, partition}`，`topInset` 已退休）→ 出登录结论
+ *   （长轮询：窗收场后才答复）；
  * - `host:cancel-login`（R7）：入 `{}` → 出 `{cancelled}`。
  *
  * 返回值是帧内结果（`{ok:true,data}` / `{ok:false,error}`），这里原样透传：不改写成成功、不吞错。

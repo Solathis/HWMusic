@@ -6,10 +6,13 @@
 
 /* 暗色变体：`.dark` 类（shadcn 默认）与**系统偏好**两条路都认。
    R10 裁决：主题只跟系统，不做手动切换、不引 next-themes（它的防闪烁内联脚本会被 CSP 拦）。
+   R25 增补：用户要求登录体验里有「浅色 / 深色 / 跟随系统」三态，于是多了**强制浅色**这一档
+   （`<html class="light">`）——媒体分支必须把 `.light` 子树排除掉，否则"系统是暗色、用户选了浅色"
+   时令牌换了、`dark:` 工具类却照旧生效（颜色只换了一半，是最难查的一类主题 bug）。
    块形式的多分支写法是 Tailwind v4 的 `@custom-variant` 语法：`@slot` 处插入工具类本体。 */
 @custom-variant dark {
   @media (prefers-color-scheme: dark) {
-    & {
+    &:not(.light, .light *) {
       @slot;
     }
   }
@@ -134,9 +137,13 @@
 
 /* 系统暗色：把上面那套令牌照原样接到 :root 上（**逐条一致**由 test/theme-tokens.test.mjs 钉住）。
    令牌写两份是刻意的：一份给 `.dark` 类（shadcn 默认写法）、一份给系统偏好，
-   漏一条的后果是暗色下有一处颜色悄悄留在亮色，而那在 review 里几乎看不出来。 */
+   漏一条的后果是暗色下有一处颜色悄悄留在亮色，而那在 review 里几乎看不出来。
+
+   R25：选择器是 `:root:not(.light)` —— 用户把主题**强制成浅色**时（`<html class="light">`）
+   整块不生效。为什么靠排除而不是再抄一份 `.light` 令牌块：排除法不需要第三份令牌副本
+   （三份迟早只对齐两份），而且特异性一路是同一个 `:root`，不存在"谁压谁"的暗规则。 */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not(.light) {
     color-scheme: dark;
     --background: oklch(0.145 0 0);
     --foreground: oklch(0.985 0 0);

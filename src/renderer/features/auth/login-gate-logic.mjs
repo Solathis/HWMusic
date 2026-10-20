@@ -143,6 +143,15 @@ export const QR_EXPIRED_NOTICE = "二维码已过期，点击刷新。";
 export const QR_EXPIRED_BOX_TEXT = "二维码已过期";
 
 /**
+ * 过期占位的**第二行**（R25 用户指令：遮罩只显示两行——「二维码已过期」/「点击刷新」）。
+ *
+ * 这一行说的是"这块地方点得动"：二维码容器本身就是那个控件（R20 起可点，键鼠都可达，
+ * 可达名字是 [`QR_REFRESH_LABEL`]），所以过期态**不需要**再加一个按钮——R25 把 R21 那个
+ * 显著的「刷新二维码」按钮删掉了，容器是唯一的换码入口。
+ */
+export const QR_EXPIRED_BOX_HINT = "点击刷新";
+
+/**
  * 本地倒计时数到 0 时那一行（R21 要求 1）。
  *
  * 为什么不改成"已过期"：本地钟不是权威。服务端实测在本地归零前就给 `expired`
@@ -153,9 +162,6 @@ export const QR_EXPIRING_TEXT = "正在确认过期…";
 
 /** 倒计时的测试锚点（真窗守卫与标记测试按它点名那一行）。 */
 export const QR_COUNTDOWN_TESTID = "login-qr-countdown";
-
-/** 过期态那个显著的「刷新二维码」按钮的测试锚点（文案复用 [`QR_REFRESH_LABEL`]）。 */
-export const QR_REFRESH_ACTION_TESTID = "login-qr-refresh-action";
 
 /** 倒计时的步长（秒级；改它等于改倒计时的分辨率，界面文案跟着变）。 */
 export const QR_COUNTDOWN_TICK_MS = 1_000;
@@ -465,9 +471,11 @@ export function canRefreshQr(state) {
  * 两种形态都**可点**（`disabled: false`）：打开与返回各自是那一刻唯一该做的事。
  * R17 抓过的那类坑正是"最需要某个控件时它恰好是灰的"，这里不再留任何一个灰的入口。
  *
- * 为什么要有"返回"这一档：走网页那条路时子窗**铺满内容区**（顶部只留 48px header），
- * 正文里的一切（包括原来那个入口）都在窗底下——点不到。用户唯一能碰到的就是那条 header，
- * 所以这一档的入口要挪进 header，点它走 `auth:cancel-login`（窗在 Rust 手里，只有它能拆）。
+ * 为什么要有"返回"这一档：走网页那条路时官方登录页**铺满整个主窗**（R25 起不再让出顶部那 48px），
+ * 正文里的一切（包括原来那个入口）都在它底下——点不到。用户唯一能碰到的只有浮在网页之上的
+ * 那两个控件，所以"返回"这一档**不再由 gate 渲染**（R25 用户指令：它要悬浮在网页左上角，
+ * 不独占一行），改由浮动 webview `login-return` 渲染（同一个文案与锚点，见 `login-chrome.tsx`）。
+ * 这里保留 `form` 这一档是因为"此刻该存在哪个控件"仍然是门禁的判定，只是落点搬了家。
  */
 export function webLoginEntry(state) {
   if (!canStartLogin(state)) {

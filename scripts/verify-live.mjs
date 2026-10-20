@@ -66,6 +66,20 @@
  *    `node scripts/verify-live.mjs --check-back-path`（默认不跑）。跑起来的那一段：
  *    点入口 → 等 header 里出现「返回扫码登录」→ 点它 → 等回到二维码态。
  *
+ * ## R25 增补（用户四项之 1/2/4；这一层量的是真窗上的形态）
+ *
+ * 1. **过期遮罩两行**（「二维码已过期」/「点击刷新」）、过期态**不再**多一个「刷新二维码」按钮
+ *    ——门禁的还是 R25 那套：可操作元素集合 = 主题三档 + 二维码容器 + 常驻入口
+ *    （过期/失败各按自己的档位多一个「重试」）。过期那一档要**真的等到一张码过期**才量得到，
+ *    所以不在默认路径里（TTL 约 181 秒）；
+ * 2. **「返回扫码登录」浮在网页之上**：它不在门禁里了（官方页铺满整窗），而是独立的小 webview
+ *    `login-return`。`--check-back-path` 那一段因此改成**跨 CDP target** 找那个浮动页面：
+ *    找到 → 量文案/可点/透明背景/加载的是 `login-chrome` 入口 → 点它 → 回到二维码态
+ *    → 再断言浮动页面随登录页一起消失；
+ * 3. **主题控件**（浅色 / 深色 / 跟随系统）：量 gate 右上角那一份——三档文案与唯一真源逐字一致、
+ *    恰有一档是生效的（`aria-pressed`）。浮动 `login-theme` 那一份与它是同一个组件，
+ *    由 ② 的跨 target 机制覆盖（同一个页面入口、不同 kind）。
+ *
  * 用法：`node scripts/verify-live.mjs [--port 9223] [--out .tmp/r17-live] [--timeout 60000]
  *        [--check-back-path]`
  */
@@ -202,7 +216,7 @@ export function measureQrInPage(testid) {
  * 全部在页面里现取（同 measureQrInPage 的理由：函数会被序列化送进页面，不许闭包）。
  */
 export function measureGateLayoutInPage(params) {
-  const { testid, entryTestid, titleText, hintText } = params;
+  const { testid, entryTestid, titleText, hintText, themeControlTestid, themeOptionTestids } = params;
   const rectOf = (element) => {
     if (element === null || element === undefined) return null;
     const box = element.getBoundingClientRect();
@@ -229,6 +243,22 @@ export function measureGateLayoutInPage(params) {
   const buttons = [...document.querySelectorAll("button")];
   const header = document.querySelector("header");
 
+  /** R25：主题控件那三档的形状（文案 / 锚点 / 哪一档是当前生效的）。 */
+  const themeOf = () => {
+    const control = document.querySelector('[data-testid="' + themeControlTestid + '"]');
+    if (control === null) return { found: false, options: [], pressed: [] };
+    const nodes = themeOptionTestids.map((id) => control.querySelector('[data-testid="' + id + '"]'));
+    return {
+      found: true,
+      inHeader: header !== null && header.contains(control),
+      options: nodes.map((node) => (node === null ? "" : textOf(node))),
+      testids: nodes.map((node) => (node === null ? "" : node.getAttribute("data-testid"))),
+      pressed: nodes
+        .filter((node) => node !== null && node.getAttribute("aria-pressed") === "true")
+        .map((node) => node.getAttribute("data-testid")),
+    };
+  };
+
   return {
     titleCount: titleNodes.length,
     headings: headings.map((node) => textOf(node)),
@@ -241,9 +271,11 @@ export function measureGateLayoutInPage(params) {
     entryText: textOf(entry),
     entryBox: rectOf(entry),
     entryDisabled: entry === null ? null : entry.disabled === true,
-    /** R20：header 里渲染后的可见文字（品牌那句删掉之后必须是空串） */
+    /** R20：header 里渲染后的可见文字（R25 起里面只有主题控件那三个档位的文案） */
     headerText: textOf(header),
     headerBox: rectOf(header),
+    /** R25：主题控件（浅色 / 深色 / 跟随系统）——真窗要看得见、点得动 */
+    themeControl: themeOf(),
     paragraphs: paragraphs.map((node) => textOf(node)),
     containerBorder: containerStyle === null
       ? null
@@ -301,27 +333,46 @@ export async function waitForQrTier(page, { testid, timeoutMs, pollMs = 400 }) {
 }
 
 /**
- * R20：量「返回扫码登录」那一条（只在 `--check-back-path` 下跑）。
+ * R25：量登录体验的**浮动控件**（返回 / 主题）那一个 webview 里的东西。
  *
- * 三条一起判：文案是逻辑模块那份唯一真源、它**在 header 里**（网页登录窗铺满内容区时，
- * 那条 48px 是唯一还看得见、点得到的地方）、此刻可点；同时"打开"形态必须已经退场
- * （同一时刻只有一个入口形态）。
+ * 与门禁那份不同：这两个控件活在**独立的小 webview** 里（`login-return` / `login-theme`），
+ * 所以它们的页面是另一个 CDP target，量的时候要指名道姓地问"这一页里有没有它"。
  *
  * 同其余 measure* 函数的纪律：会被序列化送进页面，不许闭包引用外部变量。
  */
+export function measureFloatingControlInPage(params) {
+  const { testid, text } = params;
+  const node = document.querySelector('[data-testid="' + testid + '"]');
+  const textOf = (element) => (element === null ? "" : (element.textContent ?? "").trim());
+  return {
+    found: node !== null,
+    text: textOf(node),
+    expectedText: text === undefined ? null : text,
+    disabled: node === null ? null : node.disabled === true,
+    /** 浮动控件铺的是透明背景：量一下 body 的计算背景色（不透明就说明会盖住网页一块） */
+    bodyBackground: getComputedStyle(document.body).backgroundColor,
+    viewport: { width: window.innerWidth, height: window.innerHeight },
+  };
+}
+
+/**
+ * R20 要求 3（R25 改写）：量「返回扫码登录」那一条（只在 `--check-back-path` 下跑）。
+ *
+ * R25 起它**不在门禁里**了：官方登录页铺满整个主窗，门禁那一层整个被盖住——控件浮在
+ * 网页**之上**（独立的小 webview `login-return`），所以"在不在 header 里"这条断言退休，
+ * 换成"它在一个独立的、铺透明背景的小 webview 里，且此刻可点"。
+ */
 export function measureBackEntryInPage(params) {
-  const { backTestid, openTestid, backText } = params;
+  const { backTestid, backText } = params;
   const textOf = (element) => (element === null ? "" : (element.textContent ?? "").trim());
   const back = document.querySelector('[data-testid="' + backTestid + '"]');
-  const openEntry = document.querySelector('[data-testid="' + openTestid + '"]');
-  const header = document.querySelector("header");
   return {
     found: back !== null,
     text: textOf(back),
     expectedText: backText,
     disabled: back === null ? null : back.disabled === true,
-    inHeader: back !== null && header !== null && header.contains(back),
-    openEntryGone: openEntry === null,
+    bodyBackground: getComputedStyle(document.body).backgroundColor,
+    viewport: { width: window.innerWidth, height: window.innerHeight },
   };
 }
 
@@ -349,6 +400,13 @@ async function main() {
     WEB_LOGIN_ENTRY_TESTID,
     WEB_LOGIN_ENTRY_TEXT,
   } = await import(pathToFileURL(path.join(ROOT, "src/renderer/features/auth/login-gate-logic.mjs")).href);
+  // R25：主题三态的真源（gate 里的控件与浮动控件是同一个组件）
+  const { THEME_CHOICES, THEME_CONTROL_TESTID, THEME_LABELS, themeOptionTestId } = await import(
+    pathToFileURL(path.join(ROOT, "src/renderer/features/theme/theme.mjs")).href
+  );
+  const { LOGIN_CHROME_KIND, LOGIN_CHROME_ENTRY } = await import(
+    pathToFileURL(path.join(ROOT, "src/shared/login-chrome.mjs")).href
+  );
 
   const browser = await chromium.connectOverCDP(CDP_URL);
   try {
@@ -447,12 +505,14 @@ async function main() {
     const statusText = await page.evaluate(() => document.querySelector('[role="status"]')?.textContent?.trim() ?? "");
     record(knownLines.has(statusText), "状态行文案是已知档位之一", `"${statusText}"`);
 
-    // R18：布局与视觉（标题/边框/提示/几何顺序/常驻入口）在真窗上量
+    // R18：布局与视觉（标题/边框/提示/几何顺序/常驻入口/主题控件）在真窗上量
     const layout = await page.evaluate(measureGateLayoutInPage, {
       testid: QR_TESTID,
       entryTestid: WEB_LOGIN_ENTRY_TESTID,
       titleText: LOGIN_GATE_TITLE,
       hintText: QR_HINT_TEXT,
+      themeControlTestid: THEME_CONTROL_TESTID,
+      themeOptionTestids: THEME_CHOICES.map(themeOptionTestId),
     });
 
     record(
@@ -480,11 +540,27 @@ async function main() {
       `入口文案 "${layout.entryText}"，disabled=${layout.entryDisabled}`,
     );
 
-    // R20 要求 1：header 里那句品牌与窗口标题栏重复 → 删掉。量的是**渲染后的可见文字**
+    // R20 要求 1 / R25：header 里那句品牌与窗口标题栏重复 → 删掉；R25 起里面只放主题控件。
+    // 量的是**渲染后的可见文字**：它必须恰好是主题那三档的文案（多一个字都说明品牌回来了）。
+    const headerText = layout.headerText ?? "";
+    const themeLabels = THEME_CHOICES.map((choice) => THEME_LABELS[choice]);
     record(
-      layout.headerText === "",
-      "header 里没有任何可见文字（R20：与窗口标题栏重复的品牌已删）",
-      layout.headerText === "" ? "空" : `header 文本「${layout.headerText}」`,
+      themeLabels.every((label) => headerText.includes(label)) && !headerText.includes("华为音乐第三方客户端"),
+      "header 里只有主题控件那三档（品牌那句已删）",
+      headerText === "" ? "空" : `header 文本「${headerText}」`,
+    );
+
+    // R25 用户四项之 4：gate 视图右上角的主题控件（浅色 / 深色 / 跟随系统），三档都在、恰有一档生效
+    const theme = layout.themeControl ?? { found: false, options: [], pressed: [] };
+    record(
+      theme.found === true && theme.inHeader === true,
+      "主题控件在 gate 右上角（header 里）",
+      JSON.stringify(theme),
+    );
+    record(
+      JSON.stringify(theme.options ?? []) === JSON.stringify(themeLabels) && (theme.pressed ?? []).length === 1,
+      "主题三档文案与唯一真源逐字一致，且恰有一档是当前生效的",
+      `文案 ${JSON.stringify(theme.options)}；生效 ${JSON.stringify(theme.pressed)}（期望 ${JSON.stringify(themeLabels)}）`,
     );
 
     // R20 要求 2：二维码容器本身可点刷新（可达名字 + 当前可点）
@@ -497,11 +573,17 @@ async function main() {
         : `aria-label="${refresh.label}"，disabled=${refresh.disabled}`,
     );
 
-    // R20 要求 2 的另一半：正常路径的可操作元素集合（「重试」只在失败态出现）
+    // R20 要求 2 / R25 要求 1：正常路径的可操作元素集合——主题三档 + 二维码容器 + 常驻入口
+    //（「重试」只在失败态；过期态**不再**多一个「刷新二维码」按钮）
     const buttonIds = layout.buttons.map((button) => button.testid || button.text);
+    const expectedIds = [
+      ...THEME_CHOICES.map(themeOptionTestId),
+      QR_REFRESH_TESTID,
+      WEB_LOGIN_ENTRY_TESTID,
+    ];
     record(
-      buttonIds.length === 2 && buttonIds[0] === QR_REFRESH_TESTID && buttonIds[1] === WEB_LOGIN_ENTRY_TESTID,
-      "正常路径恰好两个可操作元素：二维码刷新容器 + 常驻入口",
+      JSON.stringify(buttonIds) === JSON.stringify(expectedIds),
+      "正常路径恰好这些可操作元素：主题三档 + 二维码刷新容器 + 常驻入口",
       `实际 ${layout.buttons.length} 个：${JSON.stringify(layout.buttons)}`,
     );
 
@@ -538,38 +620,76 @@ async function main() {
         : `标题底 ${boxes.title.y + boxes.title.height} ≤ 二维码顶 ${boxes.qr.y}；中心横坐标 ${boxes.title.centerX} vs ${boxes.qr.centerX}（容差 ${CENTER_TOLERANCE_PX}px）`,
     );
 
-    // R20 要求 3（显式开关）：网页登录窗铺满内容区时，header 里那条「返回扫码登录」是
-    // 用户唯一能点到的控件——点开它、量它、再点它，看门禁是不是回到二维码态。
+    // R20 要求 3 / R25 要求 2（显式开关）：点开网页登录之后，官方页铺满整个主窗，
+    // 「返回扫码登录」**浮在网页之上**（独立的小 webview `login-return`）——它是用户此刻
+    // 唯一能点到的控件。这里跨 CDP target 找到那个浮动页面，量它、点它，看门禁是不是回到二维码态。
     if (CHECK_BACK_PATH) {
       const entrySelector = `[data-testid="${WEB_LOGIN_ENTRY_TESTID}"]`;
       const backSelector = `[data-testid="${WEB_LOGIN_BACK_TESTID}"]`;
+      const listPages = () => browser.contexts().flatMap((context) => context.pages());
+
       let opened = false;
       let openDetail = "";
+      let backPage = null;
       try {
         await page.click(entrySelector, { timeout: TIMEOUT_MS });
-        await page.waitForSelector(backSelector, { timeout: TIMEOUT_MS });
-        opened = true;
-        openDetail = "header 里出现了返回控件";
       } catch (error) {
-        openDetail = String(error.message ?? error).slice(0, 200);
+        openDetail = `点击常驻入口失败：${String(error.message ?? error).slice(0, 160)}`;
       }
-      record(opened, "点开网页登录之后，header 里出现「返回扫码登录」", openDetail);
+      if (openDetail === "") {
+        // 浮动控件是"登录页建好之后"，所以给它一点时间出现
+        const deadline = Date.now() + TIMEOUT_MS;
+        for (;;) {
+          for (const candidate of listPages()) {
+            const found = await candidate
+              .evaluate((selector) => document.querySelector(selector) !== null, backSelector)
+              .catch(() => false);
+            if (found) {
+              backPage = candidate;
+              break;
+            }
+          }
+          if (backPage !== null) {
+            opened = true;
+            openDetail = `浮动 webview 里出现了返回控件：${backPage.url()}`;
+            break;
+          }
+          if (Date.now() >= deadline) {
+            openDetail = `等 ${TIMEOUT_MS}ms 没等到带返回控件的浮动页面；当时开着的页面：${JSON.stringify(listPages().map((candidate) => candidate.url()))}`;
+            break;
+          }
+          await sleep(400);
+        }
+      }
+      record(opened, "点开网页登录之后，浮动 webview（login-return）里出现「返回扫码登录」", openDetail);
 
-      if (opened) {
-        const back = await page.evaluate(measureBackEntryInPage, {
+      if (opened && backPage !== null) {
+        const back = await backPage.evaluate(measureBackEntryInPage, {
           backTestid: WEB_LOGIN_BACK_TESTID,
-          openTestid: WEB_LOGIN_ENTRY_TESTID,
           backText: WEB_LOGIN_BACK_TEXT,
         });
+        const transparent =
+          typeof back.bodyBackground === "string" &&
+          (back.bodyBackground === "rgba(0, 0, 0, 0)" || back.bodyBackground === "transparent");
         record(
-          back.found && back.text === WEB_LOGIN_BACK_TEXT && back.inHeader && back.disabled === false && back.openEntryGone,
-          "「返回扫码登录」文案正确、在 header 里、可点，且「打开」形态已退场",
+          back.found && back.text === WEB_LOGIN_BACK_TEXT && back.disabled === false,
+          "「返回扫码登录」文案正确且可点",
           JSON.stringify(back),
+        );
+        record(
+          transparent,
+          "浮动控件铺的是透明背景（它浮在官方页之上，铺底色会盖住网页一块）",
+          `body 背景色 ${back.bodyBackground}；视口 ${JSON.stringify(back.viewport)}`,
+        );
+        record(
+          typeof LOGIN_CHROME_ENTRY === "string" && backPage.url().includes(LOGIN_CHROME_ENTRY.replace(".html", "")),
+          "浮动控件加载的是 login-chrome 入口（R25 的唯一入口 + kind 查询串）",
+          `${backPage.url()}（kind=${LOGIN_CHROME_KIND.return}）`,
         );
 
         let returned = { seen: false, status: "" };
         try {
-          await page.click(backSelector, { timeout: TIMEOUT_MS });
+          await backPage.click(backSelector, { timeout: TIMEOUT_MS });
           returned = await waitForQrTier(page, { testid: QR_TESTID, timeoutMs: TIMEOUT_MS });
         } catch (error) {
           returned = { seen: false, status: String(error.message ?? error).slice(0, 200) };
@@ -578,6 +698,11 @@ async function main() {
           returned.seen,
           "点「返回扫码登录」之后回到二维码态（新码重新发出来，状态行不再是那条路）",
           returned.seen ? "新二维码已画出来" : `没回到二维码态；当时状态行「${returned.status || "（空）"}」`,
+        );
+        record(
+          listPages().every((candidate) => !candidate.url().includes("login-chrome")),
+          "收尾之后浮动控件也一起消失了（与登录页同生同灭）",
+          JSON.stringify(listPages().map((candidate) => candidate.url())),
         );
       }
     }
@@ -602,6 +727,7 @@ async function main() {
       statusText,
       paragraphs: layout.paragraphs,
       buttons: layout.buttons,
+      themeControl: layout.themeControl,
       layout: { ...layout, containerBorder: border },
       measurement,
       consoleErrors,

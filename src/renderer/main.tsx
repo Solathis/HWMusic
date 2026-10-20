@@ -9,12 +9,17 @@ import { createRoot } from "react-dom/client"
 import { APP_BRAND_LABEL } from "../shared/app-name.mjs"
 import { App } from "./App.tsx"
 import { installDesktopBridge } from "./host-api"
+import { installThemeSync } from "./theme-sync"
 
 document.title = APP_BRAND_LABEL
 
 // 宿主桥必须在渲染第一帧之前就位：门禁的订阅与 core_call 都走它。
 // （`rendererReady()` 由 useAuthGate 在**订阅之后**调用：Rust 侧的启动期广播是排队等冲刷的。）
 installDesktopBridge()
+
+// 主题（R25）：主题档位存在 Rust 侧，这里挂上"订阅 theme:changed + 应用一次当前档位"。
+// 不 await：第一帧按系统档画（R10 起的既有行为），拿到回执后立刻补上强制档位。
+void installThemeSync()
 
 const container = document.getElementById("root")
 

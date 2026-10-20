@@ -4,6 +4,13 @@
  * 做法与 R3 的 channel-parity 一致：Node 侧直接 import 常量并**硬钉内容**（只做两侧互比，
  * "两侧一起写错"也能过），再按源码扫描反漂移——字面量只许出现在唯一真源文件里。
  * Rust 侧 login.rs 归 R7：这里写成"存在即互钉"的前置钉子，R7 落地当天自动生效。
+ *
+ * R25（用户四项之 2/3）：**登录页不再让出顶部那一条**——官方页铺满整窗，"返回扫码登录"改成浮在
+ * 网页之上的浮动控件（`login-chrome.html?kind=return`）。于是：
+ * - `host:open-login` 的载荷里**没有** `topInset` 了（Rust 的 `LoginConfig` 也没有这个字段）；
+ * - `LOGIN_VIEW_TOP_INSET`（48）仍然存在，但它**只服务门禁自己那条 header**
+ *   （`src/renderer/login-gate.tsx`），不再是"给子窗让位"的几何契约——所以
+ *   "Rust 必须镜像这个常量"那条钉子**反转**成"Rust 不许再镜像它"。
  * 先写先看红。
  */
 import test from "node:test";
@@ -59,16 +66,30 @@ test("顶部内缩：48 字面量只许出现在 login-inset.mjs（其余地方�
   assert.deepEqual(offenders, [], `顶部内缩字面量出现在唯一真源之外：${offenders.join(" | ")}`);
 });
 
-test("顶部内缩：R7 的 Rust 镜像一旦落地，必须与共享常量同值（Rust 无法 import .mjs，只能镜像 + 互钉）", () => {
+test("顶部内缩：R25 起 Rust **不再**镜像它（登录页铺满整窗，顶部那一条只剩门禁自己用）", () => {
   const rustPath = "src-tauri/src/login.rs";
   if (!existsSync(`${repoRoot}${rustPath}`)) {
-    assert.ok(true, "R4 阶段 login.rs 尚不存在：Node/渲染层两侧 import 同一常量，R7 落地后本断言自动升级为互钉");
+    assert.ok(true, "R4 阶段 login.rs 尚不存在");
     return;
   }
   const code = stripComments(read(rustPath));
-  const found = code.match(/LOGIN_VIEW_TOP_INSET\s*:[^=]*=\s*([0-9_]+)/);
-  assert.ok(found, "R7 落地后 login.rs 必须能识别出 LOGIN_VIEW_TOP_INSET 的数值，供本测试互钉");
-  assert.equal(Number(found[1].replaceAll("_", "")), LOGIN_VIEW_TOP_INSET, "Rust 与 Node 的顶部内缩必须相等");
+  assert.doesNotMatch(
+    code,
+    /LOGIN_VIEW_TOP_INSET/,
+    "R25：Rust 侧不许再镜像顶部内缩——登录页铺满整个客户区（用户四项之 3），" +
+      "留一个镜像值只会让下一个人又去客户区里挖一条",
+  );
+  assert.doesNotMatch(code, /top_inset/, "几何里不许再有 topInset 这个字段（留一个永远是 0 的旋钮只会摆错页面）");
+  assert.doesNotMatch(code, /topInset/, "载荷解析里不许再有 topInset");
+});
+
+test("顶部内缩：门禁那条 header 仍然读共享常量（唯一消费者，不许写第二份 48）", () => {
+  const gate = read("src/renderer/login-gate.tsx");
+  assert.match(
+    gate,
+    /LOGIN_VIEW_TOP_INSET/,
+    "R25：登录页不再是它的消费者，但门禁自己那条 header 仍然是——常量不许变成孤儿",
+  );
 });
 
 test("登录超时：唯一真源是 login-callback.mjs 的 LOGIN_TIMEOUT_MS = 10 × 60_000", () => {
@@ -196,10 +217,17 @@ test("R7：两条期限文案两侧逐字一致，且「打不开官方页」≠
   assert.notEqual(LOGIN_PAGE_UNAVAILABLE_MESSAGE, LOGIN_TIMEOUT_MESSAGE);
 });
 
-test("R7：topInset 校验范围（Rust 0..=4096）必须容得下共享常量 48", () => {
+test("R25：host:open-login 的形状只有 url 与 partition（topInset 已退休）", () => {
   const code = stripComments(read("src-tauri/src/login.rs"));
-  const max = code.match(/MAX_TOP_INSET\s*:[^=]*=\s*([0-9_.]+)/);
-  assert.ok(max, "login.rs 必须显式定义 topInset 的上界（越界值不许静默接受）");
-  assert.ok(Number(max[1].replaceAll("_", "")) >= LOGIN_VIEW_TOP_INSET, "上界必须容得下共享常量");
-  assert.match(code, /topInset/, "Rust 侧的错误里要指明字段名（不回显值）");
+  const configAt = code.indexOf("pub struct LoginConfig");
+  assert.ok(configAt > -1, "login.rs 要有 LoginConfig（载荷的形状就是它）");
+  const body = code.slice(configAt, code.indexOf("}", configAt));
+  for (const field of ["url", "partition"]) {
+    assert.ok(body.includes(field), `LoginConfig 必须还有 ${field}：${body}`);
+  }
+  assert.ok(
+    !body.includes("top_inset") && !body.includes("topInset"),
+    `LoginConfig 不许再有 topInset（登录页铺满整窗）：${body}`,
+  );
+  assert.match(code, /struct LoginConfig/, "形状要能被本用例定位（改结构就得同步改这里）");
 });

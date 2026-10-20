@@ -18,6 +18,7 @@ pub mod lyrics_window;
 mod secure_store;
 mod sidecar;
 pub mod shortcuts;
+pub mod theme;
 pub mod tray;
 mod webview_proxy;
 
@@ -292,6 +293,11 @@ pub fn run() {
             let data_root = webview_data_root(handle)?;
             app.manage(close_behavior::CloseBehaviorState::restore(&data_root));
 
+            // 主题（R25）：与关窗行为同一个位置（**先于建窗**读盘）。三个 webview
+            //（主窗 + 两个浮动控件）都要在挂载时读到它，而浮动控件是登录那一刻才建的
+            // ——早一步登记，就不存在"第一个读它的人比登记早"的窗口。
+            app.manage(theme::ThemeState::restore(&data_root));
+
             let data_root = create_main_window(handle)?;
             app.manage(WebviewDataRoot(data_root.clone()));
 
@@ -379,7 +385,11 @@ pub fn run() {
             lyrics_window::core_lyrics_toggle,
             lyrics_window::core_lyrics_configure,
             lyrics_window::core_lyrics_document,
-            lyrics_window::core_lyrics_progress
+            lyrics_window::core_lyrics_progress,
+            // R25：登录体验的浮动控件（返回 / 主题）。**另开一条命令**而不是放宽 core_call 的
+            // 来源守卫：浮动 webview 的 label 不是 main，而 core_call 收的是全部业务频道
+            //（守卫与两条动作的边界见 commands.rs 的 `require_login_chrome_source`）。
+            commands::core_login_chrome
         ])
         .build(tauri::generate_context!())
         .expect("Tauri 应用启动失败")
@@ -756,6 +766,37 @@ mod tests {
             "关窗行为恢复必须在建窗之前：关窗回调从窗建好那一刻就可能被触发（restore={restore}, create={window}）"
         );
         assert!(register < restore, "先拿托管状态再恢复（manage 要在 restore 之前）");
+    }
+
+    /// R25：主题状态同样**先于建窗**登记——三个 webview（主窗 + 两个浮动控件）挂载时都要读它，
+    /// 而浮动控件是"用户点登录那一刻"才建的：早一步登记，就不存在"第一个读它的人比登记早"的窗口。
+    #[test]
+    fn the_theme_state_is_registered_before_the_window_is_created() {
+        let source = lib_source();
+        let setup = setup_block(&source);
+
+        let register = setup
+            .find("app.manage(theme::ThemeState::restore(")
+            .expect("setup 里必须按 settings.json 恢复主题并登记托管状态");
+        let window = setup
+            .find("create_main_window(")
+            .expect("setup 里必须建主窗");
+        assert!(
+            register < window,
+            "主题恢复要排在建窗之前（主窗挂载时就会读它）：register={register}, create={window}"
+        );
+    }
+
+    /// R25：浮动控件的命令必须进 `generate_handler!`——只定义不注册，用户点浮动控件上的
+    /// 「返回扫码登录」或任一主题档位都只会拿到 `command not found`（点上没反应）。
+    #[test]
+    fn the_login_chrome_command_is_registered_in_the_invoke_handler() {
+        let source = lib_source();
+        let registered = invoke_handler_block(&source);
+        assert!(
+            registered.contains("commands::core_login_chrome"),
+            "core_login_chrome 必须进 generate_handler!：{registered}"
+        );
     }
 
     /// R11 的顺序契约二：托盘在**建窗之后**安装（建窗失败就别装了），且装不上不拦启动。

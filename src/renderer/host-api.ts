@@ -11,6 +11,7 @@ import {
   CORE_CALL,
   CORE_GET_AUTOSTART,
   CORE_GET_TRAY_AVAILABLE,
+  CORE_LOGIN_CHROME,
   CORE_LYRICS_CONFIGURE,
   CORE_LYRICS_DOCUMENT,
   CORE_LYRICS_PROGRESS,
@@ -156,6 +157,31 @@ export async function coreLyricsDocument(document: unknown): Promise<unknown> {
 /** 推进度（调用方已按 `shouldPushProgress` 节流）。 */
 export async function coreLyricsProgress(progress: unknown): Promise<unknown> {
   return invokeLyrics(CORE_LYRICS_PROGRESS, { progress });
+}
+
+// ---------------------------------------------------------------------------
+// 登录体验的浮动控件（R25）：一条专用命令
+// ---------------------------------------------------------------------------
+
+/** 浮动控件能发的两种动作（与 `src/shared/commands.ts` 的说明同源）。 */
+export type LoginChromeRequest =
+  | { action: "return" }
+  /** `theme` 缺省 = 读回当前档位（不需要第二条命令） */
+  | { action: "theme"; theme?: string };
+
+/**
+ * 登录体验的控件命令（**`core_call` 之外的第二条业务命令**，理由见 `src/shared/commands.ts`）。
+ *
+ * 谁调它：主窗里 gate 的主题控件、以及两个浮动 webview（label `login-return` / `login-theme`）。
+ * 官方登录页与歌词窗调不动（来源守卫只放行那三个 label）。回执是**事实**：
+ * `{cancelled}` 或 `{theme}`——调用方不必猜"到底改没改"。
+ */
+export async function coreLoginChrome<T = unknown>(payload: LoginChromeRequest): Promise<T> {
+  try {
+    return await invoke<T>(CORE_LOGIN_CHROME, { payload });
+  } catch (failure) {
+    throw normalizeFailure(failure);
+  }
 }
 
 /**

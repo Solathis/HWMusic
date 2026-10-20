@@ -56,12 +56,12 @@ import {
   LOGIN_GATE_PHASE,
   LOGIN_GATE_TITLE,
   QR_COUNTDOWN_TESTID,
+  QR_EXPIRED_BOX_HINT,
   QR_EXPIRED_BOX_TEXT,
   QR_EXPIRED_NOTICE,
   QR_EXPIRING_TEXT,
   QR_GATE_STATUS,
   QR_HINT_TEXT,
-  QR_REFRESH_ACTION_TESTID,
   QR_REFRESH_LABEL,
   QR_REFRESH_TESTID,
   WEB_LOGIN_BACK_TESTID,
@@ -80,6 +80,7 @@ import {
   shouldShowLoginGate,
   webLoginEntry,
 } from "../src/renderer/features/auth/login-gate-logic.mjs";
+import { THEME_CONTROL_TESTID } from "../src/renderer/features/theme/theme.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const read = (relative) => readFileSync(`${repoRoot}${relative}`, "utf8");
@@ -520,18 +521,22 @@ test("常驻入口（要求 4 / R20 要求 3）：那个 <Button> 不被错误�
   const jsx = gateJsx();
   assert.equal(WEB_LOGIN_ENTRY_TEXT, "在网页中打开登录");
   assert.equal(WEB_LOGIN_BACK_TEXT, "返回扫码登录");
-  assert.match(jsx, /\{entry\.text\}/, "入口文案来自逻辑模块的唯一真源（两种形态都是它）");
+  assert.match(jsx, /\{entry\.text\}/, "入口文案来自逻辑模块的唯一真源");
   assert.match(jsx, /data-testid=\{entry\.testid\}/, "入口要有测试锚点（真窗守据点名它）");
   assert.match(jsx, /disabled=\{entry\.disabled\}/, "可用性也由逻辑模块裁决（外壳不自己算）");
+  // R25：正文里只剩 open 形态（back 形态的落点搬到了浮动 webview，见 login-chrome.tsx）
+  assert.match(jsx, /\{entry\.form === "open" \? entryButton : null\}/, "只有 open 形态由 gate 渲染");
+  assert.doesNotMatch(source, /\{entry\.form === "back"/, "gate 里不该再有 back 形态的落点");
   assert.equal(
     jsx.split("<Button").length - 1,
-    4,
-    "源码里恰好四个 shadcn Button：二维码刷新容器 / 过期态的刷新按钮（R21）/ 重试（失败态）/ 入口",
+    3,
+    "R25 起源码里恰好三个 shadcn Button：二维码刷新容器 / 重试（失败态）/ 常驻入口" +
+      "（过期态那个刷新按钮已删；主题控件在 theme-control.tsx 里，是另一个组件）",
   );
   assert.equal(
     jsx.split("{entry.text}").length - 1,
     1,
-    "入口元素只有一处定义（在 header 与正文之间搬位置，不是各写一份）",
+    "入口元素只有一处定义",
   );
   assert.doesNotMatch(source, /shouldOfferOfficialFallback|OFFICIAL_FALLBACK_KINDS/, "按错误类别决定入口是否出现的那套判定已删除");
 });
@@ -542,12 +547,17 @@ test("接线：门禁经 coreCall 调 auth:qr-start（自动/刷新）与 auth:l
   assert.match(gate, /AUTH_STATUS/, "会话状态来自 auth:status 广播");
   assert.match(gate, /AUTH_QR/, "二维码状态来自 auth:qr 广播");
   assert.match(gate, /AUTH_LOGIN/, "常驻入口仍走 auth:login");
-  // R20 要求 3：网页登录窗铺满内容区时，唯一的回退路径就是这条（关窗 → 那条路收场 → 回二维码态）
-  assert.match(gate, /AUTH_CANCEL_LOGIN/, "「返回扫码登录」走 auth:cancel-login（窗在 Rust 手里，只有它能拆）");
+  // R25：「返回扫码登录」搬出了门禁——它浮在官方页之上（浮动 webview），走专用命令。
+  // 门禁这一层不再有第二条取消路径（也就不会再 import AUTH_CANCEL_LOGIN）。
+  assert.doesNotMatch(
+    stripComments(gate),
+    /AUTH_CANCEL_LOGIN/,
+    "取消登录只剩一条入口（浮动控件 → core_login_chrome）",
+  );
   assert.match(
-    gate,
-    /import\s*\{[^}]*AUTH_CANCEL_LOGIN[^}]*\}\s*from\s*"\.\.\/shared\/request-channels\.ts"/,
-    "频道名来自共享常量表（唯一真源，不写字面量）",
+    read("src/renderer/login-chrome.tsx"),
+    /coreLoginChrome/,
+    "返回控件走 core_login_chrome（它不是业务频道：core_call 的来源守卫会拒浮动 webview）",
   );
   assert.doesNotMatch(gate, /["']auth:(login|logout|cancel-login|qr-start|get-status|status|qr)["']/, "频道名一律 import 共享常量，不写字面量");
 });
@@ -764,7 +774,6 @@ test("R20 手动刷新：二维码容器可点（等待/已扫/过期/失败都�
 test("R20 手动刷新：文案与锚点是唯一真源，点击走 startQr（与自动发起同一条路：换一张新码）", () => {
   assert.equal(QR_REFRESH_LABEL, "刷新二维码");
   assert.equal(QR_REFRESH_TESTID, "login-qr-refresh");
-  assert.equal(QR_REFRESH_ACTION_TESTID, "login-qr-refresh-action");
   assert.equal(QR_COUNTDOWN_TESTID, "login-qr-countdown");
 
   const jsx = gateJsx();
@@ -772,21 +781,22 @@ test("R20 手动刷新：文案与锚点是唯一真源，点击走 startQr（�
   assert.match(jsx, /data-testid=\{QR_REFRESH_TESTID\}/, "真窗守据点名它");
   assert.match(jsx, /disabled=\{!canRefreshQr\(state\)\}/, "不可点的档位由逻辑模块裁决");
 
-  // 点击语义：容器与"重试"是同一件事（startQr = qrRequested + auth:qr-start）
+  // 点击语义：容器就是唯一的换码控件（startQr = qrRequested + auth:qr-start）
   const refreshAt = jsx.indexOf("<Button", jsx.indexOf("QR_REFRESH_TESTID") - 400);
   const block = jsx.slice(refreshAt, jsx.indexOf("</Button>", refreshAt));
   assert.match(block, /onClick=\{startQr\}/, `刷新要绑 startQr：${block}`);
   assert.match(block, /onClick=\{startQr\}[\s\S]*QR_REFRESH_TESTID|QR_REFRESH_TESTID[\s\S]*onClick=\{startQr\}/, "同一个元素上");
 
-  // R21 要求 3：过期态那个显著的「刷新二维码」按钮也走同一条路（同一个动作，不是第二条链）
-  const actionAt = jsx.indexOf("QR_REFRESH_ACTION_TESTID");
-  assert.ok(actionAt > -1, "过期态要有显著的刷新按钮（R21 要求 3）");
-  const actionBlock = jsx.slice(jsx.lastIndexOf("<Button", actionAt), jsx.indexOf("</Button>", actionAt));
-  assert.match(actionBlock, /onClick=\{startQr\}/, `过期态的刷新按钮要走同一个 startQr：${actionBlock}`);
-  assert.match(actionBlock, /\{QR_REFRESH_LABEL\}/, `按钮文案与容器的可达名字同源：${actionBlock}`);
+  // R25 要求 1：过期占位只有两行，「刷新二维码」按钮删掉——源码里不该再出现它
+  assert.equal(
+    jsx.split("QR_REFRESH_LABEL").length - 1,
+    1,
+    "QR_REFRESH_LABEL 只该出现在容器那个 aria-label 上（过期态那个按钮已删）",
+  );
+  assert.match(jsx, /QR_EXPIRED_BOX_HINT/, "过期占位第二行来自唯一真源");
 });
 
-test("R20 返回扫码登录：网页那条路开着时入口变形，而且挪进那条唯一可见的 48px header", () => {
+test("R25 返回扫码登录：形态判定仍在逻辑层，落点搬到浮动 webview（gate 里不渲染它）", () => {
   const official = reduceGateState(loggedOut(), { type: LOGIN_GATE_EVENT.started });
   const entry = webLoginEntry(official);
   assert.equal(entry.form, "back");
@@ -801,22 +811,22 @@ test("R20 返回扫码登录：网页那条路开着时入口变形，而且挪�
   assert.equal(normal.testid, WEB_LOGIN_ENTRY_TESTID);
   assert.equal(normal.disabled, false);
 
-  // 源码：back 形态要放进 header（网页窗盖住正文时那是唯一可达的一条），且只放一份
+  // 源码：back 形态**不在** gate 里（官方页铺满整窗，gate 整个在它底下），
+  // 由浮动控件渲染——文案与锚点还是同一份常量（不是各写一份）
   const jsx = gateJsx();
-  const headerAt = jsx.indexOf("<header");
-  const headerOpen = jsx.indexOf(">", headerAt);
-  const headerTag = jsx.slice(headerAt, headerOpen);
-  assert.match(headerTag, /justify-end|justify-between|ml-auto/, `返回控件要摆在 header 里：${headerTag}`);
-  assert.match(jsx.slice(headerOpen, jsx.indexOf("</header>", headerOpen)), /entry\.form === "back"/, "header 里只在 back 形态下放它");
+  assert.doesNotMatch(jsx, /\{entry\.form === "back"/, "gate 里没有 back 形态的落点");
+  const chrome = read("src/renderer/login-chrome.tsx");
+  assert.match(chrome, /WEB_LOGIN_BACK_TEXT/, "浮动控件用同一份文案常量");
+  assert.match(chrome, /WEB_LOGIN_BACK_TESTID/, "浮动控件用同一份锚点常量");
 });
 
-test("R20 返回扫码登录：形态判据是 busy（不是本地那个 path）——渲染层 reload 之后返回路径照样在", () => {
+test("R25 返回扫码登录：形态判据仍是 busy（不是本地那个 path）——渲染层 reload 之后照样有回去的路", () => {
   // R19 的场景：reload 之后门禁靠 auth:get-status 重建状态，那时 `path` 是 null，
   // 只有 sidecar 的 `busy:true` 说明"窗还开着"。若按 path 判形态，入口会退回"打开"形态
-  // ——而它此刻点不动（窗盖着正文），用户就没有任何回去的路。
+  // ——而它此刻点不动（官方页盖着正文），用户就没有任何回去的路。
   const afterReload = { ...initialGateState(), phase: LOGIN_GATE_PHASE.loggedOut, busy: true };
   const entry = webLoginEntry(afterReload);
-  assert.equal(entry.form, "back", "窗还开着：入口必须是「返回扫码登录」");
+  assert.equal(entry.form, "back", "窗还开着：此刻该存在的是「返回扫码登录」");
   assert.equal(entry.disabled, false);
 
   // 两种形态永远可点（R17 的教训：最需要它的场景里它不许是灰的）

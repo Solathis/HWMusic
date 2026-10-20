@@ -10,7 +10,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { LOGIN_TIMEOUT_MS } from "../src/protocols/login-callback.mjs";
-import { LOGIN_VIEW_TOP_INSET } from "../src/shared/login-inset.mjs";
 import { HOST_CANCEL_LOGIN, HOST_OPEN_LOGIN } from "../src/shared/request-channels.ts";
 import {
   HOST_LOGIN_STATUS,
@@ -51,7 +50,7 @@ test("分区：每次都是一次性随机值，且落在 Rust 的 [A-Za-z0-9_-]
   assert.ok(seen.size >= 190, "随机性不能退化成常量");
 });
 
-test("开窗：payload 形状 {url, partition, topInset}；topInset 来自共享常量而不是第二份字面量", async () => {
+test("开窗：payload 形状 {url, partition}——R25 起 topInset 退休（登录页铺满整窗）", async () => {
   const services = fakeHostServices({ [HOST_OPEN_LOGIN]: { ok: true, data: { status: "cancelled" } } });
   const host = createLoginHost({ hostServices: services, partition: () => "p-test" });
 
@@ -62,18 +61,21 @@ test("开窗：payload 形状 {url, partition, topInset}；topInset 来自共享
   assert.deepEqual(services.calls[0].payload, {
     url: AUTHORIZE_URL,
     partition: "p-test",
-    topInset: LOGIN_VIEW_TOP_INSET,
   });
-  assert.equal(LOGIN_VIEW_TOP_INSET, 48, "共享常量的唯一真源（test/login-parity 扫源码钉住）");
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(services.calls[0].payload, "topInset"),
+    false,
+    "topInset 已从载荷里退休（用户四项之 3：网页不再被挤压）：留一个永远是 0 的旋钮只会让下一个人摆错页面",
+  );
   assert.equal(LOGIN_HOST_TIMEOUT_MS > LOGIN_TIMEOUT_MS, true, "开窗调用要等满 10 分钟");
   assert.equal(services.calls[0].options.timeoutMs, LOGIN_HOST_TIMEOUT_MS);
 });
 
-test("开窗：调用方可以显式覆盖 partition / topInset（几何契约由调用方说了算时）", async () => {
+test("开窗：调用方可以显式覆盖 partition（一次性隔离由调用方说了算时）", async () => {
   const services = fakeHostServices({ [HOST_OPEN_LOGIN]: { ok: true, data: { status: "closed" } } });
   const host = createLoginHost({ hostServices: services, partition: () => "unused" });
-  await host.openLoginPage({ url: AUTHORIZE_URL, partition: "explicit-1", topInset: 0 });
-  assert.deepEqual(services.calls[0].payload, { url: AUTHORIZE_URL, partition: "explicit-1", topInset: 0 });
+  await host.openLoginPage({ url: AUTHORIZE_URL, partition: "explicit-1" });
+  assert.deepEqual(services.calls[0].payload, { url: AUTHORIZE_URL, partition: "explicit-1" });
 });
 
 test("开窗：宿主回结构化错误时如实抛出（不假装开好了）", async () => {

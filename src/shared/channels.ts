@@ -114,6 +114,20 @@ export const LYRICS_STATE = "lyrics:state" as const;
  */
 export const AUTH_QR = "auth:qr" as const;
 
+/**
+ * 主题变化广播（R25 增补）：`{theme: "light"|"dark"|"system"}` —— **目标态**（改完这一下之后
+ * 该是什么），不是"当前计算出来的明暗"。
+ *
+ * 为什么是广播而不是让每个 webview 各自去查：主题状态由 Rust 侧持有（`settings.json` 的
+ * `theme` 键），而改它的入口有好几个（gate 的主题控件、浮动控件、将来的设置页）——
+ * 每个 webview 各查一次就会各自漂移（"主窗是暗的、浮动控件还是亮的"正是这么来的）。
+ * 广播一发，**所有**该应用 class 的 webview 一起变（主窗 + 两个浮动控件）。
+ *
+ * 谁不订阅：官方登录页（**零注入**是硬边界，`login.rs` 根本不碰它的文档）与歌词窗
+ * （它有自己的 AMLL 主题，不在 R25 的范围内）。
+ */
+export const THEME_CHANGED = "theme:changed" as const;
+
 export const BROADCAST_CHANNELS = [
   APP_NOTICE,
   AUTH_STATUS,
@@ -124,6 +138,7 @@ export const BROADCAST_CHANNELS = [
   LYRICS_DOCUMENT,
   LYRICS_PROGRESS,
   LYRICS_STATE,
+  THEME_CHANGED,
 ] as const;
 
 export type BroadcastChannel = (typeof BROADCAST_CHANNELS)[number];

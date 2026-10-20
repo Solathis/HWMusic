@@ -19,6 +19,13 @@
  * 「二维码已过期」，并多出一个显著的「刷新二维码」按钮（手动刷新是唯一的换码方式）。
  * R20 那句「二维码已刷新，请重新扫码。」随自动换新一起删除。
  *
+ * R25 增补（用户四项之 1/2/4）：
+ * 1. 过期占位**只有两行**——「二维码已过期」/「点击刷新」，R21 那个显著的「刷新二维码」按钮删掉
+ *    （容器本身就是刷新控件，它一直可点）；
+ * 2. 右上角多一个**主题控件**（浅色 / 深色 / 跟随系统，与浮动控件同一个 React 组件）；
+ * 3. 「返回扫码登录」**不再由 gate 渲染**：官方页 R25 起铺满整窗，gate 整个在它底下，
+ *    那个控件改由浮动 webview `login-return` 顶上（标记层面：gate 里根本不该有它）。
+ *
  * 先写先看红。
  */
 import test from "node:test";
@@ -34,11 +41,11 @@ import {
   LOGIN_GATE_EVENT,
   LOGIN_GATE_TITLE,
   QR_COUNTDOWN_TESTID,
+  QR_EXPIRED_BOX_HINT,
   QR_EXPIRED_BOX_TEXT,
   QR_EXPIRED_NOTICE,
   QR_GATE_STATUS,
   QR_HINT_TEXT,
-  QR_REFRESH_ACTION_TESTID,
   QR_REFRESH_LABEL,
   QR_REFRESH_TESTID,
   WEB_LOGIN_BACK_TESTID,
@@ -48,6 +55,12 @@ import {
   initialGateState,
   reduceGateState,
 } from "../src/renderer/features/auth/login-gate-logic.mjs";
+import {
+  THEME_CHOICES,
+  THEME_CONTROL_TESTID,
+  THEME_LABELS,
+  themeOptionTestId,
+} from "../src/renderer/features/theme/theme.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 /** 中间产物落在 .tmp（已 gitignore），与 test-browser.mjs 的守卫目录同一个约定。 */
@@ -63,11 +76,12 @@ import { LoginGate } from "../../src/renderer/login-gate.tsx";
 
 /**
  * 把一份门禁状态渲染成静态标记。
- * 副作用（自动发起二维码、订阅广播）不会在 SSR 里跑：本文件只问"这份状态长什么样"。
+ * 副作用（自动发起二维码、订阅广播、读主题档位）不会在 SSR 里跑：本文件只问"这份状态长什么样"。
+ * R25：主题控件在 SSR 里显示的是默认档（跟随系统）——那正是它的初始高亮。
  */
 export function renderGate(state) {
   return renderToStaticMarkup(
-    <LoginGate gate={{ state, startQr() {}, startLogin() {}, backToQr() {} }} />,
+    <LoginGate gate={{ state, startQr() {}, startLogin() {} }} />,
   );
 }
 `;
@@ -275,19 +289,21 @@ test("标记：标题在二维码正上方、居中，且全页只出现一次�
 // R20 要求 1：header 里那句品牌与窗口标题栏重复 → 删掉（几何契约仍在）
 // ---------------------------------------------------------------------------
 
-test("标记：header 里没有任何可见文字（品牌与窗口标题栏重复的那句已删），48px 几何契约不破", async () => {
+test("标记：header 里不再有品牌（与窗口标题栏重复），改放主题控件——48px 那条仍在", async () => {
   const { renderGate } = await gateRenderer();
   const html = renderGate(pendingState());
   const header = headerTag(html);
 
-  assert.equal(
-    visibleText(header.replace(/^<header\b[^>]*>/, "").replace(/<\/header>$/, "")).replaceAll("\u0001", "").trim(),
-    "",
-    `header 里不许有可见文字：${header}`,
-  );
   assert.doesNotMatch(html, new RegExp(APP_BRAND_LABEL), "品牌不进引导页（窗口标题栏已经有它）");
-  assert.match(header, /style="height:48px"/, `高度仍来自共享常量：${header}`);
   assert.equal(occurrences(html, APP_BRAND_LABEL), 0, "同一句话全页不许出现（省得又变回两处）");
+  assert.match(header, /style="height:48px"/, `高度仍来自共享常量：${header}`);
+
+  // R25（用户四项之 4）：gate 视图右上角也要有主题控件
+  assert.match(header, new RegExp(`data-testid="${THEME_CONTROL_TESTID}"`), `主题控件要在 header 里：${header}`);
+  const labels = buttonSummaries(html)
+    .filter((button) => THEME_CHOICES.some((choice) => themeOptionTestId(choice) === button.testid))
+    .map((button) => button.text);
+  assert.deepEqual(labels, THEME_CHOICES.map((choice) => THEME_LABELS[choice]), "三档都在：浅色 / 深色 / 跟随系统");
 });
 
 // ---------------------------------------------------------------------------
@@ -310,21 +326,29 @@ test("标记：二维码容器带边框（border + border-border + 圆角工具�
 // R20 要求 2 / R21 要求 1+2：过期码不留屏、过期态不可扫、倒计时在二维码下方
 // ---------------------------------------------------------------------------
 
-test("标记：过期态不可扫——canvas 撤下、二维码区域自己写着「二维码已过期」，并给一个显著的刷新按钮", async () => {
+test("标记：过期态不可扫——canvas 撤下、二维码区域只写两行（已过期 / 点击刷新），没有多余的刷新按钮", async () => {
   const { renderGate } = await gateRenderer();
   const html = renderGate(expiredState());
+  const block = qrHostBlock(html);
 
   assert.doesNotMatch(html, /<canvas/, "过期码绝不能留在屏上让人扫（那是必然扫不动的死码）");
-  assert.doesNotMatch(qrHostBlock(html), /<canvas/, "二维码容器里也不许有 canvas");
-  assert.match(qrHostBlock(html), new RegExp(QR_EXPIRED_BOX_TEXT), `二维码区域要写明已过期：${qrHostBlock(html)}`);
+  assert.doesNotMatch(block, /<canvas/, "二维码容器里也不许有 canvas");
+  assert.match(block, new RegExp(QR_EXPIRED_BOX_TEXT), `二维码区域要写明已过期：${block}`);
   assert.doesNotMatch(html, /animate-pulse/, "过期不是「加载中」：占位说的是已过期，不是马上就来");
   assert.equal(statusTextOf(html), QR_EXPIRED_NOTICE, "状态行给的是可操作的下一句（点击刷新）");
 
-  // R21 要求 3：过期态那个显著的「刷新二维码」按钮（手动刷新是唯一的换码方式）
-  const action = buttonSummaries(html).find((button) => button.testid === QR_REFRESH_ACTION_TESTID);
-  assert.ok(action, `过期态要有显著的刷新入口：${JSON.stringify(buttonSummaries(html))}`);
-  assert.equal(action.text, QR_REFRESH_LABEL, "按钮文案与容器的可达名字同源");
-  assert.equal(action.disabled, false, "它是这个档位唯一的出路：不许是灰的");
+  // R25（用户四项之 1）：过期占位**只有两行**，且删掉了 R21 那个显著的「刷新二维码」按钮
+  assert.match(block, new RegExp(QR_EXPIRED_BOX_HINT), `第二行要说清"点哪儿"：${block}`);
+  assert.equal(
+    occurrences(block, QR_EXPIRED_BOX_TEXT) + occurrences(block, QR_EXPIRED_BOX_HINT),
+    2,
+    `过期占位恰好两行：${visibleText(block).replaceAll("\u0001", "|")}`,
+  );
+  assert.equal(
+    buttonSummaries(block).length,
+    1,
+    "过期占位里除了容器自己（它可点）没有任何按钮：" + JSON.stringify(buttonSummaries(block)),
+  );
 
   // 过期态没有倒计时可显示（"剩 0 秒"是错的：那一刻的权威是服务端那条广播）
   assert.doesNotMatch(html, new RegExp(`data-testid="${QR_COUNTDOWN_TESTID}"`), "过期态不该有倒计时");
@@ -377,7 +401,7 @@ test("标记：时间走到本地归零 → 那一行说「正在确认过期…
   assert.equal(countdown[1], "正在确认过期…");
 });
 
-test("标记：过期态点刷新 → 新码画出来、过期文案与那个按钮一起退场、倒计时重新开始", async () => {
+test("标记：过期态点刷新 → 新码画出来、过期文案退场、倒计时重新开始", async () => {
   const { renderGate } = await gateRenderer();
   const refreshed = reduceGateState(expiredState(), { type: LOGIN_GATE_EVENT.qrRequested });
   const waiting = reduceGateState(refreshed, {
@@ -391,7 +415,7 @@ test("标记：过期态点刷新 → 新码画出来、过期文案与那个按
 
   assert.match(html, /<canvas/, "新码要画出来");
   assert.doesNotMatch(html, new RegExp(QR_EXPIRED_BOX_TEXT), "过期文案退场（它是过期专属的一档）");
-  assert.doesNotMatch(html, new RegExp(`data-testid="${QR_REFRESH_ACTION_TESTID}"`), "过期态那个按钮同时退场");
+  assert.doesNotMatch(html, new RegExp(QR_EXPIRED_BOX_HINT), "「点击刷新」也一起退场（两行是一体的）");
   assert.equal(statusTextOf(html), "等待扫码…");
   assert.match(visibleText(html), /剩 181 秒过期/, "倒计时按新码的有效期重新开始");
 });
@@ -423,77 +447,81 @@ test("标记：二维码容器本身可点刷新（真 <button> + 可达名字 +
   assert.equal(expired?.disabled, false, "过期态：容器本身就是用户想点的那块地方");
 });
 
-test("标记：可操作元素集合 = 刷新容器 + 常驻入口；过期态多一个「刷新二维码」；「重试」只在失败态", async () => {
+test("标记：可操作元素集合 = 主题三档 + 刷新容器 + 常驻入口；「重试」只在失败态", async () => {
   const { renderGate } = await gateRenderer();
+  const themeIds = THEME_CHOICES.map(themeOptionTestId);
   const pending = buttonSummaries(renderGate(pendingState()));
   assert.deepEqual(
     pending.map((button) => button.testid || button.text),
-    [QR_REFRESH_TESTID, WEB_LOGIN_ENTRY_TESTID],
-    `正常路径只有这两个可操作元素：${JSON.stringify(pending)}`,
+    [...themeIds, QR_REFRESH_TESTID, WEB_LOGIN_ENTRY_TESTID],
+    `正常路径只有这些可操作元素（主题三档在 header 里、排在最前）：${JSON.stringify(pending)}`,
   );
 
-  // R21 要求 3：过期态多一个**显著**的刷新按钮（换码只剩手动这一条路）
+  // R25 要求 1：过期态**不再**多一个刷新按钮（换码靠点容器；那一档与正常路径的可操作元素完全一样）
   const expired = buttonSummaries(renderGate(expiredState()));
   assert.deepEqual(
     expired.map((button) => button.testid || button.text),
-    [QR_REFRESH_TESTID, QR_REFRESH_ACTION_TESTID, WEB_LOGIN_ENTRY_TESTID],
-    `过期态要有那个刷新按钮：${JSON.stringify(expired)}`,
+    [...themeIds, QR_REFRESH_TESTID, WEB_LOGIN_ENTRY_TESTID],
+    `过期态不许再多一个刷新按钮：${JSON.stringify(expired)}`,
   );
 
   const failed = buttonSummaries(renderGate(failedState()));
   assert.deepEqual(
     failed.map((button) => button.testid || button.text),
-    [QR_REFRESH_TESTID, "重试", WEB_LOGIN_ENTRY_TESTID],
+    [...themeIds, QR_REFRESH_TESTID, "重试", WEB_LOGIN_ENTRY_TESTID],
     `失败态多一个「重试」：${JSON.stringify(failed)}`,
   );
 });
 
 // ---------------------------------------------------------------------------
-// R20 要求 3：网页登录窗开着 → 入口变形为「返回扫码登录」并挪进那条可见的 48px header
+// R20 要求 3 / R25 要求 2：网页登录那条路开着时的「返回扫码登录」
 // ---------------------------------------------------------------------------
 
-/** 网页登录那条路正在跑（窗铺满内容区，顶部只留 header）。 */
+/** 网页登录那条路正在跑（官方页铺满整窗，gate 整个在它底下）。 */
 function officialState() {
   return reduceGateState(loggedOut(), { type: LOGIN_GATE_EVENT.started });
 }
 
-test("标记：网页登录窗开着时，入口变形为「返回扫码登录」，且落在 header 里（那一刻唯一可见的一条）", async () => {
+test("标记：R25 起「返回扫码登录」**不由 gate 渲染**（它浮在官方页之上，落点是浮动 webview）", async () => {
   const { renderGate } = await gateRenderer();
   const html = renderGate(officialState());
 
-  const back = buttonSummaries(html).find((button) => button.testid === WEB_LOGIN_BACK_TESTID);
-  assert.ok(back, `找不到返回控件：${JSON.stringify(buttonSummaries(html))}`);
-  assert.equal(back.text, WEB_LOGIN_BACK_TEXT, "文案是「返回扫码登录」");
-  assert.equal(back.disabled, false, "窗开着时它必须点得动（用户唯一的回退路径）");
-  // 注意用**按钮文案**判形态，不能拿整页可见文本找：状态行那句"已在网页中打开登录。"里就有它
-  assert.equal(
-    buttonSummaries(html).filter((button) => button.text === WEB_LOGIN_ENTRY_TEXT).length,
-    0,
-    `同一时刻只有一个入口形态（不许两个都在）：${JSON.stringify(buttonSummaries(html))}`,
+  // 门禁这一层此刻整个被官方页盖着：在这儿画它等于画在别人的地板底下
+  assert.doesNotMatch(
+    html,
+    new RegExp(`data-testid="${WEB_LOGIN_BACK_TESTID}"`),
+    "官方页铺满整窗时，gate 里不该有返回控件（它由浮动 webview login-return 顶上）",
   );
-  assert.doesNotMatch(html, new RegExp(`data-testid="${WEB_LOGIN_ENTRY_TESTID}"`), "开窗形态同时退场");
+  assert.doesNotMatch(html, new RegExp(WEB_LOGIN_BACK_TEXT), `返回文案不该出现在 gate 的标记里：${visibleText(html)}`);
 
-  // 位置：在 header 里（网页窗盖住正文的那 48px），且 header 仍在页面最上方、高度契约不变
-  const header = headerTag(html);
-  assert.match(header, new RegExp(`data-testid="${WEB_LOGIN_BACK_TESTID}"`), `返回控件要在 header 里：${header}`);
-  assert.match(header, /style="height:48px"/, "header 高度契约不变");
+  // 正文里那两种形态此刻都不该出现：官方页开着 = 不该再发起第二次登录（只会撞 login_in_progress），
+  // 「返回」则由浮动控件负责（见上一条）。
+  assert.doesNotMatch(html, new RegExp(`data-testid="${WEB_LOGIN_ENTRY_TESTID}"`), "开窗时不渲染「打开」形态");
+  assert.match(statusTextOf(html) ?? "", /已在网页中打开登录/, "状态行说清现在是哪条路");
+
+  // 主题控件还在 header 里（gate 视图那一份；被盖住时由浮动 login-theme 顶上）
+  assert.match(headerTag(html), new RegExp(`data-testid="${THEME_CONTROL_TESTID}"`), "主题控件不随官方页退场");
+  assert.match(headerTag(html), /style="height:48px"/, "header 高度契约不变");
   assert.ok(html.indexOf("<header") < html.indexOf(`>${LOGIN_GATE_TITLE}<`), "header 仍在最上方");
 });
 
-test("标记：渲染层 reload 之后（path 丢了、只剩 busy:true）返回控件照样在 header 里", async () => {
+test("标记：渲染层 reload 之后（path 丢了、只剩 busy:true）形态判定仍是 back（只是落点在浮动控件）", async () => {
   const { renderGate } = await gateRenderer();
   // R19 的场景：门禁状态靠 auth:get-status 应答重建，`path` 是 null，只有 sidecar 的 busy
   const afterReload = { ...loggedOut(), busy: true };
   assert.equal(afterReload.path, null, "这份夹具要的正是「没有本地 path」那一档");
-  const html = renderGate(afterReload);
 
-  const header = headerTag(html);
-  assert.match(header, new RegExp(`data-testid="${WEB_LOGIN_BACK_TESTID}"`), `窗还开着就必须有回去的路：${header}`);
-  const back = buttonSummaries(html).find((button) => button.testid === WEB_LOGIN_BACK_TESTID);
-  assert.equal(back?.disabled, false, "这条路不许是灰的");
+  // 判定（纯函数）仍然说"此刻该有一个返回控件"
+  const { webLoginEntry } = await import("../src/renderer/features/auth/login-gate-logic.mjs");
+  const entry = webLoginEntry(afterReload);
+  assert.equal(entry.form, "back", "窗还开着就必须有回去的路");
+  assert.equal(entry.disabled, false, "这条路不许是灰的");
+
+  // 但它的**落点**不在 gate 里（gate 被官方页盖着），所以标记里没有它
+  assert.doesNotMatch(renderGate(afterReload), new RegExp(`data-testid="${WEB_LOGIN_BACK_TESTID}"`));
 });
 
-test("标记：回到二维码态之后入口变回「在网页中打开登录」（正文里那一份，顺序契约不变）", async () => {
+test("标记：回到二维码态之后正文里是「在网页中打开登录」（顺序契约不变）", async () => {
   const { renderGate } = await gateRenderer();
   const back = reduceGateState(officialState(), {
     type: LOGIN_GATE_EVENT.status,
@@ -503,9 +531,8 @@ test("标记：回到二维码态之后入口变回「在网页中打开登录�
   });
   const html = renderGate(reduceGateState(back, { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.pending, content: "NEW" }));
 
-  assert.equal(occurrences(html, WEB_LOGIN_ENTRY_TEXT), 1, "变回常驻入口");
-  assert.doesNotMatch(html, new RegExp(WEB_LOGIN_BACK_TEXT), "返回控件退场");
-  assert.doesNotMatch(headerTag(html), /<button/, "header 里不再留控件（回到无文字的那条占位）");
+  assert.equal(occurrences(html, WEB_LOGIN_ENTRY_TEXT), 1, "常驻入口在，且只有一处");
+  assert.doesNotMatch(html, new RegExp(WEB_LOGIN_BACK_TEXT), "返回控件的文案不在 gate 里（它归浮动控件）");
 
   const entryAt = html.indexOf(WEB_LOGIN_ENTRY_TEXT);
   const statusAt = html.indexOf('role="status"');

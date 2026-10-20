@@ -131,11 +131,12 @@ test("CSP 一致性：常量后缀与 tauri.conf.json 的 img-src/media-src 白�
   assert.deepEqual(directive("connect-src"), ["'self'", "ipc:", "http://ipc.localhost"], "渲染层不得有对外直连通道");
 });
 
-test("广播频道：R16 起是 app:notice + auth:status + auth:qr + player:command + 托盘那两条 + 歌词窗那三条（每个新增都在共享常量表里，不另立清单）", () => {
+test("广播频道：R16 起是 app:notice + auth:status + auth:qr + player:command + 托盘那两条 + 歌词窗那三条 + 主题那条（每个新增都在共享常量表里，不另立清单）", () => {
   // R4 落地时这里钉的是"只有 app:notice"；R7 增补 auth:status（登录状态）、
   // R9 预登记 player:command（R11 托盘的播放控制）、R11 增补 lyrics:toggle / app:open-settings
   // （托盘"桌面歌词"与"设置…"）、R12 增补 lyrics:document / lyrics:progress / lyrics:state
-  // （主窗转发给歌词窗的歌词、进度与配置）、R16 增补 auth:qr（引导页二维码的生命周期）后
+  // （主窗转发给歌词窗的歌词、进度与配置）、R16 增补 auth:qr（引导页二维码的生命周期）、
+  // R25 增补 theme:changed（主题三态：浅色/深色/跟随系统）后
   // 同步改这一行——硬钉的意义是"每次放宽都得有人签字"，
   // 不是"永远不许加"。
   assert.deepEqual([...BROADCAST_CHANNELS], [
@@ -148,5 +149,6 @@ test("广播频道：R16 起是 app:notice + auth:status + auth:qr + player:comm
     "lyrics:document",
     "lyrics:progress",
     "lyrics:state",
+    "theme:changed",
   ]);
 });
