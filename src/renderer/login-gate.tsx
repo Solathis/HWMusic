@@ -31,9 +31,19 @@
  *    点击走 `auth:cancel-login`（关窗）→ 那条路的收场广播 → R18 的 `returnToQr` 链回到二维码态
  *    并重新发码。入口元素只有一处定义（`entry`），两种形态共用它。
  *
+ * R21（用户指令 2026-10-20，**推翻 R16/R20 的"过期自动换新"**）在这一页上加了三处：
+ * 1. **倒计时**：二维码下方那一行（[`qrCountdownText`]），由本页自己的 `setInterval`
+ *    每秒喂一条 `tick` 事件驱动——只在"有到期时刻"时才开表，本地数到 0 之后 reducer
+ *    返回同一个状态对象，React 不再重渲染（表停在那里等服务端的 `expired`）；
+ * 2. **过期态不可扫**：`expired` 时容器里不再是 Skeleton（那读起来像"马上就来"），
+ *    而是一块同尺寸的过期占位（[`QR_EXPIRED_BOX_TEXT`]）——canvas 撤下，屏上没有任何
+ *    可扫的东西；
+ * 3. **过期态多一个显著的「刷新二维码」按钮**（文案复用 [`QR_REFRESH_LABEL`]）：sidecar
+ *    不再自动换新，所以换码只剩手动这一条路；它走的是与容器、自动发起同一个 `startQr`。
+ *
  * 三条要点：
  * - 二维码由成熟库 `qrcode`（MIT）渲染到 canvas——不手写二维码组件、不自己编码；
- *   画法只有 `features/auth/qr-canvas.mjs` 一处（内容一换就重画：过期自动换新靠这一跳）；
+ *   画法只有 `features/auth/qr-canvas.mjs` 一处（内容一换就重画）；
  * - **只有出错**才出现 `重试`；"在网页中打开登录"是常驻的次要入口（克制的 link 形态），
  *   点了走 R7 的官方登录子窗；**两条路互斥**——sidecar 开窗前会停掉二维码会话，
  *   窗关掉/失败之后界面自动回到二维码态（判定见 `login-gate-logic.mjs` 的不变量 6）；
@@ -64,8 +74,12 @@ import { coreCall, isCoreError, onCoreEvent, rendererReady } from "./host-api"
 import {
   LOGIN_GATE_EVENT,
   LOGIN_GATE_TITLE,
+  QR_COUNTDOWN_TESTID,
+  QR_COUNTDOWN_TICK_MS,
+  QR_EXPIRED_BOX_TEXT,
   QR_GATE_STATUS,
   QR_HINT_TEXT,
+  QR_REFRESH_ACTION_TESTID,
   QR_REFRESH_LABEL,
   QR_REFRESH_TESTID,
   canRefreshQr,
@@ -73,6 +87,7 @@ import {
   initialGateState,
   loginGateStatusLine,
   qrContentOf,
+  qrCountdownText,
   reduceGateState,
   shouldAutoStartQr,
   webLoginEntry,
@@ -158,6 +173,8 @@ export function useAuthGate(): AuthGate {
               status: payload?.status,
               content: typeof payload?.content === "string" ? payload.content : undefined,
               expiresInMs: typeof payload?.expiresInMs === "number" ? payload.expiresInMs : undefined,
+              // R21：到期时刻由"收到这条的时刻 + 有效期"算出来（钟只有这一侧有）
+              at: Date.now(),
               message: typeof payload?.message === "string" ? payload.message : undefined,
               errorKind: typeof payload?.errorKind === "string" ? payload.errorKind : undefined,
             }),
@@ -205,6 +222,8 @@ export function useAuthGate(): AuthGate {
             status: QR_GATE_STATUS.pending,
             content: typeof answer?.content === "string" ? answer.content : undefined,
             expiresInMs: typeof answer?.expiresInMs === "number" ? answer.expiresInMs : undefined,
+            // R21：倒计时的起点就是这条应答落地的时刻（新码 + 倒计时一起重置）
+            at: Date.now(),
           }),
         )
       } catch (failure) {
@@ -268,12 +287,29 @@ export function useAuthGate(): AuthGate {
   // StrictMode 会把 effect 跑两遍（第二遍拿到的还是同一份旧状态），所以用 ref 挡住重复建单
   // ——两次建单 = 白白换掉一张用户正在扫的码。R18 从网页那条路退回来时**必须**能再发起一次：
   // 那种状态带着 `officialNote`（"那条路怎么了"），它就是"这一轮该重新发码"的标记。
+  // R21：过期**不在**这条路上（`qrAttempted` 不会被过期打回 false）——换码只能由用户点击触发。
   useEffect(() => {
     if (!shouldAutoStartQr(state)) return
     if (qrStartedRef.current && state.officialNote === null) return
     qrStartedRef.current = true
     startQr()
   }, [state, startQr])
+
+  /**
+   * 倒计时（R21）：每秒喂一次 `tick`，钟由这一侧提供（逻辑模块是纯函数，不读真实时钟）。
+   *
+   * 只在"有到期时刻可数"时开表：其余档位（没有码、已经过期、失败）一秒一次的重渲染纯属浪费。
+   * 本地数到 0 之后 reducer 会把钟钳在到期时刻并返回**同一个状态对象**，React 因此不再重渲染
+   * ——表停在那里等 sidecar 那条 `expired` 广播（过期判定不在这一侧）。
+   */
+  const expiresAt = state.qr.expiresAt
+  useEffect(() => {
+    if (expiresAt === null) return
+    const timer = setInterval(() => {
+      setState((current) => reduceGateState(current, { type: LOGIN_GATE_EVENT.tick, nowMs: Date.now() }))
+    }, QR_COUNTDOWN_TICK_MS)
+    return () => clearInterval(timer)
+  }, [expiresAt])
 
   return { state, startQr, startLogin, backToQr }
 }
@@ -305,6 +341,8 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
   const { state, startQr, startLogin, backToQr } = gate
   const status = loginGateStatusLine(state)
   const content = qrContentOf(state)
+  const countdown = qrCountdownText(state)
+  const expired = state.qr.status === QR_GATE_STATUS.expired
   const entry = webLoginEntry(state)
 
   /**
@@ -340,7 +378,10 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
         <h1 className="text-center text-lg font-medium">{LOGIN_GATE_TITLE}</h1>
 
         {/* 二维码容器：边框与圆角走设计令牌 + 工具类（零自定义 CSS）；还没有内容时给同尺寸占位，
-            界面不跳、用户知道"马上就来"。R20 起容器本身可点（换一张新码），过期也在这里换新。 */}
+            界面不跳、用户知道"马上就来"。R20 起容器本身可点（换一张新码）；R21 起过期态
+            也点得动——**那是唯一的换码路径**（sidecar 不再自动换新）。
+            过期时给的是"已过期"占位而不是 Skeleton：Skeleton 读起来像"马上就来"，而这一档
+            要等的是用户点一下。canvas 撤下 → 屏上没有任何可扫的东西。 */}
         <Button
           variant="ghost"
           className="h-auto rounded-lg border-border bg-card p-3 hover:bg-card"
@@ -350,16 +391,38 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
           data-testid={QR_REFRESH_TESTID}
         >
           {content === null ? (
-            <Skeleton className="h-52 w-52 rounded-md" />
+            expired ? (
+              <div className="flex h-52 w-52 items-center justify-center rounded-md border border-dashed border-border">
+                <span className="text-sm text-muted-foreground">{QR_EXPIRED_BOX_TEXT}</span>
+              </div>
+            ) : (
+              <Skeleton className="h-52 w-52 rounded-md" />
+            )
           ) : (
             <QrCanvas content={content} />
           )}
         </Button>
 
+        {/* R21 倒计时：二维码**下方**那一行（秒级）。只在"码在屏上等着被扫"那一档出现；
+            本地归零时它说的是「正在确认过期…」，等 sidecar 那条 expired 广播收口。 */}
+        {countdown === null ? null : (
+          <p className="text-center text-sm text-muted-foreground" data-testid={QR_COUNTDOWN_TESTID}>
+            {countdown}
+          </p>
+        )}
+
         <p className="max-w-xs text-center text-sm text-muted-foreground">{QR_HINT_TEXT}</p>
         <p className="text-center text-sm text-muted-foreground" role="status">
           {status}
         </p>
+
+        {/* R21：过期态那个**显著**的刷新入口。sidecar 不再自动换新，所以它是这一档唯一的
+            出路（容器也能点，但一个看得见的按钮才说得清"接下来该做什么"）。 */}
+        {expired ? (
+          <Button variant="secondary" size="sm" onClick={startQr} data-testid={QR_REFRESH_ACTION_TESTID}>
+            {QR_REFRESH_LABEL}
+          </Button>
+        ) : null}
 
         {canRetryQr(state) ? (
           <Button variant="secondary" size="sm" onClick={startQr}>

@@ -321,8 +321,10 @@ bundle 里没有任何硬编码的二维码端点字符串——这也是"必须
     重新武装自动发起（`officialNote` 记一句"它为什么结束了"，新码到达后退场）；
   - 二维码**不占** `busy`（`startQrLogin` 不再播 `busy:true`）：`busy` 只描述"开窗那条路正在跑"，
     否则常驻入口会在整个等扫码期间被 `disabled`。
-- 过期自动换新仍是 sidecar 的事（协议层 `createQrSession` 的 `expired → create()` 重建），
+- 过期自动换新曾是 sidecar 的事（协议层 `createQrSession` 的 `expired → create()` 重建），
   渲染层只是"内容变了就重画"；像素级的全链证据在 `test/qr-render.test.mjs`。
+  **R21 已按用户指令推翻这条**：`expired` 只广播、停轮询、不建新单，换新改为用户手动点击
+  （见下面的 R21 段）。
 
 **R20 增补（过期档位实测 + 手动刷新语义，用户真机验收反馈）**：
 
@@ -338,10 +340,28 @@ bundle 里没有任何硬编码的二维码端点字符串——这也是"必须
 | **过期档位** | **`103000201`，t+177.4 s 观测到**（`stoppedBecause: tier_changed`） |
 | 过期后重新建单 | HTTP 200 + 全字段（`content`/`qrToken`/`qrCode`/`expiredTime`），新会话 token 与旧的不同 |
 
-→ **poll 不是"静默挂"**：服务端到点就改档位，sidecar 的 `expired → create()` 换新链有真凭据支撑。
-因此 R20 **不引入**"本地按 `expiresInMs` 主动换新"的回退（简报里那条只在 poll 静默时才适用）；
-真机"过期了却没有提示"的根因在**渲染层**（旧码留在屏上 + 那句提示被紧随其后的新 `pending` 顶掉），
+→ **poll 不是"静默挂"**：服务端到点就改档位，所以 R20 当时把"过期 → 自动换新"这条链
+建立在真凭据上，并且**不引入**"本地按 `expiresInMs` 主动换新"的回退；真机"过期了却没有提示"
+的根因在**渲染层**（旧码留在屏上 + 那句提示被紧随其后的新 `pending` 顶掉），
 修法见 `src/renderer/features/auth/login-gate-logic.mjs` 的 R20 三条。
+
+**R21 按用户指令推翻自动换新**（下面这一段的"自动"部分即由此作废；实测数据不变）：
+
+- **sidecar**：`expired` 变成一条**终点**广播——`stop()`（停轮询、清总期限计时器）+ 只播
+  `expired`，**不再 `create()` 新单**。换新只剩手动一条：渲染层再发一次 `auth:qr-start`，
+  而 `createHuaweiQrPort.start()` 本来就是 restart 语义（这一条 R20 立的语义原样保留）；
+- **渲染层**：新增**秒级倒计时**（`expiresInMs` 由建单应答与 `auth:qr` 广播带过来，换算成
+  本地到期时刻显示在二维码下方）。**过期判定仍以服务端 `expired` 广播为权威**：本地数到 0
+  只说「正在确认过期…」，既不撤码也不改档（服务端实测在本地归零前就给 `103000201`）；
+- **过期态不可扫**：`expired` 到达撤下 canvas（R20 的裁决继续成立），原位写「二维码已过期」，
+  状态行说「二维码已过期，点击刷新。」，并多出一个显著的「刷新二维码」按钮
+  （`QR_REFRESH_ACTION_TESTID`）——它与二维码容器、与自动发起走同一个 `startQr`；
+- R20 的 `qrNotice` / `QR_REFRESH_NOTICE`（「二维码已刷新，请重新扫码。」）**整条删除**：
+  不再自动换新，就没有"刚换过一张"这一刻。
+- 钉在：`test/qr-login.test.mjs`（过期 = 终点档 + 手动重启）、`test/qr-port.test.mjs`
+  （过期不建单、手动 start 之后换码带当前那张的 `qrCode`）、`test/login-gate.test.mjs`
+  （倒计时/归零/只手动刷新）、`test/login-gate-markup.test.mjs`（真 SSR 标记）、
+  `test/qr-render.test.mjs`（像素全链）。
 
 同轮登记两处 **sidecar 语义**（`auth:qr-start` 的手动刷新 = 活动会话期间重启，渲染层点二维码容器）：
 
@@ -350,8 +370,10 @@ bundle 里没有任何硬编码的二维码端点字符串——这也是"必须
 - 迟到的旧会话事件按**身份**丢弃（`session !== mine`，含"确认之后换码"那条异步尾巴）：
   旧码那次在飞的轮询落地时不许把界面上那张新码顶掉；协议层另有一道 `running` 复检
   （见 `src/protocols/qr-login.mjs` 的第五条规矩）；
-- 换码链读的是**当前**那张的 `qrCode`（`session.current()`）而非建单时的快照：过期自动换新之后
-  旧 `qrCode` 已作废，拿它去 `codeRemoteLogin` 只会白跑一趟（R20 修）。
+- 换码链读的是**当前**那张的 `qrCode`（`session.current()`）而非建单时的快照：过期换新之后
+  旧 `qrCode` 已作废，拿它去 `codeRemoteLogin` 只会白跑一趟（R20 修；R21 起"换新"= 用户手动
+  `start()`，这条结论不变——过期之后端口不再自动换新，所以它手上那张一直是作废的，
+  而 `confirmed` 不会再从一条已停的会话里冒出来）。
 
 ## 2. 音乐业务接口
 
@@ -849,8 +871,11 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `LOGIN_GATE_TITLE` | `"华为账号登录"` | `src/renderer/features/auth/login-gate-logic.mjs` | R18：引导页标题的唯一真源（居中放在二维码正上方；header 里那份已移除，全页只出现一次） |
 | `WEB_LOGIN_ENTRY_TEXT` / `WEB_LOGIN_ENTRY_TESTID` | `"在网页中打开登录"` / `"login-open-web"` | `src/renderer/features/auth/login-gate-logic.mjs` | R18：**常驻**次要入口的文案与测试锚点（走 R7 的 `auth:login` 开窗路径；与二维码互斥，见 §1.8） |
 | `WEB_LOGIN_BACK_TEXT` / `WEB_LOGIN_BACK_TESTID` | `"返回扫码登录"` / `"login-back-to-qr"` | `src/renderer/features/auth/login-gate-logic.mjs` | R20：网页登录窗开着时入口**变形的文案与锚点**（走 `auth:cancel-login` 关窗；`webLoginEntry(state)` 是形态的唯一判据）。这一档挪进 header——子窗铺满内容区（顶部只留 48px）时那是唯一可达的地方 |
-| `QR_REFRESH_LABEL` / `QR_REFRESH_TESTID` | `"刷新二维码"` / `"login-qr-refresh"` | `src/renderer/features/auth/login-gate-logic.mjs` | R20：二维码容器（`<button>`）的**可达名字**与锚点；点击 = `startQr`（换一张新码） |
-| `QR_REFRESH_NOTICE` | `"二维码已刷新，请重新扫码。"` | `src/renderer/features/auth/login-gate-logic.mjs` | R20：过期提示的唯一真源。它由 `qrNotice` 保管并**挺过**紧随其后的新 `pending`（退场条件是 scanned/confirmed/failed 或用户自己按刷新） |
+| `QR_REFRESH_LABEL` / `QR_REFRESH_TESTID` | `"刷新二维码"` / `"login-qr-refresh"` | `src/renderer/features/auth/login-gate-logic.mjs` | R20：二维码容器（`<button>`）的**可达名字**与锚点；点击 = `startQr`（换一张新码）。R21：这个名字同时是过期态那个显著按钮的**文案**（同一个动作、同一句话，不再各写一份） |
+| `QR_EXPIRED_NOTICE` / `QR_EXPIRED_BOX_TEXT` | `"二维码已过期，点击刷新。"` / `"二维码已过期"` | `src/renderer/features/auth/login-gate-logic.mjs` | R21：过期态的两句话——状态行（该做什么）与二维码原位占位（这块地方现在是什么）。**替代** R20 的 `QR_REFRESH_NOTICE`（「二维码已刷新，请重新扫码。」随自动换新一起删除） |
+| `QR_EXPIRING_TEXT` | `"正在确认过期…"` | `src/renderer/features/auth/login-gate-logic.mjs` | R21：本地倒计时**数到 0** 时那一行。本地钟不是权威（服务端 `expired` 广播才是），所以这一档说的是"在等确认"，不是"已过期" |
+| `QR_COUNTDOWN_TICK_MS` / `QR_COUNTDOWN_TESTID` | `1000` / `"login-qr-countdown"` | `src/renderer/features/auth/login-gate-logic.mjs` | R21：倒计时的步长（秒级）与那一行的测试锚点；文案由 `qrCountdownText(state)` 从"到期时刻 − 渲染层的钟"算出 |
+| `QR_REFRESH_ACTION_TESTID` | `"login-qr-refresh-action"` | `src/renderer/features/auth/login-gate-logic.mjs` | R21：过期态那个显著「刷新二维码」按钮的锚点（`expired` 是终止档，手动刷新是唯一的换码路径） |
 | `QR_CANVAS_OPTIONS` / `QR_SIZE_PX` | `{width: 208, margin: 1, errorCorrectionLevel: "L"}` / `208` | `src/renderer/features/auth/qr-canvas.mjs` | R18：二维码画布的唯一画法（内容一换即重画；`npm run verify:live` 按 208×208 与墨迹占比复核） |
 | `QR_DEFAULT_INTERVAL_MS` / `QR_DEFAULT_MAX_POLL_FAILURES` | `2000` / `3` | `src/protocols/qr-login.mjs` | R16：轮询间隔兜底（真值由服务端下发）与连续失败几次收口 |
 | `MAX_URL_LOG_CHARS` | `160` | `src-tauri/src/login.rs` | R16：登录窗导航/加载日志里 URL 的截断上限（查询值一律不进日志） |
@@ -970,3 +995,21 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
   `npm run verify:live` 增补三条可量断言（header 无可见文字 / 刷新容器有可达名字且可点 /
   正常路径恰好两个可操作元素），外加一个**显式开关** `--check-back-path` 走一遍"打开→返回"。
   **仍未联调**：真机 verify:live（含 `--check-back-path`）由控制器/用户在场所跑。
+- 2026-10-20（Task R21）：**用户指令推翻 R16/R20 的"过期自动换新"**，改成"倒计时 + 过期态
+  不可扫 + **只能手动刷新**"三条：
+  1. **过期倒计时**：`expiresInMs`（建单应答与 `auth:qr` 广播都带）在渲染层换算成本地到期
+     时刻，二维码下方按秒显示（`剩 x 秒过期`）。**过期判定仍以服务端 `expired` 广播为权威**：
+     本地数到 0 只说「正在确认过期…」，不撤码、不改档（实测服务端在本地归零前就给 `103000201`，
+     所以这一档是罕见兜底）；钟在渲染层（纯函数 reducer 只吃注入的 `tick`），本地到 0 后
+     reducer 返回同一状态对象 → React 不再重渲染（表停在 0）；
+  2. **过期后不能扫**：协议层 `expired` 变成**终点**（`stop()` + 只广播，**不再 `create()` 新单**），
+     渲染层撤下 canvas、原位写「二维码已过期」、状态行说「二维码已过期，点击刷新。」；
+  3. **只能手动刷新**：过期**不**重新武装自动发起，换新由用户点击二维码容器（R20 已有）或
+     过期态那个显著的「刷新二维码」按钮触发——两者与自动发起走同一个 `startQr`
+     （= `auth:qr-start`，端口本来就是 restart 语义）。
+  R20 的 `qrNotice` / `QR_REFRESH_NOTICE`（「已刷新，请重新扫码」）**整条删除**：不再自动换新，
+  就没有"刚换过一张"这一刻。§1.8 增补 R21 段、§3 换四行常量（含删掉 `QR_REFRESH_NOTICE`、
+  改写 `QR_REFRESH_LABEL` 那一行）。验收脚本**未改**：`verify:live` 的"正常路径恰好两个可操作
+  元素"说的是 `pending` 那一档（新增的按钮只在 `expired` 出现），它的"已知状态行"是从逻辑模块
+  现算的（`Object.values(QR_GATE_STATUS)` 喂 `loginGateStatusLine`），自动跟着新文案走。
+  **仍未联调**：真机点一次过期态的刷新按钮（`npm run verify:live`）由控制器/用户在场所跑。

@@ -461,7 +461,26 @@ test("互斥：确认之后的换码不会被迟到的二维码事件顶掉（at
 
 // ---------------------------------------------------------------------------
 // R20：手动刷新（会话期间重启）与「返回扫码登录」（网页那条路的回退）
+// R21（用户指令）：过期不再自动换新——sidecar 也不在过期之后自己再发一次 qr-start
 // ---------------------------------------------------------------------------
+
+test("R21 过期：sidecar 只把 expired 播出去，绝不自己重启会话（换新只能由用户点击触发）", async () => {
+  const { auth, qrPort, broadcasts } = managerOf();
+  await auth.startQrLogin();
+  qrPort.emit({ status: "expired" });
+
+  assert.deepEqual(
+    qrEvents(broadcasts).map((payload) => payload.status),
+    ["expired"],
+    "过期如实播出去（渲染层的过期态与倒计时都读它），且**只有这一条**",
+  );
+  assert.equal(
+    qrPort.state.starts.length,
+    1,
+    "sidecar 不替用户决定「再来一张」（R21 推翻 R16/R20 的自动换新）",
+  );
+  assert.equal(qrPort.state.cancelled, 0, "过期也不取消会话：端口自己会停轮询（协议层 `expired → stop`）");
+});
 
 test("R20 手动刷新：会话期间再次 auth:qr-start → 端口被再次 start（换一对新 PKCE），走的是 restart 语义", async () => {
   const { auth, qrPort } = managerOf();

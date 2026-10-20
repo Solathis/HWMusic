@@ -11,8 +11,13 @@
  * 是"门禁页结构"这一层的可复现证据；像素与真机行为仍归 verify:live。
  *
  * R20 增补三项（用户真机验收反馈）：header 里那句品牌已删（与窗口标题栏重复）、
- * 过期之后旧码必须从屏上消失且提示可感知、二维码容器本身可点刷新（有可达名字）、
+ * 过期之后旧码必须从屏上消失、二维码容器本身可点刷新（有可达名字）、
  * 网页登录窗开着时入口变形为「返回扫码登录」并挪进那条唯一可见的 48px header。
+ *
+ * R21 增补（用户指令，**推翻自动换新**）：二维码下方多一行**过期倒计时**（秒级，
+ * 只在"码在屏上等着被扫"那一档出现）；过期态是**不可扫**的——canvas 撤下、原位写
+ * 「二维码已过期」，并多出一个显著的「刷新二维码」按钮（手动刷新是唯一的换码方式）。
+ * R20 那句「二维码已刷新，请重新扫码。」随自动换新一起删除。
  *
  * 先写先看红。
  */
@@ -28,10 +33,13 @@ import { APP_BRAND_LABEL } from "../src/shared/app-name.mjs";
 import {
   LOGIN_GATE_EVENT,
   LOGIN_GATE_TITLE,
+  QR_COUNTDOWN_TESTID,
+  QR_EXPIRED_BOX_TEXT,
+  QR_EXPIRED_NOTICE,
   QR_GATE_STATUS,
   QR_HINT_TEXT,
+  QR_REFRESH_ACTION_TESTID,
   QR_REFRESH_LABEL,
-  QR_REFRESH_NOTICE,
   QR_REFRESH_TESTID,
   WEB_LOGIN_BACK_TESTID,
   WEB_LOGIN_BACK_TEXT,
@@ -176,8 +184,24 @@ function qrHostTag(html) {
   const canvasAt = html.indexOf("<canvas");
   if (canvasAt > -1) return openTagBefore(html, canvasAt, "<button");
   const skeletonAt = html.indexOf('data-slot="skeleton"');
-  assert.ok(skeletonAt > -1, `既没有 canvas 也没有 Skeleton：${html.slice(0, 400)}`);
-  return openTagBefore(html, skeletonAt, "<button");
+  if (skeletonAt > -1) return openTagBefore(html, skeletonAt, "<button");
+  const expiredAt = html.indexOf(`data-testid="${QR_REFRESH_TESTID}"`);
+  assert.ok(expiredAt > -1, `既没有 canvas、Skeleton，也没有二维码容器：${html.slice(0, 400)}`);
+  return openTagBefore(html, html.indexOf(">", expiredAt), "<button");
+}
+
+/**
+ * 二维码容器**里**的内容（含自己的开标签）。
+ *
+ * R21 起过期态要在那个位置写「二维码已过期」——只看"页面上有没有这几个字"会被状态行里
+ * 那句更长的文案命中，所以必须把容器自己的那一块抠出来看。
+ */
+function qrHostBlock(html) {
+  const match = html.match(
+    new RegExp(`<button[^>]*data-testid="${QR_REFRESH_TESTID}"[^>]*>[\\s\\S]*?</button>`),
+  );
+  assert.ok(match !== null, `找不到二维码容器：${html.slice(0, 400)}`);
+  return match[0];
 }
 
 /** header 那条 48px 几何契约的标记（含内容）。 */
@@ -197,8 +221,17 @@ function preparingState() {
   return reduceGateState(loggedOut(), { type: LOGIN_GATE_EVENT.qrRequested });
 }
 
+/** R21：`at` = 事件发生时刻（钟由调用方注入），倒计时据此算出到期时刻。 */
+const QR_AT_MS = 1_000_000;
+
 function pendingState(content = "https://id1.cloud.huawei.com/qrcode/login.jsp?qRCode=OLD") {
-  return reduceGateState(preparingState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.pending, content });
+  return reduceGateState(preparingState(), {
+    type: LOGIN_GATE_EVENT.qr,
+    status: QR_GATE_STATUS.pending,
+    content,
+    expiresInMs: 181_000,
+    at: QR_AT_MS,
+  });
 }
 
 function expiredState() {
@@ -274,32 +307,96 @@ test("标记：二维码容器带边框（border + border-border + 圆角工具�
 });
 
 // ---------------------------------------------------------------------------
-// R20 要求 2：过期码不留屏 + 提示可感知 + 容器可点刷新
+// R20 要求 2 / R21 要求 1+2：过期码不留屏、过期态不可扫、倒计时在二维码下方
 // ---------------------------------------------------------------------------
 
-test("标记：过期之后旧码从屏上消失（回到同尺寸占位），提示行说的是「已刷新，请重新扫码」", async () => {
+test("标记：过期态不可扫——canvas 撤下、二维码区域自己写着「二维码已过期」，并给一个显著的刷新按钮", async () => {
   const { renderGate } = await gateRenderer();
   const html = renderGate(expiredState());
 
   assert.doesNotMatch(html, /<canvas/, "过期码绝不能留在屏上让人扫（那是必然扫不动的死码）");
-  assert.match(html, /animate-pulse/, "原位给同尺寸占位：界面不跳，用户知道马上会有新码");
-  assert.equal(statusTextOf(html), QR_REFRESH_NOTICE, "过期要**可感知**：状态行就是这句");
+  assert.doesNotMatch(qrHostBlock(html), /<canvas/, "二维码容器里也不许有 canvas");
+  assert.match(qrHostBlock(html), new RegExp(QR_EXPIRED_BOX_TEXT), `二维码区域要写明已过期：${qrHostBlock(html)}`);
+  assert.doesNotMatch(html, /animate-pulse/, "过期不是「加载中」：占位说的是已过期，不是马上就来");
+  assert.equal(statusTextOf(html), QR_EXPIRED_NOTICE, "状态行给的是可操作的下一句（点击刷新）");
+
+  // R21 要求 3：过期态那个显著的「刷新二维码」按钮（手动刷新是唯一的换码方式）
+  const action = buttonSummaries(html).find((button) => button.testid === QR_REFRESH_ACTION_TESTID);
+  assert.ok(action, `过期态要有显著的刷新入口：${JSON.stringify(buttonSummaries(html))}`);
+  assert.equal(action.text, QR_REFRESH_LABEL, "按钮文案与容器的可达名字同源");
+  assert.equal(action.disabled, false, "它是这个档位唯一的出路：不许是灰的");
+
+  // 过期态没有倒计时可显示（"剩 0 秒"是错的：那一刻的权威是服务端那条广播）
+  assert.doesNotMatch(html, new RegExp(`data-testid="${QR_COUNTDOWN_TESTID}"`), "过期态不该有倒计时");
 });
 
-test("标记：换新之后（新 pending 已到）提示仍在——它不许被那一跳吞掉", async () => {
+test("标记：倒计时在二维码下方（秒级文案，来自建单应答的 expiresInMs）", async () => {
   const { renderGate } = await gateRenderer();
-  const renewed = reduceGateState(expiredState(), {
+  const html = renderGate(pendingState());
+
+  const countdown = html.match(
+    new RegExp(`<p[^>]*data-testid="${QR_COUNTDOWN_TESTID}"[^>]*>([\\s\\S]*?)</p>`),
+  );
+  assert.ok(countdown, `二维码下方要有倒计时那一行：${visibleText(html).replaceAll("\u0001", "|")}`);
+  assert.equal(visibleText(countdown[1]).replaceAll("\u0001", ""), "剩 181 秒过期");
+
+  const qrAt = html.indexOf(`data-testid="${QR_REFRESH_TESTID}"`);
+  const countdownAt = html.indexOf(`data-testid="${QR_COUNTDOWN_TESTID}"`);
+  const hintAt = indexOfText(html, QR_HINT_TEXT);
+  assert.ok(qrAt > -1 && countdownAt > qrAt, "倒计时排在二维码**下方**");
+  assert.ok(countdownAt < hintAt, "倒计时紧贴二维码（提示文字在它之后）");
+});
+
+test("标记：没有倒计时可显示时那一行不出现（准备中 / 过期 / 失败）", async () => {
+  const { renderGate } = await gateRenderer();
+  const cases = [
+    ["正在准备", preparingState()],
+    ["已过期", expiredState()],
+    ["失败", failedState()],
+  ];
+  for (const [label, state] of cases) {
+    assert.doesNotMatch(
+      renderGate(state),
+      new RegExp(`data-testid="${QR_COUNTDOWN_TESTID}"`),
+      `${label}档不该有倒计时（宁可少一行，也不显示"剩 0 秒"这种假话）`,
+    );
+  }
+});
+
+test("标记：时间走到本地归零 → 那一行说「正在确认过期…」，码仍留在屏上等服务端收口", async () => {
+  const { renderGate } = await gateRenderer();
+  const atZero = reduceGateState(pendingState(), {
+    type: LOGIN_GATE_EVENT.tick,
+    nowMs: QR_AT_MS + 181_000,
+  });
+  const html = renderGate(atZero);
+
+  assert.match(html, /<canvas/, "本地归零**不是**过期：这张码还在屏上（过期判定以服务端 expired 广播为权威）");
+  const countdown = html.match(new RegExp(`data-testid="${QR_COUNTDOWN_TESTID}"[^>]*>([^<]*)<`));
+  assert.ok(countdown, `归零那一档仍要有那一行：${visibleText(html).replaceAll("\u0001", "|")}`);
+  assert.equal(countdown[1], "正在确认过期…");
+});
+
+test("标记：过期态点刷新 → 新码画出来、过期文案与那个按钮一起退场、倒计时重新开始", async () => {
+  const { renderGate } = await gateRenderer();
+  const refreshed = reduceGateState(expiredState(), { type: LOGIN_GATE_EVENT.qrRequested });
+  const waiting = reduceGateState(refreshed, {
     type: LOGIN_GATE_EVENT.qr,
     status: QR_GATE_STATUS.pending,
     content: "https://id1.cloud.huawei.com/qrcode/login.jsp?qRCode=NEW",
+    expiresInMs: 181_000,
+    at: 5_000_000,
   });
-  const html = renderGate(renewed);
+  const html = renderGate(waiting);
 
   assert.match(html, /<canvas/, "新码要画出来");
-  assert.equal(statusTextOf(html), QR_REFRESH_NOTICE, "新码在屏上、提示还在：这才是用户看得见的「请重新扫」");
+  assert.doesNotMatch(html, new RegExp(QR_EXPIRED_BOX_TEXT), "过期文案退场（它是过期专属的一档）");
+  assert.doesNotMatch(html, new RegExp(`data-testid="${QR_REFRESH_ACTION_TESTID}"`), "过期态那个按钮同时退场");
+  assert.equal(statusTextOf(html), "等待扫码…");
+  assert.match(visibleText(html), /剩 181 秒过期/, "倒计时按新码的有效期重新开始");
 });
 
-test("标记：二维码容器本身可点刷新（真 <button> + 可达名字 + 测试锚点），准备中禁用", async () => {
+test("标记：二维码容器本身可点刷新（真 <button> + 可达名字 + 测试锚点），准备中禁用、过期态仍可点", async () => {
   const { renderGate } = await gateRenderer();
   const pending = renderGate(pendingState());
   const host = qrHostTag(pending);
@@ -318,9 +415,15 @@ test("标记：二维码容器本身可点刷新（真 <button> + 可达名字 +
   );
   assert.ok(preparing, "加载态下容器仍在（尺寸不跳）");
   assert.equal(preparing.disabled, true, "已经有一次请求在飞：再点一次只是重复建单");
+
+  // R21：过期态容器照样可点（它是"再来一张"那条手动路的一部分）
+  const expired = buttonSummaries(renderGate(expiredState())).find(
+    (button) => button.testid === QR_REFRESH_TESTID,
+  );
+  assert.equal(expired?.disabled, false, "过期态：容器本身就是用户想点的那块地方");
 });
 
-test("标记：正常路径的按钮集合 = 刷新 + 常驻入口（「重试」只在失败态多出来）", async () => {
+test("标记：可操作元素集合 = 刷新容器 + 常驻入口；过期态多一个「刷新二维码」；「重试」只在失败态", async () => {
   const { renderGate } = await gateRenderer();
   const pending = buttonSummaries(renderGate(pendingState()));
   assert.deepEqual(
@@ -328,6 +431,15 @@ test("标记：正常路径的按钮集合 = 刷新 + 常驻入口（「重试�
     [QR_REFRESH_TESTID, WEB_LOGIN_ENTRY_TESTID],
     `正常路径只有这两个可操作元素：${JSON.stringify(pending)}`,
   );
+
+  // R21 要求 3：过期态多一个**显著**的刷新按钮（换码只剩手动这一条路）
+  const expired = buttonSummaries(renderGate(expiredState()));
+  assert.deepEqual(
+    expired.map((button) => button.testid || button.text),
+    [QR_REFRESH_TESTID, QR_REFRESH_ACTION_TESTID, WEB_LOGIN_ENTRY_TESTID],
+    `过期态要有那个刷新按钮：${JSON.stringify(expired)}`,
+  );
+
   const failed = buttonSummaries(renderGate(failedState()));
   assert.deepEqual(
     failed.map((button) => button.testid || button.text),
@@ -425,7 +537,7 @@ test("标记：常驻入口在每一档都在；「重试」只在失败态多�
   const cases = [
     ["正在准备", preparingState()],
     ["等待扫码", pendingState()],
-    ["已刷新", expiredState()],
+    ["已过期", expiredState()],
     ["失败", failedState()],
   ];
   for (const [label, state] of cases) {

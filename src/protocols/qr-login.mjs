@@ -21,14 +21,17 @@
  * 四条不妥协的规矩：
  * 1. **认不出的 resultCode 一律按"继续轮询"**：陌生码当成功 = 拿一个没确认的会话去换令牌；
  * 2. **状态变化才广播**：2 秒一次 tick、扫码要好几分钟，每次 tick 都广播会把通道刷成噪声；
- * 3. **过期自己重建**（选 sidecar 侧的理由）：二维码过期后渲染层什么都做不了，让它为"再来一张"
- *    再发一次 `auth:qr-start` 只会多一条出错路径；广播通道保持"当前二维码"的唯一事实来源；
+ * 3. **过期只报不换**（R21 用户指令，**推翻** R16/R20 的"过期自己重建"）：`expired` 是一条
+ *    **终点**广播——停轮询、不建新单；换新只能由用户手动触发（渲染层再发一次 `auth:qr-start`，
+ *    而"再 start"本来就是 restart 语义）。原来那条的理由是"渲染层什么都做不了"，代价却是
+ *    用户眼睁睁看着码自己换掉、不知道该做什么；现在过期态明确停住，界面上写着"点击刷新"；
  * 4. **错误不静默**：建单失败、连续轮询失败都广播 `failed`（带一句人话），界面才有东西可显示。
  *
  * R20 增补第五条（手动刷新的竞态）：**取消之后落地的响应一律不广播**（`running` 复检）。
  * 用户点一下二维码容器就是"停旧会话 + 开新会话"，而旧会话可能正好有一次轮询在飞——
  * 它落地时若照常广播，会把刚画出来的新码顶掉（还会顺手再建一张）。会话自己就知道它被
  * 取消了，所以判据放在这里，而不是指望调用方在每条路上补一遍。
+ * R21 之后仍需要它：过期不再自动换新，但"取消的旧会话打回过期态"照样会毁掉新那一张。
  *
  * 全部依赖注入（fetch/计时器/时钟），所以整条状态机在测试里跑得完，不碰网络也不碰真实时间。
  */
@@ -44,7 +47,7 @@ export const QR_LOGIN_STATUS = {
   scanned: "scanned",
   /** 已确认（载荷交给兑换链） */
   confirmed: "confirmed",
-  /** 二维码过期（随后会自动重建，所以这一档会紧跟一条 pending） */
+  /** 二维码过期（R21：**终点档**——停轮询，等用户手动再 start 换新） */
   expired: "expired",
   /** 出错（网络/端点/服务器拒绝） */
   failed: "failed",
@@ -173,7 +176,7 @@ function isHttpUrl(value) {
 }
 
 /**
- * 二维码会话（建单 + 轮询 + 过期自动重建）。
+ * 二维码会话（建单 + 轮询；过期只报不换，R21）。
  *
  * @param {{
  *   createUrl: string, pollUrl: string, intervalMs?: number, maxPollFailures?: number,
@@ -296,8 +299,8 @@ export function createQrSession(options = {}) {
   }
 
   /**
-   * 总期限（一次性）：二维码会自动续期（过期就重建），所以"一直没人扫"必须有尽头——
-   * 否则后台每 2 秒一次请求会无限跑下去，用户却看不到任何变化。
+   * 总期限（一次性）：等扫码期间轮询是 2 秒一次，没人扫就会一直跑下去——
+   * 总期限保证"一直没人扫"有个尽头（R21 起过期本身就会停轮询，但等待期仍可能无限长）。
    */
   function armDeadline() {
     if (deadlineMs === null || !Number.isFinite(deadlineMs) || deadlineMs <= 0) return;
@@ -365,11 +368,10 @@ export function createQrSession(options = {}) {
       return;
     }
     if (classified.status === QR_LOGIN_STATUS.expired) {
+      // R21（用户指令）：过期**不再自动换新**——只广播这一档并停轮询（连总期限计时器一起清）。
+      // 换新由用户点击触发：渲染层再发一次 `auth:qr-start`，而本端口的 `start()` 就是 restart。
+      stop();
       moveTo(QR_LOGIN_STATUS.expired, {});
-      // 过期自己重建：用户那边什么都做不了，让渲染层再发一次请求只会多一条出错路径。
-      const renewed = await create();
-      if (!renewed.ok) fail(renewed.error.message, renewed.error.kind);
-      else schedule();
       return;
     }
     moveTo(classified.status, { payload: classified.status === QR_LOGIN_STATUS.scanned ? classified.payload : undefined });
@@ -387,7 +389,12 @@ export function createQrSession(options = {}) {
   }
 
   return {
-    /** 发起（或重新发起）一次二维码会话：先建单，成功后才开始轮询。 */
+    /**
+     * 发起（或重新发起）一次二维码会话：先建单，成功后才开始轮询。
+     *
+     * R21 起这是**唯一**的换码路径：过期之后会话停在 `expired`（不轮询、不建单），
+     * 用户点刷新 → 渲染层再发一次 `auth:qr-start` → 走到这里（旧的先取消，再建新单）。
+     */
     async start() {
       stop();
       failures = 0;
@@ -411,7 +418,13 @@ export function createQrSession(options = {}) {
 
     isRunning: () => running,
     status: () => status,
-    /** 当前二维码的内容与有效期（只读投影；qrToken 不外传）。 */
+    /**
+     * 当前二维码的内容与有效期（只读投影；qrToken 不外传）。
+     *
+     * 过期之后这里仍是**那张已作废的码**（会话不自动换新，也就没有"新的当前"）：
+     * 它只给诊断与"换码链读当前那张"用，而那条链只在 `confirmed` 那一档才走
+     * ——过期之后不会再有任何 confirmed，所以它读不到一份过期的凭据。
+     */
     current: () =>
       current === null
         ? null

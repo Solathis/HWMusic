@@ -303,6 +303,7 @@ test("端口：CAS 跳到白名单外的域 → 明确报出来（导航白名�
 
 // ---------------------------------------------------------------------------
 // R20：活动会话期间重启（手动刷新）——迟到的旧会话事件按身份丢弃
+// R21（用户指令）：过期不再自动换新，"换一张新码"只剩手动这一条路
 // ---------------------------------------------------------------------------
 
 /** 建单响应里带一个可区分的 qrCode/qrToken（用来证明"换码带的是当前这张"）。 */
@@ -383,7 +384,7 @@ test("端口：活动会话期间再次 start（手动刷新）→ 停旧会话 
   assert.deepEqual(eventsNew.map((event) => event.status), [QR_LOGIN_STATUS.pending]);
 });
 
-test("端口：过期自动换新之后换码带的是**新**那张的 qrCode（拿旧码去换只会白跑一趟）", async () => {
+test("端口：过期不再自动换新（只播 expired、停轮询）；用户手动再 start 才换新码，换码带的是新那张的 qrCode", async () => {
   const clock = timers();
   let creates = 0;
   let polls = 0;
@@ -405,7 +406,7 @@ test("端口：过期自动换新之后换码带的是**新**那张的 qrCode（
     }
     if (target.includes("DimensionalCode/async")) {
       polls += 1;
-      // 第一张过期 → 端口自动换新 → 第二张被扫确认
+      // 第一张过期（R21：端口只报不换）→ 用户手动刷新出第二张，第二张被扫确认
       return polls === 1
         ? answer(200, { resultCode: "103000201" })
         : answer(200, { resultCode: "0", userAccount: "u", code: "c", userID: "1", siteID: "1", accountType: "1", opType: "4" });
@@ -424,6 +425,7 @@ test("端口：过期自动换新之后换码带的是**新**那张的 qrCode（
     throw new Error(`假 fetch 不认识这个地址：${target}`);
   };
 
+  const events = [];
   const confirmations = [];
   const port = createHuaweiQrPort({
     fetchImpl,
@@ -436,12 +438,29 @@ test("端口：过期自动换新之后换码带的是**新**那张的 qrCode（
   });
   await port.start({
     authorizeUrl: AUTHORIZE_URL,
-    onEvent: () => undefined,
+    onEvent: (event) => events.push(event),
     onConfirmed: (result) => confirmations.push(result),
   });
 
-  await clock.tick(); // 过期 → 自动换新（同一次 tick 内换第二张）
-  assert.equal(creates, 2);
+  await clock.tick(); // 过期
+  assert.deepEqual(
+    events.map((event) => event.status),
+    [QR_LOGIN_STATUS.pending, QR_LOGIN_STATUS.expired],
+    "过期只报这一档：端口不再自己建新单（R21 用户指令）",
+  );
+  assert.equal(creates, 1, "过期不许自己再建一张单");
+  assert.equal(clock.size(), 0, "过期之后一个挂起的计时器都不剩（轮询停了）");
+  assert.equal(confirmations.length, 0);
+
+  // 用户点了「刷新二维码」：渲染层再发一次 auth:qr-start → 端口 restart
+  await port.start({
+    authorizeUrl: AUTHORIZE_URL,
+    onEvent: (event) => events.push(event),
+    onConfirmed: (result) => confirmations.push(result),
+  });
+  assert.equal(creates, 2, "手动刷新才换第二张码");
+  assert.equal(port.status(), QR_LOGIN_STATUS.pending);
+
   await clock.tick(); // 第二张：已确认 → 换码
   for (let round = 0; round < 8; round += 1) await Promise.resolve();
 
@@ -451,6 +470,6 @@ test("端口：过期自动换新之后换码带的是**新**那张的 qrCode（
   assert.equal(
     new URLSearchParams(confirmCall.body).get("qrCode"),
     "R2",
-    "带的是**换新之后**那张的 qrCode（端口里缓存的那份是旧会话的快照）",
+    "带的是**手动刷新之后**那张的 qrCode（旧那张已经作废）",
   );
 });

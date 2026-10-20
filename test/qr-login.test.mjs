@@ -11,8 +11,10 @@
  * 1. **认不出的 resultCode 不许当成功**：一律按"继续轮询"处理并留痕（把陌生码当 confirmed
  *    就是拿一个没确认的会话去换令牌）；
  * 2. **状态变化才广播**：轮询 2 秒一次、扫码要几分钟，每次 tick 都广播会把通道刷成噪声；
- * 3. **过期自己重建**：拿回来的是一张死二维码，用户那边什么都做不了——重建是 sidecar 的职责
- *    （理由写明：渲染层不该为"再来一张"再走一次请求/响应，广播通道保持唯一事实来源）。
+ * 3. **过期只报不换**（R21 用户指令 **推翻** R16/R20 的"过期自己重建"）：过期是一条**终点**
+ *    广播——停轮询、不建新单，换新只能由用户手动触发（渲染层再发一次 `auth:qr-start`，
+ *    端口本来就是 restart 语义）。原来的理由是"渲染层什么都做不了"，但那样用户会看到码
+ *    在眼皮底下自己换掉、却不知道自己该做什么；现在过期态明确停住并请用户点刷新。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -219,7 +221,7 @@ test("会话：start 建单 → 广播 pending（带二维码内容）→ 轮询
   assert.equal(String(world.calls.at(-1).body), "qrToken=0123456789abcdef0123456789abcdef");
 });
 
-test("会话：二维码过期 → 广播 expired 并自动重新建单（新内容广播出来）", async () => {
+test("会话：二维码过期 → 只广播 expired 并停轮询，不再自动换新（R21 用户指令推翻 R16/R20）", async () => {
   const world = harness({
     createResponses: [
       { body: createPayload({ content: "https://id1.cloud.huawei.com/qrcode/login.jsp?qRCode=FIRST", qrToken: "tok-1" }) },
@@ -239,16 +241,58 @@ test("会话：二维码过期 → 广播 expired 并自动重新建单（新内
   });
 
   await session.start();
-  // 一次 tick = 一次轮询：拿到"过期"后当场重建（同一 tick 内换新二维码）
+  // 一次 tick = 一次轮询：拿到"过期"
   await world.tick();
 
   assert.deepEqual(
     world.events.map((event) => event.status),
-    [QR_LOGIN_STATUS.pending, QR_LOGIN_STATUS.expired, QR_LOGIN_STATUS.pending],
-    "过期要如实报出来，然后自己换一张新的（渲染层零动作）",
+    [QR_LOGIN_STATUS.pending, QR_LOGIN_STATUS.expired],
+    "过期是终点档：不许紧跟着再播一张新码（换新只能由用户手动触发）",
   );
-  assert.match(world.events.at(-1).content, /qRCode=SECOND/);
-  assert.equal(session.isRunning(), true, "新二维码还在等扫码");
+  assert.equal(
+    world.calls.filter((call) => call.url.includes("getqrInfo")).length,
+    1,
+    "过期不许自己再建一张单（R21 删掉的就是这一步）",
+  );
+  assert.equal(session.isRunning(), false, "过期之后停轮询：不再每 2 秒在后台打点");
+  assert.equal(await world.tick(), false, "过期之后一个挂起的计时器都不剩（轮询与总期限都停）");
+  assert.equal(session.status(), QR_LOGIN_STATUS.expired);
+});
+
+test("会话：过期之后由**用户**再 start 才换新码，倒计时/轮询随之重新开始", async () => {
+  const world = harness({
+    createResponses: [
+      { body: createPayload({ content: "https://id1.cloud.huawei.com/qrcode/login.jsp?qRCode=FIRST", qrToken: "tok-1" }) },
+      { body: createPayload({ content: "https://id1.cloud.huawei.com/qrcode/login.jsp?qRCode=SECOND", qrToken: "tok-2" }) },
+    ],
+    pollResponses: [{ body: { resultCode: "103000201" } }, { body: { resultCode: "103000200" } }],
+  });
+  const session = createQrSession({
+    createUrl: CREATE_URL,
+    pollUrl: POLL_URL,
+    intervalMs: world.intervalMs,
+    fetchImpl: world.fetchImpl,
+    now: () => 1_700_000_000_000,
+    setTimer: world.setTimer,
+    clearTimer: world.clearTimer,
+    onEvent: (event) => world.events.push(event),
+  });
+
+  await session.start();
+  await world.tick(); // 过期：停下
+  assert.equal(session.isRunning(), false);
+
+  const restarted = await session.start(); // 用户点了「刷新二维码」
+  assert.equal(restarted.ok, true);
+  assert.match(session.current().content, /qRCode=SECOND/);
+  assert.equal(session.isRunning(), true, "手动刷新之后重新开始轮询");
+
+  await world.tick(); // 新会话的第一次轮询：仍是"未扫"
+  assert.equal(
+    world.events.at(-1).status,
+    QR_LOGIN_STATUS.pending,
+    "新码仍停在 pending（状态没变所以不重复广播）——它是一张真的、可扫的码",
+  );
 });
 
 test("会话：连续网络失败按次数收口成 failed（不无限重试，也不假装还活着）", async () => {
@@ -387,6 +431,7 @@ test("会话：start 之前的状态是 idle，重复 start 不会开出第二�
 
 // ---------------------------------------------------------------------------
 // R20：活动会话期间重启（手动刷新）—— 迟到的旧会话事件一律不许广播
+// R21（用户指令）：过期不再自动换新，于是"换一张新码"这条路只剩手动一条
 // ---------------------------------------------------------------------------
 
 test("会话：取消之后才落地的轮询响应不再广播（迟到的「过期」不许顶掉新码）", async () => {
@@ -426,13 +471,13 @@ test("会话：取消之后才落地的轮询响应不再广播（迟到的「�
   assert.deepEqual(
     events.map((event) => event.status),
     [QR_LOGIN_STATUS.pending],
-    "取消之后到达的「过期」不许广播（否则它会顺手再建一张新码，把刷新出来的那张顶掉）",
+    "取消之后到达的「过期」不许广播（否则界面上刚刷出来的那张新码会被这一档打回过期态）",
   );
   assert.equal(polls, 1, "挂住的那次轮询确实发出去过（这条断言不是空转）");
   assert.equal(session.isRunning(), false);
 });
 
-test("会话：过期自动换新之后 current() 报的是新那张（换码链要带当前这张的 qrCode）", async () => {
+test("会话：过期之后手动刷新，current() 报的是新那张（换码链要带当前这张的 qrCode）", async () => {
   const world = harness({
     createResponses: [
       { body: createPayload({ content: "https://id1.cloud.huawei.com/qrcode/login.jsp?qRCode=OLD", qrCode: "R-OLD", qrToken: "tok-old" }) },
@@ -453,7 +498,10 @@ test("会话：过期自动换新之后 current() 报的是新那张（换码链
 
   await session.start();
   assert.equal(session.current().qrCode, "R-OLD");
-  await world.tick(); // 过期 → 当场重建
+  await world.tick(); // 过期：停轮询（R21 起不换新，手上仍是那张已作废的码）
+  assert.equal(session.current().qrCode, "R-OLD", "过期本身不换码：作废的那张留着只为诊断，不会再有 confirmed 去读它");
+
+  await session.start(); // 用户手动刷新
   assert.match(session.current().content, /qRCode=NEW/);
   assert.equal(session.current().qrCode, "R-NEW", "换新之后当前那张是新码：拿旧 qrCode 去换码只会换回一次失败");
 });

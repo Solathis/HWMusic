@@ -1,13 +1,15 @@
 /**
- * R16 · C 部分：二维码渲染冒烟（成熟库 `qrcode`，MIT）；R18 增补**过期自动换新的像素级全链**。
+ * R16 · C 部分：二维码渲染冒烟（成熟库 `qrcode`，MIT）；R18 增补过期换新的像素级全链。
  *
  * 为什么只到"库产出真二维码"这一层：真浏览器里的像素守卫是 `npm run test:browser`
  * （playwright + Chromium）的活；这里是**不依赖浏览器**的那一段——证明
  * 1. 依赖真的装着、许可证是 MIT（不是把别人的码抄进仓库）；
  * 2. 拿探针实探到的 `content` 形状能编出二维码（模块矩阵既不是全黑也不是全白）；
  * 3. 渲染层用的是库的渲染入口（`toCanvas`），而不是自己画模块矩阵；
- * 4. **R18**：过期换新这条链的最后一跳是真的（`expired → 新 content → 同一块画布上重画`）——
- *    用假画布接住库真写出来的像素，两帧必须**不一样**（只改状态不重画会被这条抓住）。
+ * 4. **R18/R21**：换新这条链的最后一跳是真的（`expired 撤下内容 → 用户点刷新 → 新 content
+ *    → 画布上画出不同的像素`）——用假画布接住库真写出来的像素，两帧必须**不一样**
+ *    （只改状态不重画会被这条抓住）。R21 起"换新"的触发者是**用户**（不再自动），
+ *    这一跳本身没变。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -20,7 +22,6 @@ import { AUTH_QR, AUTH_STATUS } from "../src/shared/channels.ts";
 import { QR_SIZE_PX, paintQrCanvas } from "../src/renderer/features/auth/qr-canvas.mjs";
 import {
   LOGIN_GATE_EVENT,
-  QR_GATE_STATUS,
   initialGateState,
   qrContentOf,
   reduceGateState,
@@ -141,29 +142,30 @@ test("painter：没有内容或没有画布时不画（不做无意义的绘制�
   assert.equal(canvas.frames.length, 0);
 });
 
-test("过期自动换新（全链）：广播 → 渲染层状态 → 同一块画布重画，两帧像素必须不同", async () => {
+test("手动刷新（全链）：过期撤下画布 → 用户点刷新 → 新码在新画布上画出**不同**的像素", async () => {
   const OLD = "https://id1.cloud.huawei.com/qrcode/login.jsp?qRCode=OLD-0000";
   const NEW = "https://id1.cloud.huawei.com/qrcode/login.jsp?qRCode=NEW-1111";
 
-  // sidecar 真会播出的那串（auth:status 起点 + auth:qr 的过期与换新）
+  // sidecar 真会播出的那串（auth:status 起点 + auth:qr 的过期；新码来自用户点刷新后的 qr-start 应答）
   const broadcasts = [
     { channel: AUTH_STATUS, payload: { loggedIn: false, busy: false } },
-    { channel: AUTH_QR, payload: { status: "pending", content: OLD, expiresInMs: 181_000 } },
+    { channel: AUTH_QR, payload: { status: "pending", content: OLD, expiresInMs: 181_000, at: 1_000_000 } },
     { channel: AUTH_QR, payload: { status: "expired" } },
-    { channel: AUTH_QR, payload: { status: "pending", content: NEW, expiresInMs: 180_000 } },
+    { channel: AUTH_QR, payload: { status: "pending", content: NEW, expiresInMs: 181_000, at: 1_000_000 } },
   ];
 
   const canvas = fakeCanvas();
   let state = initialGateState();
   let painted = null;
-  let statusAtExpired = null;
+  let contentAtExpired = "unset";
   for (const { channel, payload } of broadcasts) {
     state = reduceGateState(state, {
       type: channel === AUTH_STATUS ? LOGIN_GATE_EVENT.status : LOGIN_GATE_EVENT.qr,
       ...payload,
     });
-    if (payload.status === "expired") statusAtExpired = state.qr.status;
-    // 渲染层的重画条件就是"要画的内容变了"（QrCanvas 的 effect 依赖是 content）
+    if (payload.status === "expired") contentAtExpired = qrContentOf(state);
+    // 渲染层的重画条件就是"要画的内容变了"（QrCanvas 的 effect 依赖是 content）：
+    // 内容为 null = 画布被撤下（过期态），于是下一次内容变化一定落在**新画布**上重画
     const content = qrContentOf(state);
     if (content !== null && content !== painted) {
       painted = content;
@@ -171,11 +173,11 @@ test("过期自动换新（全链）：广播 → 渲染层状态 → 同一块�
     }
   }
 
-  assert.equal(statusAtExpired, QR_GATE_STATUS.expired, "过期那一档确实经过渲染层");
-  assert.equal(canvas.frames.length, 2, `换新必须在同一块画布上重画一次（实际 ${canvas.frames.length} 帧）`);
+  assert.equal(contentAtExpired, null, "过期那一档：屏上不该再有可画的内容（死码必须撤下）");
+  assert.equal(canvas.frames.length, 2, `手动刷新后必须在画布上画出新码（实际 ${canvas.frames.length} 帧）`);
   const diff = pixelDiffRatio(canvas.frames[0], canvas.frames[1]);
   assert.ok(diff > 0.05, `新码与旧码的画面必须真的不同（实际差异 ${(diff * 100).toFixed(2)}%）`);
-  assert.ok(inkCoverage(canvas.frames[1]) > 0.15, "换新后的那一帧仍是一张真的二维码");
+  assert.ok(inkCoverage(canvas.frames[1]) > 0.15, "刷新后的那一帧仍是一张真的二维码");
 });
 
 test("painter 是唯一出口：门禁的重画条件钉在「内容」上（内容不变不重画）", () => {
