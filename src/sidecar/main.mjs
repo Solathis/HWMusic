@@ -98,12 +98,17 @@ dispatcher.register(SETTINGS_SET, async (request) => {
   return answer;
 });
 
-// —— 库页面数据通道（R8）——
+// —— 库页面数据通道（R8；R32 换血：默认端点表 + 会话注入）——
 //
-// 端点从设置文档读（`data.musicEndpoints`，见 src/main/music-service.mjs）：现在没有任何
-// 写入方 → 表是空的 → 每个请求都由协议层如实回 `endpoint_unknown`，UI 显示"接口尚未配置"。
-// 这是设计落点而不是坏掉：宁可说"没配"，也不给出一个看起来是空的收藏夹。
-const musicService = createMusicService({ settingsData: settings.data });
+// 端点：默认值 = 参考实现的实测端点（`src/main/music-service.mjs` 的 `MUSIC_ENDPOINT_DEFAULTS`），
+// 设置文档 `data.musicEndpoints` 可逐键覆盖或显式关闭（`null`）。
+// 会话：**取值函数**而不是快照——这段装配发生在 `authManager` 之前，而会话要等登录/恢复之后才有。
+// 没有会话时协议层如实回 `session_required`（"先登录"），绝不拿匿名请求冒充"你的库是空的"。
+let musicSessionSource = null;
+const musicService = createMusicService({
+  settingsData: settings.data,
+  session: () => (musicSessionSource === null ? null : musicSessionSource()),
+});
 for (const [channel, handler] of Object.entries(createLibraryHandlers({ api: musicService.api }))) {
   dispatcher.register(channel, handler);
 }
@@ -162,10 +167,14 @@ const authManager = createAuthManager({
     rpc.broadcast(APP_NOTICE, { text });
   },
   log,
-  // 如实登记的缺口：会话验证要打收藏接口，而业务端点全部待确认（docs/API_CONTRACT.md §2.1），
-  // 所以这里**不注入**验证器——restore 会报 `verify_unavailable`（会话仍在、但没验过），
-  // 而不是谎报"未登录"或"已登录"。端点确认后在这里注入一个走 music.mjs 的验证器即可。
+  // 如实登记的缺口：会话验证要打收藏接口。R32 起端点有了，但**仍不注入验证器**——
+  // 现在能把"会话失效"和"网络抖动/端点被关掉"分开的证据还不够（业务码与失效的对应关系
+  // 没有实测），而判错的代价是把用户踢回登录页。所以维持保守口径：restore 报
+  // `verify_unavailable`（会话仍在、但没验过），界面照常进主界面，业务请求自己会报真实原因。
 });
+
+// 音乐业务的会话来源（`currentSession()` 是内存里的活会话；登录/登出/恢复都会更新它）。
+musicSessionSource = () => authManager.currentSession().session;
 
 // auth:login 是**长轮询**：扫码可能要好几分钟，而渲染层那条调用链（Rust core_call）有 60 秒上限。
 // 所以这里立刻回"已受理"，真正的结论经 auth:status 广播送达（dispatcher 支持处理器自行答复后

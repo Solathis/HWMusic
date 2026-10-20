@@ -734,10 +734,12 @@ test("playback:lyrics 处理器：{trackId} → 协议层 getLyrics（文本只�
 
   const calls = [];
   const api = createMusicApi({
+    // R32：注入过独立歌词端点就直接打它（默认那条路是"从播放响应推导"）
     endpoints: { lyrics: "https://example.invalid/api/lyric" },
-    fetchImpl: async (url) => {
-      calls.push(url);
-      return new Response(JSON.stringify({ code: "0", data: { lyric: "[00:01.00]一行" } }), {
+    session: { token: "MUSIC-TOKEN", snsUserID: "SNS-1" },
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url, body: init.body === undefined ? null : JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: { resultCode: "000000" }, lyric: "[00:01.00]一行" }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -746,7 +748,8 @@ test("playback:lyrics 处理器：{trackId} → 协议层 getLyrics（文本只�
   const answer = await createPlaybackHandlers({ api })[PLAYBACK_LYRICS]({ payload: { trackId: " 1001 " } });
   assert.equal(answer.ok, true, `正常路径应当成功：${JSON.stringify(answer)}`);
   assert.equal(answer.data.text, "[00:01.00]一行");
-  assert.match(calls[0], /[?&]id=1001(&|$)/, "trackId 去空白后作为请求参数");
+  // 独立歌词端点是 GET（形状未实测，按"读一条文本"的最小形状发起），参数在查询串里
+  assert.equal(new URL(calls[0].url).searchParams.get("contentID"), "1001", "trackId 去空白后作为请求参数");
 
   // 坏载荷在边界被拒（不透给协议层拼一个必然失败的请求）
   let called = 0;
@@ -766,12 +769,13 @@ test("playback:lyrics 处理器：{trackId} → 协议层 getLyrics（文本只�
   assert.equal(called, 0);
 
   // 端点未配置：结构化 endpoint_unknown（不冒充已实现、不猜 URL）
+  // R32：默认那条路是"从播放响应推导"，所以第一个缺的端点是 playback
   const unconfigured = await createPlaybackHandlers({ api: createMusicApi({ endpoints: {} }) })[PLAYBACK_LYRICS]({
     payload: { trackId: "1" },
   });
   assert.equal(unconfigured.ok, false);
   assert.equal(unconfigured.error.kind, "endpoint_unknown");
-  assert.match(unconfigured.error.message, /lyrics/, "要说清是哪个端点没配");
+  assert.match(unconfigured.error.message, /playback/, "要说清是哪个端点没配（歌词走的就是播放端点）");
 
   // 歌词文本不进日志、不落盘（与播放地址同一条纪律）
   const source = stripComments(read("src/host/playback-handlers.mjs"));

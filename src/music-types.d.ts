@@ -1,32 +1,38 @@
 /**
- * 华为业务接口的数据形状（R4 协议原型层的类型说明，供 R7/R8 的 TS 侧消费）。
+ * 华为业务接口的数据形状（协议层的类型说明，供 TS 侧消费）。
  *
- * 这些形状**不是**从官方文档抄来的：字段名以旧仓审计事实与探针观测为准，
- * 未确认处已标注 `待 R7 联调确认`（见 docs/API_CONTRACT.md）。
+ * R32 换血：字段名不再"待联调"——线上形状来自公开参考实现的实测记录
+ * （`docs/API_CONTRACT.md` §2 有逐端点的对照表），协议层负责把它翻成下面这些**内部形状**
+ * （`contentID → id`、`contentName → name`、`picture.* → coverUrl`…）。
  * 运行时实现是 src/protocols/music.mjs（.mjs，Node 侧直接跑；这里只做类型声明，不含逻辑）。
  */
 import type { CoreResult } from "./shared/result.ts";
 
-/** 歌曲条目（只列本项目用得到的字段；原始对象整体保留，不做重建）。 */
+/** 歌曲条目（协议层归一化后的产物；id 一定有，其余缺失即未知）。 */
 export interface Song {
-  id?: string | number;
-  /** 兼容字段：不同接口用不同名字指同一件事，`trackIdOf` 按序兜底 */
+  id: string;
+  /** 兼容字段：`trackIdOf` 仍按序兜底旧形状（手工注入的响应） */
   songId?: string | number;
   musicId?: string | number;
   resourceId?: string | number;
   name?: string;
   singer?: string;
-  album?: string;
+  albumId?: string;
+  albumName?: string;
+  coverUrl?: string;
+  /** 秒（真接口的字段单位未变） */
   duration?: number;
   [key: string]: unknown;
 }
 
-/** 歌单条目。 */
+/** 歌单条目（`kind` 来自 contentType：4=收藏、5=自建、7=榜单）。 */
 export interface Playlist {
-  id?: string | number;
-  name?: string;
+  id: string;
+  name: string;
+  kind?: "collected" | "owned" | "chart" | "unknown";
+  count?: number;
   coverUrl?: string;
-  songCount?: number;
+  description?: string;
   [key: string]: unknown;
 }
 
@@ -39,6 +45,11 @@ export interface PlaybackPayload {
   size?: number;
   bitrate?: number;
   duration?: number;
+  /** 接口回的音质码（"1"=standard、"3"=lossless） */
+  playQuality?: string;
+  /** 声明的内容类型（mp3/flac…）：**与 playQuality 对得上才算"已确认音质"** */
+  type?: string;
+  songInfo?: { duration?: number | string; [key: string]: unknown };
   /** 试听时长（秒）；**不能单独**作为试听判定依据，见 `classifyAudition` */
   auditionTime?: number;
   isAudition?: boolean;
@@ -53,6 +64,8 @@ export interface PlaybackInfo {
   size: number | null;
   bitrate: number | null;
   duration: number | null;
+  /** 声明的音质与实际返回对得上才算确认；否则 "unknown"（不虚标） */
+  actualQuality: "standard" | "lossless" | "unknown";
   /** 仅当 auditionTime 与标志位两个信号齐备时为 true */
   auditionLikely: boolean;
   signals: string[];
@@ -84,18 +97,20 @@ export interface FavoritesStep {
   stopReason: FavoritesSnapshot["stopReason"];
 }
 
-/** 端点表：键名是实现里的 `MUSIC_ENDPOINT_KEYS`，值必须是 https URL。 */
+/** 端点表：键名是实现里的 `MUSIC_ENDPOINT_KEYS`，值必须是 https URL（`null` = 显式关闭）。 */
 export type MusicEndpoints = Partial<Record<
   | "favorites"
   | "playlistList"
   | "playlistDetail"
+  | "playlistDetailPublic"
   | "playlistDelete"
   | "search"
   | "album"
   | "artist"
   | "history"
-  | "playback",
-  string
+  | "playback"
+  | "lyrics",
+  string | null
 >>;
 
 /** 单页收藏读取（R8 的滚动加载走这条）：**没有 total**——总数只能来自完整分页后的 ID 去重。 */
@@ -111,16 +126,8 @@ export interface FavoritesPage {
   hasMore: boolean;
 }
 
-/** 请求参数名表（真实参数名待 R7 联调确认）。 */
-export interface QueryNames {
-  page: string;
-  pageSize: string;
-  keyword: string;
-  id: string;
-}
-
-/** 会话头注入：真实凭据方案由 R7 在探针确认后提供，协议层默认不带任何凭据。 */
-export type SessionHeadersFactory = (context: { key: string }) => Record<string, string>;
+/** 会话注入：协议层不知道凭据长什么样，头由主进程按 R17 实测的 Digest 形状造。 */
+export type SessionHeadersFactory = (context: { key: string; authenticated: boolean }) => Record<string, string>;
 
 /** 收藏加载器。 */
 export interface FavoritesLoader {
@@ -132,17 +139,18 @@ export interface FavoritesLoader {
 /** 音乐接口客户端（`createMusicApi` 的返回形状）。 */
 export interface MusicApi {
   endpointOf(key: string): CoreResult<string>;
-  requestJson(key: string, request?: { method?: string; params?: Record<string, unknown>; body?: unknown }): Promise<CoreResult<unknown>>;
-  listFavoritesPage(request?: { page?: number; pageSize?: number; params?: Record<string, unknown> }): Promise<CoreResult<unknown>>;
-  readFavoritesPage(request?: { page?: number; pageSize?: number; params?: Record<string, unknown> }): Promise<CoreResult<FavoritesPage>>;
+  call(key: string, request?: { params?: Record<string, unknown>; retry?: boolean }): Promise<CoreResult<unknown>>;
+  listFavoritesPage(request?: { page?: number; pageSize?: number; contentTypes?: string[] }): Promise<CoreResult<unknown>>;
+  readFavoritesPage(request?: { page?: number; pageSize?: number }): Promise<CoreResult<FavoritesPage>>;
   createFavoritesLoader(options?: { pageSize?: number; maxPages?: number }): FavoritesLoader;
   loadAllFavorites(options?: { pageSize?: number; maxPages?: number }): Promise<CoreResult<FavoritesSnapshot>>;
-  listPlaylists(request?: { page?: number; pageSize?: number; params?: Record<string, unknown> }): Promise<CoreResult<{ playlists: Playlist[]; hasMore: boolean }>>;
-  getPlaylistDetail(playlistId: string, request?: { page?: number; pageSize?: number; params?: Record<string, unknown> }): Promise<CoreResult<{ songs: Song[]; hasMore: boolean }>>;
-  deletePlaylist(playlistId: string, request?: { method?: string; params?: Record<string, unknown>; body?: unknown }): Promise<CoreResult<{ deleted: true; playlistId: string; detail: unknown }>>;
-  search(keyword: string, request?: { page?: number; pageSize?: number; params?: Record<string, unknown> }): Promise<CoreResult<{ songs: Song[]; hasMore: boolean }>>;
-  getAlbum(albumId: string, request?: { params?: Record<string, unknown> }): Promise<CoreResult<{ songs: Song[]; detail: unknown }>>;
-  getArtist(artistId: string, request?: { params?: Record<string, unknown> }): Promise<CoreResult<{ songs: Song[]; detail: unknown }>>;
-  getHistory(request?: { page?: number; pageSize?: number; params?: Record<string, unknown> }): Promise<CoreResult<{ songs: Song[]; hasMore: boolean }>>;
-  getPlayback(request?: { trackId?: string; id?: string; params?: Record<string, unknown> }): Promise<CoreResult<PlaybackInfo>>;
+  listPlaylists(request?: { page?: number; pageSize?: number }): Promise<CoreResult<{ playlists: Playlist[]; hasMore: boolean; scanned: number }>>;
+  getPlaylistDetail(playlistId: string, request?: { page?: number; pageSize?: number; kind?: "auto" | "owned" | "collected" }): Promise<CoreResult<{ playlistId: string; playlist: Playlist | null; songs: Song[]; hasMore: boolean }>>;
+  deletePlaylist(playlistId: string): Promise<CoreResult<{ deleted: true; playlistId: string }>>;
+  search(keyword: string, request?: { page?: number; pageSize?: number }): Promise<CoreResult<{ songs: Song[]; skipped: number; reportedTotal: number | null; hasMore: boolean }>>;
+  getAlbum(albumId: string, request?: { page?: number; pageSize?: number }): Promise<CoreResult<{ albumId: string; songs: Song[]; detail: unknown; hasMore: boolean }>>;
+  getArtist(artistId: string, request?: { songNum?: number; albumNum?: number }): Promise<CoreResult<{ artistId: string; songs: Song[]; detail: unknown }>>;
+  getHistory(request?: { page?: number; pageSize?: number }): Promise<CoreResult<{ songs: Song[]; skipped: number; reportedTotal: number | null; hasMore: boolean }>>;
+  getPlayback(request?: { trackId?: string; id?: string; quality?: "standard" | "lossless" }): Promise<CoreResult<PlaybackInfo>>;
+  getLyrics(request?: { trackId?: string; id?: string; quality?: "standard" | "lossless" }): Promise<CoreResult<{ text: string; format: string; warnings: string[] }>>;
 }

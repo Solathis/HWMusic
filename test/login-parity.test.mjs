@@ -164,12 +164,16 @@ test("回调识别：hms:// 协议字面量只在 login-callback.mjs，redirect_
 });
 
 test("登录域名白名单：条目硬钉（改动必须同步改测试，避免悄悄放宽）", () => {
+  // R32：条目 = 参考实现实测走通的那五个域（授权域与令牌域是两个不同主机；
+  // 授权入口换成 oauth-login.platform.hicloud.com 之后整条跳转链的域跟着换）
   assert.deepEqual(LOGIN_ALLOWED_ORIGINS, [
-    "https://oauth-login1.cloud.huawei.com",
-    // R16 增补：实探证明授权页把浏览器跳到 id1.cloud.huawei.com 的 CAS 门户页；
+    "https://oauth-login.platform.hicloud.com",
+    "https://oauth-login.cloud.huawei.com",
+    // R16 增补、R32 保留：实探证明授权页把浏览器跳到 id1.cloud.huawei.com 的 CAS 门户页；
     // 少了它，那条导航被拦下、窗里停在授权页的空壳上（真机"登录窗空白"的根因）
     "https://id1.cloud.huawei.com",
-    "https://login.cloud.huawei.com",
+    "https://account.huawei.com",
+    "https://consumer.huawei.com",
   ]);
   assert.deepEqual(LOGIN_ALLOWED_URLS, ["https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback"]);
 

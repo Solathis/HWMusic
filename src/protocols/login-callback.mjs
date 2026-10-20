@@ -76,26 +76,40 @@ export const LOGIN_TERMINAL_CALLBACK_ERROR_KINDS = Object.freeze([
 
 /**
  * 登录子窗导航白名单（显式条目，逐条有出处；不放 `*.huawei.com` 通配）。
- * 证据见 docs/API_CONTRACT.md 的"登录域"一节；probe 观测到新跳转域时**追加条目并同步测试**。
+ *
+ * R32 换血：条目 = 参考实现（公开仓库 `talongao/huawei-music-desktop` 的 `src/auth.mjs`）
+ * `LOGIN_HOSTS` 那五个域。**为什么必须换**：授权端点换成
+ * `oauth-login.platform.hicloud.com` 之后，整条跳转链的域也跟着换（授权域 → 账号 CAS 门户 →
+ * 老的 `consumer/account` 页），而 R16 那条"补 id1"的教训恰恰说明：**漏一个域 = 窗里一片空白**，
+ * 且只在真机上才看得出来。所以这里按参考那份**实测走通**的清单来，而不是按我们旧的观测补丁。
+ *
+ * 三条不再出现在这一层的东西（保留它们在历史里的地位）：
+ * - `oauth-login1.cloud.huawei.com` 原本作为**整域**放行；现在只有它的
+ *   `loginCallback` 精确例外（见 `LOGIN_ALLOWED_URLS`）——那是"扫码后 hms:// 才会触发"
+ *   的关键落点，与参考的 regional callback 例外同义（旧仓"卡在 CAS 页"的根因）；
+ * - `login.cloud.huawei.com`（旧 CAS 域）：参考清单里没有它；oauth-login1 那条链才需要。
+ *
+ * 证据与更新纪律见 docs/API_CONTRACT.md 的"登录域"一节；probe 观测到新跳转域时
+ * **追加条目并同步测试**（`test/login-parity.test.mjs` + `src-tauri/tests/login_policy.rs`）。
  */
 export const LOGIN_ALLOWED_ORIGINS = [
-  "https://oauth-login1.cloud.huawei.com", // OAuth 授权/令牌服务域（例外 URL 所在的域）
+  "https://oauth-login.platform.hicloud.com", // 授权入口域（authorize 端点所在主机）
+  "https://oauth-login.cloud.huawei.com", // 令牌兑换域（token 端点所在主机）
   /**
-   * R16 增补（**真机故障的直接原因**）：`getLoginWay` 的实探响应把浏览器送到这里——
+   * R16 增补、R32 保留：`getLoginWay` 的实探响应把浏览器送到这里——
    * `loginInteractInfo.cas.casLoginRedirectUrl = https://id1.cloud.huawei.com:443/CAS/remoteLogin?…`
-   * （见 scripts/probe-qr.mjs 的 ③/④ 步与 .probe/qr-probe.json）。
-   *
-   * 少了这一条会怎样：授权页（oauth-login1）自身是个空壳 SPA，它拿到 `loginType = TICKET` 后就
-   * `location.href = <casLoginRedirectUrl>`；这条导航被拦下 → 窗里永远停在那个什么也没渲染的
-   * 授权页上。用户看到的正是"登录窗一片空白"，而日志里只会有一句"首载 30 秒没等到 Finished"。
+   * 授权页（自身是空壳 SPA）拿到 `loginType = TICKET` 后就 `location.href = <casLoginRedirectUrl>`；
+   * 这条导航被拦下 → 窗里永远停在什么也没渲染的授权页上（真机"登录窗一片空白"的根因）。
    */
   "https://id1.cloud.huawei.com", // 华为帐号 CAS 门户域（授权页的落地页）
-  "https://login.cloud.huawei.com", // 华为帐号登录（CAS 系，旧域名，仍在跳转链里出现）
+  "https://account.huawei.com", // 账号域（参考清单条目）
+  "https://consumer.huawei.com", // 消费者域（参考清单条目）
 ];
 
 /**
  * 精确例外：扫码成功后回调落到这里，漏掉它就会卡在 CAS 页（旧仓历史故障根因）。
  * 显式整条列出（而不是"该域全放行"），并用 `?code=...` 也不受影响（比对时忽略 query）。
+ * 与参考实现的 `regionalCallback` 判据同义（主机 + 路径都点名）。
  */
 export const LOGIN_ALLOWED_URLS = ["https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback"];
 

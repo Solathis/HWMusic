@@ -151,7 +151,8 @@ test("login 成功链：createAttempt → 开窗 → 回调 → 换 AT → 换�
 
   // 开窗参数：官方授权页 + 一次性的 partition + 顶部内缩（Rust 侧再校验一遍）
   assert.equal(host.opened.length, 1);
-  assert.match(host.opened[0].url, /^https:\/\/oauth-login1\.cloud\.huawei\.com\/oauth2\/v3\/authorize\?/);
+  // R32：授权入口换成参考实现实测的 `oauth-login.platform.hicloud.com`（不是 oauth-login1）
+  assert.match(host.opened[0].url, /^https:\/\/oauth-login\.platform\.hicloud\.com\/oauth2\/v3\/authorize\?/);
   assert.match(host.opened[0].url, /code_challenge_method=S256/);
   assert.equal(typeof host.opened[0].partition, "undefined");
   assert.deepEqual(
@@ -477,7 +478,7 @@ test("端点真源：默认端点就是 docs/API_CONTRACT.md 登记的值（含 
 
   const { auth } = managerOf();
   const attempt = createAttempt({ authorizeEndpoint: HUAWEI_OAUTH_ENDPOINTS.authorize });
-  assert.match(attempt.authorizeUrl, /^https:\/\/oauth-login1\.cloud\.huawei\.com\/oauth2\/v3\/authorize/);
+  assert.match(attempt.authorizeUrl, /^https:\/\/oauth-login\.platform\.hicloud\.com\/oauth2\/v3\/authorize/);
   assert.equal(LOGIN_TIMEOUT_MS, 600_000);
   assert.equal(
     auth.endpoints().loginex,

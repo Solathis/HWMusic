@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { createDispatcher } from "../src/host/dispatcher.mjs";
 import { createLibraryHandlers } from "../src/host/library-handlers.mjs";
 import { createMusicService, readMusicEndpoints } from "../src/main/music-service.mjs";
+import { MUSIC_ENDPOINT_KEYS } from "../src/protocols/music.mjs";
 import { createRpc } from "../src/host/rpc.mjs";
 import { createHostServices } from "../src/host/host-services.mjs";
 import {
@@ -256,7 +257,7 @@ test("dispatcher：library:* 七条频道都注册得上并路由到 music 模�
   assert.equal(favorites.ok, true);
   assert.deepEqual(stub.calls.at(-1), {
     name: "readFavoritesPage",
-    args: [{ page: 2, pageSize: 30, params: undefined }],
+    args: [{ page: 2, pageSize: 30 }],
   });
 
   const playlists = await dispatchLibrary(dispatcher, LIBRARY_PLAYLISTS, { page: 1 });
@@ -265,7 +266,7 @@ test("dispatcher：library:* 七条频道都注册得上并路由到 music 模�
 
   const detail = await dispatchLibrary(dispatcher, LIBRARY_PLAYLIST_DETAIL, { playlistId: "P-1", page: 3, pageSize: 10 });
   assert.equal(detail.ok, true);
-  assert.deepEqual(stub.calls.at(-1).args.slice(0, 2), ["P-1", { page: 3, pageSize: 10, params: undefined }]);
+  assert.deepEqual(stub.calls.at(-1).args.slice(0, 2), ["P-1", { page: 3, pageSize: 10 }]);
 
   const search = await dispatchLibrary(dispatcher, LIBRARY_SEARCH, { keyword: "  周杰伦 " });
   assert.equal(search.ok, true);
@@ -313,12 +314,19 @@ test("dispatcher：library 的坏载荷在边界就被拒（invalid_payload）�
   // 收藏/歌单列表/历史没有必填参数：坏页号由协议层自己归一（不在这里猜）
   const page = await dispatchLibrary(dispatcher, LIBRARY_FAVORITES, { page: "NaN" });
   assert.equal(page.ok, true);
-  assert.deepEqual(stub.calls.at(-1).args, [{ page: undefined, pageSize: undefined, params: undefined }]);
+  assert.deepEqual(stub.calls.at(-1).args, [{ page: undefined, pageSize: undefined }]);
 });
 
-test("dispatcher：端点未配置时 library:* 回结构化 endpoint_unknown（不是空列表、不是假成功）", async () => {
-  const service = createMusicService({ settingsData: {}, fetchImpl: async () => assert.fail("不该发出请求") });
-  assert.deepEqual(service.endpoints, {}, "没有任何写入方时端点表必须是空的");
+test("dispatcher：端点被显式关闭时 library:* 回结构化 endpoint_unknown（不是空列表、不是假成功）", async () => {
+  // R32 起默认端点表是**满的**（参考实测值）。要一个"确定性不可用"的状态，就在设置里显式关闭
+  // （`musicEndpoints: {key: null}`）——这比"假装默认表是空的"更接近真实存在的那一档。
+  const closed = Object.fromEntries(MUSIC_ENDPOINT_KEYS.map((key) => [key, null]));
+  const service = createMusicService({
+    settingsData: { musicEndpoints: closed },
+    fetchImpl: async () => assert.fail("端点被关闭时不该发出请求"),
+  });
+  assert.deepEqual(service.endpoints, {}, "全部显式关闭之后端点表必须是空的");
+  assert.deepEqual(service.disabled.length, MUSIC_ENDPOINT_KEYS.length);
 
   const dispatcher = createDispatcher();
   for (const [channel, handler] of Object.entries(createLibraryHandlers({ api: service.api }))) {
@@ -342,28 +350,44 @@ test("dispatcher：端点未配置时 library:* 回结构化 endpoint_unknown（
   assert.equal(search.error.kind, "endpoint_unknown");
 });
 
-test("音乐端点注入表：只从设置文档收已知键（非 https/空值/陌生键一律丢弃，不猜）", () => {
-  assert.deepEqual(readMusicEndpoints(undefined), {});
-  assert.deepEqual(readMusicEndpoints({ musicEndpoints: null }), {});
-  assert.deepEqual(readMusicEndpoints({ musicEndpoints: "https://example.invalid/api" }), {});
+test("音乐端点：默认值 = 参考实测端点；设置只收已知键，可逐键覆盖或显式关闭", () => {
+  assert.deepEqual(readMusicEndpoints(undefined), { overrides: {}, disabled: [] });
+  assert.deepEqual(readMusicEndpoints({ musicEndpoints: null }), { overrides: {}, disabled: [] });
+  assert.deepEqual(readMusicEndpoints({ musicEndpoints: "https://example.invalid/api" }), {
+    overrides: {},
+    disabled: [],
+  });
   assert.deepEqual(
     readMusicEndpoints({
       musicEndpoints: {
         favorites: "https://example.invalid/api/favorites",
         album: "  ",
         artist: 42,
+        playback: null,
         somethingElse: "https://example.invalid/api/other",
       },
     }),
-    { favorites: "https://example.invalid/api/favorites" },
-    "只收 MUSIC_ENDPOINT_KEYS 里的键与非空字符串值",
+    { overrides: { favorites: "https://example.invalid/api/favorites" }, disabled: ["playback"] },
+    "只收 MUSIC_ENDPOINT_KEYS 里的键：非空字符串 = 覆盖，null = 显式关闭",
   );
 
-  const service = createMusicService({
-    settingsData: { musicEndpoints: { favorites: "https://example.invalid/api/favorites" } },
-    fetchImpl: async () => new Response(JSON.stringify({ code: "0", data: { list: [] } }), { status: 200 }),
+  // 默认表：每个有路径的键都在，且都指向参考实测的业务域
+  const defaults = createMusicService({ settingsData: {}, fetchImpl: async () => assert.fail("不该发请求") }).endpoints;
+  for (const key of MUSIC_ENDPOINT_KEYS) {
+    if (key === "lyrics") {
+      assert.equal(defaults[key], undefined, "歌词没有独立端点（从播放响应推导）");
+      continue;
+    }
+    assert.match(defaults[key], /^https:\/\/api-drcn\.music\.dbankcloud\.cn\//, `${key} 的默认端点`);
+  }
+
+  const overridden = createMusicService({
+    settingsData: { musicEndpoints: { favorites: "https://example.invalid/api/favorites", playback: null } },
+    fetchImpl: async () => new Response(JSON.stringify({ result: { resultCode: "000000" } }), { status: 200 }),
   });
-  assert.deepEqual(service.endpoints, { favorites: "https://example.invalid/api/favorites" });
+  assert.equal(overridden.endpoints.favorites, "https://example.invalid/api/favorites");
+  assert.equal("playback" in overridden.endpoints, false, "显式关闭的键不在生效表里");
+  assert.ok(overridden.endpoints.search.startsWith("https://api-drcn.music.dbankcloud.cn/"), "其余键仍是默认值");
 });
 
 test("host-services：notify 走 host:notify 且文本透传", async () => {

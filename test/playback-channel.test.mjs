@@ -38,9 +38,11 @@ function scriptedApi(payload, { endpoints = { playback: "https://example.invalid
   const calls = [];
   const api = createMusicApi({
     endpoints,
+    // R32：播放地址是**带凭据**的调用（真接口要求音乐会话），所以这里注入一个假会话
+    session: { token: "MUSIC-TOKEN", snsUserID: "SNS-1" },
     fetchImpl: async (url, init = {}) => {
-      calls.push({ url, init });
-      return jsonResponse({ code: "0", data: payload });
+      calls.push({ url, init, body: init.body === undefined ? null : JSON.parse(init.body) });
+      return jsonResponse({ result: { resultCode: "000000" }, ...payload });
     },
   });
   return { api, calls };
@@ -70,7 +72,8 @@ test("正常路径：{trackId} → 协议层 getPlayback，当次应答里带着
   assert.equal(answer.data.url, SAFE_URL, "地址只作当次播放结果交给渲染层");
   assert.equal(answer.data.duration, 215);
   assert.equal(calls.length, 1, "只打一次播放端点");
-  assert.match(calls[0].url, /[?&]id=101(&|$)/, "trackId 去空白后作为请求参数");
+  // R32：参数进 JSON 体（真接口的 POST 形状），不再是查询串
+  assert.deepEqual(calls[0].body, { contentCode: "101", contentType: "1", qualityType: "1" }, "trackId 去空白后作为 contentCode");
 });
 
 test("坏载荷在边界被拒：缺/空白/非字符串 trackId → invalid_payload，且不打协议层", async () => {

@@ -1,22 +1,114 @@
 /**
  * 华为音乐业务接口（协议原型层）。
  *
- * 端点全部**注入**（`endpoints`）：具体 URL 已随旧仓删除，本模块不写任何猜测 URL，
- * 未注入的端点一律结构化 `endpoint_unknown`（而不是打到一个瞎猜的地址上）。
- * 请求参数名同样集中在可覆写的 `queryNames` 表里——真实参数名待 R7 联调确认后只改一处。
- * 探测与结论见 docs/API_CONTRACT.md。
+ * ## R32 换血：从"端点未知"到"端点形状 = 公开参考实现的实测值"
+ *
+ * 本模块此前是**纯注入 + 全部待确认**：端点表空着、参数名是占位、响应信封按 `{code:"0"}` 猜。
+ * R4 的探针只证明了"那些域名不存在"，于是每个业务请求都老老实实回 `endpoint_unknown`——
+ * 诚实，但一条业务链都不通。
+ *
+ * R32 拿到了一份**可用的协议事实**：公开仓库 `talongao/huawei-music-desktop` 的
+ * `src/music.mjs` + `docs/API_CONTRACT.md`（2026-10-14 本人账号的实验记录，含收藏/歌单/搜索/
+ * 专辑/歌手/历史/播放地址/歌词的**请求形状与响应形状**）。本模块按它逐字段对齐：
+ *
+ * | 维度 | 换血前（R4） | 换血后（R32 = 参考实测） |
+ * |---|---|---|
+ * | 参数位置 | 一律拼进查询串 | `POST` → JSON 体；`GET` → 查询串 |
+ * | 分页 | `page`/`size` | `start`/`limit`（`page` 在**通道边界**换算成 `start`） |
+ * | 业务成功 | `code === "0"` | HTTP 成功 **且** `result.resultCode === "000000"` |
+ * | 收藏容器 | `list`/`items`/…（猜的） | `favoriteInfos[]` |
+ * | 歌曲字段 | `id`/`name`（猜的） | `contentID`/`contentName`/… → **归一化**成 `id`/`name` |
+ * | 密码头 | 无 | `Authorization: Digest …`（由调用方经 `sessionHeaders` 注入） |
+ *
+ * **端点仍然注入**（注入式架构没变）：本模块不写任何域名，只登记**路径形状**
+ * （`MUSIC_ENDPOINT_PATHS`）。绝对 URL 的默认值住在 `src/main/music-service.mjs`
+ * （照抄参考的业务域 + 这些路径），可被设置文档 `data.musicEndpoints` 逐键覆盖或显式关闭。
+ *
+ * ## 归一化：为什么协议层要重写字段名
+ *
+ * 真接口的字段是 `contentID`/`contentName`/`singer`…，而渲染层的读取兜底表
+ * （`features/library/track-fields.mjs`）只认 `id`/`name`/…。两者对不上时界面不是报错，
+ * 而是显示"未知歌曲 / 未命名歌单"——**看起来像数据坏了**。所以线上形状在这里统一翻成
+ * 内部形状（`normalizeTrack` / `normalizePlaylist`），渲染层一行都不用改。
  *
  * 三个必须守住的业务语义（旧仓踩过的坑）：
  * 1. 收藏列表没有可信的总数字段 → 总数 = **完整分页后 ID 去重**，与"已加载 N 首"分开；
  *    接口若上报了 total，只作 `reportedTotal` 记录，绝不当真值。
- * 2. playback 响应里**顶层 `fileURL` 才是音频地址**；`fileInfos` 可能是 JSON 字符串（也可能是对象）。
+ * 2. playback 响应里**顶层 `fileURL` 才是音频地址**；`fileInfos` 可能是 JSON 字符串
+ *    （参考的样本里它甚至根本不是音频，而是辅助描述）。
  * 3. `auditionTime > 0` **不能单独**判定 30 秒试听，必须再有第二个信号（标志位）才算。
  * 另：自建歌单删除必须走 `playlistDelete` 端点，不允许拿收藏端点冒充成功。
  *
- * 安全约定：错误的 message 只带 HTTP 状态/错误码/域名，不回显整段响应体。
+ * 安全约定：错误的 message 只带 HTTP 状态/错误码/域名，不回显整段响应体；
+ * 会话凭据（音乐 token / 账号 AT）在本模块里只经 `session`/`sessionHeaders` 流过，不进日志。
  */
 import { err, ok } from "../shared/result.ts";
 import { isSafeMediaUrl, safeMediaUrl } from "./safe-media-url.mjs";
+
+/** 业务成功码（参考契约：`result.resultCode === "000000"`）。 */
+export const MUSIC_BUSINESS_OK = "000000";
+
+/** 业务域下的**路径**（唯一真源；绝对 URL 由调用方按业务域拼出来注入）。 */
+export const MUSIC_ENDPOINT_PATHS = Object.freeze({
+  /** 收藏（含"我的歌单"发现）：同一端点，靠 `contentTypes` 区分要什么 */
+  favorites: "/music-userbehavior-service/v3/service/favorite/simple/all",
+  /** 歌单发现：与收藏同一个端点、不同的 `contentTypes`（见 `MUSIC_LIBRARY_CONTENT_TYPES`） */
+  playlistList: "/music-userbehavior-service/v3/service/favorite/simple/all",
+  /** 自建歌单曲目：要真实 `playListID`，**不是**歌单列表接口 */
+  playlistDetail: "/music-userbehavior-service/v1/service/playlist/detail/all",
+  /** 公开/收藏歌单详情（type=4）：与自建歌单是两个端点 */
+  playlistDetailPublic: "/music-operation-service/v2/service/musiclist/detail/bymusiclistid",
+  /** 自建歌单删除（**只此一条**，收藏端点删歌单会拿到"成功"码却没删掉） */
+  playlistDelete: "/music-userbehavior-service/v1/service/playlist/delete",
+  search: "/music-search-service/v10/service/fuzzysearch",
+  album: "/music-metacontent-service/v1/service/album/detail/byalbumcode",
+  artist: "/music-metacontent-service/v2/service/artist/detail/byartistcode",
+  history: "/music-userbehavior-service/v1/service/recentlyplayed/query",
+  playback: "/music-play-service/v3/service/file/bycontentcode",
+  /**
+   * 歌词：参考实现里**没有独立歌词端点**——歌词从播放响应里取
+   * （`lyricAddress` / `contentExInfo.lyrics`，见 `getLyrics`）。
+   * 这个键留着只是因为设置文档里可能已经写过一个独立歌词端点：写了就用它，
+   * 没写就走"从播放响应推导"这条默认路。
+   */
+  lyrics: null,
+});
+
+/** 每个端点的 HTTP 方法（参考实测；写死在这里而不是让调用方猜）。 */
+export const MUSIC_ENDPOINT_METHODS = Object.freeze({
+  favorites: "POST",
+  playlistList: "POST",
+  playlistDetail: "GET",
+  playlistDetailPublic: "POST",
+  playlistDelete: "POST",
+  search: "POST",
+  album: "GET",
+  artist: "POST",
+  history: "GET",
+  playback: "POST",
+  lyrics: "GET",
+});
+
+/** 需要音乐会话（`session.token`）的端点。 */
+export const MUSIC_AUTHENTICATED_ENDPOINTS = Object.freeze([
+  "favorites",
+  "playlistList",
+  "playlistDetail",
+  "playlistDelete",
+  "history",
+  "playback",
+]);
+
+/** 收藏里"歌曲"的内容类型（参考：官方 H5 的 1 = 歌曲）。 */
+export const MUSIC_SONG_CONTENT_TYPES = Object.freeze(["1"]);
+/**
+ * "我的歌单"发现用的内容类型（参考实测：`[1,4,5,7]` 一次调用同时返回歌曲与歌单，调用方按
+ * `contentType` 分流；官方 H5 的语义是 1=歌曲、4=收藏歌单、5=自建歌单、7=榜单）。
+ */
+export const MUSIC_LIBRARY_CONTENT_TYPES = Object.freeze(["1", "4", "5", "7"]);
+
+/** 音质 → `qualityType`（参考实测：standard="1"、lossless="3"；其余不认，不猜）。 */
+export const MUSIC_QUALITY_TYPES = Object.freeze({ standard: "1", lossless: "3" });
 
 /** 业务端点键名（唯一真源；每个键都要由调用方注入，缺一个就少一个可用接口）。 */
 export const MUSIC_ENDPOINT_KEYS = [
@@ -24,13 +116,15 @@ export const MUSIC_ENDPOINT_KEYS = [
   "playlistList",
   /** 歌单曲目（R8 增补）：与歌单列表是两件事——列表只有元信息，曲目要单独取 */
   "playlistDetail",
+  /** 公开/收藏歌单详情（R32 增补，参考实测的第二条歌单详情路由） */
+  "playlistDetailPublic",
   "playlistDelete",
   "search",
   "album",
   "artist",
   "history",
   "playback",
-  /** 歌词文本（R12 增补）：`{trackId}` → 原始歌词文本（渲染层用官方 parseLrc 解析） */
+  /** 歌词（R12 增补；R32 起默认从播放响应推导，见 `MUSIC_ENDPOINT_PATHS.lyrics`） */
   "lyrics",
 ];
 
@@ -39,33 +133,50 @@ export const MUSIC_ERROR_KINDS = {
   endpointUnknown: "endpoint_unknown",
   /** 调用方参数不齐（如空 id） */
   missingParam: "missing_param",
+  /** 这个操作要音乐会话，而现在没有（未登录 / 会话缺 SNS 标识） */
+  sessionRequired: "session_required",
+  /** 音质取值不认识（不猜，也不降级成另一个音质） */
+  qualityUnsupported: "quality_unsupported",
   httpError: "http_error",
   networkError: "network_error",
   invalidResponse: "invalid_response",
-  /** HTTP 2xx 但业务错误码非 0 */
+  /** HTTP 2xx 但业务错误码不是 000000 */
   apiError: "api_error",
   /** 播放地址不在 CDN 白名单内（渲染层反正也加载不了，早点如实报错） */
   unsafeMediaUrl: "unsafe_media_url",
 };
 
-/**
- * 请求参数名表（**待 R7 联调确认**，见 docs/API_CONTRACT.md）。集中一处便于一次改完。
- */
-export const DEFAULT_QUERY_NAMES = {
-  page: "page",
-  pageSize: "size",
-  keyword: "keyword",
-  id: "id",
-};
-
 /** 能佐证"这是试听片段"的标志位候选（与 auditionTime 齐备才算试听）。 */
 export const DEFAULT_AUDITION_FLAG_KEYS = ["isAudition", "audition", "tryListen", "trialFlag", "isTry"];
 
-/** 列表可能挂在这些字段下（真实形状待联调确认，取不到就返回空数组而不是抛）。 */
-export const LIST_CONTAINER_KEYS = ["list", "items", "songs", "records", "tracks"];
+/**
+ * 列表可能挂在这些字段下（真实容器名在前，旧候选留在后面兼容手工注入的响应）。
+ *
+ * 真实名来自参考的响应记录：`favoriteInfos`（收藏/歌单发现）、`songSimpleInfos`（搜索/专辑/
+ * 公开歌单）、`contentSimpleInfos`（播放历史）。
+ */
+export const LIST_CONTAINER_KEYS = [
+  "favoriteInfos",
+  "songSimpleInfos",
+  "contentSimpleInfos",
+  "playListSongInfoList",
+  "list",
+  "items",
+  "songs",
+  "records",
+  "tracks",
+];
 
 export const DEFAULT_PAGE_SIZE = 50;
 export const DEFAULT_MAX_PAGES = 200;
+/** 歌单发现（`playlistList`）的单次抓取量：参考用 200（`limit=1000` 会被 400 拒）。 */
+export const DEFAULT_DISCOVERY_LIMIT = 200;
+/** 歌单发现的翻页上限（参考的保守上界：`DISCOVERY_PAGE_CAP = 10`）。 */
+export const DEFAULT_DISCOVERY_PAGE_CAP = 10;
+/** 歌词文本资源的体积上限（参考实现同样取 512 KiB）。 */
+export const LYRICS_MAX_BYTES = 512 * 1024;
+/** 只读请求超时（参考：25 秒）。 */
+export const MUSIC_TIMEOUT_MS = 25_000;
 
 function messageOf(cause) {
   if (cause instanceof Error && cause.message.trim() !== "") return cause.message;
@@ -77,8 +188,22 @@ function isNonEmptyString(value) {
   return typeof value === "string" && value.trim() !== "";
 }
 
-function isSuccessCode(code) {
-  return code === 0 || code === "0";
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** 文本读取（去空白；数字也接受——真接口里数量和时长**多为字符串**）。 */
+function textOf(value) {
+  if (typeof value === "string" && value.trim() !== "") return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+/** 数值读取：转不动就是未知（**不默认成 0**，那会显示成"确实是 0"）。 */
+function numberOrNull(value) {
+  if (value === null || value === undefined || value === "" || typeof value === "boolean") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 /** 正整数兜底（负数/NaN/0 一律回落到默认值）。 */
@@ -88,15 +213,31 @@ function positiveInt(value, fallback) {
 }
 
 /**
- * 业务信封解码：`{code:"0", data}` 视为成功；非 0 错误码 → api_error。
- * 无 code 字段时把整个响应当数据（不同接口/网关形态不一，宽容读取）。
+ * 业务信封解码。
+ *
+ * 判据按参考契约：**HTTP 成功且 `result.resultCode === "000000"`** 才算成功
+ * （`resultCode` 是字符串，且非 000000 时业务失败）。响应体里没有 `result` 时
+ * 兼容两种老形态：`{code, data}` 信封（取 `data`）与直给对象。
+ *
+ * 返回的是**整个响应体**（不是某个 `data` 字段）：真接口把 `favoriteInfos`/`result` 等
+ * 平铺在顶层，调用方按各自的容器名取（见 `extractList` 与各操作的 `pick`）。
  */
 export function decodeEnvelope(raw) {
   if (raw === null || typeof raw !== "object") return err("接口响应不是 JSON 对象", MUSIC_ERROR_KINDS.invalidResponse);
   if (Array.isArray(raw)) return ok(raw);
 
+  const result = raw.result;
+  if (isObject(result)) {
+    const code = result.resultCode;
+    if (code !== undefined && code !== null && String(code) !== MUSIC_BUSINESS_OK) {
+      // 只带业务码：resultMessage 可能回显请求内容
+      return err(`接口返回错误码 ${String(code).slice(0, 32)}`, MUSIC_ERROR_KINDS.apiError);
+    }
+    return ok(raw);
+  }
+
   const code = raw.code ?? raw.resultCode;
-  if (code !== undefined && code !== null && code !== "" && !isSuccessCode(code)) {
+  if (code !== undefined && code !== null && code !== "" && !(code === 0 || code === "0")) {
     const detail = raw.msg ?? raw.message ?? raw.desc ?? raw.error_description;
     const text = isNonEmptyString(detail) ? `：${String(detail).slice(0, 200)}` : "";
     return err(`接口返回错误码 ${String(code).slice(0, 32)}${text}`, MUSIC_ERROR_KINDS.apiError);
@@ -115,7 +256,17 @@ export function extractList(payload) {
   return [];
 }
 
-/** 歌曲 ID：多字段兜底；取不到返回 null（调用方如实丢弃并计数，不编造 ID）。 */
+/** 嵌套取值：`pick(raw, "playListInfoEx.playListSongInfoList")`（缺一层就是 null）。 */
+export function pickPath(payload, path) {
+  let current = payload;
+  for (const key of String(path).split(".")) {
+    if (!isObject(current)) return null;
+    current = current[key];
+  }
+  return current === undefined ? null : current;
+}
+
+/** 歌曲 ID：内部形状优先（`normalizeTrack` 的产物），再兜旧候选；取不到返回 null。 */
 export function trackIdOf(item) {
   if (item === null || typeof item !== "object") return null;
   for (const key of ["id", "songId", "musicId", "resourceId", "trackId"]) {
@@ -126,31 +277,110 @@ export function trackIdOf(item) {
   return null;
 }
 
+/** 艺人显示名（参考：优先 `artistNamePairs[]`，其次 `artistName`/`singerName`；不按逗号切）。 */
+function artistsTextOf(item) {
+  const pairs = Array.isArray(item.artistNamePairs) ? item.artistNamePairs : [];
+  const names = [];
+  for (const pair of pairs) {
+    const name = textOf(isObject(pair) ? pair.artistName ?? pair.name : pair);
+    if (name !== null) names.push(name);
+  }
+  if (names.length > 0) return names.join("、");
+  return textOf(item.artistName) ?? textOf(item.singerName);
+}
+
+/** 封面地址：只在 CDN 白名单内才认（白名单外的图渲染层也加载不了）。 */
+function coverUrlOf(item, isSafeUrl) {
+  const picture = isObject(item.picture) ? item.picture : {};
+  const candidates = [picture.bigImgURL, picture.middleImgURL, picture.smallImgURL, item.coverUrl, item.cover];
+  for (const candidate of candidates) {
+    const value = textOf(candidate);
+    if (value !== null && isSafeUrl(value)) return value;
+  }
+  return null;
+}
+
+/**
+ * 线上条目 → 内部曲目形状。
+ *
+ * 字段映射逐条来自参考的 `trackFrom`（`docs/API_CONTRACT.md` §5"曲目归一化"）：
+ * `contentID → id`、`contentName → title/name`、`artistNamePairs|artistName → singer`、
+ * `albumID/albumName → albumId/albumName`、`picture.* → coverUrl`、`duration → duration`。
+ *
+ * **没有 id 的条目一律返回 null**（调用方如实丢弃并计数，绝不编一个 id——
+ * 列表里出现删不掉的幽灵行比少一行糟得多）。
+ */
+export function normalizeTrack(item, options = {}) {
+  const isSafeUrl = options.isSafeUrl ?? isSafeMediaUrl;
+  if (!isObject(item)) return null;
+  const id = textOf(item.contentID ?? item.contentId ?? item.songCode) ?? trackIdOf(item);
+  if (id === null) return null;
+  const name = textOf(item.contentName ?? item.songName) ?? textOf(item.name);
+  const albumPair = isObject(item.albumNamePair) ? item.albumNamePair : null;
+  const albumId = textOf(item.albumID ?? item.albumId ?? albumPair?.id ?? albumPair?.albumID);
+  const albumName = textOf(item.albumName ?? albumPair?.name ?? albumPair?.albumName);
+  const coverUrl = coverUrlOf(item, isSafeUrl);
+  const track = { id };
+  if (name !== null) track.name = name;
+  const singer = artistsTextOf(item);
+  if (singer !== null) track.singer = singer;
+  if (albumId !== null) track.albumId = albumId;
+  if (albumName !== null) track.albumName = albumName;
+  if (coverUrl !== null) track.coverUrl = coverUrl;
+  const duration = numberOrNull(item.duration);
+  if (duration !== null) track.duration = duration;
+  return track;
+}
+
+/** 歌单内容类型 → 语义（参考：官方 H5 的 4/5/7）。 */
+export const PLAYLIST_KINDS = Object.freeze({ "4": "collected", "5": "owned", "7": "chart" });
+
+/** 线上条目 → 内部歌单形状（渲染层读 `id`/`name`/`count`）。 */
+export function normalizePlaylist(item, options = {}) {
+  const isSafeUrl = options.isSafeUrl ?? isSafeMediaUrl;
+  if (!isObject(item)) return null;
+  const id = textOf(item.contentID ?? item.contentId ?? item.musicListID);
+  const name = textOf(item.contentName ?? item.name);
+  if (id === null || name === null) return null;
+  const contentType = item.contentType === undefined || item.contentType === null ? null : String(item.contentType);
+  const count = numberOrNull(item.totalCount ?? item.songCount ?? item.count);
+  const coverUrl = coverUrlOf(item, isSafeUrl);
+  const playlist = { id, name, kind: PLAYLIST_KINDS[contentType] ?? "unknown" };
+  if (contentType !== null) playlist.contentType = contentType;
+  if (count !== null) playlist.count = count;
+  if (coverUrl !== null) playlist.coverUrl = coverUrl;
+  const description = textOf(item.listDesc ?? item.description);
+  if (description !== null) playlist.description = description;
+  return playlist;
+}
+
 /**
  * 单页列表归一（R8 抽出：渐进加载器与"一次一页"的库页面频道共用同一套结论）。
  *
- * 三件事只在这里做一次：取列表（多容器名兼容）、**丢掉无 ID 的条目并计数**（不编 ID）、
+ * 三件事只在这里做一次：取列表（多容器名兼容）、**归一化并丢掉无 ID 的条目**（不编 ID）、
  * 读接口上报的 total（**只作记录**——收藏没有可信总数，真值是完整分页后的 ID 去重）。
  */
-export function normalizeListPage(payload) {
-  const container = payload !== null && typeof payload === "object" ? payload : {};
+export function normalizeListPage(payload, options = {}) {
+  const container = isObject(payload) ? payload : {};
   const list = extractList(container);
   const songs = [];
   let skipped = 0;
   for (const item of list) {
-    if (trackIdOf(item) === null) {
+    const track = normalizeTrack(item, options);
+    if (track === null) {
       skipped += 1;
       continue;
     }
-    songs.push(item);
+    songs.push(track);
   }
-  const reported = container.total ?? container.totalCount;
+  const reported = container.total ?? container.totalCount ?? container.totalNum;
   return {
     container,
     songs,
     skipped,
     received: list.length,
-    reportedTotal: typeof reported === "number" && Number.isFinite(reported) ? reported : null,
+    // 真接口的数量字段**多为字符串**，所以按数值宽容读；读不出来就是 null（只作记录，从不当真值）
+    reportedTotal: numberOrNull(reported),
   };
 }
 
@@ -168,7 +398,8 @@ export function parseFileInfos(value) {
 
 /**
  * 试听判定：`auditionTime > 0` 记一个信号，标志位记另一个信号，**两个齐备**才算试听。
- * 只看 auditionTime 会把"整曲但带试听字段"误判成 30 秒片段（旧仓踩过）。
+ * 只看 auditionTime 会把"整曲但带试听字段"误判成 30 秒片段（参考的会员样本实测就是
+ * `auditionTime=30000` 却完整可播）。
  */
 export function classifyAudition(payload, options = {}) {
   const flagKeys = options.flagKeys ?? DEFAULT_AUDITION_FLAG_KEYS;
@@ -182,7 +413,7 @@ export function classifyAudition(payload, options = {}) {
   return { auditionLikely: signals.includes("auditionTime") && signals.includes("flag"), signals };
 }
 
-/** 查询串清洗：丢空值/NaN/对象，字符串去首尾空白。 */
+/** 查询串清洗：丢空值/NaN/对象，字符串去首尾空白（GET 用）。 */
 function cleanParams(params) {
   const cleaned = {};
   for (const [key, value] of Object.entries(params ?? {})) {
@@ -201,23 +432,25 @@ function cleanParams(params) {
   return cleaned;
 }
 
-/** 是否还有下一页：优先信显式标志，其次"整页返回即可能还有"，绝不拿 total 当真。 */
-function hasMoreFrom(payload, received, pageSize) {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return false;
-  const flag = payload.hasMore ?? payload.has_more ?? payload.more;
-  if (flag === false || flag === "false") return false;
-  if (flag === true || flag === "true") return true;
-  const end = payload.isEnd ?? payload.is_end ?? payload.last;
-  if (end === true || end === "true") return false;
-  return received >= pageSize;
-}
-
 function hostOf(value) {
   try {
     return new URL(value).hostname;
   } catch {
     return null;
   }
+}
+
+/**
+ * 已确认的音质（**声明的**音质要与实际返回对得上才算数，见参考 `confirmedPlaybackQuality`）。
+ * `playQuality` 是接口回的音质码，`type` 是响应里声明的编码（mp3/flac 之类）。
+ */
+export function confirmedPlaybackQuality(playQuality, declaredType) {
+  const quality = String(playQuality ?? "");
+  const normalized = typeof declaredType === "string" ? declaredType.trim().toLowerCase() : "";
+  const codec = /\bflac\b/.test(normalized) ? "flac" : /\bmp3\b/.test(normalized) || normalized === "audio/mpeg" ? "mp3" : undefined;
+  if (quality === "3" && codec === "flac") return "lossless";
+  if (quality === "1" && codec === "mp3") return "standard";
+  return "unknown";
 }
 
 /**
@@ -247,13 +480,15 @@ export function parsePlaybackPayload(raw, options = {}) {
   }
 
   const audition = classifyAudition(raw, { flagKeys: options.flagKeys });
+  const songInfo = isObject(raw.songInfo) ? raw.songInfo : null;
   return ok({
     url: fileUrl,
     fileInfos,
     format: raw.format ?? null,
     size: raw.size ?? null,
     bitrate: raw.bitrate ?? null,
-    duration: raw.duration ?? null,
+    duration: raw.duration ?? songInfo?.duration ?? null,
+    actualQuality: confirmedPlaybackQuality(raw.playQuality ?? raw.qualityType, raw.type),
     auditionLikely: audition.auditionLikely,
     signals: audition.signals,
     warnings,
@@ -261,15 +496,11 @@ export function parsePlaybackPayload(raw, options = {}) {
 }
 
 /**
- * 歌词响应解码（纯函数，R12）。
+ * 歌词响应解码（R12；用于"设置里注入了一个独立歌词端点"的那条路）。
  *
- * 端点的**响应形状尚未联调确认**（业务端点全部待确认，见 docs/API_CONTRACT.md §2.1），
- * 所以这里按"多个候选键宽容读取"的老办法（与 `trackIdOf` / `extractList` 同款）：
+ * 独立歌词端点的**响应形状没有实测证据**，所以这里仍按"多个候选键宽容读取"的老办法：
  * 拿到非空字符串就算歌词文本，一个都没有就如实回 `invalid_response`（**不猜**、不把
  * 整段响应体当歌词塞给渲染层——那只会让歌词窗显示一坨 JSON）。
- *
- * 读出来的 `warnings` 会随应答回到渲染层：形状不合预期时，"到底是用哪个键读到的"
- * 是唯一能排查的线索（不比播放地址那条——歌词文本不是敏感信息，不需要隐藏）。
  */
 export function parseLyricsPayload(raw) {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
@@ -277,7 +508,6 @@ export function parseLyricsPayload(raw) {
   }
 
   const warnings = [];
-  // 候选键：联调确认后就收敛到那一个（读到的键名会进 warnings，便于确认）
   const candidates = ["lyric", "lyrics", "lrc", "lyricText", "content", "text"];
   let text = null;
   let key = null;
@@ -290,7 +520,6 @@ export function parseLyricsPayload(raw) {
     }
   }
   if (text === null && raw.data !== undefined && raw.data !== raw) {
-    // 有的网关把业务数据再包一层：只在**顶层没找到**时才往里看一层（不递归猜）
     const nested = parseLyricsPayload(raw.data);
     if (nested.ok && isNonEmptyString(nested.data.text)) return nested;
     warnings.push("nested_shape_unrecognized");
@@ -307,13 +536,90 @@ export function parseLyricsPayload(raw) {
   return ok({ text, format, warnings });
 }
 
+/** `contentExInfo` 经常是 **JSON 字符串**（参考契约 §1）：能解就解，解不动当没有。 */
+function contentExInfoOf(raw) {
+  const extra = raw?.contentExInfo;
+  if (isObject(extra)) return extra;
+  if (typeof extra === "string") {
+    try {
+      const parsed = JSON.parse(extra);
+      return isObject(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * 歌词资源地址（参考 `lyricAddressFrom` 的字段清单，含历史拼写 `lyricAddres`）。
+ * 只认 CDN 白名单内的地址——歌词资源同样走那条白名单。
+ */
+export function lyricAddressOf(raw, options = {}) {
+  const isSafeUrl = options.isSafeUrl ?? isSafeMediaUrl;
+  if (!isObject(raw)) return null;
+  const extra = contentExInfoOf(raw) ?? {};
+  const values = [
+    raw.lyricAddress,
+    raw.lyricAddres,
+    extra.lyricAddress,
+    extra.lyricAddres,
+    extra.lyrics?.lyricAddress,
+    extra.lyrics?.lineByLineLyric,
+    raw.lyrics?.lineByLineLyric,
+  ];
+  for (const value of values) {
+    if (typeof value === "string" && isSafeUrl(value)) return value;
+  }
+  return null;
+}
+
+/**
+ * 内嵌歌词文本（参考 `inlineLyricsFrom`）：有的播放响应不给地址，直接把歌词塞在
+ * `contentExInfo.lyrics` 里，而且**可能再套一层 JSON 字符串**（最多剥两层）。
+ */
+export function inlineLyricsOf(raw) {
+  if (!isObject(raw)) return null;
+  const extra = contentExInfoOf(raw) ?? {};
+  const values = [extra.lyrics, extra.Lyrics, raw.lyrics, raw.Lyrics];
+  for (const value of values) {
+    const text = unwrapLyricValue(value);
+    if (text !== null) return text;
+  }
+  return null;
+}
+
+function unwrapLyricValue(value, depth = 0) {
+  if (typeof value !== "string" || depth > 2) return null;
+  const text = value.trim();
+  if (text === "" || text.length > LYRICS_MAX_BYTES) return null;
+  if (!text.startsWith("{")) return text;
+  try {
+    const parsed = JSON.parse(text);
+    return unwrapLyricValue(parsed?.lyric ?? parsed?.lyrics ?? parsed?.content ?? parsed?.lrc, depth + 1);
+  } catch {
+    return null;
+  }
+}
+
+/** 是否还有下一页（各端点的判据不一样，逐条写在这里而不是到处猜）。 */
+function favoritesHasMore(received, limit) {
+  return received >= limit;
+}
+
 /**
  * 业务接口客户端。
  *
  * @param {{endpoints?: Record<string, string>, fetchImpl?: Function,
- *          sessionHeaders?: (context: {key: string}) => Record<string, string>,
- *          pageSize?: number, maxPages?: number, queryNames?: Record<string, string>,
- *          flagKeys?: string[], isSafeUrl?: (url: string) => boolean}} options
+ *          session?: object|Function|null,
+ *          sessionHeaders?: (context: {key: string, authenticated: boolean}) => Record<string, string>,
+ *          pageSize?: number, maxPages?: number, flagKeys?: string[],
+ *          isSafeUrl?: (url: string) => boolean, timeoutMs?: number,
+ *          discoveryLimit?: number, discoveryPageCap?: number}} options
+ *
+ * `session` 是 `{token, snsUserID}`（音乐会话；`snsUserID` 是收藏/歌单发现必需的
+ * `targetSnsUserID` 来源）。可以传对象，也可以传函数（会话在运行时才会变——
+ * 顶层装配时它多半还是 null）。
  */
 export function createMusicApi(options = {}) {
   const endpoints = options.endpoints ?? {};
@@ -321,15 +627,45 @@ export function createMusicApi(options = {}) {
   const sessionHeaders = options.sessionHeaders ?? (() => ({}));
   const defaultPageSize = positiveInt(options.pageSize, DEFAULT_PAGE_SIZE);
   const maxPages = positiveInt(options.maxPages, DEFAULT_MAX_PAGES);
-  const queryNames = { ...DEFAULT_QUERY_NAMES, ...(options.queryNames ?? {}) };
+  const discoveryLimit = positiveInt(options.discoveryLimit, DEFAULT_DISCOVERY_LIMIT);
+  const discoveryPageCap = positiveInt(options.discoveryPageCap, DEFAULT_DISCOVERY_PAGE_CAP);
   const flagKeys = options.flagKeys ?? DEFAULT_AUDITION_FLAG_KEYS;
   const isSafeUrl = options.isSafeUrl ?? isSafeMediaUrl;
+  const timeoutMs = positiveInt(options.timeoutMs, MUSIC_TIMEOUT_MS);
+  const sessionSource = options.session;
+  /** 被设置**显式关闭**的端点（`musicEndpoints: {favorites: null}`）：报错要说得比"尚未确定"更准。 */
+  const disabledEndpoints = new Set(options.disabledEndpoints ?? []);
+
+  /** 当前音乐会话（对象或"返回对象的函数"两种传法都认）。 */
+  function currentSession() {
+    const value = typeof sessionSource === "function" ? sessionSource() : sessionSource;
+    return isObject(value) ? value : null;
+  }
+
+  function sessionTokenOf() {
+    const session = currentSession();
+    return isNonEmptyString(session?.token) ? session.token : null;
+  }
+
+  function snsUserIDOf() {
+    const session = currentSession();
+    return isNonEmptyString(session?.snsUserID) ? session.snsUserID : null;
+  }
 
   /** 端点解析：非 https / 空值 = "端点尚未确定"，绝不猜。 */
   function endpointOf(key) {
     const value = endpoints[key];
+    if (disabledEndpoints.has(key)) {
+      return err(
+        `接口端点 ${key} 被设置显式关闭（settings.data.musicEndpoints.${key} = null）`,
+        MUSIC_ERROR_KINDS.endpointUnknown,
+      );
+    }
     if (!isNonEmptyString(value)) {
-      return err(`接口端点 ${key} 尚未确定（待授权 probe / R7 联调确认，见 docs/API_CONTRACT.md）`, MUSIC_ERROR_KINDS.endpointUnknown);
+      return err(
+        `接口端点 ${key} 尚未确定（默认值见 src/main/music-service.mjs，可在设置里覆盖或显式关闭）`,
+        MUSIC_ERROR_KINDS.endpointUnknown,
+      );
     }
     let url;
     try {
@@ -343,25 +679,42 @@ export function createMusicApi(options = {}) {
     return ok(url.href);
   }
 
-  async function requestJson(key, request = {}) {
+  /** 一次业务调用：方法/参数位置/头/超时/重试都按参考的 `#request` 形状。 */
+  async function call(key, { params = {}, retry = true } = {}) {
     const endpoint = endpointOf(key);
     if (!endpoint.ok) return endpoint;
 
-    const url = new URL(endpoint.data);
-    for (const [name, value] of Object.entries(cleanParams(request.params))) url.searchParams.set(name, value);
-
-    const headers = { accept: "application/json", ...sessionHeaders({ key }) };
-    const init = { method: request.method ?? "GET", headers };
-    if (request.body !== undefined) {
-      headers["content-type"] = "application/json";
-      init.body = JSON.stringify(request.body);
+    const authenticated = MUSIC_AUTHENTICATED_ENDPOINTS.includes(key);
+    if (authenticated && sessionTokenOf() === null) {
+      return err(`此操作需要音乐会话（先登录）：接口 ${key}`, MUSIC_ERROR_KINDS.sessionRequired);
     }
 
-    let response;
-    try {
-      response = await fetchImpl(url.href, init);
-    } catch (cause) {
-      return err(`请求 ${key} 失败：${messageOf(cause)}`, MUSIC_ERROR_KINDS.networkError);
+    const method = MUSIC_ENDPOINT_METHODS[key] ?? "POST";
+    const url = new URL(endpoint.data);
+    if (method === "GET") {
+      for (const [name, value] of Object.entries(cleanParams(params))) url.searchParams.set(name, value);
+    }
+
+    const headers = { "content-type": "application/json", ...sessionHeaders({ key, authenticated }) };
+    const init = { method, headers, signal: AbortSignal.timeout(timeoutMs) };
+    if (method === "POST") {
+      // 参数逐个原样进 JSON 体（参考就是这么发的：数字是数字、数组是数组、
+      // 该是字符串的字段在各自的构造点已经是字符串）。
+      init.body = JSON.stringify(params ?? {});
+    }
+
+    const attempts = retry ? 2 : 1;
+    let response = null;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        response = await fetchImpl(url.href, init);
+        break;
+      } catch (cause) {
+        if (attempt === attempts - 1) {
+          return err(`请求 ${key} 失败：${messageOf(cause)}`, MUSIC_ERROR_KINDS.networkError);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
     }
     if (!response || typeof response.ok !== "boolean") {
       return err(`请求 ${key} 未返回可识别的响应`, MUSIC_ERROR_KINDS.invalidResponse);
@@ -377,17 +730,42 @@ export function createMusicApi(options = {}) {
     } catch {
       return err(`请求 ${key} 的响应不是 JSON`, MUSIC_ERROR_KINDS.invalidResponse);
     }
-    return decodeEnvelope(raw);
+    if (raw === null || typeof raw !== "object") {
+      return err(`请求 ${key} 的响应不是 JSON 对象`, MUSIC_ERROR_KINDS.invalidResponse);
+    }
+    const decoded = decodeEnvelope(raw);
+    // 业务码失败与成功都带上原始响应体（各操作要按各自的容器名取数据，
+    // 失败时也常要靠容器名判断"是哪条路由不对"）。
+    return Object.assign(decoded, { raw });
   }
 
-  function favoritesParams(page, pageSize, extra) {
-    return { [queryNames.page]: page, [queryNames.pageSize]: pageSize, ...(extra ?? {}) };
+  /** `page` → `start`（协议层唯一一处换算：通道契约仍然是页号）。 */
+  function startOf(page, pageSize) {
+    return (positiveInt(page, 1) - 1) * positiveInt(pageSize, defaultPageSize);
   }
 
-  function listFavoritesPage(request = {}) {
+  /** 收藏一页（R32：`contentTypes` 现在真的会被带上——决定"要歌曲"还是"要歌单"）。 */
+  function favoritesPageBody({ start, limit, contentTypes }) {
+    const snsUserID = snsUserIDOf();
+    if (snsUserID === null) return null;
+    return { targetSnsUserID: snsUserID, start, limit, contentTypes: [...contentTypes] };
+  }
+
+  async function listFavoritesPage(request = {}) {
+    // 与 listPlaylists 同一个顺序：先说"端点没配"，再说"没登录"（从外到里，用户才知道下一步做什么）
+    const endpoint = endpointOf("favorites");
+    if (!endpoint.ok) return endpoint;
     const page = positiveInt(request.page, 1);
     const pageSize = positiveInt(request.pageSize, defaultPageSize);
-    return requestJson("favorites", { params: favoritesParams(page, pageSize, request.params) });
+    const body = favoritesPageBody({
+      start: startOf(page, pageSize),
+      limit: pageSize,
+      contentTypes: request.contentTypes ?? MUSIC_SONG_CONTENT_TYPES,
+    });
+    if (body === null) {
+      return err("收藏接口需要音乐会话里的 SNS 用户标识（先登录）", MUSIC_ERROR_KINDS.sessionRequired);
+    }
+    return call("favorites", { params: body });
   }
 
   /**
@@ -423,7 +801,7 @@ export function createMusicApi(options = {}) {
     }
 
     function accept(page) {
-      const normalized = normalizeListPage(page);
+      const normalized = normalizeListPage(page, { isSafeUrl });
       skipped += normalized.skipped;
       let added = 0;
       for (const item of normalized.songs) {
@@ -451,9 +829,10 @@ export function createMusicApi(options = {}) {
       }
 
       pages = nextPage;
-      const { added, received, container } = accept(result.data);
+      const { added, received } = accept(result.data);
 
-      if (hasMoreFrom(container, received, pageSize)) {
+      // 判据 = 参考的"整页返回即可能还有"（真接口不发 hasMore）
+      if (favoritesHasMore(received, pageSize)) {
         if (pages >= pageLimit) {
           done = true;
           stopReason = "max_pages";
@@ -481,14 +860,6 @@ export function createMusicApi(options = {}) {
     return createFavoritesLoader(loaderOptions).loadAll();
   }
 
-  async function listPlaylists(request = {}) {
-    const result = await requestJson("playlistList", {
-      params: { [queryNames.page]: positiveInt(request.page, 1), [queryNames.pageSize]: positiveInt(request.pageSize, defaultPageSize), ...(request.params ?? {}) },
-    });
-    if (!result.ok) return result;
-    return ok({ playlists: extractList(result.data), hasMore: hasMoreFrom(result.data, extractList(result.data).length, positiveInt(request.pageSize, defaultPageSize)) });
-  }
-
   /**
    * 单页收藏读取（R8 的滚动加载走这条）：把**分页结论**在协议层算好——渲染层不必、也不许
    * 自己猜 "还有没有下一页"。刻意不给 `total`：收藏没有可信总数，"共 M 首"只能等
@@ -497,121 +868,309 @@ export function createMusicApi(options = {}) {
   async function readFavoritesPage(request = {}) {
     const page = positiveInt(request.page, 1);
     const pageSize = positiveInt(request.pageSize, defaultPageSize);
-    const result = await listFavoritesPage({ page, pageSize, params: request.params });
+    const result = await listFavoritesPage({ page, pageSize });
     if (!result.ok) return result;
-    const normalized = normalizeListPage(result.data);
+    const normalized = normalizeListPage(result.data, { isSafeUrl });
     return ok({
       page,
       pageSize,
       songs: normalized.songs,
       skipped: normalized.skipped,
       reportedTotal: normalized.reportedTotal,
-      hasMore: hasMoreFrom(normalized.container, normalized.received, pageSize),
+      hasMore: favoritesHasMore(normalized.received, pageSize),
     });
   }
 
-  /** 歌单曲目（与歌单列表分开）：id 必填，缺了就是调用方的问题，如实回 missing_param。 */
+  /**
+   * **我的歌单**（R32 起按参考的发现流程走）。
+   *
+   * 为什么不能"一页拿完就交"：歌单与歌曲**混在同一个分页列表里**（`contentTypes=[1,4,5,7]`），
+   * 首页很可能整页都是歌曲——直接过滤首页就会显示"还没有歌单"，而用户明明有。
+   * 所以这里照参考的做法翻页：翻到短页、翻到"这一页没带来新条目"、或触到保守上限为止，
+   * 再把歌单条目挑出来（`contentType != 1`，按 `contentType:id` 去重）。
+   *
+   * `start` 的起点仍然是通道给的页号（`page=1` 即参考的"从头扫"）。
+   */
+  async function listPlaylists(request = {}) {
+    // 先报"端点没配"，再报"没登录"：两件事按从外到里的顺序说，用户才知道下一步该干什么
+    const endpoint = endpointOf("playlistList");
+    if (!endpoint.ok) return endpoint;
+    if (snsUserIDOf() === null) {
+      return err("歌单列表需要音乐会话里的 SNS 用户标识（先登录）", MUSIC_ERROR_KINDS.sessionRequired);
+    }
+
+    let start = startOf(request.page, request.pageSize ?? discoveryLimit);
+    const seen = new Set();
+    const playlists = [];
+    let truncated = true;
+    let scanned = 0;
+
+    for (let index = 0; index < discoveryPageCap; index += 1) {
+      const body = favoritesPageBody({ start, limit: discoveryLimit, contentTypes: MUSIC_LIBRARY_CONTENT_TYPES });
+      const page = await call("playlistList", { params: body });
+      if (!page.ok) return page;
+      const items = extractList(page.data);
+      scanned += items.length;
+      let fresh = 0;
+      for (const item of items) {
+        if (!isObject(item)) continue;
+        const contentType = item.contentType === undefined || item.contentType === null ? "" : String(item.contentType);
+        const rawId = textOf(item.contentID ?? item.contentId ?? item.musicListID);
+        if (rawId === null) continue;
+        const key = `${contentType}:${rawId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        // `fresh` 数的是**所有新条目**（含歌曲）——这是参考的判据，也是"没有进展就停"的唯一依据。
+        // 只数歌单会怎样：首页整页都是新歌时 fresh=0 → 立刻停 → 界面上"还没有歌单"，而用户明明有。
+        fresh += 1;
+        // 歌曲（contentType=1）不进歌单列表：它属于收藏那一条路
+        if (contentType === "1") continue;
+        const playlist = normalizePlaylist(item, { isSafeUrl });
+        if (playlist === null) continue;
+        playlists.push(playlist);
+      }
+      start += discoveryLimit;
+      if (items.length < discoveryLimit || fresh === 0) {
+        truncated = false;
+        break;
+      }
+    }
+
+    return ok({ playlists, hasMore: truncated, scanned });
+  }
+
+  /**
+   * 歌单曲目：自建（type=5，`playlistDetail`）与收藏（type=4，`playlistDetailPublic`）
+   * 是**两个不同的端点**，而通道只带 `playlistId`（渲染层不知道 kind）。
+   *
+   * 所以默认 `kind='auto'` = 先自建、拿不到歌单元信息再试公开那条；`kind` 显式给了就只走那一条。
+   * 这不是"猜"：两条路由都是参考实测存在且形状明确的，响应用 `playListInfoEx` / `musicListInfoEx`
+   * 自证身份——哪条路真的回了歌单，就从哪条路取。
+   */
   async function getPlaylistDetail(playlistId, request = {}) {
     if (!isNonEmptyString(playlistId)) return err("歌单曲目接口需要 playlistId", MUSIC_ERROR_KINDS.missingParam);
+    const id = playlistId.trim();
+    const page = positiveInt(request.page, 1);
     const pageSize = positiveInt(request.pageSize, defaultPageSize);
-    const result = await requestJson("playlistDetail", {
-      params: {
-        [queryNames.id]: playlistId.trim(),
-        [queryNames.page]: positiveInt(request.page, 1),
-        [queryNames.pageSize]: pageSize,
-        ...(request.params ?? {}),
-      },
-    });
-    if (!result.ok) return result;
-    const list = extractList(result.data);
-    return ok({ songs: list, hasMore: hasMoreFrom(result.data, list.length, pageSize) });
+    const start = startOf(page, pageSize);
+    const kind = request.kind ?? "auto";
+
+    const failures = [];
+
+    async function owned() {
+      const result = await call("playlistDetail", { params: { playListID: id, start, limit: pageSize } });
+      if (!result.ok) return { failure: result };
+      const container = pickPath(result.data, "playListInfoEx");
+      if (!isObject(container)) return { empty: true, result };
+      const songs = extractList({ list: container.playListSongInfoList ?? [] }).map((item) => normalizeTrack(item, { isSafeUrl })).filter((track) => track !== null);
+      const playlist = normalizePlaylist({ ...(isObject(container.playListInfo) ? container.playListInfo : {}), contentType: "5" }, { isSafeUrl });
+      return { songs, playlist, received: Array.isArray(container.playListSongInfoList) ? container.playListSongInfoList.length : 0 };
+    }
+
+    async function collected() {
+      const result = await call("playlistDetailPublic", {
+        params: { musicListID: id, copyrightSwitch: "1", start, limit: String(pageSize) },
+      });
+      if (!result.ok) return { failure: result };
+      const container = pickPath(result.data, "musicListInfoEx");
+      if (!isObject(container)) return { empty: true, result };
+      const songs = extractList({ list: container.songSimpleInfos ?? [] }).map((item) => normalizeTrack(item, { isSafeUrl })).filter((track) => track !== null);
+      const detail = isObject(container.musicListDetail) ? container.musicListDetail : {};
+      const playlist = normalizePlaylist({ ...detail, contentType: detail.contentType ?? "4" }, { isSafeUrl });
+      return { songs, playlist, received: Array.isArray(container.songSimpleInfos) ? container.songSimpleInfos.length : 0 };
+    }
+
+    const order = kind === "owned" ? [owned] : kind === "collected" ? [collected] : [owned, collected];
+    for (const attempt of order) {
+      const found = await attempt();
+      if (found.failure) {
+        failures.push(found.failure);
+        continue;
+      }
+      if (found.empty) continue;
+      return ok({
+        playlistId: id,
+        playlist: found.playlist,
+        songs: found.songs,
+        hasMore: found.received >= pageSize,
+      });
+    }
+
+    // 两条路都没给出歌单：如实报第一段的失败（网络/端点/业务码），都已成功但内容为空则报 invalid_response
+    if (failures.length > 0) return failures[0];
+    return err(`歌单详情里没有歌单元信息（playlistId=${id.slice(0, 40)}）`, MUSIC_ERROR_KINDS.invalidResponse);
   }
 
   /** 自建歌单删除：**只走 playlistDelete**（拿收藏端点删歌单会拿到"成功"码却没删掉）。 */
   async function deletePlaylist(playlistId, request = {}) {
     if (!isNonEmptyString(playlistId)) return err("删除歌单需要 playlistId", MUSIC_ERROR_KINDS.missingParam);
-    const result = await requestJson("playlistDelete", {
-      method: request.method ?? "POST",
-      params: { [queryNames.id]: playlistId.trim(), ...(request.params ?? {}) },
-      body: request.body,
+    const result = await call("playlistDelete", {
+      params: { playListID: playlistId.trim() },
+      retry: false,
     });
     if (!result.ok) return result;
-    return ok({ deleted: true, playlistId: playlistId.trim(), detail: result.data });
+    return ok({ deleted: true, playlistId: playlistId.trim() });
   }
 
   async function search(keyword, request = {}) {
     if (!isNonEmptyString(keyword)) return err("搜索关键字为空", MUSIC_ERROR_KINDS.missingParam);
+    const page = positiveInt(request.page, 1);
     const pageSize = positiveInt(request.pageSize, defaultPageSize);
-    const result = await requestJson("search", {
+    const result = await call("search", {
       params: {
-        [queryNames.keyword]: keyword.trim(),
-        [queryNames.page]: positiveInt(request.page, 1),
-        [queryNames.pageSize]: request.pageSize,
-        ...(request.params ?? {}),
+        contentType: "1",
+        correct: "1",
+        queryWord: keyword.trim().slice(0, 80),
+        start: String(startOf(page, pageSize)),
+        limit: String(pageSize),
       },
     });
     if (!result.ok) return result;
-    const list = extractList(result.data);
-    return ok({ songs: list, hasMore: hasMoreFrom(result.data, list.length, pageSize) });
+    const normalized = normalizeListPage(result.data, { isSafeUrl });
+    return ok({
+      songs: normalized.songs,
+      skipped: normalized.skipped,
+      reportedTotal: normalized.reportedTotal,
+      hasMore: String(result.data.hasNextPage ?? "") === "1",
+    });
   }
 
   async function getAlbum(albumId, request = {}) {
     if (!isNonEmptyString(albumId)) return err("专辑接口需要 albumId", MUSIC_ERROR_KINDS.missingParam);
-    const result = await requestJson("album", {
-      params: { [queryNames.id]: albumId.trim(), ...(request.params ?? {}) },
+    const pageSize = positiveInt(request.pageSize, defaultPageSize);
+    const result = await call("album", {
+      params: { albumCode: albumId.trim(), start: startOf(request.page, pageSize), limit: pageSize },
     });
     if (!result.ok) return result;
-    return ok({ songs: extractList(result.data), detail: result.data });
+    const container = pickPath(result.data, "albumInfoEx") ?? {};
+    const songs = extractList({ list: container.songSimpleInfos ?? [] })
+      .map((item) => normalizeTrack(item, { isSafeUrl }))
+      .filter((track) => track !== null);
+    return ok({
+      albumId: albumId.trim(),
+      songs,
+      detail: result.data,
+      hasMore: Array.isArray(container.songSimpleInfos) ? container.songSimpleInfos.length >= pageSize : false,
+    });
   }
 
   async function getArtist(artistId, request = {}) {
     if (!isNonEmptyString(artistId)) return err("歌手接口需要 artistId", MUSIC_ERROR_KINDS.missingParam);
-    const result = await requestJson("artist", {
-      params: { [queryNames.id]: artistId.trim(), ...(request.params ?? {}) },
+    const songNum = positiveInt(request.songNum, 20);
+    const albumNum = positiveInt(request.albumNum, 20);
+    const result = await call("artist", {
+      params: { artistCode: artistId.trim(), songNum, albumNum },
     });
     if (!result.ok) return result;
-    return ok({ songs: extractList(result.data), detail: result.data });
+    const container = pickPath(result.data, "artistInfoEx") ?? {};
+    const songs = extractList({ list: container.songSimpleInfos ?? [] })
+      .map((item) => normalizeTrack(item, { isSafeUrl }))
+      .filter((track) => track !== null);
+    // 歌手页的曲目是**有限列表**（参考：start 分页未验证，不造无限滚动接口）
+    return ok({ artistId: artistId.trim(), songs, detail: result.data });
   }
 
+  /** 播放历史：参考只验证了 `contentType=1` 这一条查询，**不承诺无限翻页**。 */
   async function getHistory(request = {}) {
-    const pageSize = positiveInt(request.pageSize, defaultPageSize);
-    const result = await requestJson("history", {
-      params: { [queryNames.page]: positiveInt(request.page, 1), [queryNames.pageSize]: pageSize, ...(request.params ?? {}) },
-    });
+    const result = await call("history", { params: { contentType: "1" } });
     if (!result.ok) return result;
-    const list = extractList(result.data);
-    return ok({ songs: list, hasMore: hasMoreFrom(result.data, list.length, pageSize) });
+    const normalized = normalizeListPage(result.data, { isSafeUrl });
+    return ok({ songs: normalized.songs, skipped: normalized.skipped, hasMore: false, reportedTotal: normalized.reportedTotal });
   }
 
+  /**
+   * 播放地址（R32 换血：`contentCode`/`contentType`/`qualityType` 进 JSON 体；
+   * 音质只认 standard/lossless 两个值，别的一律如实回 `quality_unsupported`——不猜也不用别的音质顶替）。
+   */
   async function getPlayback(request = {}) {
     const trackId = request.trackId ?? request.id;
     if (!isNonEmptyString(trackId)) return err("播放地址接口需要 trackId", MUSIC_ERROR_KINDS.missingParam);
-    const result = await requestJson("playback", {
-      params: { [queryNames.id]: trackId.trim(), ...(request.params ?? {}) },
+    const quality = request.quality ?? "standard";
+    const qualityType = MUSIC_QUALITY_TYPES[quality];
+    if (qualityType === undefined) {
+      return err(`不支持的音质：${String(quality).slice(0, 20)}（只认 standard / lossless）`, MUSIC_ERROR_KINDS.qualityUnsupported);
+    }
+    const result = await call("playback", {
+      params: { contentCode: trackId.trim(), contentType: "1", qualityType },
     });
     if (!result.ok) return result;
     return parsePlaybackPayload(result.data, { isSafeUrl, flagKeys });
   }
 
   /**
-   * 歌词文本（R12）：`{trackId}` → `{text, format, warnings}`。
+   * 歌词文本（R12；R32 起默认**从播放响应推导**——参考实现里没有独立歌词端点）。
    *
-   * 端点未注入时由 `requestJson` 回结构化 `endpoint_unknown`（渲染层据此说"歌词来源尚未配置"，
-   * 不冒充"这首歌没有歌词"）。拿到的文本**不进日志、不落盘**：它只经这一帧交给渲染层。
+   * 两条路：
+   * 1. 设置里显式注入过 `musicEndpoints.lyrics` → 直接打那个端点（形状按候选键宽容读取）；
+   * 2. 否则：取一次播放响应 → `lyricAddress`（CDN 白名单内）→ 下载文本；
+   *    没有地址就看内嵌的 `contentExInfo.lyrics`。
+   *
+   * 拿到的文本**不进日志、不落盘**：它只经这一帧交给渲染层。
    */
   async function getLyrics(request = {}) {
     const trackId = request.trackId ?? request.id;
     if (!isNonEmptyString(trackId)) return err("歌词接口需要 trackId", MUSIC_ERROR_KINDS.missingParam);
-    const result = await requestJson("lyrics", {
-      params: { [queryNames.id]: trackId.trim(), ...(request.params ?? {}) },
+
+    if (isNonEmptyString(endpoints.lyrics)) {
+      const direct = await call("lyrics", { params: { contentID: trackId.trim(), contentType: "1" } });
+      if (!direct.ok) return direct;
+      return parseLyricsPayload(direct.data);
+    }
+
+    const qualityType = MUSIC_QUALITY_TYPES[request.quality ?? "standard"] ?? MUSIC_QUALITY_TYPES.standard;
+    const result = await call("playback", {
+      params: { contentCode: trackId.trim(), contentType: "1", qualityType },
     });
     if (!result.ok) return result;
-    return parseLyricsPayload(result.data);
+
+    const warnings = [];
+    const address = lyricAddressOf(result.data, { isSafeUrl });
+    if (address !== null) {
+      const fetched = await fetchLyricsText(address);
+      if (fetched.ok) return ok({ text: fetched.data, format: "lrc", warnings });
+      warnings.push(fetched.error.kind);
+    }
+    const inline = inlineLyricsOf(result.data);
+    if (inline !== null) return ok({ text: inline, format: "lrc", warnings });
+
+    return err(
+      "播放响应里没有可用的歌词（既没有 CDN 白名单内的 lyricAddress，也没有内嵌歌词）",
+      MUSIC_ERROR_KINDS.invalidResponse,
+    );
+  }
+
+  /** 下载歌词文本（有上限、不跟随跳转、只认白名单地址已在上面查过）。 */
+  async function fetchLyricsText(address) {
+    let response;
+    try {
+      response = await fetchImpl(address, {
+        method: "GET",
+        headers: { accept: "text/plain,*/*" },
+        signal: AbortSignal.timeout(timeoutMs),
+        redirect: "error",
+      });
+    } catch (cause) {
+      return err(`歌词资源请求失败：${messageOf(cause)}`, MUSIC_ERROR_KINDS.networkError);
+    }
+    if (!response || typeof response.ok !== "boolean") {
+      return err("歌词资源未返回可识别的响应", MUSIC_ERROR_KINDS.invalidResponse);
+    }
+    if (!response.ok) return err(`歌词资源返回 HTTP ${response.status}`, MUSIC_ERROR_KINDS.httpError);
+    let text;
+    try {
+      text = await response.text();
+    } catch (cause) {
+      return err(`歌词资源读取失败：${messageOf(cause)}`, MUSIC_ERROR_KINDS.invalidResponse);
+    }
+    if (typeof text !== "string") return err("歌词资源不是文本", MUSIC_ERROR_KINDS.invalidResponse);
+    if (text.length > LYRICS_MAX_BYTES) return err("歌词资源过大", MUSIC_ERROR_KINDS.invalidResponse);
+    if (text.trim() === "") return err("歌词资源是空的", MUSIC_ERROR_KINDS.invalidResponse);
+    return ok(text);
   }
 
   return {
     endpointOf,
-    requestJson,
+    call,
     listFavoritesPage,
     readFavoritesPage,
     createFavoritesLoader,

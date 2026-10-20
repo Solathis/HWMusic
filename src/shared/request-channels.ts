@@ -65,10 +65,13 @@ export const SETTINGS_TEST_PROXY = "settings:test-proxy" as const;
  * 分批加只会让渲染层在中间几轮里出现"某些页面点了没反应"（频道不在白名单 =
  * Rust 准入直接回 `unknown_channel`，看起来像坏掉）。
  *
- * 业务语义（与 src/protocols/music.mjs 同源，端点全部注入、未配置时结构化 `endpoint_unknown`）：
+ * 业务语义（与 src/protocols/music.mjs 同源；R32 起端点有默认值 = 参考实测的业务域 + 路径，
+ * 可在设置里覆盖或显式关闭，关闭/未确定时才是结构化 `endpoint_unknown`）：
  * - `library:favorites`：收藏分页（**没有可信总数**，总数 = 完整分页后 ID 去重，UI 与已加载数分开显示）；
+ * - `library:playlists`：歌单（协议层会翻页扫完再挑歌单——真接口把歌曲与歌单混在一个列表里）；
  * - `library:playlist-detail`：歌单曲目分页（与歌单列表分开：列表只有元信息）；
  * - 其余为一页式列表（`hasMore` 由协议层的同一规则给出，渲染层不自己猜）。
+ * 没有音乐会话（没登录）时回结构化 `session_required`——与"接口没配"是两件事。
  */
 export const LIBRARY_FAVORITES = "library:favorites" as const;
 export const LIBRARY_PLAYLISTS = "library:playlists" as const;
@@ -92,16 +95,18 @@ export const LIBRARY_HISTORY = "library:history" as const;
 export const PLAYBACK_RESOLVE_URL = "playback:resolve-url" as const;
 
 /**
- * 歌词文本频道（R12 增补）：载荷 `{trackId}`，应答 `data` 即协议层 `parseLyricsPayload` 的产物
- * （`{text, format}` —— **原始歌词文本**，不是解析结果）。
+ * 歌词文本频道（R12 增补）：载荷 `{trackId}`，应答 `data` 即协议层 `getLyrics` 的产物
+ * （`{text, format, warnings}` —— **原始歌词文本**，不是解析结果）。
  *
  * 为什么返回文本而不是 AMLL 行数组：逐行滚动必须来自官方组件，而"文本 → 行"这一步是官方
  * `parseLrc` 的职责（R9 的 `features/lyrics/amll-adapter.ts` 在它之上补 `[offset:]` 与翻译行）。
  * 把解析放在 sidecar 会让渲染层拿到的是一份"别人解析好的东西"，AMLL 的版本一变就对不上。
  *
- * 端点仍未注入（`data.musicEndpoints.lyrics`，与其余业务端点同一张表）：
- * 未配置时协议层如实回结构化 `endpoint_unknown`，界面说"歌词来源尚未配置"——
- * 不冒充"这首歌没有歌词"，也不打到一个瞎猜的地址上。
+ * **文本来源（R32 换血）**：参考实现里没有独立歌词端点——歌词从**播放响应**里取
+ * （`lyricAddress` 走 CDN 白名单下载，或内嵌的 `contentExInfo.lyrics`）。
+ * 所以默认那条路的第一个缺的端点其实是 `playback`；失败时协议层回结构化
+ * `endpoint_unknown`（界面说"歌词来源尚未配置"）或 `invalid_response`
+ * （"这首歌的响应里没有歌词"）——两者不互相冒充。
  */
 export const PLAYBACK_LYRICS = "playback:lyrics" as const;
 

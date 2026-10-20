@@ -95,7 +95,24 @@ test("attempt：协议事实照抄（client_id/redirect/scope/access_type/PKCE S
   assert.equal(attempt.redirectUri, OAUTH_REDIRECT_URI);
   assert.equal(attempt.redirectUri, "hms://redirect_uri");
   assert.equal(attempt.scope, OAUTH_SCOPE);
-  assert.equal(attempt.scope, "openid");
+  assert.equal(
+    attempt.scope,
+    [
+      "openid",
+      "https://www.huawei.com/auth/account/mobile.number",
+      "https://www.huawei.com/auth/account/guardian.uid",
+      "https://www.huawei.com/auth/account/country",
+      "https://www.huawei.com/auth/account/base.profile",
+      "https://www.huawei.com/auth/account/birthday",
+      "https://www.huawei.com/auth/pay/walletinfo",
+      "https://www.huawei.com/auth/account/gender",
+      "https://www.huawei.com/auth/drive.file",
+      "https://www.huawei.com/auth/account/accountlist.anonymous",
+      "https://www.huawei.com/auth/account/accountlist",
+      "https://www.huawei.com/default/scopes",
+    ].join(" "),
+    "R32：scope 是用户指令给出的完整清单（空格分隔的线上形态）",
+  );
   assert.equal(attempt.accessType, OAUTH_ACCESS_TYPE);
   assert.equal(attempt.accessType, "offline");
   assert.equal(attempt.responseType, OAUTH_RESPONSE_TYPE);
@@ -110,8 +127,10 @@ test("attempt：协议事实照抄（client_id/redirect/scope/access_type/PKCE S
   assert.equal(url.searchParams.get("response_type"), "code");
   assert.equal(url.searchParams.get("client_id"), "101444301");
   assert.equal(url.searchParams.get("redirect_uri"), "hms://redirect_uri");
-  assert.equal(url.searchParams.get("scope"), "openid");
+  assert.equal(url.searchParams.get("scope"), OAUTH_SCOPE);
   assert.equal(url.searchParams.get("access_type"), "offline");
+  assert.equal(url.searchParams.get("countryCode"), "cn", "R32：参考实测参数，缺了授权页按别的区域渲染");
+  assert.equal(url.searchParams.get("ui_locales"), "zh-cn");
   assert.equal(url.searchParams.get("code_challenge_method"), "S256");
   assert.equal(url.searchParams.get("code_challenge"), attempt.codeChallenge);
   assert.equal(url.searchParams.get("state"), attempt.state);

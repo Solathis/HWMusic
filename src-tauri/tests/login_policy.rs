@@ -24,7 +24,7 @@ use huawei_music_desktop_lib::login::{
 };
 use serde_json::json;
 
-const AUTHORIZE: &str = "https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize?client_id=101444301&state=S";
+const AUTHORIZE: &str = "https://oauth-login.platform.hicloud.com/oauth2/v3/authorize?client_id=101444301&state=S";
 
 fn config_of(payload: serde_json::Value) -> huawei_music_desktop_lib::login::LoginConfig {
     parse_config(&payload).expect("这份 payload 应当合法")
@@ -42,21 +42,36 @@ fn error_of(payload: serde_json::Value) -> huawei_music_desktop_lib::bridge::Cor
 fn navigation_allows_only_explicit_whitelist_entries() {
     // 白名单里的整域（含 query/hash/任意路径）
     for allowed in [
-        "https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize?client_id=1&state=S",
+        // R32：授权入口换成参考实现实测的 oauth-login.platform.hicloud.com，
+        // 令牌域 oauth-login.cloud.huawei.com 同时进白名单（授权域与令牌域是两个主机）
+        "https://oauth-login.platform.hicloud.com/oauth2/v3/authorize?client_id=1&state=S",
+        "https://oauth-login.cloud.huawei.com/oauth2/v3/token",
+        "https://account.huawei.com/",
+        "https://consumer.huawei.com/",
+        // oauth-login1 只剩 loginCallback 这一条精确例外（扫码路径的 CAS 回调落点）
         "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?code=C&state=S",
         // R16 增补：授权页把浏览器送到这里（https://id1.cloud.huawei.com:443/CAS/remoteLogin?… 的落地页）。
         // 默认端口 `:443` 在 origin 里被归一化掉，两种写法都要放行。
         "https://id1.cloud.huawei.com/CAS/portal/loginAuth.html?clientID=101444301&state=S",
         "https://id1.cloud.huawei.com:443/CAS/portal/loginAuth.html?clientID=101444301",
-        "https://login.cloud.huawei.com/",
-        "https://login.cloud.huawei.com/sso/index.html?x=1#frag",
     ] {
         assert_eq!(navigation_for(allowed), Navigation::Allow, "白名单条目必须放行：{allowed}");
     }
 
+    // oauth-login1 的**整域**已经不放行了（R32 降级为精确例外）：授权页那个路径现在必须被拦
+    for blocked in [
+        "https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize",
+        "https://oauth-login1.cloud.huawei.com/oauth2/v2/loginCallback?code=C",
+        // R32 移出的旧 CAS 域（参考清单里没有它）
+        "https://login.cloud.huawei.com/",
+        "https://login.cloud.huawei.com/sso/index.html?x=1#frag",
+    ] {
+        assert_eq!(navigation_for(blocked), Navigation::Block, "不在白名单里就必须拦下：{blocked}");
+    }
+
     // 同形攻击面 + 降级 + 其它 scheme：一律 Block
     for blocked in [
-        "https://oauth-login1.cloud.huawei.com.attacker.invalid/oauth2/v3/authorize",
+        "https://oauth-login.platform.hicloud.com.attacker.invalid/oauth2/v3/authorize",
         "https://account.huawei.com.attacker.invalid/",
         "https://oauth-login2.cloud.huawei.com/oauth2/v3/authorize",
         // id1 的同形/子域同样不许放行（白名单是显式条目，不是后缀通配）
@@ -66,11 +81,11 @@ fn navigation_allows_only_explicit_whitelist_entries() {
         "http://id1.cloud.huawei.com/CAS/portal/loginAuth.html",
         "https://huawei.com.evil.com/",
         "https://evil-huawei.com/",
-        "https://user:pass@oauth-login1.cloud.huawei.com/oauth2/v3/authorize",
-        "https://user@oauth-login1.cloud.huawei.com/oauth2/v3/authorize",
-        "https://oauth-login1.cloud.huawei.com:8443/oauth2/v3/authorize",
-        "http://oauth-login1.cloud.huawei.com/oauth2/v3/authorize",
-        "http://login.cloud.huawei.com/",
+        "https://user:pass@oauth-login.platform.hicloud.com/oauth2/v3/authorize",
+        "https://user@oauth-login.platform.hicloud.com/oauth2/v3/authorize",
+        "https://oauth-login.platform.hicloud.com:8443/oauth2/v3/authorize",
+        "http://oauth-login.platform.hicloud.com/oauth2/v3/authorize",
+        "http://oauth-login.cloud.huawei.com/oauth2/v3/token",
         "javascript:alert(1)",
         "data:text/html,<b>x</b>",
         "about:blank",
@@ -83,8 +98,8 @@ fn navigation_allows_only_explicit_whitelist_entries() {
     }
 
     // 白名单是**显式条目**，不是后缀通配：这一条钉的就是"别改成 endsWith(huawei.com)"
-    // R16 起是三条：oauth-login1（授权/令牌）+ id1（CAS 门户落地页）+ login（旧 CAS 域）
-    assert_eq!(LOGIN_ALLOWED_ORIGINS.len(), 3);
+    // R32 起是五条（参考 LOGIN_HOSTS 的五个主机）+ 一条 loginCallback 精确例外
+    assert_eq!(LOGIN_ALLOWED_ORIGINS.len(), 5);
     assert_eq!(LOGIN_ALLOWED_URLS.len(), 1);
 }
 

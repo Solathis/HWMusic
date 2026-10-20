@@ -1,13 +1,17 @@
 /**
  * OAuth/PKCE 协议原型（华为帐号 OAuth，授权码 + PKCE S256）。
  *
- * 端点一律**注入**：authorize/token 的确切 URL 已由 R4 探针确认并登记在 `docs/API_CONTRACT.md`
- * （§1.2 / §1.3，含可复现证据）；本模块仍不写死任何 URL——端点值只登记在契约文件里，
- * 由 R7 从配置传入（`createAttempt({authorizeEndpoint})` / `exchangeAuthorizationCode({endpoint})`）。
+ * 端点一律**注入**：本模块不写死任何 URL——端点值由调用方给（生产默认值住在
+ * `src/main/auth-manager.ts` 的 `HUAWEI_OAUTH_ENDPOINTS`，登记在 `docs/API_CONTRACT.md` §1）。
+ *
+ * R32 换血（对齐公开参考实现 `talongao/huawei-music-desktop` 的**实测**事实，见 §1.2/§1.3）：
+ * authorize 与 token 是**两个不同的主机**（此前我们都打在 `oauth-login1` 上，授权页能开、
+ * 但请求参数集与端点都不是实测那一组）；授权页参数补齐 `countryCode=cn` 与 `ui_locales=zh-cn`；
+ * `scope` 换成用户指令给出的**完整清单**（参考实现默认只用 `openid`，那是它自己的最小实验集）。
  *
  * 协议事实（照抄任务书，勿改）：
  * client_id = 101444301（非本项目注册身份）、redirect_uri = hms://redirect_uri、
- * scope = openid、access_type = offline、response_type = code、PKCE S256。
+ * access_type = offline、response_type = code、PKCE S256。
  *
  * 安全约定：返回值里的错误消息**只带端点/HTTP 状态/错误码**，绝不回显 code、code_verifier、
  * access_token、refresh_token（这些值进日志就等于泄漏）。
@@ -18,9 +22,37 @@ import { err, ok } from "../shared/result.ts";
 
 export const OAUTH_CLIENT_ID = "101444301";
 export const OAUTH_REDIRECT_URI = "hms://redirect_uri";
-export const OAUTH_SCOPE = "openid";
+/**
+ * 授权页的 `scope`：**完整清单**（用户指令逐字给出，顺序即此顺序）。
+ *
+ * 为什么不是参考实现默认的 `['openid']`：参考那份是它做最小实验时用的集合，
+ * 而用户指令点名了要这一整串（音乐业务要用到的账号域资料都在里面）。
+ * 空格分隔是 OAuth 2.0 的规定形态（`scope` 参数值）；这里存**数组**，
+ * 拼串只发生在 `buildAuthorizeUrl` 一处，避免两处各拼一遍拼出两个样子。
+ */
+export const OAUTH_SCOPES = Object.freeze([
+  "openid",
+  "https://www.huawei.com/auth/account/mobile.number",
+  "https://www.huawei.com/auth/account/guardian.uid",
+  "https://www.huawei.com/auth/account/country",
+  "https://www.huawei.com/auth/account/base.profile",
+  "https://www.huawei.com/auth/account/birthday",
+  "https://www.huawei.com/auth/pay/walletinfo",
+  "https://www.huawei.com/auth/account/gender",
+  "https://www.huawei.com/auth/drive.file",
+  "https://www.huawei.com/auth/account/accountlist.anonymous",
+  "https://www.huawei.com/auth/account/accountlist",
+  "https://www.huawei.com/default/scopes",
+]);
+
+/** `scope` 参数的线上形态（空格分隔）。 */
+export const OAUTH_SCOPE = OAUTH_SCOPES.join(" ");
+
 export const OAUTH_ACCESS_TYPE = "offline";
 export const OAUTH_RESPONSE_TYPE = "code";
+/** 授权页的地区/语言（参考实现实测参数：`countryCode=cn&ui_locales=zh-cn`）。 */
+export const OAUTH_COUNTRY_CODE = "cn";
+export const OAUTH_UI_LOCALES = "zh-cn";
 export const PKCE_CODE_CHALLENGE_METHOD = "S256";
 export const OAUTH_GRANT_TYPE_AUTHORIZATION_CODE = "authorization_code";
 export const OAUTH_GRANT_TYPE_REFRESH_TOKEN = "refresh_token";
@@ -99,7 +131,7 @@ function messageOf(cause) {
   return "未知错误（详情见日志）";
 }
 
-/** 拼授权页 URL（参数名固定为 OAuth 2.0 标准名，端点本身由调用方给）。 */
+/** 拼授权页 URL（参数名与取值 = 参考实现实测那一组，端点本身由调用方给）。 */
 export function buildAuthorizeUrl({ authorizeEndpoint, clientId = OAUTH_CLIENT_ID, codeChallenge, state, extraParams = {} }) {
   const endpoint = assertHttpsEndpoint(authorizeEndpoint, "authorizeEndpoint");
   const url = new URL(endpoint);
@@ -111,6 +143,10 @@ export function buildAuthorizeUrl({ authorizeEndpoint, clientId = OAUTH_CLIENT_I
   url.searchParams.set("code_challenge", codeChallenge);
   url.searchParams.set("code_challenge_method", PKCE_CODE_CHALLENGE_METHOD);
   url.searchParams.set("state", state);
+  // 地区与语言：参考实现的授权 URL 里有这两个（少了它们授权页按别的区域渲染，
+  // 后续 CAS 落地页也就跟着换域——R16 那类"窗里停在空壳"的故障与域判定强相关）。
+  url.searchParams.set("countryCode", OAUTH_COUNTRY_CODE);
+  url.searchParams.set("ui_locales", OAUTH_UI_LOCALES);
   for (const [name, value] of Object.entries(extraParams)) url.searchParams.set(name, String(value));
   return url.href;
 }
@@ -226,11 +262,13 @@ export async function exchangeAuthorizationCode({
   const response = await postForm({
     endpoint: endpoint.trim(),
     params: {
+      // 字段集与顺序逐字对齐参考实现（`grant_type/client_id/redirect_uri/code/code_verifier`）；
+      // 表单编码下顺序本身不影响服务端，但"与契约长得一样"让差分测试能逐字段比对。
       grant_type: OAUTH_GRANT_TYPE_AUTHORIZATION_CODE,
       client_id: clientId,
+      redirect_uri: redirectUri,
       code,
       code_verifier: codeVerifier,
-      redirect_uri: redirectUri,
     },
     fetchImpl,
     signal,

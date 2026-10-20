@@ -40,9 +40,9 @@ function positiveOf(value) {
   return Number.isInteger(number) && number > 0 ? number : undefined;
 }
 
-/** 三个分页频道的共同入参形状。 */
+/** 三个分页频道的共同入参形状（R32：`page` 由协议层换算成真接口的 `start`）。 */
 function pageRequest(payload) {
-  return { page: positiveOf(payload.page), pageSize: positiveOf(payload.pageSize), params: undefined };
+  return { page: positiveOf(payload.page), pageSize: positiveOf(payload.pageSize) };
 }
 
 /** 需要一个 id 的频道：缺了就是调用方的问题，如实回 invalid_payload（并指明缺哪个字段）。 */
@@ -91,14 +91,14 @@ export function createLibraryHandlers({ api } = {}) {
       const payload = payloadOf(request);
       const id = requireId(payload, "albumId", "专辑页需要 albumId");
       if (!id.ok) return id.result;
-      return api.getAlbum(id.value, { params: undefined });
+      return api.getAlbum(id.value, { page: positiveOf(payload.page), pageSize: positiveOf(payload.pageSize) });
     },
 
     [LIBRARY_ARTIST]: (request) => {
       const payload = payloadOf(request);
       const id = requireId(payload, "artistId", "歌手页需要 artistId");
       if (!id.ok) return id.result;
-      return api.getArtist(id.value, { params: undefined });
+      return api.getArtist(id.value, {});
     },
 
     [LIBRARY_HISTORY]: (request) => api.getHistory(pageRequest(payloadOf(request))),

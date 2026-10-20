@@ -59,20 +59,25 @@ import type { CoreFail, CoreResult } from "../shared/result.ts";
 import type { HostConclusion, LoginHost } from "./huawei.ts";
 
 /**
- * OAuth 端点：R4 探针**已确认**的值（登记在 `docs/API_CONTRACT.md` §1.2/§1.3，含可复现证据）。
+ * OAuth 端点：**R32 起取参考实现实测的那一组**（登记在 `docs/API_CONTRACT.md` §1.2/§1.3）。
  *
  * 为什么要在这里写默认值：`src/protocols/auth.mjs` 坚持"端点一律注入、代码里不写死"，
  * 而总得有人把已确认的事实注入进去——本模块就是那个调用方。默认值可被构造参数覆盖
  * （探针更新后改一处），`test/auth-manager.test.mjs` 会拿契约文件反查这两个字面量。
  *
- * `loginex`（R17 补上，此前为 `null`）：值来自 `src/main/music-session.mjs`，证据分两级——
- * **本机实测**了"该路径存在且只收 POST"（405 vs 对照 404、无效 AT 回 200 + 业务码 990000），
- * **公开来源**（旧仓的授权实验记录）给了请求体与 Digest 头形状；
- * "拿有效 AT 换到真会话"这一档**仍未实测**（要用户授权扫码）。详见 `docs/API_CONTRACT.md` §1.5。
+ * **换血原因（R32 的真机结论）**：R4 探针把 authorize/token 都登记成
+ * `oauth-login1.cloud.huawei.com`——那只证明"该域可达且路径存在"，不证明"这就是客户端该用的端点"。
+ * 参考实现（公开仓库 `talongao/huawei-music-desktop`，2026-10-14 本人账号实验）用的是
+ * **两个不同主机**：授权在 `oauth-login.platform.hicloud.com`，兑换在 `oauth-login.cloud.huawei.com`。
+ * 用错主机的后果不是"报错"，而是授权页照常打开、`hms://` 照常回调，之后整条链拿不到能用的令牌
+ * ——所以这里以参考的实测值为准。
+ *
+ * `loginex`（R17 补上）：值来自 `src/main/music-session.mjs`；"拿有效 AT 换到真会话"仍未本机实测
+ * （要用户授权），端点形状与 Digest 头形状来自同一份公开来源。
  */
 export const HUAWEI_OAUTH_ENDPOINTS = {
-  authorize: "https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize",
-  token: "https://oauth-login1.cloud.huawei.com/oauth2/v3/token",
+  authorize: "https://oauth-login.platform.hicloud.com/oauth2/v3/authorize",
+  token: "https://oauth-login.cloud.huawei.com/oauth2/v3/token",
   loginex: HUAWEI_MUSIC_LOGINEX_ENDPOINT,
 } as const;
 

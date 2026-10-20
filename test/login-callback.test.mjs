@@ -201,13 +201,22 @@ test("createCallbackConsumer：先看已消费、再看格式、最后比 state�
 });
 
 test("isAllowedLoginUrl：华为登录域放行、精确例外放行；oauth-login2 与同形钓鱼域不放行", () => {
-  assert.equal(isAllowedLoginUrl("https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize?client_id=1"), true);
-  assert.equal(isAllowedLoginUrl("https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?code=a"), true);
-  assert.equal(isAllowedLoginUrl("https://login.cloud.huawei.com/"), true);
+  // R32：白名单 = 参考实现实测走通的那五个域（授权域与令牌域是两个不同主机）
+  assert.equal(isAllowedLoginUrl("https://oauth-login.platform.hicloud.com/oauth2/v3/authorize?client_id=1"), true);
+  assert.equal(isAllowedLoginUrl("https://oauth-login.cloud.huawei.com/oauth2/v3/token"), true);
+  assert.equal(isAllowedLoginUrl("https://id1.cloud.huawei.com:443/CAS/remoteLogin?x=1"), true, "CAS 门户域（默认端口不写进 origin）");
+  assert.equal(isAllowedLoginUrl("https://account.huawei.com/"), true);
+  assert.equal(isAllowedLoginUrl("https://consumer.huawei.com/"), true);
+  assert.equal(isAllowedLoginUrl("https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?code=a"), true, "精确例外（扫码后 hms:// 才会触发）");
+  assert.equal(
+    isAllowedLoginUrl("https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize"),
+    false,
+    "oauth-login1 只剩 loginCallback 这一条精确例外，整域不再放行",
+  );
   assert.equal(isAllowedLoginUrl("https://oauth-login2.cloud.huawei.com/oauth2/v3/authorize"), false, "换区域主机必须复发故障前的显式决策，不默认放行");
   assert.equal(isAllowedLoginUrl("https://evil-huawei.com/"), false);
   assert.equal(isAllowedLoginUrl("https://huawei.com.evil.com/"), false);
-  assert.equal(isAllowedLoginUrl("http://oauth-login1.cloud.huawei.com/oauth2/v3/authorize"), false, "降级到 http 一律不放行");
+  assert.equal(isAllowedLoginUrl("http://oauth-login.platform.hicloud.com/oauth2/v3/authorize"), false, "降级到 http 一律不放行");
   assert.equal(isAllowedLoginUrl("hms://redirect_uri?code=a"), false, "回调不进导航白名单（由 isCallback 单独拦）");
   assert.equal(isAllowedLoginUrl(""), false);
   assert.equal(isAllowedLoginUrl(null), false);

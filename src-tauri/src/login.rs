@@ -175,14 +175,20 @@ const DELETE_BACKOFF_MS: u64 = 50;
 
 /// **导航白名单的镜像**（Node 侧唯一真源：`src/protocols/login-callback.mjs`）。
 /// 显式条目表，不是 `*.huawei.com` 通配；条目由 parity 测试互钉。
-pub const LOGIN_ALLOWED_ORIGINS: [&str; 3] = [
-    "https://oauth-login1.cloud.huawei.com", // OAuth 授权/令牌服务域
-    // R16 增补（真机"登录窗空白"的直接原因）：实探（scripts/probe-qr.mjs）证明授权页拿到
+///
+/// R32：条目 = 参考实现实测走通的那五个域（授权域与令牌域是**两个不同主机**，
+/// 授权入口换成 `oauth-login.platform.hicloud.com` 之后整条跳转链的域也跟着换）。
+/// `oauth-login1.cloud.huawei.com` 从"整域放行"降级为下面的 `loginCallback` 精确例外。
+pub const LOGIN_ALLOWED_ORIGINS: [&str; 5] = [
+    "https://oauth-login.platform.hicloud.com", // 授权入口域（authorize 端点所在主机）
+    "https://oauth-login.cloud.huawei.com", // 令牌兑换域（token 端点所在主机）
+    // R16 增补、R32 保留（真机"登录窗空白"的直接原因）：实探（scripts/probe-qr.mjs）证明授权页拿到
     // `loginType = TICKET` 后会把浏览器跳到 `https://id1.cloud.huawei.com:443/CAS/remoteLogin?…`
     // → `/CAS/portal/loginAuth.html`。这条导航原先被拦下，页面上就停在一个什么都没渲染的空壳上。
     // 端口 443 是默认端口，`Url::origin()` 归一化后不带端口，所以这一条同时覆盖 `:443` 的写法。
     "https://id1.cloud.huawei.com", // 华为帐号 CAS 门户域（授权页的落地页）
-    "https://login.cloud.huawei.com", // 华为帐号登录（CAS 系，旧域名，仍在跳转链里出现）
+    "https://account.huawei.com", // 账号域（参考清单条目）
+    "https://consumer.huawei.com", // 消费者域（参考清单条目）
 ];
 
 /// 精确例外：扫码成功后回调落到这里，漏掉它就会卡在 CAS 页。

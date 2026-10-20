@@ -1266,8 +1266,9 @@ mod tests {
         }
 
         // 合法配置 → Deferred：答复交给登录窗线程（它在窗收场之后写这一帧）
+        // R32：白名单换成参考实测的授权入口域，这里的 URL 也要跟着换（否则会被当"不在白名单"拒掉）
         let good = json!({
-            "url": "https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize?client_id=101444301",
+            "url": "https://oauth-login.platform.hicloud.com/oauth2/v3/authorize?client_id=101444301",
             "partition": "p-1",
             "topInset": 48,
         });

@@ -8,15 +8,38 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createBridge } from "../src/host/bridge.mjs";
+import { MUSIC_ENDPOINT_KEYS } from "../src/protocols/music.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const sidecarEntry = `${repoRoot}src/sidecar/main.mjs`;
 
+/**
+ * 真进程的数据目录：里面写一份"全部业务端点显式关闭"的设置。
+ *
+ * R32 起默认端点表是**满的**（参考实测值），不关掉的话这些端到端用例会真的去请求华为的接口——
+ * 测试既不该依赖外网，也不该拿别人的服务当夹具。显式关闭（`musicEndpoints: {key: null}`）
+ * 给出的正是"确定性不可用"那一档，`endpoint_unknown` 的断言因此仍然成立。
+ */
+function makeDataDir() {
+  const dir = mkdtempSync(join(tmpdir(), "hwmusic-e2e-"));
+  writeFileSync(
+    join(dir, "settings.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      data: { musicEndpoints: Object.fromEntries(MUSIC_ENDPOINT_KEYS.map((key) => [key, null])) },
+    }),
+  );
+  return dir;
+}
+
 function startSidecar() {
-  const child = spawn(process.execPath, [sidecarEntry], {
+  const child = spawn(process.execPath, [sidecarEntry, "--data-dir", makeDataDir()], {
     cwd: repoRoot,
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -127,7 +150,7 @@ test("端到端：auth:login 立刻回「已受理」，结论经 auth:status �
   // 顶部不再让出那一条，"返回扫码登录"改成浮在网页之上的浮动控件。
   const open = sidecar.hostRequests.find((request) => request.channel === "host:open-login");
   assert.ok(open, `sidecar 没有发出 host:open-login：${JSON.stringify(sidecar.hostRequests)}`);
-  assert.match(open.payload.url, /^https:\/\/oauth-login1\.cloud\.huawei\.com\/oauth2\/v3\/authorize\?/);
+  assert.match(open.payload.url, /^https:\/\/oauth-login\.platform\.hicloud\.com\/oauth2\/v3\/authorize\?/);
   assert.match(open.payload.partition, /^[A-Za-z0-9_-]{1,64}$/);
   assert.equal(
     Object.prototype.hasOwnProperty.call(open.payload, "topInset"),
@@ -197,11 +220,11 @@ test("端到端：auth:get-status 回当前状态快照，且**不**额外广播
   assert.deepEqual(sidecar.problems, []);
 });
 
-test("端到端：library:favorites 在端点未配置时回结构化 endpoint_unknown（不冒充空数据、不挂起）", async (t) => {
+test("端到端：library:favorites 在端点被关闭时回结构化 endpoint_unknown（不冒充空数据、不挂起）", async (t) => {
   const sidecar = startSidecar();
   t.after(() => sidecar.cleanup());
 
-  // 真进程里没有任何端点写入方（docs/API_CONTRACT.md §2.1）→ 必须如实报"接口未配"
+  // 这次的数据目录里把业务端点全关了（见 makeDataDir）→ 必须如实报"接口没配"
   const favorites = await sidecar.bridge.call("library:favorites", { page: 1, pageSize: 20 });
   assert.equal(favorites.ok, false, `端点未配置不许"成功"：${JSON.stringify(favorites)}`);
   assert.equal(favorites.error.kind, "endpoint_unknown");
@@ -215,11 +238,11 @@ test("端到端：library:favorites 在端点未配置时回结构化 endpoint_u
   assert.deepEqual(sidecar.problems, []);
 });
 
-test("端到端：playback:resolve-url 端点未配置时回结构化 endpoint_unknown；坏载荷在边界被拒", async (t) => {
+test("端到端：playback:resolve-url 端点被关闭时回结构化 endpoint_unknown；坏载荷在边界被拒", async (t) => {
   const sidecar = startSidecar();
   t.after(() => sidecar.cleanup());
 
-  // 真进程里没有端点写入方 → 必须如实报"接口未配"，而不是回一个假的播放地址
+  // 业务端点全关 → 必须如实报"接口没配"，而不是回一个假的播放地址
   const resolved = await sidecar.bridge.call("playback:resolve-url", { trackId: "1001" });
   assert.equal(resolved.ok, false, `端点未配置不许"成功"：${JSON.stringify(resolved)}`);
   assert.equal(resolved.error.kind, "endpoint_unknown");
@@ -232,15 +255,15 @@ test("端到端：playback:resolve-url 端点未配置时回结构化 endpoint_u
   assert.deepEqual(sidecar.problems, []);
 });
 
-test("端到端：playback:lyrics 频道真的注册了；端点未配置时回结构化 endpoint_unknown（R12）", async (t) => {
+test("端到端：playback:lyrics 频道真的注册了；端点被关闭时回结构化 endpoint_unknown（R12）", async (t) => {
   const sidecar = startSidecar();
   t.after(() => sidecar.cleanup());
 
-  // 真进程里没有端点写入方 → 必须如实报"接口未配"，而不是回一段编出来的歌词
+  // R32 起歌词**从播放响应推导**（参考实现里没有独立歌词端点）：所以这条路上第一个缺的端点是 playback
   const lyrics = await sidecar.bridge.call("playback:lyrics", { trackId: "1001" });
   assert.equal(lyrics.ok, false, `端点未配置不许"成功"：${JSON.stringify(lyrics)}`);
   assert.equal(lyrics.error.kind, "endpoint_unknown");
-  assert.match(lyrics.error.message, /lyrics/, "要说清是哪个端点没配（渲染层据此说「歌词来源尚未配置」）");
+  assert.match(lyrics.error.message, /playback/, "要说清是哪个端点没配（歌词走的就是播放端点）");
 
   const bad = await sidecar.bridge.call("playback:lyrics", { trackId: " " });
   assert.equal(bad.ok, false);

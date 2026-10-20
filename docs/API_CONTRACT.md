@@ -21,89 +21,97 @@
 
 ## 1. OAuth（华为帐号）
 
-### 1.1 协议参数（已确认 · 出处：任务书/旧仓审计事实，勿改）
+### 1.1 协议参数（已确认 · 出处：用户指令 + 参考实现实测，勿改）
 
 | 项 | 值 |
 |---|---|
 | `client_id` | `101444301`（**非本项目注册的身份**，极可能是华为音乐官方 App 的 OAuth 身份，随时可能失效） |
 | `redirect_uri` | `hms://redirect_uri` |
-| `scope` | `openid` |
+| `scope` | **完整清单**（R32，用户指令逐字给出；空格分隔）：`openid` + `https://www.huawei.com/auth/account/{mobile.number,guardian.uid,country,base.profile,birthday,gender,accountlist.anonymous,accountlist}` + `https://www.huawei.com/auth/pay/walletinfo` + `https://www.huawei.com/auth/drive.file` + `https://www.huawei.com/default/scopes`（共 12 项，顺序即此顺序）。**注意**：参考实现默认只发 `openid`（那是它做最小实验用的集合），本项目的授权 URL 按用户指令发全量 |
 | `access_type` | `offline` |
 | `response_type` | `code` |
+| `countryCode` | `cn`（R32；参考实测参数，缺了授权页按别的区域渲染） |
+| `ui_locales` | `zh-cn`（R32；同上） |
 | PKCE | `code_challenge_method=S256`，`code_challenge = BASE64URL(SHA256(code_verifier))`；verifier 43–128 字符 |
 | `state` | 随机、一次性、回调时**常量时间**比对（`timingSafeEqual`）、10 分钟过期 |
 
-代码落点：`src/protocols/auth.mjs`（常量 + `createAttempt`）、`src/protocols/login-callback.mjs`（消费与编排）。
+代码落点：`src/protocols/auth.mjs`（常量 + `createAttempt` + `buildAuthorizeUrl`）、
+`src/protocols/login-callback.mjs`（消费与编排）。
 
-### 1.2 authorize 端点（已确认 · probe 证据）
-
-```
-https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize
-```
-
-证据（2026-10-19 实测，可用上表命令复现）：
-
-1. 该域对**任意 GET 路径**都返回同一份 SPA 页面（`/oauth2/v3/authorize`、`/oauth2/v2/authorize`、
-   `/oauth2/v3/loginCallback` 三者响应字节完全相同：14581 B，`sha256_16=94bf249ba7a6facf`）
-   → **单靠 GET 状态码无法区分端点**，路径证据只能来自页面自己的 JS。
-2. 授权页 bundle（`/static_rss_vue3/js/index-legacy-*.js`，213575 B）里**逐个列出了端点字符串**，
-   其中含 `"/oauth2/v3/authorize"`（注释即"v3 的 authorize 接口"）与 `"/oauth2/v2/authorize"`。
-   完整清单见 `.probe/login-probe.json` 的 `bundleEndpoints`（本次 22 条），关键几条：
-
-   | bundle 里的路径 | 判断 |
-   |---|---|
-   | `/oauth2/v3/authorize` | **本项目使用**（v3 授权接口） |
-   | `/oauth2/v2/authorize` | v2 旧版，不用 |
-   | `/oauth2/v3/loginCallback` | 回调落点（见 §1.4，导航白名单精确例外） |
-   | `/oauth2/v2/loginCallback` | v2 回调，存在但**不放行**（见 §1.4 注） |
-   | `/oauth2/ajax/login`、`/oauth2/ajax/getLoginWay`、`/oauth2/ajax/authorizeConfirm` | 官方页自身的 XHR，本项目不用 |
-   | `/oauth2/v3/device`、`/oauth2/v3/device/revoke` | 设备码流程，本项目不用 |
-
-### 1.3 token 端点（已确认 · probe 证据）
+### 1.2 authorize 端点（已确认 · R32 换成参考实现实测值）
 
 ```
-https://oauth-login1.cloud.huawei.com/oauth2/v3/token
+https://oauth-login.platform.hicloud.com/oauth2/v3/authorize
 ```
 
-证据：`POST` 一个**无效**授权码（`code=PROBE-INVALID-CODE`，无任何账号参与）得到
+**R32 换血理由**：R4 探针登记的是 `https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize`——
+那次探测证明的只是"该域可达、该路径存在"（同一份 SPA 对任意路径都回同一份页面），**不证明**
+"这是客户端该用的授权入口"。公开参考实现 `talongao/huawei-music-desktop`（`src/auth.mjs` +
+`docs/API_CONTRACT.md`，2026-10-14 本人账号实验）用的是 **`oauth-login.platform.hicloud.com`**，
+并且**真实走通过**"授权 → hms:// 回调 → 兑换 → 音乐会话"这条链。
+
+代价不对称：用错主机的表现不是报错，而是授权页照常打开、`hms://` 照常回调，之后拿不到能用的令牌
+——所以以"实测走通过的那一组"为准。旧值（`oauth-login1`）保留在 §1.4 的 `loginCallback` 精确例外里
+（扫码路径的 CAS 回调仍然落在它上面）。
+
+### 1.3 token 端点（已确认 · R32 换成参考实现实测值）
 
 ```
-HTTP 400  content-type: application/json  {"error":1101,"error_description":"invalid code","sub_error":20152}
+https://oauth-login.cloud.huawei.com/oauth2/v3/token
 ```
 
-判读：① 该路径**存在**（`/oauth2/v6/token` 同类请求是 404 HTML 错误页 → 路径不对）；
-② 端点**受理了 `client_id=101444301` 与 `redirect_uri=hms://redirect_uri`**（先报的是"授权码无效"，
-不是"客户端未注册"）——这是"身份被受理"的弱证据，**不等于**该身份被本项目授权使用；
-③ 该端点的错误体是华为自有形态（数字 `error` + `sub_error`），**不是** RFC 6749 的字符串
-`invalid_grant`：`src/protocols/auth.mjs` 的错误处理因此只记录 HTTP 状态与 HTTP 层的错误码，不假设字符串错误码。
+请求 `application/x-www-form-urlencoded`，字段与顺序逐字对齐参考：
+`grant_type=authorization_code` / `client_id` / `redirect_uri` / `code` / `code_verifier`。
+刷新令牌：`grant_type=refresh_token` + `client_id` + `refresh_token`（参考实测**不带** client_secret）。
+
+**R32 换血理由**：与 §1.2 同一条——R4 只证明了 `oauth-login1` 那个路径存在（无效授权码回
+`HTTP 400 {"error":1101,"error_description":"invalid code"}` 只能说明"端点受理了这个 client_id"），
+而参考实测的兑换主机是 `oauth-login.cloud.huawei.com`。授权域与令牌域**本就是两个主机**，
+把它们都打在同一个域上是 R4 的简化，不是事实。
+
+R4 那次探测留下的两条结论仍然有效、也仍然重要：① 错误体是华为自有形态（数字 `error` +
+`sub_error`），**不是** RFC 6749 的字符串错误码，所以错误处理只记录 HTTP 状态与 HTTP 层错误码；
+② "身份被受理"不等于"该身份被本项目授权使用"。
 
 ### 1.4 登录域导航白名单（Node 侧唯一真源：`src/protocols/login-callback.mjs`）
 
 ```js
 LOGIN_ALLOWED_ORIGINS = [
-  "https://oauth-login1.cloud.huawei.com",  // OAuth 授权/令牌服务域
-  "https://id1.cloud.huawei.com",           // R16 增补：CAS 门户域（授权页的落地页，见下）
-  "https://login.cloud.huawei.com",         // 华为帐号登录（CAS 系，旧域名）
+  "https://oauth-login.platform.hicloud.com",  // R32：授权入口域（authorize 端点所在主机）
+  "https://oauth-login.cloud.huawei.com",      // R32：令牌兑换域（token 端点所在主机）
+  "https://id1.cloud.huawei.com",              // R16：CAS 门户域（授权页的落地页，见下）
+  "https://account.huawei.com",                // R32：参考清单条目
+  "https://consumer.huawei.com",               // R32：参考清单条目
 ]
 LOGIN_ALLOWED_URLS    = ["https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback"]  // 精确例外
 ```
 
 - 是**显式条目表**，不是 `*.huawei.com` 通配（`test/login-parity.test.mjs` 扫源码禁止通配写法）；
-- **不放 `oauth-login2`**：换区域主机属显式决策，默认不放行（历史故障正是"漏了某个登录域"）；
-- **R16 增补 `https://id1.cloud.huawei.com`（真机"登录窗一片空白"的根因）**：
-  `POST /oauth2/ajax/getLoginWay` 的实探响应是
-  `loginInteractInfo.cas.casLoginRedirectUrl = https://id1.cloud.huawei.com:443/CAS/remoteLogin?…`
-  → 302 → `/CAS/portal/loginAuth.html?…`。授权页（oauth-login1）自身只是个空壳 SPA，它拿到
-  `loginType = TICKET` 后就 `location.href = <casLoginRedirectUrl>`；这条导航原先被白名单拦下，
-  于是窗里永远停在那个什么都没渲染的授权页上。**端口 443 是默认端口**，`Url::origin()` / `URL.origin`
-  归一化后都不带端口，所以一条 `https://id1.cloud.huawei.com` 同时覆盖 `:443` 的写法（两侧测试都钉了）。
-  证据：`.probe/qr-probe.json` 的 ①②③ 步（`node scripts/probe-qr.mjs` 可复现）。
-- `loginCallback` 例外是"扫码成功后 `hms://` 才会触发"的关键（旧仓历史故障根因：漏掉它 → 停在 CAS 页）；
-- 探针实测：`https://login.cloud.huawei.com/` → `403`（域存在，仅拒绝裸请求，属预期）；
+- **R32 换血**：条目 = 参考实现 `LOGIN_HOSTS` 那五个域。理由与 §1.2 同源——授权入口换主机之后，
+  整条跳转链的域跟着换；而 R16 那条教训恰恰是"**漏一个域 = 窗里一片空白**，且只有真机才看得出来"，
+  所以按参考那份**实测走通**的清单来，而不是按我们的旧观测补丁；
+- `oauth-login1.cloud.huawei.com` 从"整域放行"**降级**为 `loginCallback` 精确例外（保留）：
+  扫码成功后回调落到这里，漏掉它就会卡在 CAS 页（旧仓历史故障根因，也是 §1.8 二维码路径的关键落点）；
+- `login.cloud.huawei.com`（旧 CAS 域）**移出**：它是 oauth-login1 那条链的域，参考清单里没有；
+- **不放 `oauth-login2`**：换区域主机属显式决策，默认不放行；
+- **R16 保留**：`https://id1.cloud.huawei.com` —— 实探（`scripts/probe-qr.mjs` 的 ③/④ 步，
+  `.probe/qr-probe.json`）证明 `POST /oauth2/ajax/getLoginWay` 的响应把浏览器送到
+  `https://id1.cloud.huawei.com:443/CAS/remoteLogin?…` → `/CAS/portal/loginAuth.html`。
+  授权页自身是空壳 SPA，它拿到 `loginType = TICKET` 后就 `location.href = <casLoginRedirectUrl>`；
+  这条导航原先被拦下，窗里就永远停在什么都没渲染的授权页上。**端口 443 是默认端口**，
+  `Url::origin()` / `URL.origin` 归一化后都不带端口，所以一条 `https://id1.cloud.huawei.com`
+  同时覆盖 `:443` 的写法（两侧测试都钉了）；
 - **注**：bundle 里同时存在 `/oauth2/v2/loginCallback`。本项目只放 v3（审计事实点名的那个）。
-  R7 联调若观测到回调真的落到 v2，必须**带证据**显式加条目并同步 parity 测试，不得改成通配。
+  若观测到回调真的落到 v2，必须**带证据**显式加条目并同步 parity 测试，不得改成通配。
 - Rust 侧镜像（`src-tauri/src/login.rs` 的 `LOGIN_ALLOWED_ORIGINS`）与互钉测试已落地：
   改一侧就必须改另一侧 + `test/login-parity.test.mjs` + `src-tauri/tests/login_policy.rs`。
+
+历史证据（R4 探针，仍在 §0 的产物里可复现，只是**不再作为端点真源**）：
+`oauth-login1` 域对任意 GET 路径返回同一份 SPA（14581 B，`sha256_16=94bf249ba7a6facf`），
+bundle（`/static_rss_vue3/js/index-legacy-*.js`，213575 B）里逐个列出 `"/oauth2/v3/authorize"`、
+`"/oauth2/v2/authorize"`、`"/oauth2/v3/loginCallback"`、`"/oauth2/ajax/getLoginWay"` 等 22 条路径，
+完整清单见 `.probe/login-probe.json` 的 `bundleEndpoints`。这组观测解释的是"路径存在性"，
+不是"客户端该用哪个主机"。
 
 ### 1.5 令牌链的后续环节
 
@@ -163,14 +171,10 @@ DNS  api-drcn.music.dbankcloud.cn                  → 2407:c080:1400:61:40a0:d5
 | 3 | 该 AT 是否被本客户端（`client_id=101444301`）签发的会被受理 | 依赖第 1 条 |
 | 4 | 音乐会话有效期与失效行为 | 依赖第 1 条；自动续期本来就没打通 |
 
-**顺带记录的音乐业务端点**（同为上述公开来源，**本仓一条都没实测**，故不接线）：
-收藏 `POST /music-userbehavior-service/v3/service/favorite/simple/all`、播放历史
-`GET /music-userbehavior-service/v1/service/recentlyplayed/query`、搜索
-`POST /music-search-service/v10/service/fuzzysearch`、播放地址
-`POST /music-play-service/v3/service/file/bycontentcode` 等（完整清单见该仓库的契约文档）。
-本机对 `favorite/simple/exist` 只做到"401 = 路径存在但要授权"这一步（见上表），
-其余路径未逐个探测——**"路径可能存在"不等于"请求形状已确认"**，所以 `data.musicEndpoints`
-仍然由设置文档注入、代码里不写死。
+**顺带记录的音乐业务端点**（同为上述公开来源）**R32 起已经接进代码**：逐端点的路径 / 方法 /
+参数 / 响应容器 / 归一化规则见 §2（那里是业务接口的唯一真源）。R17 时它们只是"记录在案、不接线"，
+理由是"路径可能存在 ≠ 请求形状已确认"——R32 拿到的正是**请求与响应形状**，所以接线了。
+**仍然没有实测的**是"用本项目的账号走完这些请求"（见 §2.1 第 3 条那张表）。
 
 ### 1.6 宿主契约（R7）：登录窗的导航 URL 如何交给 `consumeCallback`
 
@@ -666,62 +670,121 @@ bundle 里没有任何硬编码的二维码端点字符串——这也是"必须
 
 ## 2. 音乐业务接口
 
-### 2.1 结论：**端点全部待确认**（K1 风险未消除，如实登记）
+### 2.1 结论：**端点与请求/响应形状 = 公开参考实现的实测值（R32 换血）**
 
-| 探测对象 | 结果 |
+| 探测对象 | R4 结果 | R32 结论 |
+|---|---|---|
+| `https://music.huawei.com/` 等候选 | **ENOTFOUND**（域名不解析） | 同上，这些**不是**业务域 |
+| 业务域 | 未知 | **`https://api-drcn.music.dbankcloud.cn`**（参考实现实测；R17 本机也验证过该域可解析） |
+| 业务端点形状 | 全部"待确认" | 见 §2.2 的逐端点表（路径 / 方法 / 参数 / 响应容器全部来自参考实测记录） |
+
+**证据分级**（与 §1.5.1 同一套口径，逐级如实标注）：
+
+1. **公开来源（协议形状）**：`talongao/huawei-music-desktop` 的 `src/music.mjs` + `docs/API_CONTRACT.md`
+   （核验日期 2026-10-14，作者本人账号的兼容性实验记录）。本节的路径、方法、参数名、参数位置、
+   响应容器名、成功判据、归一化字段映射**逐条来自它**；
+2. **本机实测（可达性）**：R17 探针证明业务域可解析、`loginex` 路径存在且只收 POST
+   （405 vs 对照 404、无效 AT 回 200 + 业务码 `990000`）；
+3. **仍未实测（本仓，一条不漏）**：
+
+   | # | 项 | 为什么没验 |
+   |---|---|---|
+   | 1 | 用本项目账号走完 §2.2 的每一条请求（收藏/歌单/搜索/专辑/歌手/历史） | 要用户在场的授权登录；本仓不代登 |
+   | 2 | 歌单发现的真实分页形态（首页是不是常常整页歌曲） | 依赖第 1 条 |
+   | 3 | 播放地址与音质（`lossless` 在本账号是否可用） | 依赖第 1 条 |
+   | 4 | 歌词资源地址在本账号响应里的真实字段 | 依赖第 1 条（字段清单来自参考，未本机复核） |
+   | 5 | 各写操作（删歌单等）的真实生效与清理 | 依赖第 1 条；本项目第一版只开放删除自建歌单 |
+
+**架构没变**：端点仍然**注入**。`src/protocols/music.mjs` 只登记**路径形状**（`MUSIC_ENDPOINT_PATHS`，
+一个域名都不含 —— 由 `test/music.test.mjs` 的源码扫描钉死）；绝对 URL 的默认值住在
+`src/main/music-service.mjs`（业务域 + 路径），设置文档 `data.musicEndpoints` 可逐键**覆盖或显式关闭**
+（`null` = 这次不要这个端点，离线/排障/测试要一个"确定性不可用"的状态）。
+
+### 2.2 逐端点表（唯一真源：`src/protocols/music.mjs` 的 `MUSIC_ENDPOINT_PATHS` / `MUSIC_ENDPOINT_METHODS`）
+
+| 键 | 方法 | 路径 | 参数 | 需音乐会话 | 响应容器 |
+|---|---|---|---|---|---|
+| `favorites` | POST | `/music-userbehavior-service/v3/service/favorite/simple/all` | `targetSnsUserID` `start` `limit` `contentTypes:["1"]` | ✅ | `favoriteInfos[]` |
+| `playlistList` | POST | 同上（**同一个端点，不同的 `contentTypes`**） | `targetSnsUserID` `start` `limit` `contentTypes:["1","4","5","7"]` | ✅ | `favoriteInfos[]` |
+| `playlistDetail` | GET | `/music-userbehavior-service/v1/service/playlist/detail/all` | `playListID` `start` `limit` | ✅ | `playListInfoEx.playListInfo` + `.playListSongInfoList[]` |
+| `playlistDetailPublic` | POST | `/music-operation-service/v2/service/musiclist/detail/bymusiclistid` | `musicListID` `copyrightSwitch:"1"` `start` `limit` | — | `musicListInfoEx.musicListDetail` + `.songSimpleInfos[]` |
+| `playlistDelete` | POST | `/music-userbehavior-service/v1/service/playlist/delete` | `playListID` | ✅ | —（写操作，不自动重试） |
+| `search` | POST | `/music-search-service/v10/service/fuzzysearch` | `contentType:"1"` `correct:"1"` `queryWord` `start` `limit` | — | `songSimpleInfos[]` + `hasNextPage` + `totalNum` |
+| `album` | GET | `/music-metacontent-service/v1/service/album/detail/byalbumcode` | `albumCode` `start` `limit` | — | `albumInfoEx.albumInfo` + `.songSimpleInfos[]` |
+| `artist` | POST | `/music-metacontent-service/v2/service/artist/detail/byartistcode` | `artistCode` `songNum` `albumNum` | — | `artistInfoEx.artistInfo` + `.songSimpleInfos[]` + `.albumSimpleInfos[]` |
+| `history` | GET | `/music-userbehavior-service/v1/service/recentlyplayed/query` | `contentType:"1"` | ✅ | `contentSimpleInfos[]` |
+| `playback` | POST | `/music-play-service/v3/service/file/bycontentcode` | `contentCode` `contentType:"1"` `qualityType` | ✅ | `fileURL`（顶层）等，见 §2.4 |
+| `lyrics` | — | *（默认没有独立端点）* | — | — | 从播放响应推导，见 §2.4 |
+
+三条容易踩的规则：
+
+1. **`POST` 用 JSON 体，`GET` 用查询串**（R32 之前我们一律拼查询串——那是错的）；
+2. **分页是 `start`/`limit`（偏移量），不是 `page`/`size`**。通道契约仍然是"页号"
+   （`library:favorites` 的载荷是 `{page, pageSize}`），换算是协议层唯一一处（`start = (page-1) × pageSize`）；
+3. **`playlistList` 与 `favorites` 是同一个端点**：真接口把歌曲与各种歌单混在一个分页列表里
+   （`contentTypes=[1,4,5,7]`），由 `contentType` 分流（官方 H5 的语义：1=歌曲、4=收藏歌单、5=自建歌单、
+   7=榜单）。所以"我的歌单"必须**翻页扫完**再挑歌单（见 §2.3 的发现流程）。
+
+值必须是 `https://` URL（非 https 一律按"端点未确定"处理）。
+
+**会话凭据**由主进程经 `sessionHeaders` 注入（`Authorization: Digest username=app-music-baseline,
+nonce=…, created=…[, token=…]`，见 §1.5.1 ②）；`snsUserID`（收藏/歌单发现的 `targetSnsUserID` 来源）
+从存盘的会话里取。**账号 AT / 音乐会话不进日志、不落明文盘。**
+
+### 2.3 响应语义与归一化（形状 = 参考实测，逐条钉在测试里）
+
+| 事实 | 实现处置 |
 |---|---|
-| `https://music.huawei.com/` | **ENOTFOUND**（域名不解析，不是 403/404） |
-| `https://api.music.huawei.com/`、`https://music-api.huawei.com/`、`https://msc.appmusic.huawei.com/` | 均 **ENOTFOUND**（候选，均不存在） |
-| `https://www.huawei.com/` | 200，但其脚本（require/jquery/bootstrap/common）**不含任何业务接口线索** |
-| 公开入口页脚本里的 API 候选 | 0 条 |
+| 业务成功 = HTTP 成功 **且** `result.resultCode === "000000"` | `decodeEnvelope` 按它判定；非 `000000` → `api_error`（只带业务码，**不回显 `resultMessage`**——服务端可能回显请求内容） |
+| 响应没有 `result` 时仍是老形态 | 兼容 `{code:"0", data}` 信封与直给对象（手工注入的响应/网关包装） |
+| 收藏**没有可信总数字段** | 总数 = **完整分页后 ID 去重**；接口上报的 `totalCount`/`totalNum` 只作 `reportedTotal` 记录，绝不当真值。`total` 只在分页走完（`stopReason="exhausted"`）才有值，未走完为 `null`；"已加载 N 首"用 `loadedCount` |
+| 分页到底的判据 | 收藏/歌单发现：**整页返回 = 可能还有下一页**（真接口不发 `hasMore`）；搜索：`hasNextPage === "1"`；历史：不分页（参考只验证了一条查询） |
+| 歌单发现**必须翻页** | 歌曲与歌单混在一个列表里，首页很可能整页都是歌。判停条件照参考：短页、**这一页没带来任何新条目**（`fresh === 0`，新条目含歌曲）、或触到保守上限（10 页 × 200 条）。触到上限 → `hasMore: true`（如实说"没扫完"） |
+| **`contentID` 等线上字段名** | 归一化成内部形状：`contentID→id`、`contentName→name`、`artistNamePairs/artistName→singer`、`albumID/albumName→albumId/albumName`、`picture.*→coverUrl`、`duration→duration`、`totalCount→count`、`contentType→kind`（4/5/7）。**渲染层一行都不用改**（它的读取兜底表认的就是 `id`/`name`/…） |
+| 无 ID 的条目 | 如实丢弃并计数（`skipped`），**绝不编 ID**（列表里出现删不掉的幽灵行比少一行糟得多） |
+| 时长单位 | 真接口的 `duration` 是**秒**（`auditionTime/Begin/End` 才是毫秒，两者不许混用）；取不到就显示"—"，不显示 `0:00` |
+| 自建歌单删除必须 `playlist/delete` | `favorite/delete` 对 type=5 曾返回 `000000` **但没有删掉歌单**——`deletePlaylist` 只打那一个端点，且测试断言"绝不走收藏端点" |
 
-→ 业务接口只能靠**授权联调**或用户在场的授权 probe 确定。因此
-`src/protocols/music.mjs` 采纳**端点注入式**设计：`createMusicApi({endpoints})`，
-未注入的端点返回结构化 `endpoint_unknown`，**不写任何猜测 URL**（测试扫描源码禁止出现
-huawei/dbankcdn 等域名）。
+**单页收藏读取**（`readFavoritesPage`，R8 的滚动加载走这条）应答
+`{page, pageSize, songs, skipped, reportedTotal, hasMore}`；**没有 `total`**：总数是"拼页者"的结论，
+不是单页的结论。
 
-### 2.2 注入契约（端点键名 —— 调用方必须提供）
+#### 2.3.1 播放资源（参考的最终口径覆盖 R4 的猜测）
 
-| 键 | 用途 | 状态 |
-|---|---|---|
-| `favorites` | 收藏列表分页 | 待确认 |
-| `playlistList` | 自建歌单列表 | 待确认 |
-| `playlistDetail` | **歌单曲目（R8 增补）**：与歌单列表分开——列表只有元信息，曲目要单独取 | 待确认 |
-| `playlistDelete` | **自建歌单删除（必须用这个，不能用收藏端点）** | 待确认 |
-| `search` | 搜索 | 待确认 |
-| `album` / `artist` | 专辑 / 歌手详情与曲目 | 待确认 |
-| `history` | 播放历史 | 待确认 |
-| `playback` | 播放地址（含试听信息） | 待确认 |
+**播放地址**：`POST file/bycontentcode`，体 `{contentCode, contentType:"1", qualityType}`，
+`qualityType` 只认 `standard="1"` / `lossless="3"`（别的一律回 `quality_unsupported`，**不猜也不降级**）。
 
-值必须是 `https://` URL；同时 `queryNames` 表集中了请求参数名（`page`/`pageSize`/`keyword`/`id`），
-默认值同样是**待确认**的占位：真实参数名确定后只改这一处。
+| 事实 | 实现处置 |
+|---|---|
+| **顶层 `fileURL` 才是音频** | `parsePlaybackPayload` 只认顶层 `fileURL`；缺失 → `invalid_response`。参考的样本里 `fileInfos` 甚至根本不是音频（`mediaFileType=JSON`、`fileType=18`），**绝不盲用 `fileInfos[0].fileURL`** |
+| `fileInfos` 可能是 JSON 字符串 | 解析失败不抛：降级为 `null` 并记 `file_infos_unparsable` 警告，不影响出音频地址 |
+| **`auditionTime` 不能单独判 30 秒试听** | 参考的会员样本实测 `auditionTime=30000` 却完整可播（MP3/FLAC 全曲解码成功）。`classifyAudition` 要求**两个信号齐备**（`auditionTime > 0` **且** 标志位命中）才判 `auditionLikely` |
+| 音质**不虚标** | `confirmedPlaybackQuality(playQuality, type)`：`"3"+flac → lossless`、`"1"+mp3 → standard`，对不上就是 `unknown` |
+| 播放地址必须落在 CDN 白名单 | 非白名单域 → `unsafe_media_url`（文案只带域名）。白名单与参考**逐字相同**：`dbankcdn.cn` / `tingmall.com` / `kuke.com` |
 
-会话凭据由 R7 通过 `sessionHeaders()` 注入（默认不带任何凭据）。**账号 AT/音乐会话不落盘、不进日志。**
+#### 2.3.2 歌词（R32 起从播放响应推导）
 
-### 2.3 响应语义（实现已按审计事实固化，形状细节待联调）
+参考实现里**没有独立歌词端点**——歌词从**播放响应**里取：
 
-| 事实 | 状态 | 实现处置 |
-|---|---|---|
-| 响应信封含业务错误码（`code`，`0` 为成功） | 待确认 | `decodeEnvelope` 宽容处理：`code` 缺省视为成功，非 0 → `api_error`（带码与 ≤200 字说明，不回显整段响应体） |
-| 列表容器字段名不定 | 待确认 | `extractList` 依次尝试 `list/items/songs/records/tracks`，取不到给空数组 |
-| 歌曲 ID 字段名不定 | 待确认 | `trackIdOf` 依次尝试 `id/songId/musicId/resourceId/trackId`；都没有的条目**如实丢弃并计数**（不编 ID） |
-| **收藏无直接总数字段** | 审计事实 | 总数 = **完整分页后 ID 去重**；接口若上报 `total`，只作 `reportedTotal` 记录，绝不当真值。`total` 只在分页走完（`stopReason="exhausted"`）才有值，未走完为 `null`；"已加载 N 首"用 `loadedCount`（R8 的 UI 必须分开显示） |
-| playback **顶层 `fileURL` 才是音频** | 审计事实 | `parsePlaybackPayload` 只认顶层 `fileURL`；缺失 → `invalid_response` |
-| `fileInfos` 可能是 JSON 字符串 | 审计事实 | `parseFileInfos` 解析失败不抛：降级为 `null` 并记 `file_infos_unparsable` 警告，不影响出音频地址 |
-| **`auditionTime` 不能单独判 30 秒试听** | 审计事实 | `classifyAudition` 要求**两个信号齐备**（`auditionTime > 0` **且** 标志位命中）才判 `auditionLikely`；标志位候选表 `DEFAULT_AUDITION_FLAG_KEYS` 可覆写 |
-| 自建歌单删除必须 `playlist/delete` | 审计事实 | `deletePlaylist` 只打 `playlistDelete` 端点，且测试断言"绝不走收藏端点" |
-| 播放地址必须落在 CDN 白名单 | 本项目约束 | 非白名单域 → `unsafe_media_url`（渲染层反正加载不了，早报错） |
+1. `lyricAddress`（含历史拼写 `lyricAddres`）或 `contentExInfo.lyrics.lyricAddress` /
+   `lineByLineLyric`，且**必须落在 CDN 白名单内**才去下载（有界读取，上限 512 KiB，不跟随跳转）；
+2. 没有地址就看内嵌歌词（`contentExInfo.lyrics` / `lyrics`，**最多剥两层 JSON 字符串**）；
+3. 两者都没有 → `invalid_response`（**不把整段响应体当歌词**塞给渲染层——那只会让歌词窗显示一坨 JSON）。
+
+设置里若显式注入了 `musicEndpoints.lyrics`，`getLyrics` 就直接打那个端点（宽容读候选键）；
+那条路的响应形状**没有实测证据**，所以只在显式注入时使用。
 
 ### 2.4 CDN 域（已确认可达）
 
 | 域 | probe 实测 | 用途 |
 |---|---|---|
-| `*.dbankcdn.cn` | `https://www.dbankcdn.cn/` → 200 | 封面 / 音频 |
-| `*.tingmall.com` | `https://www.tingmall.com/` → 200 | 封面 / 音频 |
-| `*.kuke.com` | `https://www.kuke.com/` → 200 | 封面 / 音频 |
+| `*.dbankcdn.cn` | `https://www.dbankcdn.cn/` → 200 | 封面 / 音频 / 歌词 |
+| `*.tingmall.com` | `https://www.tingmall.com/` → 200 | 封面 / 音频 / 歌词 |
+| `*.kuke.com` | `https://www.kuke.com/` → 200 | 封面 / 音频 / 歌词 |
 
-这三个后缀是 `src/protocols/safe-media-url.mjs` 的白名单，与 `src-tauri/tauri.conf.json` 的 CSP
-`img-src`/`media-src` **同源**，一致性由 `test/safe-media-url.test.mjs` 解析 CSP 行钉死。
+这三个后缀是 `src/protocols/safe-media-url.mjs` 的白名单（与参考实现的 `allowedSuffixes` **逐字相同**），
+与 `src-tauri/tauri.conf.json` 的 CSP `img-src`/`media-src` **同源**，一致性由
+`test/safe-media-url.test.mjs` 解析 CSP 行钉死。歌词资源走同一份白名单。
 
 ### 2.5 主界面 ↔ sidecar 的数据通道（R8 落地）
 
@@ -731,30 +794,41 @@ Rust 镜像见 §3 的 parity 钉）：
 | 频道 | 载荷 | 应答 `data` | 说明 |
 |---|---|---|---|
 | `library:favorites` | `{page, pageSize}` | `{page, pageSize, songs, skipped, reportedTotal, hasMore}` | **应答里没有 `total`**：收藏没有可信总数，总数由渲染层把页拼完后去重得出，未走完就是"已加载 N 首" |
-| `library:playlists` | `{page, pageSize}` | `{playlists, hasMore}` | 歌单元信息 |
-| `library:playlist-detail` | `{playlistId, page, pageSize}` | `{songs, hasMore}` | 走 `playlistDetail` 端点；缺 `playlistId` → `invalid_payload` |
-| `library:search` | `{keyword, page, pageSize}` | `{songs, hasMore}` | 空关键字 → `invalid_payload`（不把坏参数透给协议层） |
+| `library:playlists` | `{page, pageSize}` | `{playlists, hasMore, scanned}` | 歌单元信息。R32 起**协议层会翻页扫完**（歌曲与歌单混在一个列表里，见 §2.3），`hasMore=true` = 触到保守上限没扫完 |
+| `library:playlist-detail` | `{playlistId, page, pageSize}` | `{playlistId, playlist, songs, hasMore}` | 缺 `playlistId` → `invalid_payload`；`playlist` 是歌单元信息（自建/收藏两条路由自动分派，见 §2.3） |
+| `library:search` | `{keyword, page, pageSize}` | `{songs, skipped, reportedTotal, hasMore}` | 空关键字 → `invalid_payload`（不把坏参数透给协议层） |
 | `library:album` / `library:artist` | `{albumId}` / `{artistId}` | `{songs, detail}` | 缺 id → `invalid_payload`；`detail` 是端点的原始回包（`getAlbum`/`getArtist` 原样透出，供后续页面取专辑/歌手元信息） |
-| `library:history` | `{page, pageSize}` | `{songs, hasMore}` | 播放历史 |
+| `library:history` | `{page, pageSize}` | `{songs, skipped, reportedTotal, hasMore}` | 播放历史；`hasMore` 恒为 `false`（参考只验证了一条查询，不承诺无限翻页） |
 
-**端点注入点**（R8 新增，取代"没有写入方"的状态）：设置文档 `data.musicEndpoints`，
-键名 = §2.2 的端点键，值必须是 `https://`。`src/main/music-service.mjs` 只收已知键与非空字符串
-（陌生键/空值一律丢弃），**现在仍是空表** → 每个库页面请求都由协议层如实回
-`endpoint_unknown`，UI 显示"接口尚未配置（待联调确认）。"。这是设计落点：宁可说"没配"，
-也不给出一个看起来是空的收藏夹。
+**端点注入点**：设置文档 `data.musicEndpoints`，键名 = §2.2 的端点键。R32 起语义是三档：
+
+| 设置里的值 | 含义 |
+|---|---|
+| **不写这个键** | 用**默认值**（`src/main/music-service.mjs` 的 `MUSIC_ENDPOINT_DEFAULTS` = 业务域 + §2.2 的路径，参考实测） |
+| 非空 `https://` 字符串 | 覆盖该键（域名变化时不用改代码） |
+| `null` | **显式关闭**该键（离线/排障/测试要一个"确定性不可用"的状态；与 `auth-manager` 的 `loginex: null` 同义） |
+
+陌生键一律丢弃（多收了会让人以为某个接口能用）。全部关闭时每个库页面请求由协议层如实回
+`endpoint_unknown`（消息里会写明是"被显式关闭"还是"尚未确定"），UI 显示"接口尚未配置"。
+**这是设计落点**：宁可说"没配"，也不给出一个看起来是空的收藏夹。
+
+**会话注入**（R32 接通）：`createMusicService({session})` 拿的是**取值函数**（顶层装配时还没登录），
+`{musicSession, userId}` → `{token, snsUserID}` 的映射在 `src/main/music-service.mjs` 的 `sessionOf`
+（唯一翻译点）。没有会话时协议层回结构化 `session_required`（"先登录"），
+**绝不拿匿名请求冒充"你的库是空的"**。
 
 **渲染层的三态纪律**（`src/renderer/features/library/library-state.mjs`，由测试钉住）：
 加载中 → 骨架屏；失败 → `endpoint_unknown` 说"未配置"、其余类别说人话；真的空 → 一句空态。
 **失败绝不复用空态文案**——那会把"连不上"说成"你什么都没有"。
 
-**尚未接线**：`sessionHeaders`（会话凭据注入）没有接——端点未确认前猜 header 名是空转；
-音源/封面链路（CSP `img-src`/`media-src` + CDN 白名单）也留给联调后的任务。
+**仍然未接线**：封面/背景图链路（CSP `img-src` + CDN 白名单已经具备，但曲目投影里还没有一个
+UI 消费者）；音质/试听标注（`actualQuality` 与 `auditionLikely` 已在协议层算出，UI 本任务不显示）。
 
 ### 2.6 播放器 ↔ sidecar 的通道（R9 落地）
 
 | 频道 | 方向 | 载荷 | 应答 / 语义 |
 |---|---|---|---|
-| `playback:resolve-url` | 渲染层 → core（请求） | `{trackId}` | `data` = `parsePlaybackPayload` 的产物 `{url, fileInfos, format, size, bitrate, duration, auditionLikely, signals, warnings}`；缺 `trackId` → `invalid_payload`；端点未配置 → `endpoint_unknown`；地址不在 CDN 白名单 → `unsafe_media_url`（文案只带域名） |
+| `playback:resolve-url` | 渲染层 → core（请求） | `{trackId}` | `data` = `parsePlaybackPayload` 的产物 `{url, fileInfos, format, size, bitrate, duration, actualQuality, auditionLikely, signals, warnings}`；缺 `trackId` → `invalid_payload`；没有音乐会话 → `session_required`（"先登录"）；端点被关/未配 → `endpoint_unknown`；地址不在 CDN 白名单 → `unsafe_media_url`（文案只带域名） |
 | `player:command` | core → 渲染层（广播） | `{command}`，取值 `play`/`pause`/`toggle`/`next`/`previous` | R9 **预登记**、R11 起**真的有人在发**（Rust 侧托盘的播放三项：`toggle`/`previous`/`next`）；渲染层 `features/playback/player-commands.mjs` 执行，认不出的命令回结构化 `invalid_command`，**拒绝且不猜** |
 
 **播放地址的四条纪律**（R9 裁决，逐条在测试里钉住）：
@@ -790,13 +864,14 @@ Rust 镜像见 §3 的 parity 钉）：
 
 1. **歌词来源**：解析适配（`features/lyrics/amll-adapter.ts`：`[offset:]` 补偿 + 翻译行合并）、
    进度同步（`features/lyrics/lyric-sync.mjs`）与 AMLL 面板宿主在本任务交付；
-   **歌词文本通道由 R12 接上**（`playback:lyrics`，见 §2.9）——所以在 R9 那两个提交里
-   面板如实显示"歌词来源尚未接入。"，而 R12 起改口为"歌词来源尚未配置。"（频道已接，
-   缺的是端点）。这不是改文案了事：五档状态与两句失败文案的区分见 §2.9。
-2. **封面/背景图**：曲目投影里没有封面字段（未确认），且 AMLL 对**字符串**地址会自己
-   `fetch` 成 blob（`connect-src` 只有 `'self' ipc:`，会被 CSP 拦）。要接通得先用 `<img>`
-   （`img-src` 白名单）加载再把 `HTMLImageElement` 传进 `BackgroundRender`。
-3. **音质/试听标注**：`auditionLikely` 已在协议层算出，UI 本任务不显示（不虚标音质）。
+   **歌词文本通道由 R12 接上**（`playback:lyrics`，见 §2.9），**R32 起文本来源真的存在了**
+   （从播放响应推导，见 §2.3.2）。这不是改文案了事：五档状态与两句失败文案的区分见 §2.9。
+2. **封面/背景图**：R32 起曲目归一化里**已经有** `coverUrl`（白名单内的 CDN 地址），
+   但渲染层还没有消费者——且 AMLL 对**字符串**地址会自己 `fetch` 成 blob
+   （`connect-src` 只有 `'self' ipc:`，会被 CSP 拦）。要接通得先用 `<img>`（`img-src` 白名单）
+   加载再把 `HTMLImageElement` 传进 `BackgroundRender`。
+3. **音质/试听标注**：`actualQuality` 与 `auditionLikely` 已在协议层算出，UI 本任务不显示
+   （不虚标音质）。
 
 ### 2.7 设置页 ↔ core / 外壳（R10 落地）
 
@@ -1197,7 +1272,9 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 ## 4. 红线（任何后续任务不得越过）
 
 1. 渲染层拿不到 Token；业务 HTTP 只在 sidecar/Rust 侧。
-2. 端点未确认前不写猜测 URL：只登记本文件，代码走注入。
+2. **端点一律注入，代码里只写"已确认"的值**：`src/protocols/*.mjs` 不含域名（路径形状可以写，
+   绝对 URL 必须由 `src/main/*` 注入）；默认值必须是**有实测出处**的那一组，并在本文件登记。
+   未确认的端点不写猜测值（宁可回结构化 `endpoint_unknown`）。
 3. 探针只碰公开资源，不碰账号与私人凭据；产物落 `.probe/`（已 gitignore）。
 4. OAuth 身份 `101444301` 非本项目注册：发布物必须声明，不尝试"修身份"式重试。
 
@@ -1476,3 +1553,31 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
   测试：cargo **239 pass + 0 fail + 1 ignored**、node **708 pass / 0 fail**（渲染层只改注释与文案来源
   说明，无行为改动）、tsc 0 错、vite 三入口构建通过、acceptance 6/0/0。
   真机复验项见 `KNOWN_LIMITATIONS.md` B18-R28。
+- 2026-10-21（Task R32）：**按参考项目全面对齐协议层**（用户指令：参考
+  `talongao/huawei-music-desktop` 修复所有问题，确保歌曲正常播放、歌单列表正确显示）。七项换血：
+  1. **§1.1/§1.2/§1.3 端点与参数**：authorize 换成 `oauth-login.platform.hicloud.com`、
+     token 换成 `oauth-login.cloud.huawei.com`（**两个不同主机**——R4 把它们都登记在
+     `oauth-login1` 上，那只证明了"域可达、路径存在"）；`scope` 换成用户指令的完整 12 项清单；
+     授权 URL 补 `countryCode=cn` / `ui_locales=zh-cn`；兑换表单字段顺序也对齐参考；
+  2. **§1.4 白名单**：条目 = 参考 `LOGIN_HOSTS` 五域；`oauth-login1` 从整域放行**降级**为
+     `loginCallback` 精确例外（保留）；`login.cloud.huawei.com` 移出。Rust 镜像与两侧 parity 同步；
+  3. **§2.1/§2.2 业务端点**：默认端点表 = 业务域 + 参考实测路径（11 个键，`lyrics` 无独立端点）；
+     POST 用 JSON 体 / GET 用查询串；分页 `start`/`limit`（通道的页号在协议层换算）；
+     沿用注入式架构（`protocols/music.mjs` 仍**一个域名都不含**，由源码扫描钉死）；
+     设置 `data.musicEndpoints` 支持覆盖与**显式关闭**（`null`）；
+  4. **§2.3 响应与归一化**：成功判据 = `result.resultCode === "000000"`；线上字段
+     （`contentID`/`contentName`/`picture.*`…）归一化成内部形状（`id`/`name`/`coverUrl`…），
+     **渲染层零改动**；"我的歌单"必须翻页扫完再挑（歌曲与歌单混在一个列表里，`fresh === 0` 才停）；
+  5. **§2.3.1 播放链**：`contentCode/contentType/qualityType` 进 JSON 体（音质只认 standard/lossless，
+     对不上就 `quality_unsupported`）；顶层 `fileURL` 是音频；音质**不虚标**（`actualQuality`
+     要与声明的编码对得上）；
+  6. **§2.3.2 歌词**：参考没有独立歌词端点 → 从播放响应推导（`lyricAddress` 走 CDN 白名单下载，
+     或内嵌 `contentExInfo.lyrics`，最多剥两层 JSON）；设置里显式注入 `lyrics` 时才走独立端点；
+  7. **会话接通**：`createMusicService({session})` 取活会话（`{musicSession,userId}` →
+     `{token,snsUserID}`），`Authorization: Digest`（无 token 调用也带，形状同参考）；
+     没有会话时回 `session_required`（不拿匿名请求冒充"你的库是空的"）。
+  新增 `test/reference-parity.test.mjs`：拿 `.tmp/reference-repo/src/*.mjs` 做**逐字差分**
+  （不确定项按"缺席即跳过"处理，不假装验过）。**未实测**：用本项目账号走完这些请求（要用户在场授权），
+  见 §2.1 第 3 条。
+  测试：cargo **239 pass + 0 fail + 1 ignored**（白名单 3 条断言改写）、node **723 pass / 0 fail**
+  （`test/music.test.mjs` 按新线上形状重写、新增差分用例）、tsc 0 错、acceptance 6/0/0。
