@@ -33,7 +33,7 @@ use tauri::{
 };
 
 use crate::bridge::{CoreError, LYRICS_DOCUMENT, LYRICS_PROGRESS, LYRICS_STATE, APP_NOTICE};
-use crate::commands::{emit_core_event, require_main_window};
+use crate::commands::{emit_core_event, require_main_webview};
 use crate::{LYRICS_WINDOW_LABEL, MAIN_WINDOW_LABEL};
 
 // ---------------------------------------------------------------------------
@@ -534,10 +534,10 @@ pub fn toggle_failure_plan(requested_open: bool, window_visible: bool, reason: &
 #[tauri::command]
 pub async fn core_lyrics_toggle(
     app: AppHandle,
-    window: tauri::Window,
+    webview: tauri::Webview,
     checked: bool,
 ) -> Result<Value, CoreError> {
-    require_main_window(window.label())?;
+    require_main_webview(webview.label())?;
 
     let config = config_of(&app);
     match apply_toggle(&app, &config, checked) {
@@ -564,10 +564,10 @@ pub async fn core_lyrics_toggle(
 #[tauri::command]
 pub async fn core_lyrics_configure(
     app: AppHandle,
-    window: tauri::Window,
+    webview: tauri::Webview,
     config: Option<Value>,
 ) -> Result<Value, CoreError> {
-    require_main_window(window.label())?;
+    require_main_webview(webview.label())?;
 
     let current = config_of(&app);
     let next = current.apply_patch(&config.unwrap_or(Value::Null));
@@ -592,10 +592,10 @@ pub async fn core_lyrics_configure(
 #[tauri::command]
 pub async fn core_lyrics_document(
     app: AppHandle,
-    window: tauri::Window,
+    webview: tauri::Webview,
     document: Value,
 ) -> Result<Value, CoreError> {
-    require_main_window(window.label())?;
+    require_main_webview(webview.label())?;
 
     let Some(object) = document.as_object() else {
         return Err(CoreError::new(
@@ -622,10 +622,10 @@ pub async fn core_lyrics_document(
 #[tauri::command]
 pub async fn core_lyrics_progress(
     app: AppHandle,
-    window: tauri::Window,
+    webview: tauri::Webview,
     progress: Value,
 ) -> Result<Value, CoreError> {
-    require_main_window(window.label())?;
+    require_main_webview(webview.label())?;
 
     let Some(object) = progress.as_object() else {
         return Err(CoreError::new(
@@ -991,7 +991,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} 必须是 async 命令"));
             let body = &production[start..];
             let guard = body
-                .find("require_main_window(")
+                .find("require_main_webview(")
                 .unwrap_or_else(|| panic!("{name} 必须过主窗来源守卫"));
             assert!(guard < 900, "{name} 的守卫要在最前面（守卫={guard}）");
         }

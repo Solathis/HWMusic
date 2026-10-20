@@ -1,22 +1,37 @@
-//! 登录子窗：把**华为官方授权页**铺在引导页正文位置，并把它变成一次可结算的登录尝试。
+//! 登录页宿主：把**华为官方授权页**铺在主窗客户区里（顶部让出应用自己的 header），
+//! 并把它变成一次可结算的登录尝试。
+//!
+//! **宿主形态（R23，用户指令"不开新窗口、在程序中跳转"）**：官方页是**主窗里的第二个 webview**
+//! （`tauri::webview::WebviewBuilder` + `Window::add_child`），不是独立子窗口。于是：
+//!
+//! - 应用自己的 header（含「返回扫码登录」）**始终**在主窗 webview 里、始终可见可点——它是规范几何
+//!   [`LOGIN_VIEW_TOP_INSET`] 让出来的那一条，登录页铺在它下面（R7 的独立子窗做不到这件事：
+//!   子窗是另一个顶层窗口，"返回"要么被盖住、要么得先关窗）；
+//! - 几何是**客户区相对**的物理像素（[`layout_target`]）：没有屏幕坐标、没有跨窗缩放换算；
+//! - "返回"= 关掉这个 webview（[`shutdown`]），主窗一动不动。
 //!
 //! 设计要点（每一条都对应旧仓踩过的坑，见 `docs/API_CONTRACT.md` §1.4/§1.6）：
 //!
-//! 1. **零命令权限**：`capabilities/main.json` 的 `windows` 里没有 `login`，因此官方页调不到本应用
-//!    的任何命令；这里也不给它注入任何脚本（不订阅 `initialization_script`/`eval` 那条路），
-//!    白名单与回调**只靠导航事件**观测。
+//! 1. **零命令权限**：`capabilities/main.json` 的 `windows` 只列 `main`/`lyrics`，官方页那个
+//!    **webview**（label [`LOGIN_WEBVIEW_LABEL`]）不在其中；这里也不给它注入任何脚本
+//!    （不订阅 `initialization_script`/`eval` 那条路），白名单与回调**只靠导航事件**观测。
+//!    R23 追加一条同类前提：**来源守卫按 webview label 判**（见 `commands::require_main_webview`）
+//!    ——同窗之后窗口 label 恒为 `main`，按窗口 label 判等于把守卫让给官方页。
 //! 2. **白名单是显式条目**：`LOGIN_ALLOWED_ORIGINS`/`LOGIN_ALLOWED_URLS` 是 Node 侧
 //!    `src/protocols/login-callback.mjs` 的镜像副本（Rust 无法 import .mjs），
 //!    由 `test/login-parity.test.mjs` 双向钉住；漏条目就是旧仓"扫码成功后卡在 CAS 页"的根因。
 //! 3. **`hms://` 一律拦下不请求**，并把**原样** URL 交给等待方：判真伪是 Node 侧 `isCallback`/
 //!    `consumeCallback` 的唯一职责（宿主预滤或不预滤都安全，见契约 §1.6）。
-//! 4. **双来源**（旧仓缺陷 C1）：导航拦截与窗口关闭两条路**都能**把结论交给等待方，
+//! 4. **双来源**（旧仓缺陷 C1）：导航拦截与"webview 没了"两条路**都能**把结论交给等待方，
 //!    结论槽是 take-once 的（先到者胜、后到者不改写）。只接一条路 → "扫码成功却等超时"。
+//!    R23 起第二条不再是"窗口关闭事件"（同窗宿主没有可被用户关掉的窗），而是每 tick 现问
+//!    `app.get_webview(..)`：查不到即 `Closed`。用户那条正路是 header 的「返回扫码登录」
+//!    → `host:cancel-login` → `Cancelled`。
 //! 5. **双期限**：首载 [`LOGIN_LOAD_DEADLINE_SECS`] 秒打不开官方页 = 独立文案（多半是网络/代理），
 //!    总 [`LOGIN_TIMEOUT_SECS`] 秒 = 扫码超时文案。两条文案不同，处置方式也不同。
 //! 6. **一次性隔离**：每次登录一个随机 `partition` + 独立 webview 数据目录；收场后清浏览数据、
 //!    退避删目录（WebView2 释放句柄有延迟）。下次登录是全新目录，不残留上一次的登录态。
-//! 7. **不阻塞效果线程**：`host:open-login` 立刻返回，真正的等待与收尾在 `login-window` 线程里
+//! 7. **不阻塞效果线程**：`host:open-login` 立刻返回，真正的等待与收尾在 `login-view` 线程里
 //!    （阻塞效果线程会让随后的 `host:cancel-login` 永远送不进来）。
 //!
 //! **已知缺口（不硬绕）**：wry 0.57（tauri 2.12 的 webview 层）只注册 WebView2 的
@@ -24,20 +39,31 @@
 //! 内部发起 `hms://` 跳转，本模块看不到（顶部框架的跳转与 302 都能看到）。关闭这个缺口要么等上游
 //! 拿到帧级事件，要么注入脚本监听——后者是硬边界明令禁止的（登录页零注入），所以这里**如实记录**。
 //! 兜底：即使回调从 iframe 走了、结论没收到，总期限（10 分钟）仍会收口，不会永久挂住。
+//!
+//! **同窗宿主带来的构建代价（如实登记，见报告 §核实）**：`Window::add_child` 与 `WebviewBuilder`
+//! 在 tauri 2.12.4 里由 `unstable` Cargo feature 把关（`src/window/mod.rs:1224`、
+//! `src/webview/mod.rs:261-271`），因此 `Cargo.toml` 开了这个 feature；它的副作用是运行时把
+//! **每个**窗口的内容 webview 建成 `WindowChild`（tauri-runtime-wry `src/lib.rs:4596-4615`），
+//! 主窗/歌词窗由"自动铺满父窗"改成"显式 bounds + 比例跟随"（同文件 `4922-4933`、`4273-4293`）。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use tauri::webview::{NewWindowResponse, PageLoadEvent};
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
+use tauri::{AppHandle, Manager, Webview, WebviewUrl};
 
 use crate::bridge::{CoreError, CoreShared, Effect, APP_NOTICE};
 use crate::{MAIN_WINDOW_LABEL, WebviewDataRoot};
 
-/// 登录窗 label（capabilities 里**故意不列**它：官方页零命令权限）。
-pub const LOGIN_WINDOW_LABEL: &str = "login";
+/// 登录页那个 **webview** 的 label（R23 起：它是主窗的子 webview，不再是窗口）。
+///
+/// 两条要点：
+/// 1. `capabilities/main.json` 里**故意不列**它（列的是 `windows: ["main","lyrics"]`）——官方页零命令权限；
+/// 2. 它与主窗的 label（`main`）**必须不同**：同窗之后 `window.label()` 恒为 `main`，命令层唯一能区分
+///    "这一帧是登录页发的还是主窗发的"的东西就是这个 **webview label**（见 `commands::require_main_webview`）。
+pub const LOGIN_WEBVIEW_LABEL: &str = "login";
 
 /// 顶部内缩（物理像素会按主窗缩放比换算）。
 ///
@@ -57,31 +83,36 @@ pub const LOGIN_LOAD_TIMEOUT_MESSAGE: &str = "无法打开华为官方登录页�
 /// 总超时文案（与 Node 侧的 `LOGIN_TIMEOUT_MESSAGE` 逐字一致，parity 钉住）。
 pub const LOGIN_TOTAL_TIMEOUT_MESSAGE: &str = "登录超时（10 分钟内未完成扫码），请重试。";
 
-/// 并排第二次登录的提示（不并行开第二个窗：只把既有窗拉到前台）。
-pub const LOGIN_IN_PROGRESS_MESSAGE: &str = "已有一次登录正在进行（已把登录窗口拉到前台）";
+/// 并排第二次登录的提示（不并行开第二个登录页：只把既有那个拉到前台）。
+pub const LOGIN_IN_PROGRESS_MESSAGE: &str = "已有一次登录正在进行（已把登录界面拉到前台）";
 
 /// 回调 scheme 的镜像（Node 唯一真源是 `auth.mjs` 的 `OAUTH_REDIRECT_URI`）。
 pub const CALLBACK_SCHEME: &str = "hms";
 
-/// `topInset` 的合法上界：越界值静默接受会把窗摆到屏外，不如结构化拒掉。
+/// `topInset` 的合法上界：越界值静默接受会把登录页摆到客户区之外，不如结构化拒掉。
 pub const MAX_TOP_INSET: f64 = 4096.0;
 
 /// `partition` 的字符集与长度（进文件系统之前必须过这一关）。
 pub const PARTITION_MAX_LEN: usize = 64;
 
-/// 几何钳制下限：主窗被外部压到退化尺寸时也不交出负高度（`set_size` 会失败或建出畸形窗）。
+/// 几何钳制下限：主窗被外部压到退化尺寸时也不交出负高度（`set_bounds` 会失败或建出畸形块）。
 pub const MIN_LOGIN_HEIGHT: f64 = 160.0;
 /// 几何钳制下限（宽）。
 pub const MIN_LOGIN_WIDTH: f64 = 320.0;
 
-/// 跟随主窗几何的轮询间隔：登录窗"铺在主窗内容区上"，主窗一动就要重算。
+/// 跟随主窗几何的轮询间隔：登录页"铺在主窗客户区上"，主窗一动就要重算。
 ///
-/// 为什么轮询而不是订阅主窗的 `WindowEvent`：tauri 每个窗口只有一个事件处理器，
-/// 在 main 窗上注册会与后续任务（托盘 R11 / 歌词 R12 / 窗口状态）抢同一个槽位。
-/// 代价是每 250 毫秒 4 次几何查询（可忽略），换掉一个跨任务的共享可变点。
+/// 为什么轮询而不是订阅主窗的 `Resized`：
+/// 1. `Window::on_window_event`（tauri-2.12.4 `src/window/mod.rs:1276-1281`）**没有注销口子**——
+///    它把运行时的 event id 直接丢掉，而 `Listener::unlisten` 管的是 JS 事件、不是窗口事件。
+///    每次登录挂一个监听器就会永久累积（每个还握着一份 [`LoginSession`]）；
+/// 2. 同窗 webview 本来就**不会**随父窗自动长大：tauri 只对开了 `auto_resize` 的 webview 按比例跟随，
+///    而比例缩放会把 header 那条 48px 一起缩掉（我们要的是"顶部恒让出 48px"）。
+///
+/// 代价是每 250 毫秒几次几何查询（可忽略），换掉一个会累积的注册点与一个跨任务共享点。
 const FOLLOW_TICK: Duration = Duration::from_millis(250);
 
-/// 建窗任务投到主线程后的等待上限（主线程若在忙，宁可结构化失败也不要永久挂住）。
+/// 建登录页任务投到主线程后的等待上限（主线程若在忙，宁可结构化失败也不要永久挂住）。
 const BUILD_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 删目录的退避次数与基数（WebView2 释放用户数据目录有延迟，一把删不掉是常态）。
@@ -94,7 +125,7 @@ pub const LOGIN_ALLOWED_ORIGINS: [&str; 3] = [
     "https://oauth-login1.cloud.huawei.com", // OAuth 授权/令牌服务域
     // R16 增补（真机"登录窗空白"的直接原因）：实探（scripts/probe-qr.mjs）证明授权页拿到
     // `loginType = TICKET` 后会把浏览器跳到 `https://id1.cloud.huawei.com:443/CAS/remoteLogin?…`
-    // → `/CAS/portal/loginAuth.html`。这条导航原先被拦下，窗里就停在一个什么都没渲染的空壳上。
+    // → `/CAS/portal/loginAuth.html`。这条导航原先被拦下，页面上就停在一个什么都没渲染的空壳上。
     // 端口 443 是默认端口，`Url::origin()` 归一化后不带端口，所以这一条同时覆盖 `:443` 的写法。
     "https://id1.cloud.huawei.com", // 华为帐号 CAS 门户域（授权页的落地页）
     "https://login.cloud.huawei.com", // 华为帐号登录（CAS 系，旧域名，仍在跳转链里出现）
@@ -229,7 +260,7 @@ pub fn navigation_for(raw: &str) -> Navigation {
 // 配置校验（纯函数；错误里绝不回显 url 原文）
 // ---------------------------------------------------------------------------
 
-/// 登录窗配置（`host:open-login` 的 payload）。
+/// 登录页配置（`host:open-login` 的 payload）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoginConfig {
     /// 官方授权页 URL（必须 https 且在导航白名单内）
@@ -251,12 +282,12 @@ fn invalid_payload(message: impl Into<String>) -> CoreError {
 pub fn parse_config(payload: &Value) -> Result<LoginConfig, CoreError> {
     let object = payload
         .as_object()
-        .ok_or_else(|| invalid_payload("登录窗配置必须是 JSON 对象"))?;
+        .ok_or_else(|| invalid_payload("登录页配置必须是 JSON 对象"))?;
 
     let url = match object.get("url") {
         Some(Value::String(value)) => value.trim().to_string(),
         Some(_) => return Err(invalid_payload("url 必须是字符串")),
-        None => return Err(invalid_payload("登录窗配置缺少 url")),
+        None => return Err(invalid_payload("登录页配置缺少 url")),
     };
     if url.is_empty() {
         return Err(invalid_payload("url 不能为空"));
@@ -278,7 +309,7 @@ pub fn parse_config(payload: &Value) -> Result<LoginConfig, CoreError> {
     let partition = match object.get("partition") {
         Some(Value::String(value)) => value.clone(),
         Some(_) => return Err(invalid_payload("partition 必须是字符串")),
-        None => return Err(invalid_payload("登录窗配置缺少 partition")),
+        None => return Err(invalid_payload("登录页配置缺少 partition")),
     };
     if !partition_is_safe(&partition) {
         return Err(invalid_payload(format!(
@@ -291,7 +322,7 @@ pub fn parse_config(payload: &Value) -> Result<LoginConfig, CoreError> {
             .as_f64()
             .filter(|inset| inset.is_finite())
             .ok_or_else(|| invalid_payload("topInset 必须是有限数字"))?,
-        None => return Err(invalid_payload("登录窗配置缺少 topInset")),
+        None => return Err(invalid_payload("登录页配置缺少 topInset")),
     };
     if !(0.0..=MAX_TOP_INSET).contains(&top_inset) {
         return Err(invalid_payload(format!(
@@ -318,7 +349,7 @@ pub fn partition_is_safe(partition: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// 登录窗的 webview 数据目录：`<数据根>/webview2/login/<partition>`。
+/// 登录页 webview 的数据目录：`<数据根>/webview2/login/<partition>`。
 ///
 /// 与主窗数据根分开（主窗那份只给主窗用）：登录态、cookie、缓存都锁在这一个一次性目录里，
 /// 收场即删；下次登录换一个 partition，天然隔离。
@@ -337,7 +368,7 @@ pub enum LoginConclusion {
     Callback { url: String },
     /// 用户/渲染层主动取消
     Cancelled,
-    /// 登录窗被关闭（用户关窗、系统关窗、应用退出）
+    /// 登录页没了（应用退出 / 收尾先行；同窗宿主里用户没有可关的窗）
     Closed,
     /// 超过总期限
     TimedOut,
@@ -481,7 +512,7 @@ impl LoginState {
         true
     }
 
-    /// 收尾：放开独占（拆窗完成后才调，避免新窗撞上正在拆除的 label）。幂等。
+    /// 收尾：放开独占（登录页拆完之后才调，避免新建的那个撞上正在拆的 label）。幂等。
     pub fn finish(&self) {
         *lock(&self.active) = None;
     }
@@ -508,33 +539,36 @@ pub struct Rect {
     pub height: f64,
 }
 
-/// 登录窗的目标几何：铺满主窗**内容区**，顶部让出 `top_inset`。
+/// 登录页的目标几何：铺满主窗**客户区**，顶部让出 `top_inset`——**客户区相对坐标**。
+///
+/// 入参是主窗客户区的**物理像素**尺寸（不是屏幕坐标：同窗 webview 的坐标原点就是客户区左上角，
+/// 跨窗那套"屏幕位置 + 缩放比换算"在这里根本不存在——R7 的真机几何偏差就出在那条路上）。
+/// 输出恒以 `x = 0` 为左边界、`y = top_inset` 为顶边（上面那一条留给应用自己的 header，
+/// 「返回扫码登录」就在那儿，它必须始终可见可点）。
 ///
 /// 钳制两条（主窗被外部压到退化尺寸时才会碰到）：
-/// - 高度下限 [`MIN_LOGIN_HEIGHT`] / 宽度下限 [`MIN_LOGIN_WIDTH`]：绝不把负值或零交给 `set_size`；
+/// - 高度下限 [`MIN_LOGIN_HEIGHT`] / 宽度下限 [`MIN_LOGIN_WIDTH`]：绝不把负值或零交给 `set_bounds`；
 /// - 非有限/负输入按 0 处理：合成器偶发退化值不该变成 NaN 几何。
-pub fn layout_target(content: Rect, top_inset: f64) -> Rect {
+pub fn layout_target(client_width: f64, client_height: f64, top_inset: f64) -> Rect {
     let sane = |value: f64| if value.is_finite() && value > 0.0 { value } else { 0.0 };
     let inset = sane(top_inset);
-    let x = sane(content.x);
-    let y = sane(content.y);
-    let width = sane(content.width);
-    let height = sane(content.height);
+    let width = sane(client_width);
+    let height = sane(client_height);
     Rect {
-        x,
-        y: y + inset,
+        x: 0.0,
+        y: inset,
         width: width.max(MIN_LOGIN_WIDTH),
         height: (height - inset).max(MIN_LOGIN_HEIGHT),
     }
 }
 
 // ---------------------------------------------------------------------------
-// 建窗 / 等待 / 收尾（需要 tauri 运行时）
+// 建登录页 / 等待 / 收尾（需要 tauri 运行时）
 // ---------------------------------------------------------------------------
 
 /// `host:open-login` 的入口（在效果线程上调用，**必须立刻返回**）。
 ///
-/// 返回 `Ok(())` = 已交给 `login-window` 线程（它在窗收场后答复这一帧，调用方不得再写第二次）；
+/// 返回 `Ok(())` = 已交给 `login-view` 线程（它在登录页收场后答复这一帧，调用方不得再写第二次）；
 /// `Err` = 连窗都没开起来，结构化错误直接答复。
 pub fn open_login(
     app: &AppHandle,
@@ -546,7 +580,7 @@ pub fn open_login(
     let data_root = app
         .try_state::<WebviewDataRoot>()
         .map(|state| state.0.clone())
-        .ok_or_else(|| CoreError::new("internal", "数据根未登记：登录窗无法确定 webview 数据目录"))?;
+        .ok_or_else(|| CoreError::new("internal", "数据根未登记：登录页无法确定 webview 数据目录"))?;
     let state = app
         .try_state::<Arc<LoginState>>()
         .map(|state| Arc::clone(&state))
@@ -554,7 +588,7 @@ pub fn open_login(
 
     let session = LoginSession::new();
     if !state.begin(Arc::clone(&session)) {
-        focus_login_window(app);
+        focus_login_view(app);
         return Err(CoreError::new("login_in_progress", LOGIN_IN_PROGRESS_MESSAGE));
     }
 
@@ -565,9 +599,9 @@ pub fn open_login(
     // 线程里用一份 Arc，外面留一份用于"线程都起不来"这条路的收尾
     let thread_state = Arc::clone(&state);
     let spawned = std::thread::Builder::new()
-        .name("login-window".to_string())
+        .name("login-view".to_string())
         .spawn(move || {
-            run_login_window(
+            run_login_view(
                 app_handle,
                 shared,
                 request_id,
@@ -604,8 +638,8 @@ pub fn cancel_login(app: &AppHandle) -> Result<bool, CoreError> {
     }
 }
 
-/// 登录线程的正体：建窗 → 等结论 → **先答复等待方** → 拆窗清理 → 放开独占。
-fn run_login_window(
+/// 登录线程的正体：建登录页 → 等结论 → **先答复等待方** → 拆登录页清理 → 放开独占。
+fn run_login_view(
     app: AppHandle,
     shared: Arc<CoreShared>,
     request_id: String,
@@ -615,24 +649,24 @@ fn run_login_window(
     state: Arc<LoginState>,
     session: Arc<LoginSession>,
 ) {
-    let window = match create_login_window(&app, &config, &data_root, &login_data, &session) {
-        Ok(window) => window,
+    let webview = match create_login_view(&app, &config, &data_root, &login_data, &session) {
+        Ok(webview) => webview,
         Err(error) => {
-            // 建窗失败**不是**登录结论，而是宿主错误：如实回结构化错误帧（带真实原因），
+            // 建登录页失败**不是**登录结论，而是宿主错误：如实回结构化错误帧（带真实原因），
             // 而不是塞一句"打不开官方页，请检查网络或代理"——那是另一回事，处置方式也不同。
             // 用户点一次登录什么都没发生是最难排查的故障，所以这里必须留痕。
-            log::warn!("登录窗建不起来：{error}");
+            log::warn!("登录页建不起来：{error}");
             // 先答复、再善后（与成功路径同一条纪律）：退避删目录最长要等约 1.5 秒，
             // 不能让等待方陪着等——何况"删目录失败"的结论不该改变这次登录的答复。
             respond(&shared, &request_id, Err(error));
-            // `create_dir_all(login_data)` 在建窗**之前**就跑了：`build()`/`show()` 失败时目录已经
-            // 在那儿，而这条路上 `shutdown_window` 永远不会被调用 → 就地尽力清一次（终审 C）。
+            // `create_dir_all(login_data)` 在建登录页**之前**就跑了：建不出来时目录已经在那儿，
+            // 而这条路上 `shutdown_login_view` 永远不会被调用 → 就地尽力清一次（终审 C）。
             for failure in abandon_build_data_dir(&login_data) {
                 if failure.needs_user_notice() {
-                    log::warn!("建窗失败后的目录善后有残留：{}", failure.message());
+                    log::warn!("建登录页失败后的目录善后有残留：{}", failure.message());
                     announce_failure(&app, &shared, &failure.message());
                 } else {
-                    log::warn!("建窗失败后的目录善后未竟（不打扰用户）：{}", failure.message());
+                    log::warn!("建登录页失败后的目录善后未竟（不打扰用户）：{}", failure.message());
                 }
             }
             state.finish();
@@ -642,26 +676,26 @@ fn run_login_window(
 
     let conclusion = wait_for_conclusion(&app, &session, config.top_inset);
 
-    // **先答复、再拆窗**（顺序是硬要求）：拆窗要删目录、要退避重试，可能失败；
-    // 若因为拆窗失败而不答复，Node 侧就变成"扫码成功却等超时"——旧仓缺陷 C1 的另一种写法。
+    // **先答复、再拆登录页**（顺序是硬要求）：拆要删目录、要退避重试，可能失败；
+    // 若因为拆失败而不答复，Node 侧就变成"扫码成功却等超时"——旧仓缺陷 C1 的另一种写法。
     respond(&shared, &request_id, Ok(conclusion.to_payload()));
 
-    for failure in shutdown_window(&app, &window, &login_data) {
+    for failure in shutdown_login_view(&app, &webview, &login_data) {
         if failure.needs_user_notice() {
-            // 只有真残留才打扰用户（窗口还在 / 目录没删掉）。
-            log::warn!("登录窗收尾失败（有残留）：{}", failure.message());
+            // 只有真残留才打扰用户（webview 还在 / 目录没删掉）。
+            log::warn!("登录页收尾失败（有残留）：{}", failure.message());
             announce_failure(&app, &shared, &failure.message());
         } else {
-            // 窗口已经消失的路径上（vanish-poll 判 Closed，或收尾前用户/系统已关窗）
+            // 登录页已经消失的路径上（vanish-poll 判 Closed，或收尾前它已被拆掉）
             // `clear_all_browsing_data`/`close` 必然失败，而整个一次性目录照样被删掉——
             // 这是预期失败，不是残留：只留日志，绝不弹一条让用户去清理一个刚被删掉的东西。
-            log::warn!("登录窗收尾未竟（预期失败，不打扰用户）：{}", failure.message());
+            log::warn!("登录页收尾未竟（预期失败，不打扰用户）：{}", failure.message());
         }
     }
     state.finish();
 }
 
-/// 等结论：结论槽 + 窗口消失兜底 + 双期限 + 每 tick 跟随主窗几何。
+/// 等结论：结论槽 + 登录页消失兜底 + 双期限 + 每 tick 跟随主窗几何。
 fn wait_for_conclusion(app: &AppHandle, session: &Arc<LoginSession>, top_inset: f64) -> LoginConclusion {
     let started = Instant::now();
     let mut layout_warned = false;
@@ -669,8 +703,9 @@ fn wait_for_conclusion(app: &AppHandle, session: &Arc<LoginSession>, top_inset: 
         if let Some(conclusion) = session.conclusion() {
             return conclusion;
         }
-        // 窗口没了而结论槽还空着：兜底判 Closed（事件路径之外的第二条来源，绝不让等待方挂到超时）
-        if app.get_webview_window(LOGIN_WINDOW_LABEL).is_none() {
+        // 登录页没了而结论槽还空着：兜底判 Closed（事件路径之外的第二条来源，绝不让等待方挂到超时）。
+        // 同窗宿主里这不是"用户关了窗"，而是"那个 webview 被拆掉了"（应用退出 / 收尾先行）。
+        if app.get_webview(LOGIN_WEBVIEW_LABEL).is_none() {
             session.settle(LoginConclusion::Closed);
             return session.conclusion().unwrap_or(LoginConclusion::Closed);
         }
@@ -686,36 +721,36 @@ fn wait_for_conclusion(app: &AppHandle, session: &Arc<LoginSession>, top_inset: 
         }
         if let Err(error) = follow_main_window(app, top_inset) {
             if !layout_warned {
-                log::warn!("登录窗未能跟随主窗几何：{error}（后续不再重复记录）");
+                log::warn!("登录页未能跟随主窗几何：{error}（后续不再重复记录）");
                 layout_warned = true;
             }
         }
     }
 }
 
-/// 建窗（投到主线程执行：tao 的窗口创建要在事件循环线程上）。
-fn create_login_window(
+/// 建登录页（投到主线程执行：webview 的创建要在事件循环线程上）。
+fn create_login_view(
     app: &AppHandle,
     config: &LoginConfig,
     data_root: &Path,
     login_data: &Path,
     session: &Arc<LoginSession>,
-) -> Result<WebviewWindow, CoreError> {
+) -> Result<Webview, CoreError> {
     let url = tauri::Url::parse(&config.url)
         .map_err(|_| invalid_payload("url 解析不了（parse_config 之后不该发生）"))?;
 
-    // 目录必须先建：WebView2 不会自建，缺目录时建窗直接 `os error 5`（拒绝访问）。
+    // 目录必须先建：WebView2 不会自建，缺目录时建 webview 直接 `os error 5`（拒绝访问）。
     std::fs::create_dir_all(login_data).map_err(|source| {
         CoreError::new(
             "internal",
-            format!("登录窗数据目录建不出来（{source}）：登录无法开始"),
+            format!("登录页数据目录建不出来（{source}）：登录无法开始"),
         )
     })?;
 
-    // 代理在**建窗时**读取一次 → 改代理要重启应用才生效（与主窗一致，R6 已知限制）。
+    // 代理在**建登录页时**读取一次 → 改代理要重启应用才生效（与主窗一致，R6 已知限制）。
     let proxy = crate::proxy_url_argument(crate::webview_proxy::resolve_for_webview(
         data_root,
-        LOGIN_WINDOW_LABEL,
+        LOGIN_WEBVIEW_LABEL,
     ));
 
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -725,7 +760,6 @@ fn create_login_window(
     let login_data_for_discard = login_data.to_path_buf();
     let nav_session = Arc::clone(session);
     let load_session = Arc::clone(session);
-    let close_session = Arc::clone(session);
     let top_inset = config.top_inset;
 
     app.run_on_main_thread(move || {
@@ -736,70 +770,73 @@ fn create_login_window(
             proxy,
             nav_session,
             load_session,
-            close_session,
             top_inset,
         );
         // 交付守卫：等待方可能已经走了（`BUILD_TIMEOUT` 超时，或它先返回了 Err）。那时 `send` 会把
-        // 刚建出来的窗**原样还回来**——必须销毁，否则这个晚到的闭包会留下一个无人等待、无人管理的
-        // 登录窗（`LoginState` 已 finish，用户再点登录只会撞 duplicate-label）。
-        match deliver_build_result(sender.send(built), |window| {
-            discard_orphan_login_window(&window, &login_data_for_discard)
+        // 刚建出来的登录页**原样还回来**——必须关掉，否则这个晚到的闭包会留下一个无人等待、无人管理的
+        // 登录页（`LoginState` 已 finish，用户再点登录只会撞 duplicate-label）。
+        match deliver_build_result(sender.send(built), |webview| {
+            discard_orphan_login_window(&webview, &login_data_for_discard)
         }) {
             BuildDelivery::Delivered | BuildDelivery::NothingBuilt => {}
             BuildDelivery::OrphanDiscarded => log::warn!(
-                "登录窗建出来了，但等待方已收场（多半是建窗超时）：已销毁这个没人等的窗并删掉它的数据目录"
+                "登录页建出来了，但等待方已收场（多半是建页超时）：已关掉这个没人等的登录页并删掉它的数据目录"
             ),
             BuildDelivery::OrphanLeftBehind(reason) => log::warn!(
-                "登录窗建出来了但等待方已收场，且没能清干净（{reason}）：窗口或数据目录可能残留"
+                "登录页建出来了但等待方已收场，且没能清干净（{reason}）：登录页或数据目录可能残留"
             ),
         }
     })
     .map_err(|source| {
         CoreError::new(
             "internal",
-            format!("建窗任务排不到主线程（{source}）：登录无法开始"),
+            format!("建登录页任务排不到主线程（{source}）：登录无法开始"),
         )
     })?;
 
     let outcome = receiver.recv_timeout(BUILD_TIMEOUT);
-    // 等待方一旦收场就**立刻扔掉接收端**：此后闭包的 `send` 必然失败，它建出来的窗就落进交付守卫
-    // 手里被销毁。若把接收端留到函数返回时才析构，中间那一瞬晚到的 `send` 仍可能"成功"——
-    // 窗被丢进一个没人再读的通道，照样是孤儿窗（这正是本次要堵的那个洞）。
+    // 等待方一旦收场就**立刻扔掉接收端**：此后闭包的 `send` 必然失败，它建出来的登录页就落进交付守卫
+    // 手里被关掉。若把接收端留到函数返回时才析构，中间那一瞬晚到的 `send` 仍可能"成功"——
+    // 登录页被丢进一个没人再读的通道，照样是孤儿（这正是本次要堵的那个洞）。
     drop(receiver);
 
     match outcome {
-        Ok(Ok(window)) => Ok(window),
+        Ok(Ok(webview)) => Ok(webview),
         Ok(Err(error)) => Err(error),
         Err(_) => {
-            // 主线程忙到超时：排队的闭包稍后仍会执行，它会建出、显示并聚焦一个无人等待的窗。
+            // 主线程忙到超时：排队的闭包稍后仍会执行，它会建出并聚焦一个无人等待的登录页。
             // 闭包侧的交付守卫兜住"稍后才建出来"的那种；这里再清一次"已经建出来但还没交付"的那种，
-            // 两道防线都不留孤儿窗（此时 `LoginState` 仍是本次登录的，label 不会被别人占用）。
-            discard_pending_login_window(app);
+            // 两道防线都不留孤儿（此时 `LoginState` 仍是本次登录的，label 不会被别人占用）。
+            discard_pending_login_view(app);
             Err(CoreError::new(
                 "internal",
-                "登录窗建窗任务超时（主线程没有回应）：登录无法开始",
+                "登录页建页任务超时（主线程没有回应）：登录无法开始",
             ))
         }
     }
 }
 
-/// 尽力清掉一个"可能已经建出来、但已经没人等待"的登录窗（建窗超时那条路专用）。
+/// 尽力关掉一个"可能已经建出来、但已经没人等待"的登录页（建页超时那条路专用）。
 ///
 /// 只写日志不发 `app:notice`：这条路上用户已经拿到结构化错误了，残留与否不影响他的下一步。
-/// **这个函数只销毁窗口、不删数据目录**：闭包可能正在用那个目录建 WebView2，并发删会把它弄坏。
-/// 目录由 [`run_login_window`] 的 Err 支用退避删除兜底（那里对"删不掉"仍按 [`ShutdownFailure::DataDir`]
-/// 分级——目录里可能真有 cookie）；并发删的最坏结果是那个晚到的闭包建不出窗，而那比留下一个
-/// 无人等待的孤儿窗更好；窗真的建出来了的话，交付守卫也会连目录一起清掉。
-fn discard_pending_login_window(app: &AppHandle) {
-    let Some(window) = app.get_webview_window(LOGIN_WINDOW_LABEL) else {
+/// **这个函数只关 webview、不删数据目录**：闭包可能正在用那个目录建 WebView2，并发删会把它弄坏。
+/// 目录由 [`run_login_view`] 的 Err 支用退避删除兜底（那里对"删不掉"仍按 [`ShutdownFailure::DataDir`]
+/// 分级——目录里可能真有 cookie）；并发删的最坏结果是那个晚到的闭包建不出登录页，而那比留下一个
+/// 无人等待的孤儿页更好；页真的建出来了的话，交付守卫也会连目录一起清掉。
+fn discard_pending_login_view(app: &AppHandle) {
+    let Some(webview) = app.get_webview(LOGIN_WEBVIEW_LABEL) else {
         return; // 还没建出来：闭包侧的交付守卫会接住它
     };
-    if let Err(source) = window.discard() {
-        log::warn!("建窗超时留下的孤儿登录窗未能销毁（{source}）：窗口可能残留在任务管理器里");
+    if let Err(source) = webview.discard() {
+        log::warn!("建页超时留下的孤儿登录页未能关掉（{source}）：它可能还挂在主窗上");
     }
 }
 
-/// 真正调用 tauri 建窗（在主线程上跑）。
+/// 真正调用 tauri 建登录页（在主线程上跑）。
+///
+/// 宿主是**主窗的第二个 webview**：几何在**建的时候就定死**（`add_child` 的 position/size 参数），
+/// 之后由 [`follow_main_window`] 每 tick 重算——同窗 webview 不会随父窗自动长大，也不需要
+/// （`auto_resize` 是比例缩放，会把 header 那条 48px 一起缩掉）。
 #[allow(clippy::too_many_arguments)]
 fn build_on_main_thread(
     app: &AppHandle,
@@ -808,39 +845,48 @@ fn build_on_main_thread(
     proxy: Option<tauri::Url>,
     nav_session: Arc<LoginSession>,
     load_session: Arc<LoginSession>,
-    close_session: Arc<LoginSession>,
     top_inset: f64,
-) -> Result<WebviewWindow, CoreError> {
-    let title = format!("{} · 华为帐号登录", display_name(app));
+) -> Result<Webview, CoreError> {
+    let main = app.get_window(MAIN_WINDOW_LABEL).ok_or_else(|| {
+        CoreError::new(
+            "internal",
+            "主窗不在了：登录页没有可挂的地方（同窗宿主）",
+        )
+    })?;
+
+    // 建之前先把目标几何算出来：`add_child` 一步就把登录页摆到最终位置，
+    // 于是不存在"先闪一下左上角再搬过去"的窗口期（R7 用 `visible(false)` + `show()` 达到同一目的，
+    // 同窗宿主没有那一步，也不需要）。
+    let target = main_layout_target(&main, top_inset)?;
 
     // R16：把这次登录要打开的地址记下来（**只记形状**：origin+path+参数名，见 describe_navigation_for_log）。
-    // 真机"登录窗空白"当天，日志里缺的正是这一行：没有任何一条记录说得出"窗里到底停在哪一页"。
+    // 真机"登录页空白"当天，日志里缺的正是这一行：没有任何一条记录说得出"页面上到底停在哪一页"。
     log::info!(
-        "登录窗创建：url={} partition={} topInset={}",
-        describe_navigation_for_log(&url.as_str()),
+        "登录页创建（主窗内第二 webview）：url={} partition={} topInset={} rect=({},{},{},{})",
+        describe_navigation_for_log(url.as_str()),
         config_partition_hint(&login_data),
-        top_inset
+        top_inset,
+        target.x,
+        target.y,
+        target.width,
+        target.height
     );
 
-    let mut builder = WebviewWindowBuilder::new(app, LOGIN_WINDOW_LABEL, WebviewUrl::External(url))
-        .title(title)
-        .decorations(false)
-        .skip_taskbar(true)
-        .visible(false) // 先摆好几何再显示：避免在左上角闪一下
+    let mut builder = WebviewBuilder::new(LOGIN_WEBVIEW_LABEL, WebviewUrl::External(url))
         .data_directory(login_data)
         // 白名单 + hms:// 拦截全部走导航事件（登录页零注入：不订阅 initialization_script 那条路）
         .on_navigation(move |url| {
             let decision = navigation_for(url.as_str());
             let described = describe_navigation_for_log(url.as_str());
             match &decision {
-                // 拦下必须留痕：这是"窗里为什么是空白/为什么没动"的第一手证据
+                // 拦下必须留痕：这是"页面为什么是空白/为什么没动"的第一手证据
                 Navigation::Block => log::warn!(
-                    "登录窗拦下一次不在白名单里的导航：{described}（如果窗里是空白页，多半就是这一步被拦下的）"
+                    "登录页拦下一次不在白名单里的导航：{described}（如果页面上是空白，多半就是这一步被拦下的）"
                 ),
                 Navigation::Callback(_) => {
-                    log::info!("登录窗收到登录回调：{described}（交给 core 判定真伪）")
+                    log::info!("登录页收到登录回调：{described}（交给 core 判定真伪）")
                 }
-                Navigation::Allow => log::debug!("登录窗导航放行：{described}"),
+                Navigation::Allow => log::debug!("登录页导航放行：{described}"),
             }
             match decision {
                 Navigation::Callback(original) => {
@@ -855,18 +901,18 @@ fn build_on_main_thread(
         .on_new_window(|_url, _features| NewWindowResponse::Deny)
         // 首载/失败都要记：只认 Finished 的话，"页面开始加载了但一直没完成"这件事在日志里
         // 就是一片空白（首载 30 秒超时那条结论到了，却没人知道卡在哪一页）。
-        .on_page_load(move |_window, payload| {
+        .on_page_load(move |_webview, payload| {
             let described = describe_navigation_for_log(payload.url().as_str());
             match payload.event() {
-                PageLoadEvent::Started => log::info!("登录窗开始加载：{described}"),
+                PageLoadEvent::Started => log::info!("登录页开始加载：{described}"),
                 PageLoadEvent::Finished => {
-                    log::info!("登录窗加载完成：{described}");
+                    log::info!("登录页加载完成：{described}");
                     load_session.mark_loaded();
                 }
             }
         });
 
-    // debug 构建给登录窗开 devtools：真机上"空白窗"的 console/网络错误只有在这里看得见。
+    // debug 构建给登录页开 devtools：真机上"空白页"的 console/网络错误只有在这里看得见。
     // release 不开：官方登录页在生产环境不该多出一个可调试面板（那是身份边界上的输入面）。
     #[cfg(debug_assertions)]
     {
@@ -876,50 +922,19 @@ fn build_on_main_thread(
     if let Some(proxy) = proxy {
         builder = builder.proxy_url(proxy);
     }
-    if let Some(main) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        builder = builder.parent(&main).map_err(|source| {
-            CoreError::new("internal", format!("登录窗挂不上主窗（{source}）"))
-        })?;
-    }
 
-    let window = builder
-        .build()
-        .map_err(|source| CoreError::new("internal", format!("登录窗建不起来（{source}）")))?;
-
-    // 双来源之一：窗口关闭。CloseRequested（用户/系统要求关）与 Destroyed（已销毁）都算 Closed。
-    {
-        let close_session = Arc::clone(&close_session);
-        window.on_window_event(move |event| {
-            if matches!(
-                event,
-                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
-            ) {
-                close_session.settle(LoginConclusion::Closed);
-            }
-        });
+    let webview = main
+        .add_child(
+            builder,
+            tauri::PhysicalPosition::new(target.x.round() as i32, target.y.round() as i32),
+            tauri::PhysicalSize::new(target.width.round() as u32, target.height.round() as u32),
+        )
+        .map_err(|source| CoreError::new("internal", format!("登录页建不起来（{source}）")))?;
+    // 把焦点交给官方页（用户在它里面扫/输）：失败只留痕——页已经建好且能点，聚焦失败不该让整次登录失败。
+    if let Err(source) = webview.set_focus() {
+        log::warn!("登录页没能拿到焦点（{source}）：用户可能要自己点一下页面");
     }
-
-    if let Err(error) = apply_layout(app, &window, top_inset) {
-        log::warn!("登录窗几何未能按主窗内容区摆放：{error}");
-    }
-    // `show()` 失败发生在 `build()` **之后**：窗已经在 label 表里了，直接返回 Err 就留下一个
-    // 谁也管不到的窗（后续重试撞 duplicate-label）——所以先销毁再返回错误。
-    if let Err(source) = window.show() {
-        return Err(abandon_unmanaged_window(
-            &window,
-            CoreError::new("internal", format!("登录窗显示不出来（{source}）")),
-        ));
-    }
-    let _ = window.set_focus();
-    Ok(window)
-}
-
-/// 应用名（标题用），拿不到就退回 label。
-fn display_name(app: &AppHandle) -> String {
-    app.config()
-        .product_name
-        .clone()
-        .unwrap_or_else(|| MAIN_WINDOW_LABEL.to_string())
+    Ok(webview)
 }
 
 /// 日志里的分区名（一次性数据目录的最后一段）：只为让"这次登录用的是哪个目录"可追。
@@ -929,50 +944,50 @@ fn config_partition_hint(dir: &Path) -> String {
         .unwrap_or_else(|| "(未知)".to_string())
 }
 
-/// 把登录窗摆到主窗内容区（顶部让出 `top_inset`，单位 CSS 像素 → 物理像素按主窗缩放比换算）。
-fn apply_layout(app: &AppHandle, window: &WebviewWindow, top_inset: f64) -> Result<(), CoreError> {
-    let main = app
-        .get_webview_window(MAIN_WINDOW_LABEL)
-        .ok_or_else(|| CoreError::new("internal", "主窗不在了：无法计算登录窗几何"))?;
+/// 主窗此刻的登录页目标几何（**客户区相对**物理像素）。
+///
+/// `top_inset` 的单位是 **CSS 像素**（唯一真源 [`LOGIN_VIEW_TOP_INSET`]），这里按主窗缩放比换算成
+/// 物理像素——同窗 webview 的坐标系就是物理像素，没有跨窗换算那一步。
+fn main_layout_target(main: &tauri::Window, top_inset: f64) -> Result<Rect, CoreError> {
     let scale = main.scale_factor().unwrap_or(1.0).max(0.1);
-    let position = main
-        .inner_position()
-        .map_err(|source| CoreError::new("internal", format!("取主窗位置失败：{source}")))?;
     let size = main
         .inner_size()
-        .map_err(|source| CoreError::new("internal", format!("取主窗尺寸失败：{source}")))?;
-
-    let target = layout_target(
-        Rect {
-            x: f64::from(position.x),
-            y: f64::from(position.y),
-            width: f64::from(size.width),
-            height: f64::from(size.height),
-        },
+        .map_err(|source| CoreError::new("internal", format!("取主窗客户区尺寸失败：{source}")))?;
+    Ok(layout_target(
+        f64::from(size.width),
+        f64::from(size.height),
         top_inset * scale,
-    );
+    ))
+}
 
-    window
+/// 把登录页摆到主窗客户区（顶部让出 header 那一条）。
+fn apply_layout(app: &AppHandle, webview: &Webview, top_inset: f64) -> Result<(), CoreError> {
+    let main = app
+        .get_window(MAIN_WINDOW_LABEL)
+        .ok_or_else(|| CoreError::new("internal", "主窗不在了：无法计算登录页几何"))?;
+    let target = main_layout_target(&main, top_inset)?;
+
+    webview
         .set_position(tauri::PhysicalPosition::new(
             target.x.round() as i32,
             target.y.round() as i32,
         ))
-        .map_err(|source| CoreError::new("internal", format!("摆放登录窗失败：{source}")))?;
-    window
+        .map_err(|source| CoreError::new("internal", format!("摆放登录页失败：{source}")))?;
+    webview
         .set_size(tauri::PhysicalSize::new(
             target.width.round() as u32,
             target.height.round() as u32,
         ))
-        .map_err(|source| CoreError::new("internal", format!("设置登录窗尺寸失败：{source}")))?;
+        .map_err(|source| CoreError::new("internal", format!("设置登录页尺寸失败：{source}")))?;
     Ok(())
 }
 
-/// 跟随主窗 geometry（登录窗"铺在主窗内容区上"：主窗一动就要重算）。
+/// 跟随主窗几何（登录页"铺在主窗客户区上"：主窗一动就要重算）。
 pub fn follow_main_window(app: &AppHandle, top_inset: f64) -> Result<(), CoreError> {
-    let window = app
-        .get_webview_window(LOGIN_WINDOW_LABEL)
-        .ok_or_else(|| CoreError::new("internal", "登录窗已关闭：无需跟随"))?;
-    apply_layout(app, &window, top_inset)
+    let webview = app
+        .get_webview(LOGIN_WEBVIEW_LABEL)
+        .ok_or_else(|| CoreError::new("internal", "登录页已拆掉：无需跟随"))?;
+    apply_layout(app, &webview, top_inset)
 }
 
 /// 收尾各步的原始结果（拆成数据就是为了让分级判定成为**纯函数**，不依赖真 GUI 也能测）。
@@ -982,9 +997,9 @@ pub struct ShutdownOutcome {
     pub clear_browsing_data: Result<(), String>,
     /// `close` 的结果
     pub close: Result<(), String>,
-    /// `close` 之后窗口是否还在（还在才需要 destroy）
+    /// `close` 之后登录页是否还在 tauri 的 webview 表里（还在才需要再关一次）
     pub still_present: bool,
-    /// `destroy` 的结果（只在 `still_present` 为真时才被采纳）
+    /// 再关一次的结果（只在 `still_present` 为真时才被采纳）
     pub destroy: Result<(), String>,
     /// 删数据目录的失败原因（`None` = 已清干净或本来就不存在）
     pub data_dir: Option<String>,
@@ -1016,7 +1031,7 @@ pub enum ShutdownFailure {
 impl ShutdownFailure {
     /// 是否值得广播 `app:notice` 打扰用户：**只有真残留才值得**。
     ///
-    /// 为什么"浏览数据没清掉"与"关闭调用失败"不算：`shutdown_window` 跑在"先答复、再拆窗"之后，
+    /// 为什么"浏览数据没清掉"与"关闭调用失败"不算：`shutdown_login_view` 跑在"先答复、再拆登录页"之后，
     /// 到达这里时窗口往往已经被用户或系统关掉了（"窗口消失"轮询判 Closed 的路径更是必然），
     /// 这种句柄失效的失败**每次都发生**且什么也没留下——[`remove_dir_with_backoff`] 会把整个
     /// 一次性数据目录端掉（旧仓文案却让用户去"手动清理"一个刚被删掉的东西）。
@@ -1031,16 +1046,16 @@ impl ShutdownFailure {
     pub fn message(&self) -> String {
         match self {
             Self::BrowsingData(source) => format!(
-                "登录窗浏览数据未能清除（{source}）：本次的一次性数据目录会被整棵删掉，正常收尾不留残留"
+                "登录页浏览数据未能清除（{source}）：本次的一次性数据目录会被整棵删掉，正常收尾不留残留"
             ),
             Self::Close(source) => {
-                format!("登录窗关闭调用失败（{source}）：改用强制销毁，这一步失败本身不代表残留")
+                format!("登录页关闭调用失败（{source}）：会再关一次，这一步失败本身不代表残留")
             }
             Self::Destroy(source) => {
-                format!("登录窗销毁失败（{source}）：窗口可能残留在任务管理器里")
+                format!("登录页关不掉了（{source}）：它可能还铺在主窗上，重启应用可清")
             }
             Self::DataDir(source) => format!(
-                "登录窗临时数据目录未能删除（{source}）：下次登录会另建新目录（partition 一次性），\
+                "登录页临时数据目录未能删除（{source}）：下次登录会另建新目录（partition 一次性），\
                  但该目录里可能残留本次的浏览数据，建议手动清理"
             ),
         }
@@ -1067,19 +1082,26 @@ pub fn shutdown_failures(outcome: &ShutdownOutcome) -> Vec<ShutdownFailure> {
     failures
 }
 
-/// 收尾：清浏览数据 → close（必要时 destroy）→ 退避删数据目录。
+/// 收尾：清浏览数据 → close（还在就再关一次）→ 退避删数据目录。
 ///
-/// 顺序不能换：浏览数据必须在 webview 还活着时清（销毁后就够不着了）。
-pub fn shutdown_window(
+/// 顺序不能换：浏览数据必须在 webview 还活着时清（拆掉后就够不着了）。
+///
+/// **同窗宿主没有"窗口关闭"那一步**：tauri 对子 webview 只有一条拆解路（`Webview::close()`
+/// → 运行时的 `WebviewMessage::Close` → 从宿主窗的 webview 表里摘掉，最后一个 `Rc` 掉下去时
+/// wry 关掉 WebView2 控制器）。于是 [`ShutdownOutcome::destroy`] 这一格的含义变成"**再关一次**"：
+/// `close()` 之后表里还有它，说明第一次没成功，重试是仅剩的手段（幂等，失败才算真残留）。
+pub fn shutdown_login_view(
     app: &AppHandle,
-    window: &WebviewWindow,
+    webview: &Webview,
     data_dir: &Path,
 ) -> Vec<ShutdownFailure> {
-    let clear_browsing_data = window.clear_all_browsing_data().map_err(|source| source.to_string());
-    let close = window.close().map_err(|source| source.to_string());
-    let still_present = app.get_webview_window(LOGIN_WINDOW_LABEL).is_some();
+    let clear_browsing_data = webview
+        .clear_all_browsing_data()
+        .map_err(|source| source.to_string());
+    let close = webview.close().map_err(|source| source.to_string());
+    let still_present = app.get_webview(LOGIN_WEBVIEW_LABEL).is_some();
     let destroy = if still_present {
-        window.destroy().map_err(|source| source.to_string())
+        webview.close().map_err(|source| source.to_string())
     } else {
         Ok(())
     };
@@ -1094,49 +1116,34 @@ pub fn shutdown_window(
     })
 }
 
-/// 一个"建出来了但还没交给等待方"的窗的最小能力面。
+/// 一个"建出来了但还没交给等待方"的登录页的最小能力面。
 ///
-/// 真实实现是 tauri 的 [`WebviewWindow`]（销毁要真 GUI，测不了）；测试用假实现观察
-/// **有没有真的去销毁**——这正是"孤儿窗"缺陷的判据，纯函数替代不了。
+/// 真实实现是 tauri 的 [`Webview`]（真拆解要 GUI，测不了）；测试用假实现观察
+/// **有没有真的去关掉**——这正是"孤儿登录页"缺陷的判据，纯函数替代不了。
 pub trait DiscardableWindow {
-    /// 销毁窗口（尽力而为）：`Ok(())` = 已销毁；`Err` = 失败原因。
+    /// 关掉它（尽力而为）：`Ok(())` = 已关掉；`Err` = 失败原因。
     fn discard(&self) -> Result<(), String>;
 }
 
-impl DiscardableWindow for WebviewWindow {
+impl DiscardableWindow for Webview {
     fn discard(&self) -> Result<(), String> {
-        self.destroy().map_err(|source| source.to_string())
+        self.close().map_err(|source| source.to_string())
     }
 }
 
-/// 建出来的窗还没交出去就失败了（`show()` 失败等）：**先销毁再返回 Err**。
+/// 清掉一个"没人等待"的登录页：关掉它 + 删掉它那个一次性数据目录。
 ///
-/// 为什么必须销毁：`build()` 成功那一刻窗已经注册进 label 表了，光返回 Err 会留下一个
-/// 谁也管不到的窗（此时 `LoginState` 已 `finish`——用户再点登录只会撞 duplicate-label）。
-/// 销毁也失败时把两个原因都留在错误里：不许吞掉任何一个（`show` 失败与清不掉是两件事）。
-pub fn abandon_unmanaged_window<W: DiscardableWindow>(window: &W, error: CoreError) -> CoreError {
-    match window.discard() {
-        Ok(()) => error,
-        Err(source) => CoreError::new(
-            "internal",
-            format!("{}；清理这个未接管的登录窗也失败（{source}）：窗口可能残留", error.message),
-        ),
-    }
-}
-
-/// 清掉一个"没人等待"的窗：销毁窗口 + 删掉它那个一次性数据目录。
-///
-/// 两条**各自尽力**（销毁失败不该连累目录清理，反之亦然），失败原因合并交回调用方写日志。
+/// 两条**各自尽力**（关闭失败不该连累目录清理，反之亦然），失败原因合并交回调用方写日志。
 pub fn discard_orphan_login_window<W: DiscardableWindow>(
-    window: &W,
+    webview: &W,
     data_dir: &Path,
 ) -> Result<(), String> {
     let mut problems = Vec::new();
-    if let Err(source) = window.discard() {
-        problems.push(format!("销毁孤儿登录窗失败（{source}）"));
+    if let Err(source) = webview.discard() {
+        problems.push(format!("关掉孤儿登录页失败（{source}）"));
     }
     if let Some(source) = remove_dir_with_backoff(data_dir) {
-        problems.push(format!("删孤儿登录窗数据目录失败（{source}）"));
+        problems.push(format!("删孤儿登录页数据目录失败（{source}）"));
     }
     if problems.is_empty() {
         Ok(())
@@ -1145,34 +1152,34 @@ pub fn discard_orphan_login_window<W: DiscardableWindow>(
     }
 }
 
-/// 建窗结果交付的结局（纯函数可测；调用方据此留日志）。
+/// 建登录页结果交付的结局（纯函数可测；调用方据此留日志）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildDelivery {
     /// 等待方收到了结果（正常路径）
     Delivered,
-    /// 等待方已经走了，但窗已经建出来了 → 已尽力销毁
+    /// 等待方已经走了，但登录页已经建出来了 → 已尽力关掉
     OrphanDiscarded,
-    /// 等待方已经走了，窗建出来了却没销毁掉（窗口可能残留）
+    /// 等待方已经走了，登录页建出来了却没关掉（它可能还铺在主窗上）
     OrphanLeftBehind(String),
-    /// 等待方已经走了，窗也没建出来 → 没什么可清
+    /// 等待方已经走了，登录页也没建出来 → 没什么可清
     NothingBuilt,
 }
 
-/// 交付建窗结果；**没人接收时把已经建出来的窗就地清掉**。
+/// 交付建页结果；**没人接收时把已经建出来的登录页就地关掉**。
 ///
-/// 为什么这不是"多此一举"：`create_login_window` 把建窗闭包投到主线程后只等
-/// [`BUILD_TIMEOUT`]（10 秒）。主线程忙到超时时，那个闭包**稍后仍会执行**——它会建出、显示并
-/// 聚焦一个无人等待的登录窗；此刻 `LoginState` 已经 `finish()`，用户再点登录只会撞
-/// duplicate-label，人卡在一个没人管的无边框窗里。
+/// 为什么这不是"多此一举"：`create_login_view` 把建页闭包投到主线程后只等
+/// [`BUILD_TIMEOUT`]（10 秒）。主线程忙到超时时，那个闭包**稍后仍会执行**——它会建出并聚焦一个
+/// 无人等待的登录页；此刻 `LoginState` 已经 `finish()`，用户再点登录只会撞 duplicate-label，
+/// 人卡在一个没人管的官方页面上（那还是身份边界上的输入面）。
 /// `mpsc::Sender::send` 在接收端已经析构时会把**值原样还回来**（`SendError(built)`），正好是
-/// "等待方走了、但窗建出来了"的准确信号：拿回来的窗就是孤儿，交给 `discard` 清掉。
+/// "等待方走了、但登录页建出来了"的准确信号：拿回来的就是孤儿，交给 `discard` 关掉。
 pub fn deliver_build_result<T, E>(
     sent: Result<(), std::sync::mpsc::SendError<Result<T, E>>>,
     discard: impl FnOnce(T) -> Result<(), String>,
 ) -> BuildDelivery {
     match sent {
         Ok(()) => BuildDelivery::Delivered,
-        Err(std::sync::mpsc::SendError(Ok(window))) => match discard(window) {
+        Err(std::sync::mpsc::SendError(Ok(webview))) => match discard(webview) {
             Ok(()) => BuildDelivery::OrphanDiscarded,
             Err(reason) => BuildDelivery::OrphanLeftBehind(reason),
         },
@@ -1200,7 +1207,7 @@ pub fn remove_dir_with_backoff(dir: &Path) -> Option<String> {
     Some(last)
 }
 
-/// 建窗失败路径的目录善后（**注入式**：删除器可替身，好测"删不掉"那一半）。
+/// 建登录页失败路径的目录善后（**注入式**：删除器可替身，好测"删不掉"那一半）。
 ///
 /// 与收尾路径共用 [`shutdown_failures`] 的分级：唯一的失败项是 [`ShutdownFailure::DataDir`]，
 /// 于是"删不掉才会打扰用户"这条判断不需要第二份实现。
@@ -1214,17 +1221,17 @@ pub fn abandon_build_data_dir_with(
     })
 }
 
-/// 建窗失败后的善后：尽力删掉 `create_login_window` 可能**已经建出来**的那个一次性目录。
+/// 建登录页失败后的善后：尽力删掉 `create_login_view` 可能**已经建出来**的那个一次性目录。
 ///
-/// 为什么必须有：`create_dir_all(login_data)` 在建窗之前就跑了，而 `build()` / `show()` 失败会让
-/// 函数带着 `Err` 返回——那条路上 [`shutdown_window`] 永远不会被调用（它只接在"建窗成功"后面），
+/// 为什么必须有：`create_dir_all(login_data)` 在建登录页之前就跑了，而建页失败会让函数带着 `Err`
+/// 返回——那条路上 [`shutdown_login_view`] 永远不会被调用（它只接在"建页成功"后面），
 /// 于是目录没人删。里面可能有 cookie，也是"下次登录会另建新目录"之外的纯垃圾。
 /// 失败时按 [`ShutdownFailure::DataDir`] 分级：只有真删不掉才广播 `app:notice`。
 pub fn abandon_build_data_dir(data_dir: &Path) -> Vec<ShutdownFailure> {
     abandon_build_data_dir_with(data_dir, remove_dir_with_backoff)
 }
 
-/// 向渲染层发一条 `app:notice`（宿主级提示：登录窗收尾没做完）。
+/// 向渲染层发一条 `app:notice`（宿主级提示：登录页收尾没做完）。
 ///
 /// 复用 `apply_effect` 的广播路径（判定与入队在同一个加锁方法里完成，渲染层没就绪就先排队）。
 fn announce_failure(app: &AppHandle, shared: &Arc<CoreShared>, text: &str) {
@@ -1245,12 +1252,17 @@ fn respond(shared: &Arc<CoreShared>, request_id: &str, result: Result<Value, Cor
     }
 }
 
-/// 并排第二次登录：把既有窗拉到前台。
-fn focus_login_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(LOGIN_WINDOW_LABEL) {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+/// 并排第二次登录：把既有的登录页与主窗一起拉到前台（同窗宿主里"既有登录页"就铺在主窗上，
+/// 只把 webview 聚焦是不够的——用户可能正把整个应用最小化在任务栏后面）。
+fn focus_login_view(app: &AppHandle) {
+    if let Some(main) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = main.unminimize();
+        let _ = main.show();
+        let _ = main.set_focus();
+    }
+    if let Some(webview) = app.get_webview(LOGIN_WEBVIEW_LABEL) {
+        let _ = webview.show();
+        let _ = webview.set_focus();
     }
 }
 
@@ -1394,6 +1406,77 @@ mod tests {
             !production.contains("WebviewUrl::App("),
             "登录窗不得挂本地页面：那会变成「自绘登录页」，等于自实现登录协议"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // R23：宿主从"独立子窗"换成"主窗里的第二个 webview"
+    // -----------------------------------------------------------------------
+
+    /// 生产代码那一段（`#[cfg(test)]` 之前）。源码扫描类用例共用它：
+    /// 本模块自己的字面量也在同一文件里，不切掉就等于在扫自己。
+    fn production_source() -> String {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/login.rs"))
+            .expect("要能读到自己的源码");
+        match source.find("#[cfg(test)]") {
+            Some(cut) => source[..cut].to_string(),
+            None => source,
+        }
+    }
+
+    /// 宿主形状的源码钉子（R23 用户指令"不开新窗口"）：官方登录页必须是**主窗的子 webview**
+    /// （`WebviewBuilder` + `Window::add_child`），生产代码里不许再出现任何**建窗** API——
+    /// 那正是用户退回来的那件事（"网页登录仍然是打开一个新界面"）。
+    ///
+    /// 扫的是字面量，所以注释里也不许写那两个标识符；说"独立子窗/建窗 API"就够了。
+    #[test]
+    fn the_login_page_is_hosted_as_a_child_webview_of_the_main_window() {
+        let production = production_source();
+        assert!(
+            production.contains("WebviewBuilder::new("),
+            "登录页要由 WebviewBuilder 建（同窗第二 webview）"
+        );
+        assert!(
+            production.contains(".add_child("),
+            "登录页要挂进主窗（Window::add_child），不是自己开一个窗"
+        );
+        for forbidden in ["WebviewWindowBuilder", "WebviewWindow"] {
+            assert!(
+                !production.contains(forbidden),
+                "登录页不再是独立子窗：生产代码里不许出现 {forbidden}"
+            );
+        }
+    }
+
+    /// 来源守卫能区分登录页与主窗，靠的是 **webview label**（同窗之后窗口 label 恒为 `main`）。
+    /// 两个 label 必须不同，否则登录页在命令层与主窗长得一模一样。
+    #[test]
+    fn the_login_webview_label_is_distinct_from_the_main_window_label() {
+        assert_eq!(LOGIN_WEBVIEW_LABEL, "login");
+        assert_ne!(
+            LOGIN_WEBVIEW_LABEL,
+            crate::MAIN_WINDOW_LABEL,
+            "登录 webview 的 label 必须与主窗不同：相同就等于把来源守卫让出去"
+        );
+    }
+
+    /// 几何：同窗 webview 的坐标原点是**主窗客户区左上角**，所以 x 恒为 0、屏幕坐标不参与。
+    #[test]
+    fn layout_target_is_client_relative_and_reserves_the_header() {
+        let target = layout_target(1280.0, 800.0, LOGIN_VIEW_TOP_INSET);
+        assert_eq!(target.x, 0.0, "同窗 webview 里不存在屏幕 x 偏移");
+        assert_eq!(target.y, LOGIN_VIEW_TOP_INSET, "顶部让出 header 那一条");
+        assert_eq!(target.width, 1280.0, "宽度铺满客户区");
+        assert_eq!(target.height, 800.0 - LOGIN_VIEW_TOP_INSET, "高度铺满剩下的客户区");
+
+        // 退化尺寸仍然钳制，且非有限/负输入不许产出 NaN 几何
+        let squashed = layout_target(1.0, 1.0, LOGIN_VIEW_TOP_INSET);
+        assert_eq!(squashed.width, MIN_LOGIN_WIDTH);
+        assert_eq!(squashed.height, MIN_LOGIN_HEIGHT);
+        for bad in [f64::NAN, f64::INFINITY, -5.0] {
+            let target = layout_target(bad, bad, bad);
+            assert!(target.x.is_finite() && target.y.is_finite());
+            assert!(target.width >= MIN_LOGIN_WIDTH && target.height >= MIN_LOGIN_HEIGHT);
+        }
     }
 
     // -----------------------------------------------------------------------

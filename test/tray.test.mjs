@@ -110,7 +110,12 @@ test("Rust 侧：命令挂主窗来源守卫，且用的是活的托盘事实（
   const start = commands.indexOf("pub fn core_get_tray_available");
   assert.ok(start !== -1);
   const body = commands.slice(start, start + 600);
-  assert.match(body, /require_main_window\(/, "与自启那两条同一个门：非主窗问不了托盘");
+  // R23：守卫判的是 **webview label**（同窗之后窗口 label 恒为 main，按窗口判会被登录页绕过）
+  assert.match(
+    body,
+    /require_main_webview\(webview\.label\(\)\)/,
+    "与自启那两条同一个门：非主窗（含主窗里的登录页）问不了托盘",
+  );
   assert.match(body, /crate::tray::available\(/, "可用性要现问 tauri 的托盘表（自己记一份只会漂移）");
 });
 

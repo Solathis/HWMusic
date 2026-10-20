@@ -191,13 +191,20 @@ DNS  api-drcn.music.dbankcloud.cn                  → 2407:c080:1400:61:40a0:d5
   漏了预滤不会让登录流被一次普通导航杀死——这正是本表存在的理由。
 - Rust 侧 R7 若把 `isCallback` 当"必须先调"的前置条件，属于**超出契约的额外要求**，不要在 Rust 里依赖它。
 
-### 1.7 登录子窗 ↔ sidecar 的线上契约（R7 落地）
+### 1.7 登录页宿主 ↔ sidecar 的线上契约（R7 落地 · R23 换宿主）
+
+**宿主形态（R23，用户指令"不开新窗口、在程序中跳转"）**：官方授权页是**主窗里的第二个 webview**
+（`tauri::webview::WebviewBuilder` + `Window::add_child`，label `login`），不是独立子窗。
+于是应用自己的 header（含「返回扫码登录」）**始终**在主窗 webview 上、始终可见可点——它是
+`LOGIN_VIEW_TOP_INSET`（48 CSS px）让出来的那一条，登录页铺在它下面。几何是**客户区相对**物理像素
+（`login::layout_target(width, height, topInset×scale)`：`x` 恒为 0），没有屏幕坐标、没有跨窗换算。
+"返回" = 关掉这个 webview（`shutdown_login_view`），主窗一动不动。
 
 **宿主要求（core → 宿主，payload 形状由两侧测试互钉）**
 
 | 频道 | 入 | 出 |
 |---|---|---|
-| `host:open-login` | `{url, partition, topInset}` | `{status, url?, message?}`，**在登录窗收场之后**才答复（长轮询） |
+| `host:open-login` | `{url, partition, topInset}` | `{status, url?, message?}`，**在登录页收场之后**才答复（长轮询） |
 | `host:cancel-login` | `{}` | `{cancelled: boolean}`（`cancelled:false` = 本来就没有进行中的登录，不是错误） |
 
 `status` 词表（Rust `LoginConclusion::status` ↔ Node `HOST_LOGIN_STATUS`，`test/login-parity.test.mjs` 互钉）：
@@ -205,16 +212,27 @@ DNS  api-drcn.music.dbankcloud.cn                  → 2407:c080:1400:61:40a0:d5
 | status | 含义 | 附带的字段 |
 |---|---|---|
 | `callback` | 拦到 `hms://` 导航，URL **原样**交回（判真伪是 `consumeCallback` 的事） | `url` |
-| `cancelled` | 用户/渲染层取消（`host:cancel-login`） | — |
-| `closed` | 登录窗被关闭 | — |
+| `cancelled` | 用户/渲染层取消（`host:cancel-login`，即 header 那条「返回扫码登录」） | — |
+| `closed` | 登录页没了（应用退出 / 收尾先行；同窗宿主里用户没有可关的窗） | — |
 | `timed_out` | 总期限（10 分钟）到 | `message` |
 | `load_failed` | 首载期限（30 秒）内打不开官方页（网络/代理） | `message` |
 
 - 两条期限**文案不同**（处置方式不同）：打不开官方页 vs 扫码超时。文案两侧逐字一致，parity 互钉。
-- **双来源**（旧仓缺陷 C1）：Rust 侧"导航拦截"与"窗口关闭"两条路都能把结论交给等待方；
-  结论槽是 take-once 的（先到者胜、后到者不改写）。只接一条 = "扫码成功却等超时"。
-- **登录窗零命令权限**：`capabilities/main.json` 的 `windows` 只有 `main`/`lyrics`，且不给登录页注入任何
-  脚本（不订阅 `initialization_script`/`eval`）：白名单与回调**只靠导航事件**观测。
+- **双来源**（旧仓缺陷 C1）：Rust 侧"导航拦截"与"登录页消失（每 tick 现问 `app.get_webview`）"
+  两条路都能把结论交给等待方；结论槽是 take-once 的（先到者胜、后到者不改写）。只接一条 = "扫码成功却等超时"。
+- **登录页零命令权限**：`capabilities/main.json` 的 `windows` 只有 `main`/`lyrics`（不含 `login`），
+  且不给登录页注入任何脚本（不订阅 `initialization_script`/`eval`）：白名单与回调**只靠导航事件**观测。
+- **来源守卫判 webview label**（R23 的安全性前提）：同窗之后 `window.label()` 对登录页**恒为 `main`**，
+  按窗口 label 判来源等于把守卫让给官方页。命令面因此一律取 `tauri::Webview` 并判 `webview.label()`
+  （`commands::require_main_webview`；`commands.rs` 5 条 + `lyrics_window.rs` 4 条，共 9 条命令全过这道门）。
+  第二层：官方页是**远程来源**，`Webview::on_message` 对远程来源一律要求 ACL 条目
+  （tauri-2.12.4 `src/webview/mod.rs:2080`），而本应用没有 app 级 ACL manifest、`main.json` 也没有
+  `remote` 字段 → 远程来源连自定义命令都到不了（`src/ipc/authority.rs:57-67` 的 `Origin::matches`）。
+- **构建代价（如实登记）**：`add_child`/`WebviewBuilder` 在 tauri 2.12.4 里要 `unstable` Cargo feature
+  （`Cargo.toml` 已开）。它同时把**每个**窗口的内容 webview 建成 `WindowChild`
+  （tauri-runtime-wry `src/lib.rs:4596-4615`），主窗/歌词窗由"自动铺满父窗"改成"显式 bounds + 比例跟随"
+  （同文件 `4922-4933`/`4273-4293`）——这是 Tauri 支持的既有模式（`WebviewWindow` 在两种模式下都工作），
+  但真机观感需要用户验收（见 `KNOWN_LIMITATIONS.md` B16）。
 
 **渲染层 ← sidecar 的登录状态广播（R7 增补的广播频道）**
 
@@ -564,7 +582,8 @@ Rust 镜像见 §3 的 parity 钉）：
 | `core_set_autostart` | `{enabled: boolean}` | 观测到的实际状态（`boolean`） | 写完**回读** `is_enabled`：请求被受理 ≠ 真的打开了（Windows 上是 `Run` 键写入）。界面开关跟着观测值走——乐观翻转会在写入失败时显示一个不存在的"已开启" |
 | `core_get_autostart` | 无 | 当前状态（`boolean`） | 设置页挂载时读一次；读不到就如实显示"状态未取到"并禁用开关（不猜） |
 
-两条命令都过**主窗来源守卫**（`require_main_window`）：登录子窗/歌词窗/托盘改不了系统自启。
+两条命令都过**主窗来源守卫**（`require_main_webview`，R23 起判 **webview label**）：
+登录页/歌词窗/托盘改不了系统自启。
 
 **权限裁决（Tauri 2.12 语义，已逐行核对源码）**：自定义命令**不进 capabilities**。
 `tauri::Webview::on_message`（tauri-2.12.4 `src/webview/mod.rs:2080`）只在三种情形查 ACL——
@@ -883,6 +902,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `LOGIN_VIEW_TOP_INSET` | `48`（CSS px） | `src/shared/login-inset.mjs` | R7：`huawei.ts` 与渲染层 `login-gate.tsx` 双侧 import；Rust `login.rs` 镜像并互钉 |
 | `LOGIN_TIMEOUT_MS` | `10 * 60_000` | `src/protocols/login-callback.mjs` | Node 侧；Rust `LOGIN_TIMEOUT_SECS = 600` 由 R7 镜像并由 parity 测试互钉 |
 | `LOGIN_LOAD_DEADLINE_SECS` | `30` | `src-tauri/src/login.rs` | 首载期限（Rust 独有：Node 侧没有对应的墙钟，只有"打不开官方页"这条结论） |
+| `LOGIN_WEBVIEW_LABEL` | `"login"` | `src-tauri/src/login.rs` | R23：登录页那个**子 webview** 的 label（不再是窗口 label）。它是命令层唯一能区分"这一帧是登录页发的还是主窗发的"的东西（`require_main_webview`），必须 ≠ `main` |
 | 两条期限文案 | 见 §1.7 | `src-tauri/src/login.rs` ↔ `src/main/huawei.ts` | 两侧逐字一致，parity 互钉 |
 | `LYRICS_SEEK_WINDOW_MS` | `200` | `src/renderer/features/lyrics/lyric-sync.mjs` | R9：歌词的 `isSeeking` 窗口（拖动时歌词跟着手走、手停 200ms 后自动收窗）；组件里不许再写这个数字（扫描钉住） |
 | `QUEUE_SETTING_KEY` | `"queue"` | `src/renderer/features/playback/queue.mjs` | R9：播放队列的持久化键（`data.queue`，只存曲目标识 + 索引） |
@@ -1068,3 +1088,22 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
      `QR_TTL_DIFF`/`QR_TTL_LEGACY` 两条路的说明）。
   测试：`test/qr-login.test.mjs` +14、`test/qr-port.test.mjs` +2（全量 658 → **674 / 0 fail**）。
   **仍未验证**：真机上两个现象是否真的消失（需一次真会话 + 一次偏钟环境），登记在 KNOWN_LIMITATIONS B14。
+- 2026-10-20（Task R23）：**用户指令"网页登录仍然是打开一个新界面，还是没有返回的按钮——其应该是在
+  程序中跳转"**。宿主从"独立子窗"换成**主窗里的第二个 webview**（`WebviewBuilder` + `Window::add_child`，
+  label `login`）；应用自己的 header（含「返回扫码登录」）因此始终可见可点。§1.7 改写（宿主形态 +
+  几何是客户区相对物理像素 + `closed` 语义 + 两层来源守卫 + 构建代价），§2.7 的守卫名同步。
+  四处要点：
+  1. **几何**：`login::layout_target(client_width, client_height, topInset×scale)` —— 入参是客户区
+     物理像素尺寸，输出 `x` 恒为 0、`y = topInset`。跨窗那套"屏幕位置 + 缩放比换算"整条消失
+     （R7 真机几何偏差的根因就在那条路上）；
+  2. **来源守卫按 webview label**（安全前提）：同窗之后 `window.label()` 对登录页恒为 `main`，
+     命令面因此一律取 `tauri::Webview` 并判 `webview.label()`（`require_main_webview`，9 条命令）。
+     第二层：官方页是远程来源 → 无 ACL 条目一律拒（出处见 §2.7）；扫描用例把"不许退回按窗口 label 判"
+     钉死（`commands.rs` 单测 + `test/tray.test.mjs` / `test/lyrics-window.test.mjs`）；
+  3. **构建代价**：`add_child`/`WebviewBuilder` 需 tauri 的 `unstable` feature（`Cargo.toml` 已开）——
+     它把**每个**窗口的内容 webview 建成 `WindowChild`，主窗/歌词窗改用"显式 bounds + 比例跟随"。
+     这是 Tauri 支持的既有模式（`WebviewWindow` 两种模式都工作），但真机观感须用户验收（B16）；
+  4. 策略层**一行未改**：导航白名单 / `hms://` 拦截 / `on_new_window` Deny / 双期限 / take-once 结论槽 /
+     一次性数据目录 + 退避删除 / 先答复再拆 —— 只换了承载与坐标。渲染层与 sidecar **一行未改**。
+  测试：cargo 201+1 → **204 pass + 1 ignored**（新增 4 条：宿主形状、label 相异、客户区相对几何、
+  守卫扫描；删掉 1 条随宿主消失的 `show()` 回滚用例，见报告 §自审）；node 674 / 0 不变。

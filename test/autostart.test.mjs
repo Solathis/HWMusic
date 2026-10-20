@@ -3,7 +3,8 @@
  *
  * 为什么绕开插件自带的 `plugin:autostart|enable` 而自己写两条命令（裁决）：插件命令要走
  * capabilities 的 `autostart:allow-*` 权限，等于**为渲染层开一个直接改系统自启的入口**；
- * 自己写命令则把它收在主窗来源守卫（`require_main_window`）后面，与 `core_call` 同一个门。
+ * 自己写命令则把它收在主窗来源守卫（`require_main_webview`，R23 起判 webview label）后面，
+ * 与 `core_call` 同一个门。
  *
  * 要钉住的五件事：
  * 1. **命令名一份真源**：`src/shared/commands.ts` 导出、`host-api.ts` 只用常量

@@ -160,10 +160,13 @@ test("Rust：四条命令都是 async、都过主窗来源守卫、都进了 gen
       new RegExp(`#\\[tauri::command\\][\\s\\S]{0,200}?pub async fn ${name}\\(`),
       `${name} 必须是 async 命令：WebviewWindowBuilder 的 build 要走主线程往返，同步命令会死锁`,
     );
-    // 主窗来源守卫：歌词窗只订阅事件、不调业务命令，登录子窗/托盘也一律拒绝
+    // 主窗来源守卫（R23：判 webview label —— 歌词窗/托盘/主窗里的登录页一律拒绝）
     const body = rust.slice(rust.indexOf(`pub async fn ${name}(`));
-    const guardAt = body.indexOf("require_main_window(");
-    assert.ok(guardAt !== -1 && guardAt < 900, `${name} 必须过 require_main_window（守卫要在最前面）`);
+    const guardAt = body.indexOf("require_main_webview(webview.label())");
+    assert.ok(
+      guardAt !== -1 && guardAt < 900,
+      `${name} 必须过 require_main_webview（守卫要在最前面，且判的是 webview label）`,
+    );
     assert.match(lib, new RegExp(`lyrics_window::${name}\\b`), `${name} 必须进 generate_handler!`);
   }
 });

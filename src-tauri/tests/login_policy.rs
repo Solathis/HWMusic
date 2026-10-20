@@ -12,10 +12,10 @@ use std::time::Duration;
 
 use huawei_music_desktop_lib::bridge::CoreError;
 use huawei_music_desktop_lib::login::{
-    abandon_build_data_dir, abandon_build_data_dir_with, abandon_unmanaged_window,
+    abandon_build_data_dir, abandon_build_data_dir_with,
     deadline_conclusion, deliver_build_result, layout_target, login_data_dir, navigation_for,
     parse_config, shutdown_failures, BuildDelivery, DiscardableWindow, LoginConclusion, LoginSession,
-    LoginState, Navigation, Rect, ShutdownFailure, ShutdownOutcome, LOGIN_ALLOWED_ORIGINS,
+    LoginState, Navigation, ShutdownFailure, ShutdownOutcome, LOGIN_ALLOWED_ORIGINS,
     LOGIN_ALLOWED_URLS, LOGIN_LOAD_DEADLINE_SECS, LOGIN_LOAD_TIMEOUT_MESSAGE, LOGIN_TIMEOUT_SECS,
     LOGIN_TOTAL_TIMEOUT_MESSAGE, LOGIN_VIEW_TOP_INSET, MAX_TOP_INSET, MIN_LOGIN_HEIGHT,
     MIN_LOGIN_WIDTH, PARTITION_MAX_LEN,
@@ -377,37 +377,39 @@ fn login_state_is_exclusive() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. 几何：登录窗铺主窗内容区、顶部让出 topInset（纯函数，物理像素）
+// 8. 几何（R23：登录页是**同窗** webview ⇒ 坐标是客户区相对的，没有屏幕坐标、也没有跨窗换算）
 // ---------------------------------------------------------------------------
 
 #[test]
-fn layout_target_covers_the_main_content_area_below_the_top_inset() {
-    let main = Rect { x: 100.0, y: 50.0, width: 1280.0, height: 800.0 };
-    let target = layout_target(main, LOGIN_VIEW_TOP_INSET);
+fn layout_target_fills_the_main_client_area_below_the_header() {
+    // 输入是**主窗客户区尺寸**（物理像素）：同窗 webview 的坐标原点就是客户区左上角，
+    // 所以 x 恒为 0、y 恒为 topInset——屏幕坐标（旧宿主用的 `inner_position`）不参与。
+    let target = layout_target(1280.0, 800.0, LOGIN_VIEW_TOP_INSET);
 
-    assert_eq!(target.x, main.x, "横向与主窗内容区对齐");
-    assert_eq!(target.y, main.y + LOGIN_VIEW_TOP_INSET, "顶部让出取消条");
-    assert_eq!(target.width, main.width, "宽度铺满");
-    assert_eq!(target.height, main.height - LOGIN_VIEW_TOP_INSET, "高度铺满剩下的内容区");
-    assert!(target.y + target.height <= main.y + main.height, "不得溢出主窗内容区");
+    assert_eq!(target.x, 0.0, "同窗 webview 不存在屏幕 x 偏移");
+    assert_eq!(target.y, LOGIN_VIEW_TOP_INSET, "顶部让出 header 那一条（返回控件在那儿）");
+    assert_eq!(target.width, 1280.0, "宽度铺满客户区");
+    assert_eq!(target.height, 800.0 - LOGIN_VIEW_TOP_INSET, "高度铺满剩下的客户区");
+    assert!(target.y + target.height <= 800.0, "不得溢出客户区");
 
-    // 主窗被外部压到退化尺寸时钳制：绝不交出负高度（set_size 会失败/建出畸形窗）
-    let squashed = layout_target(Rect { x: 0.0, y: 0.0, width: 10.0, height: 20.0 }, LOGIN_VIEW_TOP_INSET);
+    // 主窗被外部压到退化尺寸时钳制：绝不交出负高度（set_size 会失败/建出畸形块）
+    let squashed = layout_target(10.0, 20.0, LOGIN_VIEW_TOP_INSET);
     assert_eq!(squashed.height, MIN_LOGIN_HEIGHT);
     assert_eq!(squashed.width, MIN_LOGIN_WIDTH);
     assert!(squashed.height > 0.0 && squashed.width > 0.0);
 
     // 非有限/负输入按 0 处理（合成器偶发退化值），仍然不产出负尺寸
     for bad in [f64::NAN, f64::INFINITY, -5.0] {
-        let target = layout_target(Rect { x: bad, y: bad, width: bad, height: bad }, LOGIN_VIEW_TOP_INSET);
+        let target = layout_target(bad, bad, LOGIN_VIEW_TOP_INSET);
         assert!(target.x.is_finite() && target.y.is_finite());
         assert!(target.width >= MIN_LOGIN_WIDTH && target.height >= MIN_LOGIN_HEIGHT);
     }
 
-    // topInset 为 0 时整块内容区归登录窗
-    let flush = layout_target(main, 0.0);
-    assert_eq!(flush.y, main.y);
-    assert_eq!(flush.height, main.height);
+    // topInset 为 0 时整块客户区归登录页
+    let flush = layout_target(1024.0, 768.0, 0.0);
+    assert_eq!(flush.x, 0.0);
+    assert_eq!(flush.y, 0.0);
+    assert_eq!(flush.height, 768.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -511,16 +513,16 @@ fn a_window_nobody_waits_for_is_discarded_instead_of_left_on_screen() {
 
     // 等待方已经走了（建窗超时），但窗**已经建出来了**（`send` 把它原样还回来）→ 必须销毁
     let mut discarded: Vec<&str> = Vec::new();
-    let delivery = deliver_build_result::<&str, &str>(Err(SendError(Ok("login-window"))), |window| {
+    let delivery = deliver_build_result::<&str, &str>(Err(SendError(Ok("login-view"))), |window| {
         discarded.push(window);
         Ok(())
     });
     assert_eq!(delivery, BuildDelivery::OrphanDiscarded);
-    assert_eq!(discarded, vec!["login-window"], "孤儿登录窗必须被销毁");
+    assert_eq!(discarded, vec!["login-view"], "孤儿登录窗必须被销毁");
 
     // 销毁也失败：如实报告（调用方据此留日志），不当成没发生
     assert_eq!(
-        deliver_build_result::<&str, &str>(Err(SendError(Ok("login-window"))), |_| Err(
+        deliver_build_result::<&str, &str>(Err(SendError(Ok("login-view"))), |_| Err(
             "拒绝访问".to_string()
         )),
         BuildDelivery::OrphanLeftBehind("拒绝访问".to_string())
@@ -535,30 +537,7 @@ fn a_window_nobody_waits_for_is_discarded_instead_of_left_on_screen() {
     );
 }
 
-/// 建出来的窗（`build()` 成功后 `show()` 失败）在被交出去之前就失败：必须销毁再返回 Err。
-#[test]
-fn a_window_that_failed_to_show_is_destroyed_before_the_error_returns() {
-    let failed_show = || CoreError::new("internal", "登录窗显示不出来（拒绝访问）");
-
-    let window = FakeWindow::new(Ok(()));
-    let error = abandon_unmanaged_window(&window, failed_show());
-    assert_eq!(
-        window.discards.get(),
-        1,
-        "`build()` 已经把它注册进 label 表了：不销毁就留下一个谁也管不到的窗"
-    );
-    assert_eq!(error.message, failed_show().message, "原始失败原因要原样带出去");
-    assert_eq!(error.kind.as_deref(), Some("internal"));
-
-    // 销毁也失败：两个原因都要留在错误里，不许吞掉任何一个
-    let stubborn = FakeWindow::new(Err("拒绝访问".to_string()));
-    let error = abandon_unmanaged_window(&stubborn, failed_show());
-    assert!(error.message.contains("登录窗显示不出来"), "{}", error.message);
-    assert!(error.message.contains("拒绝访问"), "{}", error.message);
-    assert_eq!(stubborn.discards.get(), 1);
-}
-
-/// 建窗超时留下的孤儿窗：销毁 + 删掉那个一次性数据目录（两条都要尽力，一条失败不影响另一条）。
+/// 建窗超时留下的孤儿页：销毁 + 删掉那个一次性数据目录（两条都要尽力，一条失败不影响另一条）。
 #[test]
 fn an_orphan_window_is_destroyed_and_its_one_shot_directory_removed() {
     use huawei_music_desktop_lib::login::discard_orphan_login_window;
@@ -586,6 +565,10 @@ fn an_orphan_window_is_destroyed_and_its_one_shot_directory_removed() {
 }
 
 /// 纯函数测不了"有没有真接上"：钉住生产代码走的是交付守卫，而不是旧写法 `let _ = sender.send(built)`。
+///
+/// R23：宿主换成同窗 webview 之后，"建出来但接不下去"的形态只剩**孤儿**一种——旧宿主还有第二条
+/// （`build()` 成功而 `show()` 失败 → 回头销毁）；同窗宿主没有 `show()` 那一步，那条机制连同它的
+/// 用例一起删掉了（不留一个永不触发的检查）。这里改为钉住**新宿主的形状**：登录页挂在主窗上。
 #[test]
 fn the_build_handoff_is_wired_through_the_delivery_guard() {
     let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/login.rs"))
@@ -597,27 +580,31 @@ fn the_build_handoff_is_wired_through_the_delivery_guard() {
 
     assert!(
         production.contains("deliver_build_result(sender.send("),
-        "建窗结果必须走交付守卫（等待方走了就把窗销毁）"
+        "建窗结果必须走交付守卫（等待方走了就把 webview 关掉）"
     );
     assert!(
         !production.contains("let _ = sender.send("),
-        "不得丢弃交付结果：那正是「超时后留下孤儿登录窗」的来源"
-    );
-    assert!(
-        production.contains("abandon_unmanaged_window("),
-        "`show()` 失败那条路也要销毁已经建出来的窗"
+        "不得丢弃交付结果：那正是「超时后留下孤儿登录页」的来源"
     );
     assert!(
         production.contains("discard_orphan_login_window("),
-        "超时那条路要尽力清掉可能已经建出来的孤儿窗"
+        "超时那条路要尽力清掉可能已经建出来的孤儿页"
     );
     assert!(
-        production.contains("discard_pending_login_window("),
-        "建窗超时的等待方也要自己清一次（闭包可能已经建出来但还没交付）"
+        production.contains("discard_pending_login_view("),
+        "建页超时的等待方也要自己清一次（闭包可能已经建出来但还没交付）"
     );
     assert!(
         production.contains("drop(receiver)"),
-        "等待方一旦收场就要立刻扔掉接收端：否则晚到的 `send` 仍可能成功，窗被丢进没人再读的通道 = 孤儿窗"
+        "等待方一旦收场就要立刻扔掉接收端：否则晚到的 `send` 仍可能成功，webview 被丢进没人再读的通道 = 孤儿页"
+    );
+    assert!(
+        production.contains("WebviewBuilder::new(") && production.contains(".add_child("),
+        "宿主必须是主窗下面的第二个 webview（R23 用户指令：在程序内跳转、不开新窗口）"
+    );
+    assert!(
+        !production.contains("WebviewWindowBuilder"),
+        "登录页不再是独立子窗"
     );
 }
 
@@ -653,7 +640,7 @@ fn a_window_that_never_opened_does_not_leave_its_data_dir_behind() {
 fn the_build_failure_branch_also_cleans_the_one_shot_data_dir() {
     let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/login.rs"))
         .expect("要能读到 login.rs");
-    let start = source.find("fn run_login_window(").expect("登录线程的正体要还在");
+    let start = source.find("fn run_login_view(").expect("登录线程的正体要还在");
     let end = source.find("fn wait_for_conclusion(").expect("下一个函数要还在");
     let login_thread = &source[start..end];
 

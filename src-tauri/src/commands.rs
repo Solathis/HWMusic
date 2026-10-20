@@ -2,7 +2,7 @@
 //! （渲染层就绪钩子），以及宿主要求路由（`host:notify` 走系统通知；`host:secure-encrypt` /
 //! `host:secure-decrypt` 走 DPAPI 安全存储；R7 的频道如实回未实现）。
 //!
-//! 判定逻辑刻意抽成纯函数（`require_main_window` / `require_request_channel` / `plan_host_request`），
+//! 判定逻辑刻意抽成纯函数（`require_main_webview` / `require_request_channel` / `plan_host_request`），
 //! 这样不依赖 `tauri::test` mock runtime 就能钉住来源守卫与路由表。
 
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager, State, Window};
+use tauri::{AppHandle, Emitter, Manager, State, Webview};
 
 use crate::bridge::{CoreError, CoreShared, Effect, ResponseFrame, CALL_TIMEOUT_SECS, CORE_EVENT};
 use crate::sidecar::SidecarProcess;
@@ -73,14 +73,26 @@ pub const HOST_REQUEST_CHANNELS: &[&str] = &[
     "host:notify",
 ];
 
-/// 主窗来源守卫：只有主窗能调 `core_call`（登录子窗、歌词窗、托盘一律拒绝）。
-pub fn require_main_window(label: &str) -> Result<(), CoreError> {
+/// 主窗来源守卫：只有主窗那个 **webview** 能调 `core_call`（登录页、歌词窗、托盘一律拒绝）。
+///
+/// **为什么判的是 webview label 而不是窗口 label**（R23 的安全性前提）：R23 把官方登录页从"独立子窗"
+/// 改成**主窗里的第二个 webview**（用户指令：在程序内跳转）。同窗之后
+/// `Webview::window_ref().label()` 对这个登录页**恒为 `main`**（tauri 2.12.4 `src/webview/mod.rs:1793`
+/// `window_label()` 返回宿主窗的 label），于是任何"按窗口 label 判来源"的守卫都会被登录页绕过。
+/// 能区分两者的只有 **webview label**：主窗 `main`（`WebviewWindowBuilder::new` 把 webview 的 label
+/// 取成同一个值，`src/webview/webview_window.rs:101-107`），登录页 `login`（[`crate::login`]）。
+///
+/// 命令侧怎么拿到它：命令参数声明成 `tauri::Webview` 而不是 `tauri::Window`
+/// （`CommandArg for Webview` 直接把发起这一帧的 webview 交出来，`src/webview/mod.rs:2604-2609`；
+/// 而 `CommandArg for Window` 给的是 `webview().window()`，`src/window/mod.rs:1099-1104`）。
+/// 这条"必须按 webview label 判"由 `every_guarded_command_judges_by_webview_label_not_window_label` 扫描钉住。
+pub fn require_main_webview(label: &str) -> Result<(), CoreError> {
     if label == MAIN_WINDOW_LABEL {
         return Ok(());
     }
     Err(CoreError::new(
         "forbidden_source",
-        format!("core_call 只接受主窗调用（来源：{label}）"),
+        format!("core_call 只接受主窗调用（来源 webview：{label}）"),
     ))
 }
 
@@ -240,7 +252,7 @@ pub enum HostRoute {
     SecureEncrypt,
     /// DPAPI 解密（R5 已接通）
     SecureDecrypt,
-    /// 打开官方登录子窗（R7）：**长轮询性质**——答复发生在登录窗收场之后
+    /// 打开官方登录页（R7）：**长轮询性质**——答复发生在登录页收场之后
     OpenLogin,
     /// 取消进行中的登录（R7）：把结论槽结算成 Cancelled
     CancelLogin,
@@ -268,7 +280,7 @@ pub enum HostPlan {
     Respond(ResponseFrame),
     /// 已有人负责答复：调用方不得再写第二帧。
     ///
-    /// R7 唯一的构造点是 `host:open-login` 的合法载荷——答复由 `login-window` 线程在登录窗
+    /// R7 唯一的构造点是 `host:open-login` 的合法载荷——答复由 `login-view` 线程在登录页
     /// 收场后写出（旧仓把"等扫码"做成了同步阻塞，效果线程被占住，随后的取消请求永远送不进来）。
     Deferred,
     /// 取消登录（R7）：答复里要带"到底取消掉了没有"，那个答案只有 app 知道（计划阶段拿不到），
@@ -523,11 +535,11 @@ pub fn shutdown_core(app: &AppHandle, reason: &str) {
 #[tauri::command]
 pub async fn core_call(
     app: AppHandle,
-    window: Window,
+    webview: Webview,
     channel: String,
     payload: Option<Value>,
 ) -> Result<Value, CoreError> {
-    require_main_window(window.label())?;
+    require_main_webview(webview.label())?;
     require_request_channel(&channel)?;
 
     let state = app.state::<Arc<CoreState>>().inner().clone();
@@ -551,13 +563,16 @@ pub async fn core_call(
 /// 返回值 = 本次冲刷的提示条数。渲染层必须先订阅 `core:event` 再调这里，否则提示还是会丢
 /// （订阅在渲染层，R8 的 main.tsx 负责；R6 只保证"排了队、就绪即冲刷"）。
 #[tauri::command]
-pub fn core_renderer_ready(window: Window, state: State<'_, Arc<CoreState>>) -> Result<u32, CoreError> {
-    require_main_window(window.label())?;
+pub fn core_renderer_ready(
+    webview: Webview,
+    state: State<'_, Arc<CoreState>>,
+) -> Result<u32, CoreError> {
+    require_main_webview(webview.label())?;
     // 标记就绪与冲刷在同一个加锁方法里完成：冲刷期间到的广播会走"直接投递"这条更快的路，
     // 也不会有人把提示塞进已经冲刷过的队列（见 NoticeQueue）。
     let outcome = state.mark_renderer_ready_and_flush();
     let count = outcome.flushed.len() as u32;
-    let app = window.app_handle();
+    let app = webview.app_handle();
     for envelope in outcome.flushed {
         emit_now(app, envelope);
     }
@@ -627,10 +642,13 @@ pub fn read_autostart(manager: &dyn AutoStart) -> Result<bool, CoreError> {
 ///
 /// 用 `try_state` 而不是插件扩展 trait 的 `autolaunch()`：后者在插件没注册时**直接 panic**，
 /// 命令里 panic 的后果是整个应用崩掉，而不是界面上显示一句"改不了开机自启"。
+///
+/// 入参是 [`tauri::Webview`]（R23 起命令面一律拿 webview）：托管状态的查找两者同源，
+/// 拿 webview 是为了**来源判定**那一头（见 [`require_main_webview`]）。
 fn autostart_manager<R: tauri::Runtime>(
-    window: &tauri::Window<R>,
+    webview: &Webview<R>,
 ) -> Result<State<'_, tauri_plugin_autostart::AutoLaunchManager>, CoreError> {
-    window
+    webview
         .try_state::<tauri_plugin_autostart::AutoLaunchManager>()
         .ok_or_else(|| {
             CoreError::new(
@@ -652,19 +670,19 @@ fn autostart_manager<R: tauri::Runtime>(
 /// `core_renderer_ready` 一直如此）。这些前置条件由 `test/autostart.test.mjs` 钉住：
 /// 将来谁加了 app 级 manifest，那条用例会先红，提醒他同步加权限条目。
 ///
-/// 顺带：这条命令挂在 `require_main_window` 后面——登录子窗/歌词窗/托盘都改不了系统自启。
+/// 顺带：这条命令挂在 `require_main_webview` 后面——登录页/歌词窗/托盘都改不了系统自启。
 #[tauri::command]
-pub fn core_set_autostart(window: Window, enabled: bool) -> Result<bool, CoreError> {
-    require_main_window(window.label())?;
-    let manager = autostart_manager(&window)?;
+pub fn core_set_autostart(webview: Webview, enabled: bool) -> Result<bool, CoreError> {
+    require_main_webview(webview.label())?;
+    let manager = autostart_manager(&webview)?;
     apply_autostart(enabled, manager.inner())
 }
 
 /// 读当前开机自启状态（设置页挂载时一次；没有这条，开关的初始状态只能靠猜）。
 #[tauri::command]
-pub fn core_get_autostart(window: Window) -> Result<bool, CoreError> {
-    require_main_window(window.label())?;
-    let manager = autostart_manager(&window)?;
+pub fn core_get_autostart(webview: Webview) -> Result<bool, CoreError> {
+    require_main_webview(webview.label())?;
+    let manager = autostart_manager(&webview)?;
     read_autostart(manager.inner())
 }
 
@@ -681,11 +699,11 @@ pub fn core_get_autostart(window: Window) -> Result<bool, CoreError> {
 /// 查不到就回 `false`——保守方向与 `tray::decide_close` 的 fail-safe 一致。
 /// 界面说"不可用"而实际能用，比反过来（界面说能用、关窗却退出了）代价小得多。
 ///
-/// 与自启那两条同一个门（`require_main_window`）：登录子窗/歌词窗问不了这件事。
+/// 与自启那两条同一个门（`require_main_webview`）：登录页/歌词窗问不了这件事。
 #[tauri::command]
-pub fn core_get_tray_available(window: Window) -> Result<bool, CoreError> {
-    require_main_window(window.label())?;
-    Ok(crate::tray::available(window.app_handle()))
+pub fn core_get_tray_available(webview: Webview) -> Result<bool, CoreError> {
+    require_main_webview(webview.label())?;
+    Ok(crate::tray::available(webview.app_handle()))
 }
 
 #[cfg(test)]
@@ -694,12 +712,43 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn main_window_guard_allows_only_main() {
-        assert!(require_main_window(crate::MAIN_WINDOW_LABEL).is_ok());
+    fn main_webview_guard_allows_only_the_main_webview() {
+        assert!(require_main_webview(crate::MAIN_WINDOW_LABEL).is_ok());
         for label in [crate::LYRICS_WINDOW_LABEL, "login", "tray", ""] {
-            let error = require_main_window(label).expect_err("非主窗来源必须被拒绝");
+            let error = require_main_webview(label).expect_err("非主窗来源必须被拒绝");
             assert_eq!(error.kind.as_deref(), Some("forbidden_source"));
             assert!(error.message.contains(label), "错误应指明来源：{}", error.message);
+        }
+    }
+
+    /// R23 的关键钉子（同窗宿主的**安全前提**）：登录页与主窗共用同一个窗口，
+    /// 于是 `window.label()` 恒为 `main`——按窗口 label 判来源等于把守卫让给登录页。
+    /// 唯一能区分两者的东西是 **webview label**（登录页 `login` ≠ 主窗 `main`）。
+    ///
+    /// 扫的是字面量：命令面必须拿 `Webview` 并判 `webview.label()`；一旦有人改回
+    /// `Window` + `window.label()`，这条会立刻红（那是"登录页获得业务命令权限"的形状）。
+    #[test]
+    fn every_guarded_command_judges_by_webview_label_not_window_label() {
+        for relative in ["/src/commands.rs", "/src/lyrics_window.rs"] {
+            let source = std::fs::read_to_string(format!("{}{relative}", env!("CARGO_MANIFEST_DIR")))
+                .unwrap_or_else(|_| panic!("要能读到 {relative}"));
+            let production = match source.find("#[cfg(test)]") {
+                Some(cut) => &source[..cut],
+                None => &source[..],
+            };
+
+            assert!(
+                production.contains("require_main_webview(webview.label())"),
+                "{relative} 的来源守卫必须判 webview label"
+            );
+            assert!(
+                !production.contains("require_main_window("),
+                "{relative} 不许再有按窗口 label 判来源的守卫（同窗后它区分不出登录页）"
+            );
+            assert!(
+                !production.contains("window: Window") && !production.contains("window: tauri::Window"),
+                "{relative} 的命令参数不许再拿 Window（同窗后它的 label 恒为 main）"
+            );
         }
     }
 
@@ -943,7 +992,7 @@ mod tests {
             "#[tauri::command]\npub fn core_get_tray_available",
             "\n#[cfg(test)]",
         );
-        assert!(body.contains("require_main_window("), "托盘可用性也要过主窗来源守卫：{body}");
+        assert!(body.contains("require_main_webview("), "托盘可用性也要过主窗来源守卫：{body}");
         assert!(
             body.contains("crate::tray::available("),
             "可用性必须现问托盘表（自己记一份镜像只会漂移）：{body}"
