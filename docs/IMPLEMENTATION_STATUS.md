@@ -74,7 +74,7 @@
 |---|---|---|---|---|
 | 1 | OAuth PKCE（`state` 一次性 + 常量时间比对 + 10 分钟过期） | **verified** | untested | `test/login-callback.test.mjs`、`test/auth.test.mjs`；终局类别表 `LOGIN_TERMINAL_CALLBACK_ERROR_KINDS` 有穷尽归类断言 |
 | 2 | 授权码 → 账号 AT 兑换 | **verified（注入式）** | untested（无账号） | `test/auth-manager.test.mjs`「端点真源」直接读 `docs/API_CONTRACT.md` 并断言两条端点字面量仍在 |
-| 3 | 音乐会话兑换（`loginex`） | pending | untested | 默认实现返结构化 `loginex_pending`，**一次请求都不发**（A2） |
+| 3 | 音乐会话兑换（`loginex`） | **verified（端点 + 形状）** | **端点存在性 verified / 兑换往返 untested** | R17 补全：端点与请求形状有公开证据、端点存在性本机实测（`test/music-session.test.mjs` 钉形状与纪律；证据分级见 `docs/API_CONTRACT.md` §1.5.1）。「有效 AT → 真会话」要用户授权扫码，仍未实测（A2） |
 | 4 | DPAPI 会话加密/解密 | **verified** | **verified**（本机 `cargo test` 真跑 DPAPI；+1 ignored 是半程端到端） | `src-tauri/src/secure_store.rs` 内联测试；`test/session-store.test.mjs` |
 | 5 | 设置持久化（`settings.json` 形状/清洗/0600/原子写） | **verified** | **verified**（本机真写盘、真读回） | `test/settings-test-proxy.test.mjs`、`test/settings-page.test.mjs`、`scripts/acceptance.mjs` 的 `settings-persistence` 路径（4 条源码锚点） |
 | 6 | HTTP 代理（sidecar 侧 undici `ProxyAgent`） | **verified** | **verified**（本地假代理端到端到 HTTP 头级） | `test/proxy.test.mjs`；`test/fixtures/proxy-host-cases.json` 31 例跨语言互钉（5 变异全灭） |
@@ -128,7 +128,7 @@
 | 契约节 | 由谁落地 | R15 核对结论 |
 |---|---|---|
 | §1.1–§1.4 OAuth 参数 / authorize / token / 登录域白名单 | R4 | 完整；§3 的三条端点字面量由 `test/auth-manager.test.mjs` 直接读取断言 |
-| §1.5 令牌链未确认环节 | R4 | 完整（`loginex` 仍「待联调」，如实） |
+| §1.5 令牌链环节（`loginex`） | R4、**R17** | R17 增补：`loginex` 从「待联调」升到「端点 + 形状已确认」，证据分三级如实标注；**兑换往返仍未实测** |
 | §1.6 `consumeCallback` 宿主契约 | R4 修复轮 1 | 完整 |
 | §1.7 登录子窗 ↔ sidecar 线上契约 | R7 | 完整（含 `FrameNavigationStarting` 缺口的如实登记） |
 | §2.1–§2.4 业务端点登记 / 注入键 / 响应语义 / CDN 域 | R4、R8 | 完整（§2.4 的标题回归已由 R8 修复轮插回；R15 把该段整体上移到 §2.5 之前，§2 编号现在单调） |

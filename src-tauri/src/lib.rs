@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_log::{Target, TargetKind};
 use tauri_plugin_window_state::StateFlags;
 
 /// 主窗 label。窗口由代码创建（`tauri.conf.json` 的 `app.windows` 故意留空）。
@@ -36,6 +37,11 @@ pub const LYRICS_WINDOW_LABEL: &str = "lyrics";
 pub const TRAY_ID: &str = "tray";
 /// 数据目录覆盖旋钮：只接受绝对路径，空值等同未设置（%APPDATA% 不可写时排障用）。
 pub const DATA_DIR_ENV: &str = "HWMUSIC_DATA_DIR";
+/// 数据根下放日志的一级子目录名（R17/A）。
+///
+/// 名字钉成常量而不是就地拼字符串：它同时是排障入口（用户被要求去看这个目录）与
+/// 清理脚本的靶子（`.tmp/<数据根>/logs`），改名等于同时弄坏这两件事。
+pub const LOG_DIR_NAME: &str = "logs";
 
 const MAIN_WINDOW_WIDTH: f64 = 1280.0;
 const MAIN_WINDOW_HEIGHT: f64 = 800.0;
@@ -96,6 +102,53 @@ pub fn webview_data_root(app: &tauri::AppHandle) -> Result<PathBuf, DataRootErro
     }
     let paths = app.path();
     pick_data_root(paths.app_data_dir().ok(), paths.app_cache_dir().ok())
+}
+
+/// 数据根 → 日志目录（R17/A）。纯函数，便于用例钉住"落在哪"。
+pub fn log_dir(data_root: &Path) -> PathBuf {
+    data_root.join(LOG_DIR_NAME)
+}
+
+/// 日志落点决议：`HWMUSIC_DATA_DIR` 是可用的绝对路径时给出 `<该值>/logs`，否则 `None`。
+///
+/// `None` 的含义是"**沿用插件的默认落点**"（`LogDir` = `%LOCALAPPDATA%\{bundle}\logs`），
+/// 不是"不写文件"——见 [`log_plugin_targets`]。
+pub fn log_folder(raw: Option<&str>) -> Option<PathBuf> {
+    // 走同一个旋钮解析（`data_root_override`）：那三档非法输入（未设置/空白/相对路径）
+    // 的判定在这里**不许有第二份**，否则日志目录与数据根会各自漂到不同地方。
+    data_root_override(raw).map(|root| log_dir(&root))
+}
+
+/// 日志目标表（R17/A）：**stdout + 文件**，文件落点跟随数据根。
+///
+/// 为什么要有这次改动：插件的默认文件目标是 `LogDir`（Windows 上
+/// `%LOCALAPPDATA%\{bundle}\logs`）。那在正常桌面环境完全没问题，但在**受限/便携**环境里
+/// 它可能不可写——而建窗走的是数据根（`HWMUSIC_DATA_DIR` 指哪写哪），于是出现
+/// "窗口能起、日志打开失败"的错配（实测表现就是把启动整个带走的 `os error 5`）。
+/// 把日志目录也拴到同一个数据根上，两者要么一起可写、要么一起报同一个错。
+///
+/// 两档落点：
+/// - **覆盖值可用** → `Folder(<覆盖值>/logs)`；
+/// - **覆盖值不可用** → `LogDir`，即插件的默认落点——**改动前是什么就是什么**，
+///   生产环境的行为逐字节不变。
+///
+/// 为什么只在这一档跟随数据根：目标表在 `Builder` 构造时就固定，而
+/// `app_data_dir()` 要等 `AppHandle`（插件的 setup 之前拿不到）。所以能"无需 AppHandle
+/// 就确定"的那一档（环境旋钮）跟随数据根，另一档交给插件默认；两者都是可写位置。
+///
+/// 档位（Info / 单文件 4MB / KeepOne）不在本函数里：它们仍写在 `run()` 的 Builder 链上，
+/// 免得"日志级别"这种东西有两个真源。
+pub fn log_plugin_targets(data_root_override: Option<&str>) -> Vec<Target> {
+    let file = match log_folder(data_root_override) {
+        Some(path) => Target::new(TargetKind::Folder {
+            path,
+            file_name: None,
+        }),
+        None => Target::new(TargetKind::LogDir { file_name: None }),
+    };
+    // stdout 必须显式列出：`.targets()` 是**替换**默认目标表（默认表里本来就有 Stdout），
+    // 漏掉它 = 终端里再也看不到日志（开发与 CI 都靠它）。
+    vec![Target::new(TargetKind::Stdout), file]
 }
 
 /// 创建主窗（1280×800，最小 960×640，显式数据目录，接设置里的代理）。
@@ -223,6 +276,12 @@ pub fn run() {
                 .level(log::LevelFilter::Info)
                 .max_file_size(4 * 1024 * 1024)
                 .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
+                // 落点跟随数据根（R17/A）：旋钮指哪，日志就写那儿；旋钮没设时是插件的
+                // 默认 LogDir。留在这里而不是塞进 Builder 的默认值，是为了让"档位"与
+                // "落点"两件事各有一个看得见的位置。
+                .targets(log_plugin_targets(
+                    std::env::var(DATA_DIR_ENV).ok().as_deref(),
+                ))
                 .build(),
         )
         .setup(|app| {
@@ -459,6 +518,89 @@ mod tests {
             pick_data_root(None, None).unwrap_or_else(|_| abs("unused")),
             PathBuf::from(".")
         );
+    }
+
+    // ---- R17 / A：日志落点跟随数据根 -------------------------------------------------
+
+    /// 日志目录必须是数据根下的一级子目录，且名字钉死在 `LOG_DIR_NAME` 上。
+    ///
+    /// 钉名字而不是"随便拼一个"：这个目录既是排障入口（用户被要求去看它），
+    /// 也是清理脚本的靶子（`.tmp/<数据根>/logs`），改名等于同时弄坏这两件事。
+    #[test]
+    fn log_dir_is_the_data_root_leaf_named_logs() {
+        assert_eq!(LOG_DIR_NAME, "logs");
+        assert_eq!(log_dir(&abs("hwmusic-data")), abs("hwmusic-data").join("logs"));
+    }
+
+    /// 日志落点决议：**覆盖值可用 → `Folder(<覆盖值>/logs)`；否则 `None`（沿用插件默认目标）**。
+    ///
+    /// 三档非法输入（未设置 / 空白 / 相对路径）一律返回 `None`：相对路径随 cwd 漂移，
+    /// 而这条路只该把日志写到一个"现在就能确定"的地方。
+    #[test]
+    fn log_folder_override_only_accepts_an_absolute_data_root() {
+        assert_eq!(log_folder(None), None, "未设置 → 沿用插件默认（LogDir + stdout）");
+        for blank in ["", "   ", "\t \r\n"] {
+            assert_eq!(log_folder(Some(blank)), None, "{blank:?} 是空值，等同未设置");
+        }
+        for relative in ["data", "./data", "..", "logs"] {
+            assert_eq!(log_folder(Some(relative)), None, "{relative} 是相对路径，不许当数据根");
+        }
+
+        let raw = abs_str("r17-data");
+        assert_eq!(
+            log_folder(Some(&raw)),
+            Some(abs("r17-data").join(LOG_DIR_NAME)),
+            "绝对覆盖值 → 日志写 <覆盖值>/logs"
+        );
+        assert_eq!(
+            log_folder(Some(&format!("  {raw}\t"))),
+            Some(abs("r17-data").join(LOG_DIR_NAME)),
+            "两端空白照旧容忍（与 data_root_override 同一口径）"
+        );
+    }
+
+    /// 接线钉：`run()` 里那条 `.targets(..)` 必须**经唯一构造点**取目标表，且带上数据根旋钮。
+    ///
+    /// 上一条用例只证明"决议函数算得对"——算得对而没接上去，日志照旧写 `%LOCALAPPDATA%`，
+    /// 沙箱里就是同一个 `os error 5`。所以这里扫源码钉住那一段真的写了。
+    #[test]
+    fn the_log_plugin_follows_the_data_root_when_the_override_is_set() {
+        let source = lib_source();
+        let plugins = plugins_block(&source);
+        let compact: String = plugins.chars().filter(|c| !c.is_whitespace()).collect();
+
+        assert!(
+            compact.contains(".targets(log_plugin_targets("),
+            "日志目标要经唯一的构造点决定（不许在 run() 里现拼）：{compact}"
+        );
+        assert!(
+            compact.contains("std::env::var(DATA_DIR_ENV)"),
+            "落点要感知数据根旋钮（沙箱/便携环境可写才是本次改动的目的）：{compact}"
+        );
+
+        // 目标表本身的形状：stdout + 文件两档，文件那一档按覆盖值二选一。
+        // 扫的是生产代码全段：`TargetKind` 的构造在 `log_plugin_targets` 的函数体里，
+        // 不在插件注册那一段（整份扫也不会被本用例自己的字面量满足——本用例在 cfg(test) 之后）。
+        let production = production_source(&source);
+        let body_start = production
+            .find("pub fn log_plugin_targets(")
+            .expect("日志目标表必须有唯一的构造点");
+        let body = &production[body_start..];
+
+        assert!(
+            body.contains("TargetKind::Stdout"),
+            "stdout 必须显式列出：`.targets()` 是替换默认表，漏掉就等于终端里没有日志"
+        );
+        assert!(
+            body.contains("TargetKind::Folder") && body.contains("TargetKind::LogDir"),
+            "文件那一档要覆盖值与默认两条路都在（沙箱跟随数据根、生产沿用插件默认）"
+        );
+        assert!(body.contains("file_name: None"), "文件名交给插件按应用名取（不另起一个名字）");
+
+        // 档位照旧（R13 的契约，本次不改）
+        assert!(compact.contains(".level(log::LevelFilter::Info)"), "日志级别 Info");
+        assert!(compact.contains(".max_file_size(4*1024*1024)"), "单文件 4MB");
+        assert!(compact.contains("RotationStrategy::KeepOne"), "轮转只留一个文件");
     }
 
     /// 事实钉：`proxy_url` 的取值链是 `tauri::Url` → `tauri_runtime_wry::parse_proxy_url`

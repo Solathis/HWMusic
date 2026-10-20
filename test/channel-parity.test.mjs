@@ -34,6 +34,14 @@
  * - 请求频道加 `playback:lyrics`：歌词**文本**来源（渲染层用官方 `parseLrc` 解析）；
  * - 广播频道加 `lyrics:document` / `lyrics:progress` / `lyrics:state`：主窗→歌词窗的数据链
  *   （歌词窗只订阅事件、不调业务命令，所以这三条是它唯一的数据来源）。
+ *
+ * R19 的一处增补（同一流程）：
+ * - 请求频道加 `auth:get-status`：渲染层**主动查**当前登录状态。`auth:status` 是广播，
+ *   只在 sidecar 启动时播一次（经 Rust 的 NoticeQueue 冲刷），渲染层 reload/崩溃重启之后
+ *   那一条已经冲刷过了 —— 门禁会永远停在 `checking`（"正在检查登录状态…"），既不自动发起
+ *   二维码，也没有任何报错。这条频道把"现在的状态是什么"变成一次**有应答的确定性查询**
+ *   （与托盘可用性查询同款模式：挂载时主动问一次）。少了它的后果与 R16 那条一样直白，
+ *   只是表现成"门禁卡住"而不是"频道未知"。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -41,6 +49,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import {
+  AUTH_GET_STATUS,
   AUTH_QR_START,
   HOST_REQUEST_CHANNELS,
   PLAYBACK_LYRICS,
@@ -147,6 +156,7 @@ test("一致性：请求频道白名单（Node 共享常量 ↔ Rust commands.rs
   assert.deepEqual(sorted(rust), sorted(REQUEST_CHANNELS));
   assert.deepEqual(sorted(REQUEST_CHANNELS), [
     "auth:cancel-login",
+    "auth:get-status",
     "auth:login",
     "auth:logout",
     "auth:qr-start",
@@ -315,4 +325,18 @@ test("一致性：R16 二维码登录的两条频道（请求 auth:qr-start + �
     "Rust 侧广播白名单同样必须含 auth:qr",
   );
   assert.equal(rustStringConst(rustSource("bridge.rs"), "AUTH_QR"), AUTH_QR);
+});
+
+test("一致性：R19 auth:get-status 请求频道（常量 + Rust 字面量 + 请求白名单三处逐字相等）", () => {
+  // 渲染层 reload/崩溃重启之后，`auth:status` 那条启动广播已经冲刷过了；渲染层只能**主动查**。
+  // 这条频道少了任何一个环节（常量表 / Rust 准入 / sidecar 处理器），门禁就还是停在 checking。
+  assert.equal(AUTH_GET_STATUS, "auth:get-status");
+  assert.ok(
+    REQUEST_CHANNELS.includes(AUTH_GET_STATUS),
+    "auth:get-status 必须在请求白名单里：不在的话处理器根本注册不上（dispatcher.register 直接抛）",
+  );
+  assert.ok(
+    rustChannelLiterals(rustProduction(rustSource("commands.rs")), "auth:").includes(AUTH_GET_STATUS),
+    "Rust 侧命令白名单同样必须含 auth:get-status（否则 core_call 在准入处就回 unknown_channel）",
+  );
 });

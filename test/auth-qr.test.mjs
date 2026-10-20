@@ -16,7 +16,6 @@ import {
   canStartLogin,
   initialGateState,
   reduceGateState,
-  shouldOfferOfficialFallback,
 } from "../src/renderer/features/auth/login-gate-logic.mjs";
 
 const MUSIC_SESSION = { musicSession: "user$abc", userId: "42" };
@@ -106,7 +105,7 @@ function stateOf(qrPort) {
 const qrEvents = (broadcasts) => broadcasts.filter((entry) => entry.channel === AUTH_QR).map((entry) => entry.payload);
 const statusEvents = (broadcasts) => broadcasts.filter((entry) => entry.channel === AUTH_STATUS).map((entry) => entry.payload);
 
-test("二维码登录：每次会话一对新的 PKCE/state，授权页 URL 交给端口，busy 立刻广播", async () => {
+test("二维码登录：每次会话一对新的 PKCE/state，授权页 URL 交给端口，且有会话期间不占 busy", async () => {
   const { auth, broadcasts, qrPort } = managerOf();
   const started = await auth.startQrLogin();
 
@@ -120,7 +119,11 @@ test("二维码登录：每次会话一对新的 PKCE/state，授权页 URL 交�
   assert.equal(url.searchParams.get("code_challenge_method"), "S256");
   assert.ok((url.searchParams.get("code_challenge") ?? "").length >= 43, "PKCE challenge 要在授权页 URL 里");
   assert.ok((url.searchParams.get("state") ?? "").length > 0);
-  assert.deepEqual(statusEvents(broadcasts).at(-1), { loggedIn: false, busy: true });
+  assert.deepEqual(
+    statusEvents(broadcasts),
+    [],
+    "R18：开一张二维码**不播** auth:status —— busy 只描述开窗那条路，二维码的进度走 auth:qr",
+  );
 });
 
 test("二维码登录：端口的状态变化原样经 auth:qr 广播（渲染层只看这一条通道）", async () => {
@@ -268,10 +271,9 @@ test("二维码登录：已登录就不再扫码（already_logged_in）", async 
 // 修复轮 1/5：两条"错误路径卡死界面"的回归钉（都先红后绿）
 // ---------------------------------------------------------------------------
 
-test("二维码登录：会话中端口报失败 → busy 同时复位（否则回退按钮卡在禁用）", async () => {
+test("二维码登录：会话全程 busy 都是 false（常驻入口在整个等扫码期间都点得动）", async () => {
   const { auth, broadcasts, qrPort } = managerOf();
   await auth.startQrLogin();
-  assert.deepEqual(statusEvents(broadcasts).at(-1), { loggedIn: false, busy: true });
 
   // 轮询失败×3 / 10 分钟期限 / 确认链失败都走这一条（端口只发 auth:qr{failed}）
   qrPort.emit({
@@ -281,20 +283,25 @@ test("二维码登录：会话中端口报失败 → busy 同时复位（否则�
   });
 
   assert.equal(qrEvents(broadcasts).at(-1).status, "failed");
-  const last = statusEvents(broadcasts).at(-1);
-  assert.equal(last.loggedIn, false);
-  assert.equal(last.busy, false, "失败是「这条路走完了」：busy 必须跟着落下来");
+  assert.equal(statusEvents(broadcasts).at(-1).loggedIn, false);
+  // R18：二维码那条路**不许占 busy**（busy 只描述"开窗那条路正在跑"）——
+  // 否则常驻的「在网页中打开登录」会在最需要它的时刻被 disabled（R17 抓到的正是这一类）
+  assert.ok(statusEvents(broadcasts).length > 0, "这条会话至少播过一次 auth:status（否则下面的断言是空转）");
+  assert.ok(
+    statusEvents(broadcasts).every((payload) => payload.busy === false),
+    `二维码会话期间 busy 一次都不许翻成 true：${JSON.stringify(statusEvents(broadcasts))}`,
+  );
 });
 
-test("二维码登录：会话中失败（协议不可用档）后，渲染层的官方页回退按钮可点", async () => {
+test("二维码登录：会话中失败（协议不可用档）后，渲染层的常驻入口可点", async () => {
   const { broadcasts, qrPort, auth } = managerOf();
   await auth.startQrLogin();
 
-  // 渲染层真实经历的那条链：status{busy:true} → qr{failed}
+  // 渲染层真实经历的那条链：status{busy:false} → qr{failed}
   let state = reduceGateState(initialGateState(), {
     type: LOGIN_GATE_EVENT.status,
     loggedIn: false,
-    busy: true,
+    busy: false,
   });
   qrPort.emit({
     status: "failed",
@@ -307,11 +314,10 @@ test("二维码登录：会话中失败（协议不可用档）后，渲染层�
   }
 
   assert.equal(canRetryQr(state), true);
-  assert.equal(shouldOfferOfficialFallback(state), true);
   assert.equal(
     canStartLogin(state),
     true,
-    "busy 卡在 true 时回退按钮 disabled —— 恰好在最需要它的场景里点不动",
+    "busy 卡在 true 时那个入口 disabled —— 恰好在最需要它的场景里点不动",
   );
 });
 
@@ -374,4 +380,80 @@ test("二维码登录：取消 → 端口被叫停 + busy:false（用户关了�
   assert.equal(cancelled.ok, true);
   assert.equal(qrPort.state.cancelled, 1);
   assert.deepEqual(statusEvents(broadcasts).at(-1), { loggedIn: false, busy: false });
+});
+
+// ---------------------------------------------------------------------------
+// R18：两条路互斥（开窗之前先把二维码会话停掉）
+// ---------------------------------------------------------------------------
+
+test("互斥：发起网页登录时先把二维码会话停掉（否则两条路并发，可能各换一次码）", async () => {
+  const qrPort = fakeQrPort();
+  let settle;
+  const host = {
+    openLoginPage: () =>
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    cancelLogin: () => Promise.resolve({ ok: true, data: { cancelled: true } }),
+    cleanup() {},
+  };
+  const { auth, broadcasts } = managerOf({ qrPort, host });
+  await auth.startQrLogin();
+  assert.equal(qrPort.state.cancelled, 0);
+
+  const pending = auth.login();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(qrPort.state.cancelled, 1, "开窗之前必须停掉二维码会话：停轮询、作废待兑换的尝试");
+  assert.deepEqual(
+    statusEvents(broadcasts).at(-1),
+    { loggedIn: false, busy: true },
+    "停会话本身不另播一条 busy:false（那会让渲染层把网页那条路误判成「已收场」）",
+  );
+
+  // 停掉之后端口再冒出来的事件不该改变任何东西（它已经不属于"当前这条路"）
+  const before = broadcasts.length;
+  qrPort.emit({ status: "pending", content: "STALE-QR" });
+  assert.equal(broadcasts.length, before + 1, "端口事件仍会被转播（渲染层按 path 忽略它）");
+  assert.equal(qrEvents(broadcasts).at(-1).content, "STALE-QR");
+
+  // 收场（否则 runLoginFlow 的 10 分钟计时器会吊着事件循环）
+  settle({ status: "cancelled" });
+  await pending;
+  const last = statusEvents(broadcasts).at(-1);
+  assert.equal(last.busy, false);
+  assert.match(last.message, /取消/, "网页那条路的收场带一句给人看的话（渲染层靠它回到二维码态）");
+});
+
+test("互斥：确认之后的换码不会被迟到的二维码事件顶掉（attempt 已作废）", async () => {
+  let exchangeCalls = 0;
+  const qrPort = fakeQrPort();
+  let settle;
+  const host = {
+    openLoginPage: () =>
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    cancelLogin: () => Promise.resolve({ ok: true, data: { cancelled: true } }),
+    cleanup() {},
+  };
+  const { auth } = managerOf({
+    qrPort,
+    host,
+    exchangeCode: async () => {
+      exchangeCalls += 1;
+      return { ok: true, data: ACCOUNT_TOKENS };
+    },
+  });
+  await auth.startQrLogin();
+  const pending = auth.login();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // 手机在窗打开之后才点了确认：这条回调属于已经作废的那次尝试
+  qrPort.confirm({ callbackUrl: `hms://redirect_uri?code=STALE&state=${stateOf(qrPort)}` });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(exchangeCalls, 0, "作废的二维码尝试不许再走兑换链");
+
+  settle({ status: "cancelled" });
+  await pending;
 });

@@ -2,19 +2,35 @@
  * 登录门禁的判定逻辑（纯函数，.mjs 是有意的：渲染层与测试 import 同一份，不经过 JSX/打包）。
  *
  * R16 起引导页的形态变了（用户指令）：**只展示二维码和提示文字**，进页面自动发起二维码会话，
- * 界面上一开始没有按钮；只有出错时才出现"重试"（以及"二维码不可用"时的官方页次要入口）。
+ * 界面上没有"开始扫码"这类按钮；只有出错时才出现"重试"（R18 又加了一个常驻的次要入口，见下）。
  *
- * 五条不变量：
+ * R18（用户指令 2026-10-20）又改了五件事，都落在本文件里：
+ * 1. 提示文案换成手机控制中心/设置那两条路径那句（[`QR_HINT_TEXT`] 唯一真源），
+ *    **状态行不再复述它**（pending 那一档说"等待扫码…"，免得同一句话在页面上出现两次）；
+ * 2. 二维码容器带边框（视觉在 `login-gate.tsx`，是令牌工具类，这里不掺）；
+ * 3. 过期仍由 sidecar 自动换新（第 4 条不变量不变），渲染层只需要"新内容到了就换"；
+ * 4. **"在网页中打开登录"是常驻次要入口**（`WEB_LOGIN_ENTRY_TEXT`）——不再"只在协议不可用时
+ *    出现"；与二维码互斥：发起时 path 转 `official`（自动发起与重试都停），那条路收场之后
+ *    回到二维码态并**重新武装自动发起**（`officialNote` 记一句"它为什么结束了"）；
+ * 5. 标题移到二维码正上方（[`LOGIN_GATE_TITLE`] 唯一真源，全页只出现一次）。
+ *
+ * 六条不变量：
  * 1. **未登录绝不渲染 app-shell**：`shouldShowLoginGate` 为真时，外层必须先渲染门禁；
  *    "还不知道"（`checking`：等 `auth:status` 的第一条广播）也按门禁处理。
- * 2. **自动开始只发生在"确定未登录"**：`shouldAutoStartQr` 要求三条件齐备
- *    （门禁内的确定态、不 busy、本轮未发起）。检查中就发起 = 可能覆盖已有登录态。
+ * 2. **自动开始只发生在"确定未登录"且没走网页那条路**：`shouldAutoStartQr` 要求四条件齐备
+ *    （门禁内的确定态、不 busy、本轮未发起、`path` 不是 `official`）。检查中就发起 =
+ *    可能覆盖已有登录态；网页那条路在跑时发起 = 两条路并发（各换一次码）。
  * 3. **二维码状态只认广播**：`auth:qr`（sidecar 建的会话）是唯一来源；认不出的档位**不猜**，
  *    保持原状态（陌生档位当成"已确认"是最严重的误判）。
  * 4. **过期由 sidecar 自动换新**：渲染层只把状态行改成"二维码已刷新"，不自己再发一次请求
- *    （谁持有轮询状态谁负责续期，界面不做协议）。
- * 5. **失败必须可操作**：可重试（`canRetryQr`）；只有"协议不可用"那一类才额外给官方页入口
- *    （`shouldOfferOfficialFallback`）——网络抖一下就把用户推回"打开官方页面"是过度反应。
+ *    （谁持有轮询状态谁负责续期，界面不做协议）；新内容到了自然就换了画面。
+ * 5. **失败必须可操作**：可重试（`canRetryQr`）；常驻入口在"开窗那条路没在跑"时永远可点
+ *    （`canStartLogin`）——R17 抓到过"最需要它的场景里它恰好被禁用"这类坑，所以 `busy`
+ *    只描述开窗那条路，二维码等待期间**不占** `busy`。
+ * 6. **两条路互斥且可回退**：`path === "official"` 期间不建二维码订单；那条路收场
+ *    （`busy` 落下来 **且带一句给人看的话**）时回到二维码态、重新武装自动发起。
+ *    只认"带话的收场"是有原因的：二维码会话自己也会播 `busy:false`（没有文案），
+ *    把它当成"网页那条路结束了"会让界面在窗还开着的时候跳回二维码。
  */
 
 /** 门禁的三个阶段。 */
@@ -46,23 +62,20 @@ export const QR_GATE_STATUS = {
 
 const KNOWN_QR_STATUSES = Object.values(QR_GATE_STATUS);
 
-/**
- * 允许出现"在华为官方页面打开登录"这条次要入口的错误类别。
- *
- * 只在**二维码这条路本身用不了**时给：端点缺失/响应形状不认识/页面配置拿不到。
- * 网络类、超时类、确认类失败都只给"重试"——那些重试一次往往就好了，
- * 把用户推去开一个官方窗口是更重的动作（而且它自己也依赖网络）。
- */
-export const OFFICIAL_FALLBACK_KINDS = [
-  "missing_endpoint",
-  "invalid_response",
-  "qr_config_unavailable",
-  "unknown_channel",
-  "unimplemented",
-];
+/** 提示文字的唯一真源（界面与测试读同一句）。R18 按用户指令换成"两条路径"那句。 */
+export const QR_HINT_TEXT = "手机「控制中心」>「扫一扫」或者系统「设置」>「华为账号」>「扫一扫」。";
 
-/** 提示文字的唯一真源（界面与测试读同一句）。 */
-export const QR_HINT_TEXT = "请使用华为手机上的华为账号扫码登录。";
+/** 页面标题的唯一真源（R18：标题在二维码正上方，全页只出现一次——header 里那份已移除）。 */
+export const LOGIN_GATE_TITLE = "华为账号登录";
+
+/** 次要入口的文案（R18：常驻，不再只在错误态出现）。 */
+export const WEB_LOGIN_ENTRY_TEXT = "在网页中打开登录";
+
+/** 次要入口的测试锚点（真窗守卫 `npm run verify:live` 按它点名这个入口）。 */
+export const WEB_LOGIN_ENTRY_TESTID = "login-open-web";
+
+/** 网页那条路收场、广播里却没带文案时的兜底说明（"刚退回来"这个标记永远不为空）。 */
+export const OFFICIAL_ENDED_NOTE = "网页登录已结束（没有完成登录）。";
 
 /** 状态机认得的事件。 */
 export const LOGIN_GATE_EVENT = {
@@ -99,9 +112,42 @@ export function initialGateState() {
     qr: initialQrState(),
     /** 本轮是否已经自动发起过二维码（防重复建单） */
     qrAttempted: false,
-    /** 当前走的是哪条路：`"qr"`（默认）/ `"official"`（失败后的官方页次要入口）。状态行按它说人话 */
+    /** 当前走的是哪条路：`"qr"`（默认）/ `"official"`（网页登录那条路）。状态行按它说人话 */
     path: null,
+    /**
+     * 网页那条路收场时留下的一句话（R18）：回到二维码态之后先说清楚"它怎么了"，
+     * 等新二维码真的到了（`pending` 带内容）再退场。
+     */
+    officialNote: null,
   };
+}
+
+/**
+ * 网页那条路收场 → 回到二维码态。
+ *
+ * 重新武装自动发起（`qrAttempted: false`）是有意的：用户关掉登录窗之后，眼前应该重新出现
+ * 一张能扫的码，而不是让他自己去按什么东西（简报给的两个选项里选了"重新 qr-start"）。
+ *
+ * `officialNote` **永远不为空**：它既是给用户看的那句"那条路怎么了"，也是渲染层判断
+ * "这一轮该重新发码"的标记（`useAuthGate` 的自动发起 effect 读它）。
+ */
+function returnToQr(state, note) {
+  return {
+    ...state,
+    path: "qr",
+    busy: false,
+    message: null,
+    qrAttempted: false,
+    qr: initialQrState(),
+    officialNote: typeof note === "string" && note !== "" ? note : OFFICIAL_ENDED_NOTE,
+  };
+}
+
+/** "网页那条路的收场广播"的判据：busy 落下来 **且带一句给人看的话**（见不变量 6）。 */
+function isOfficialFinish(state, event) {
+  if (state?.path !== "official") return false;
+  if (event?.busy === true || event?.loggedIn === true) return false;
+  return typeof event?.message === "string" && event.message !== "";
 }
 
 function applyQrEvent(qr, event) {
@@ -128,18 +174,25 @@ export function reduceGateState(state, event) {
   switch (type) {
     case LOGIN_GATE_EVENT.status: {
       const loggedIn = event.loggedIn === true;
-      return {
+      const base = {
         ...state,
         phase: loggedIn ? LOGIN_GATE_PHASE.loggedIn : LOGIN_GATE_PHASE.loggedOut,
         busy: event.busy === true,
         // 广播里带文案就用它（失败原因），没带就保留本地那条（别把用户刚看到的说明抹掉）
         message: loggedIn ? null : (event.message ?? state.message),
       };
+      // 网页那条路收场（判据看的是**旧状态**的 path：base 里 phase 已经翻过面了）
+      if (isOfficialFinish(state, event)) return returnToQr(base, event.message);
+      return base;
     }
     case LOGIN_GATE_EVENT.qrRequested:
       return { ...state, qrAttempted: true, path: "qr", message: null, qr: initialQrState() };
-    case LOGIN_GATE_EVENT.qr:
-      return { ...state, qr: applyQrEvent(state.qr, event) };
+    case LOGIN_GATE_EVENT.qr: {
+      const qr = applyQrEvent(state.qr, event);
+      // 新二维码真的到了（pending 带内容）：网页那条路留下的那句话可以退场了
+      const landed = qr.status === QR_GATE_STATUS.pending && qr.content !== null;
+      return { ...state, qr, officialNote: landed ? null : state.officialNote };
+    }
     case LOGIN_GATE_EVENT.qrFailed:
       return {
         ...state,
@@ -151,11 +204,14 @@ export function reduceGateState(state, event) {
         },
       };
     case LOGIN_GATE_EVENT.started:
-      return { ...state, busy: true, attempted: true, path: "official", message: null };
+      // 走网页那条路：清掉上一轮的说明（这次是用户自己按的），二维码会话由 sidecar 停掉
+      return { ...state, busy: true, attempted: true, path: "official", message: null, officialNote: null };
     case LOGIN_GATE_EVENT.succeeded:
       return { ...state, phase: LOGIN_GATE_PHASE.loggedIn, busy: false, message: null };
-    case LOGIN_GATE_EVENT.failed:
+    case LOGIN_GATE_EVENT.failed: {
+      if (state?.path === "official") return returnToQr(state, event.message);
       return { ...state, busy: false, message: event.message ?? "登录未完成（详情见日志）" };
+    }
     case LOGIN_GATE_EVENT.cancelled:
       return { ...state, busy: false, message: "已取消登录（可以重新打开官方登录页）" };
     default:
@@ -169,15 +225,17 @@ export function shouldShowLoginGate(state) {
 }
 
 /**
- * 该自动发起二维码吗？三条件缺一不可：
+ * 该自动发起二维码吗？四条件缺一不可：
  * 1. 阶段是**确定的**"未登录"（`checking` 不发起：可能已有会话）；
- * 2. 不 busy（开窗那条路正在跑）；
- * 3. 本轮没发起过（重试是用户按出来的，不是自动重来）。
+ * 2. 不 busy（网页那条路正在跑）；
+ * 3. 本轮没发起过（重试是用户按出来的，不是自动重来）；
+ * 4. 当前不在网页那条路上（R18：两条路互斥，别在窗里又建一张码）。
  */
 export function shouldAutoStartQr(state) {
   if (state?.phase !== LOGIN_GATE_PHASE.loggedOut) return false;
   if (state.busy === true) return false;
   if (state.qrAttempted === true) return false;
+  if (state.path === "official") return false;
   return true;
 }
 
@@ -186,31 +244,42 @@ export function canRetryQr(state) {
   return state?.qr?.status === QR_GATE_STATUS.failed;
 }
 
-/** 官方页次要入口：只在"二维码这条路本身用不了"时出现，且别的时候不许出现。 */
-export function shouldOfferOfficialFallback(state) {
-  if (state?.qr?.status !== QR_GATE_STATUS.failed) return false;
-  return OFFICIAL_FALLBACK_KINDS.includes(state.qr.errorKind);
-}
-
-/** 次要入口可用吗？（只要不在忙：用户重来一次是他的自由） */
+/**
+ * 常驻次要入口可用吗？（R18）
+ *
+ * 只有"网页那条路正在跑"时禁用（那时再点一次只会撞上 `login_in_progress`）。
+ * 二维码在准备/等待/过期/失败**都不占** busy，所以这些档位下入口一直点得动。
+ */
 export function canStartLogin(state) {
   return state?.busy !== true;
+}
+
+/** 画面要画的那串内容（没有就是 `null`：界面给同尺寸的占位）。 */
+export function qrContentOf(state) {
+  const content = state?.qr?.content;
+  return typeof content === "string" && content !== "" ? content : null;
 }
 
 /**
  * 状态行文案（克制：一行，告诉用户现在是什么状态、下一步能做什么）。
  *
- * 优先级：**最新一次明确的失败/取消** → 会话阶段 → 当前那条路的状态。
- * 失败文案排最前是有意的：出错时用户最需要看到的就是那一句（而不是"正在准备二维码…"）。
+ * 优先级：**最新一次明确的失败/取消** → 会话阶段 → **网页那条路刚收场留下的那句话** →
+ * 当前那条路的状态。失败文案排最前是有意的：出错时用户最需要看到的就是那一句
+ * （而不是"正在准备二维码…"）。
  */
 export function loginGateStatusLine(state) {
   if (typeof state?.message === "string" && state.message !== "") return state.message;
-  if (state?.phase === LOGIN_GATE_PHASE.checking) return "正在检查登录状态…";
   if (state?.phase === LOGIN_GATE_PHASE.loggedIn) return "已登录。";
+
+  // 刚从网页那条路退回来、新码还没到：先说清楚那条路是怎么结束的
+  // （排在"正在检查登录状态…"之前：那句话是"还不知道"，而这句是**刚发生的事**）
+  if (typeof state?.officialNote === "string" && state.officialNote !== "") return state.officialNote;
+
+  if (state?.phase === LOGIN_GATE_PHASE.checking) return "正在检查登录状态…";
 
   // 官方页那条路（次要入口）跑起来时，说的是"窗已经开了"，而不是二维码现在到哪一步
   if (state?.path === "official") {
-    return state.busy === true ? "已打开华为官方登录页，请在窗口中扫码…" : "官方登录页已收起（可以重试或再打开一次）";
+    return state.busy === true ? "已在网页中打开登录。" : "官方登录页已收起（可以再打开一次）";
   }
 
   const qr = state?.qr ?? initialQrState();
@@ -218,12 +287,14 @@ export function loginGateStatusLine(state) {
     case QR_GATE_STATUS.preparing:
       return "正在准备二维码…";
     case QR_GATE_STATUS.pending:
-      return QR_HINT_TEXT;
+      // 提示文字已经在上一条把"怎么扫"说完了：这里只说"现在在等什么"
+      return "等待扫码…";
     case QR_GATE_STATUS.scanned:
       return "已扫码，请在手机上确认。";
     case QR_GATE_STATUS.confirmed:
       return "已确认，正在完成登录…";
     case QR_GATE_STATUS.expired:
+      // 短暂档：sidecar 紧接着就会播新的 pending（几秒内），之后回到"等待扫码…"
       return "二维码已刷新，请重新扫码。";
     case QR_GATE_STATUS.failed:
       return qr.message ?? "二维码登录失败（详情见日志）";

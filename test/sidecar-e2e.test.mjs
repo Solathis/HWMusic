@@ -166,6 +166,31 @@ test("端到端：auth:logout / auth:cancel-login 都给出结构化答复（不
   assert.deepEqual(sidecar.problems, []);
 });
 
+test("端到端：auth:get-status 回当前状态快照，且**不**额外广播（R19：reload 之后门禁靠它）", async (t) => {
+  const sidecar = startSidecar();
+  t.after(() => sidecar.cleanup());
+
+  // 先等启动期那条 auth:status（restore 的结论）到齐：否则"没多播"可能只是"还没播"
+  const startup = await sidecar.waitForBroadcast((frame) => frame.channel === "auth:status");
+  assert.ok(startup, `启动期没有 auth:status 广播：${JSON.stringify(sidecar.frames)}`);
+  const before = sidecar.frames.filter((frame) => frame.channel === "auth:status").length;
+
+  const snapshot = await sidecar.bridge.call("auth:get-status", {});
+  assert.equal(snapshot.ok, true, `auth:get-status 必须真的挂了处理器（不是 unimplemented）：${JSON.stringify(snapshot)}`);
+  assert.equal(snapshot.data.loggedIn, false, "没有数据目录 → 没有会话，如实说未登录（不冒充已登录）");
+  assert.equal(snapshot.data.busy, false);
+  assert.deepEqual(
+    Object.keys(snapshot.data).sort(),
+    ["busy", "loggedIn"],
+    "应答形状 = auth:status 广播那一份（message 是可选的「刚发生的事」，不随快照走）",
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const after = sidecar.frames.filter((frame) => frame.channel === "auth:status").length;
+  assert.equal(after, before, "查询**不触发广播**：再播一条只会让渲染层把同一件事处理两遍");
+  assert.deepEqual(sidecar.problems, []);
+});
+
 test("端到端：library:favorites 在端点未配置时回结构化 endpoint_unknown（不冒充空数据、不挂起）", async (t) => {
   const sidecar = startSidecar();
   t.after(() => sidecar.cleanup());

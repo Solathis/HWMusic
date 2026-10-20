@@ -30,6 +30,7 @@ import { createSettingsHandlers, createSettingsStore } from "../main/settings.mj
 import { APP_NOTICE } from "../shared/channels.ts";
 import {
   AUTH_CANCEL_LOGIN,
+  AUTH_GET_STATUS,
   AUTH_LOGIN,
   AUTH_LOGOUT,
   AUTH_QR_START,
@@ -186,6 +187,12 @@ dispatcher.register(AUTH_CANCEL_LOGIN, () => authManager.cancelLogin());
 // 之后的状态变化走 `auth:qr` 广播（扫码要好几分钟，渲染层那条调用链只有 60 秒）。
 // 轮询在 sidecar 里跑：渲染层只画二维码，不碰协议、不碰会话令牌。
 dispatcher.register(AUTH_QR_START, () => authManager.startQrLogin());
+
+// R19：登录状态**重查**。`auth:status` 只在启动时播一次（NoticeQueue 冲刷只发生一次），
+// 渲染层 reload/崩溃重启之后那一条已经冲刷过了 → 门禁会永远停在"正在检查登录状态…"。
+// 这条让渲染层每次 boot 主动问一次，应答与广播同形状；**不播广播**（有应答就不必再播一条，
+// 再播只会让渲染层把同一件事处理两遍）。
+dispatcher.register(AUTH_GET_STATUS, () => ok(authManager.statusSnapshot()));
 
 for (const channel of REQUEST_CHANNELS) {
   if (dispatcher.handlers().includes(channel)) continue;

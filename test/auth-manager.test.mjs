@@ -209,7 +209,7 @@ test("login：宿主开窗失败（结构化错误）→ open_failed，不假装
   assert.equal(result.error.kind, "login_in_progress");
 });
 
-test("login：令牌兑换失败 / loginex 缺端点 / 会话验证失败 都在存盘之前停下", async () => {
+test("login：令牌兑换失败 / loginex 端点被显式关掉 / 会话验证失败 都在存盘之前停下", async () => {
   const exchangeFailed = await loginWith(
     realCallback,
     { exchangeCode: async () => ({ ok: false, error: { message: "token 端点返回 HTTP 400", kind: "http_error" } }) },
@@ -218,13 +218,23 @@ test("login：令牌兑换失败 / loginex 缺端点 / 会话验证失败 都在
   assert.equal(exchangeFailed.result.error.kind, "http_error");
   assert.deepEqual(exchangeFailed.store.calls, [], "兑换失败不得落盘");
 
-  // loginex：端点未知 → 结构化「待联调」，且**一次请求都不发**。
-  // 这一条刻意**不注入** exchangeMusicSession：测的就是"没注入时"的默认行为（本任务的真实形态）。
+  // loginex：端点被**显式注入 null** → 结构化「待联调」，且**一次请求都不发**。
+  //
+  // R17 之前这条测的是"没注入时的默认行为"（那时默认值就是 null）。R17 把默认值换成
+  // R17 确认过的真端点之后，"不猜 URL、不发请求"这条不变式就搬到了**显式关掉**这一档：
+  // 这里注入 `endpoints: { loginex: null }`，并注入一个**一旦被调用就失败**的兑换端口——
+  // 于是"没发请求"不再靠"默认实现恰好什么都不做"来保证，而是被直接钉住。
   const host = fakeHost();
   const store = fakeSessionStore();
+  let exchanged = 0;
   const auth = createAuthManager({
     host: host.host,
     sessionStore: store,
+    endpoints: { loginex: null },
+    exchangeMusicSession: async () => {
+      exchanged += 1;
+      return { ok: false, error: { message: "不该被调用", kind: "internal" } };
+    },
     exchangeCode: async () => ({ ok: true, data: ACCOUNT_TOKENS }),
     verifySession: async () => ({ ok: true, data: { total: 1 } }),
     log: () => {},
@@ -235,8 +245,9 @@ test("login：令牌兑换失败 / loginex 缺端点 / 会话验证失败 都在
   const loginexResult = await pending;
   assert.equal(loginexResult.ok, false, JSON.stringify(loginexResult));
   assert.equal(loginexResult.error.kind, AUTH_ERROR_KINDS.loginexPending);
-  assert.match(loginexResult.error.message, /待联调/);
-  assert.deepEqual(store.calls, [], "端点未知时连会话都不该落盘");
+  assert.match(loginexResult.error.message, /不猜 URL/);
+  assert.equal(exchanged, 0, "端点被关掉时兑换端口一次都不许被调用");
+  assert.deepEqual(store.calls, [], "端点关闭时连会话都不该落盘");
 
   const verifyFailed = await loginWith(
     realCallback,
@@ -448,18 +459,100 @@ test("边界：认证状态机自己不发 HTTP（兑换与验证全部由调用
   assert.doesNotMatch(source, /undici/, "也不得自己挑 HTTP 客户端");
 });
 
-test("端点真源：默认端点就是 docs/API_CONTRACT.md 登记的 R4 确认值，loginex 没有默认值", async () => {
+test("端点真源：默认端点就是 docs/API_CONTRACT.md 登记的值（含 R17 确认的 loginex）", async () => {
   const contract = await import("node:fs/promises").then((fs) =>
     fs.readFile(new URL("../docs/API_CONTRACT.md", import.meta.url), "utf8"),
   );
   assert.ok(contract.includes(HUAWEI_OAUTH_ENDPOINTS.authorize), "authorize 端点必须是契约里登记的那一条");
   assert.ok(contract.includes(HUAWEI_OAUTH_ENDPOINTS.token), "token 端点必须是契约里登记的那一条");
+  // R17：loginex 从「待联调」升到"有确认值"——默认值必须在契约里逐字出现（文档与代码不许各说各话）
+  assert.ok(
+    contract.includes(HUAWEI_OAUTH_ENDPOINTS.loginex),
+    "loginex 端点必须是契约 §1.5 里登记的那一条（R17 确认值）",
+  );
+  assert.ok(
+    contract.includes("api-drcn.music.dbankcloud.cn"),
+    "契约里要写明音乐业务域（端点就是它拼出来的）",
+  );
 
-  // 未注入 loginex → 结构化「待联调」，且绝不猜 URL
   const { auth } = managerOf();
   const attempt = createAttempt({ authorizeEndpoint: HUAWEI_OAUTH_ENDPOINTS.authorize });
   assert.match(attempt.authorizeUrl, /^https:\/\/oauth-login1\.cloud\.huawei\.com\/oauth2\/v3\/authorize/);
   assert.equal(LOGIN_TIMEOUT_MS, 600_000);
-  assert.equal(auth.endpoints().loginex, null, "loginex 端点未知：默认必须是 null，不许塞占位 URL");
-  assert.ok(!JSON.stringify(auth.endpoints()).includes("loginex."), "不得出现猜测的 loginex 主机名");
+  assert.equal(
+    auth.endpoints().loginex,
+    HUAWEI_OAUTH_ENDPOINTS.loginex,
+    "没注入时取默认值：R17 确认的 loginex 端点",
+  );
+  // 显式注入 null 是"关掉"而不是"取默认"：这一条钉住 `??` 与 `in` 的区别
+  const closed = createAuthManager({
+    host: fakeHost().host,
+    sessionStore: fakeSessionStore(),
+    endpoints: { loginex: null },
+    log: () => {},
+  });
+  assert.equal(closed.endpoints().loginex, null, "显式注入 null 必须是「关掉」，不许被默认值顶掉");
+});
+
+// ---------------------------------------------------------------------------
+// R19：状态快照（`auth:get-status` 的应答体）—— 与 `auth:status` 广播**同形状**
+// ---------------------------------------------------------------------------
+//
+// 为什么需要它：`auth:status` 只在 sidecar 启动时广播一次（渲染层没就绪时由 Rust 排队），
+// 渲染层 reload/崩溃重启之后那一条**已经冲刷过了**，门禁于是永远停在 `checking`。
+// 这三条钉住"查询拿到的就是当前事实"：未登录 / 已登录 / 开窗那条路正在跑（busy）。
+
+test("状态快照（R19）：没有会话时如实说未登录 + 空闲（不猜、也不带编出来的文案）", () => {
+  const { auth } = managerOf();
+  assert.deepEqual(auth.statusSnapshot(), { loggedIn: false, busy: false });
+});
+
+test("状态快照（R19）：有会话时如实说已登录（reload 之后门禁靠它放行，不必等一条不会再来的广播）", async () => {
+  const { auth } = managerOf({ sessionStore: fakeSessionStore({ loaded: MUSIC_SESSION }) });
+  const restored = await auth.restore();
+  assert.equal(restored.loggedIn, true);
+  assert.deepEqual(auth.statusSnapshot(), { loggedIn: true, busy: false });
+});
+
+test("状态快照（R19）：开窗那条路正在跑时 busy 为真，且与刚播出去的那条广播逐字一致", async () => {
+  const context = managerOf();
+  const pending = context.auth.login();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  try {
+    assert.deepEqual(
+      context.broadcasts,
+      [{ channel: AUTH_STATUS, payload: { loggedIn: false, busy: true } }],
+      "login() 立刻播一条 busy:true（渲染层据此禁用常驻入口）",
+    );
+    assert.deepEqual(
+      context.auth.statusSnapshot(),
+      context.broadcasts[0].payload,
+      "快照与广播必须是同一份事实：两边各算一份（例如现读 inFlight）早晚会漂移",
+    );
+  } finally {
+    // 无论上面哪条红，都要把这次登录收场：`runLoginFlow` 挂着一枚 600 秒的期限定时器，
+    // 不收场的话测试进程会一直挂在那里（失败的测试不该顺带把整轮 test 卡住）
+    context.host.conclude(realCallback(context.host));
+    await pending;
+  }
+
+  assert.deepEqual(context.auth.statusSnapshot(), { loggedIn: true, busy: false });
+});
+
+test("状态快照（R19）：形状就是广播那一份（只多不许少），文案**不进**快照", async () => {
+  const { auth, broadcasts } = await loginWith({ status: "cancelled" });
+  const last = broadcasts.at(-1);
+  assert.equal(last.channel, AUTH_STATUS);
+  assert.ok(last.payload.message, "失败那条广播带一句给人看的话");
+
+  const snapshot = auth.statusSnapshot();
+  assert.deepEqual(Object.keys(snapshot).sort(), ["busy", "loggedIn"]);
+  for (const key of Object.keys(snapshot)) {
+    assert.ok(
+      ["loggedIn", "busy", "message"].includes(key),
+      `快照多出了广播形状里没有的字段：${key}（渲染层是按广播载荷读它的）`,
+    );
+  }
+  assert.equal(snapshot.loggedIn, false, "取消之后没有会话");
 });

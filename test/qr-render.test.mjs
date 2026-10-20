@@ -1,11 +1,13 @@
 /**
- * R16 · C 部分：二维码渲染冒烟（成熟库 `qrcode`，MIT）。
+ * R16 · C 部分：二维码渲染冒烟（成熟库 `qrcode`，MIT）；R18 增补**过期自动换新的像素级全链**。
  *
  * 为什么只到"库产出真二维码"这一层：真浏览器里的像素守卫是 `npm run test:browser`
  * （playwright + Chromium）的活；这里是**不依赖浏览器**的那一段——证明
  * 1. 依赖真的装着、许可证是 MIT（不是把别人的码抄进仓库）；
  * 2. 拿探针实探到的 `content` 形状能编出二维码（模块矩阵既不是全黑也不是全白）；
- * 3. 渲染层用的是库的渲染入口（`toCanvas`），而不是自己画模块矩阵。
+ * 3. 渲染层用的是库的渲染入口（`toCanvas`），而不是自己画模块矩阵；
+ * 4. **R18**：过期换新这条链的最后一跳是真的（`expired → 新 content → 同一块画布上重画`）——
+ *    用假画布接住库真写出来的像素，两帧必须**不一样**（只改状态不重画会被这条抓住）。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -13,6 +15,16 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import QRCode from "qrcode";
+
+import { AUTH_QR, AUTH_STATUS } from "../src/shared/channels.ts";
+import { QR_SIZE_PX, paintQrCanvas } from "../src/renderer/features/auth/qr-canvas.mjs";
+import {
+  LOGIN_GATE_EVENT,
+  QR_GATE_STATUS,
+  initialGateState,
+  qrContentOf,
+  reduceGateState,
+} from "../src/renderer/features/auth/login-gate-logic.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const read = (relative) => readFileSync(`${repoRoot}${relative}`, "utf8");
@@ -63,11 +75,113 @@ test("冒烟：库的两种渲染出口都能用（SVG 字符串 + 数据 URL �
 
 test("渲染层：门禁只经库的渲染入口画二维码（没有第二个二维码实现）", () => {
   const gate = read("src/renderer/login-gate.tsx");
-  assert.match(gate, /import QRCode from "qrcode"/);
-  assert.match(gate, /QRCode\.toCanvas\(/);
+  assert.match(gate, /paintQrCanvas\(/, "门禁经 painter（features/auth/qr-canvas.mjs）画码，不自己碰库");
 
   // 渲染层不许出现任何二维码编码细节（那意味着有人抄了一份实现进来）
   for (const forbidden of ["RS_BLOCK_TABLE", "getModuleCount", "getBestMaskPattern", "ecLevel"]) {
     assert.equal(gate.includes(forbidden), false, `渲染层不该出现二维码算法细节：${forbidden}`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// R18：过期自动换新的最后一跳（同一块画布上真的重画）
+// ---------------------------------------------------------------------------
+
+/**
+ * 假画布：`qrcode` 的 canvas 出口只用到 `getContext('2d')` 与
+ * `createImageData` / `clearRect` / `putImageData`（读 node_modules/qrcode/lib/renderer/canvas.js 确认），
+ * 所以这个替身足以接住**库真写出来的像素**——不是"调了没调"的计数桩。
+ */
+function fakeCanvas() {
+  const frames = [];
+  const context = {
+    createImageData: (width, height) => ({ width, height, data: new Uint8ClampedArray(width * height * 4) }),
+    clearRect: () => undefined,
+    putImageData: (image) => {
+      frames.push(Uint8Array.from(image.data));
+    },
+  };
+  return { frames, style: {}, width: 0, height: 0, getContext: () => context };
+}
+
+/** 一帧像素里的暗像素占比（与 verify-live 的口径同源：空白画布是 0）。 */
+function inkCoverage(frame) {
+  let dark = 0;
+  for (let index = 0; index + 3 < frame.length; index += 4) {
+    const luminance = 0.299 * frame[index] + 0.587 * frame[index + 1] + 0.114 * frame[index + 2];
+    if (frame[index + 3] >= 128 && luminance < 128) dark += 1;
+  }
+  return dark / (frame.length / 4);
+}
+
+/** 两帧像素差异比例。 */
+function pixelDiffRatio(a, b) {
+  if (a.length !== b.length) return 1;
+  let differing = 0;
+  for (let index = 0; index < a.length; index += 1) if (a[index] !== b[index]) differing += 1;
+  return differing / a.length;
+}
+
+test("painter：一次绘制写出真二维码像素（尺寸=QR_SIZE_PX、有黑有白）", async () => {
+  const canvas = fakeCanvas();
+  await paintQrCanvas(canvas, SAMPLE_CONTENT);
+
+  assert.equal(canvas.frames.length, 1, "一次绘制 = 一帧（putImageData 一次）");
+  assert.equal(canvas.width, QR_SIZE_PX, `画布尺寸由库按 width 选项定：${canvas.width}`);
+  assert.equal(canvas.height, QR_SIZE_PX);
+  const coverage = inkCoverage(canvas.frames[0]);
+  assert.ok(coverage > 0.15 && coverage < 0.8, `墨迹占比要在二维码区间（实际 ${coverage.toFixed(4)}）`);
+});
+
+test("painter：没有内容或没有画布时不画（不做无意义的绘制，也不抛）", async () => {
+  const canvas = fakeCanvas();
+  assert.equal(await paintQrCanvas(canvas, ""), null);
+  assert.equal(await paintQrCanvas(canvas, null), null);
+  assert.equal(await paintQrCanvas(null, SAMPLE_CONTENT), null);
+  assert.equal(canvas.frames.length, 0);
+});
+
+test("过期自动换新（全链）：广播 → 渲染层状态 → 同一块画布重画，两帧像素必须不同", async () => {
+  const OLD = "https://id1.cloud.huawei.com/qrcode/login.jsp?qRCode=OLD-0000";
+  const NEW = "https://id1.cloud.huawei.com/qrcode/login.jsp?qRCode=NEW-1111";
+
+  // sidecar 真会播出的那串（auth:status 起点 + auth:qr 的过期与换新）
+  const broadcasts = [
+    { channel: AUTH_STATUS, payload: { loggedIn: false, busy: false } },
+    { channel: AUTH_QR, payload: { status: "pending", content: OLD, expiresInMs: 181_000 } },
+    { channel: AUTH_QR, payload: { status: "expired" } },
+    { channel: AUTH_QR, payload: { status: "pending", content: NEW, expiresInMs: 180_000 } },
+  ];
+
+  const canvas = fakeCanvas();
+  let state = initialGateState();
+  let painted = null;
+  let statusAtExpired = null;
+  for (const { channel, payload } of broadcasts) {
+    state = reduceGateState(state, {
+      type: channel === AUTH_STATUS ? LOGIN_GATE_EVENT.status : LOGIN_GATE_EVENT.qr,
+      ...payload,
+    });
+    if (payload.status === "expired") statusAtExpired = state.qr.status;
+    // 渲染层的重画条件就是"要画的内容变了"（QrCanvas 的 effect 依赖是 content）
+    const content = qrContentOf(state);
+    if (content !== null && content !== painted) {
+      painted = content;
+      await paintQrCanvas(canvas, content);
+    }
+  }
+
+  assert.equal(statusAtExpired, QR_GATE_STATUS.expired, "过期那一档确实经过渲染层");
+  assert.equal(canvas.frames.length, 2, `换新必须在同一块画布上重画一次（实际 ${canvas.frames.length} 帧）`);
+  const diff = pixelDiffRatio(canvas.frames[0], canvas.frames[1]);
+  assert.ok(diff > 0.05, `新码与旧码的画面必须真的不同（实际差异 ${(diff * 100).toFixed(2)}%）`);
+  assert.ok(inkCoverage(canvas.frames[1]) > 0.15, "换新后的那一帧仍是一张真的二维码");
+});
+
+test("painter 是唯一出口：门禁的重画条件钉在「内容」上（内容不变不重画）", () => {
+  const gate = read("src/renderer/login-gate.tsx");
+  assert.match(gate, /paintQrCanvas\(canvasRef\.current, content\)/, "画布经 painter 画，参数是当前内容");
+  assert.match(gate, /\},\s*\[content\]\)/, "effect 依赖是 content：内容一换就重画（过期换新走的就是这条路）");
+  assert.doesNotMatch(gate, /QRCode\./, "门禁不直接碰二维码库（画法只有 qr-canvas.mjs 一处）");
+});
+

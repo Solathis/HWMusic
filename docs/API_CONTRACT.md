@@ -105,15 +105,72 @@ LOGIN_ALLOWED_URLS    = ["https://oauth-login1.cloud.huawei.com/oauth2/v3/loginC
 - Rust 侧镜像（`src-tauri/src/login.rs` 的 `LOGIN_ALLOWED_ORIGINS`）与互钉测试已落地：
   改一侧就必须改另一侧 + `test/login-parity.test.mjs` + `src-tauri/tests/login_policy.rs`。
 
-### 1.5 未确认：令牌链的后续环节
+### 1.5 令牌链的后续环节
 
 | 环节 | 状态 | 说明 |
 |---|---|---|
 | 授权码 → 账号 AT/RT（token 端点，带 `code_verifier`） | 已确认（§1.3） | — |
-| 账号 AT → **音乐会话**（旧仓称 `loginex`，请求带 Digest 头） | **待确认 / 待 R7 联调** | 端点 URL、请求形状、Digest 算法细节均无公开证据；探针无法离线确定（GET/POST 都需有效 AT）。`src/protocols/auth.mjs` 因此不实现它，只提供可注入端点的兑换/刷新 |
+| 账号 AT → **音乐会话**（旧仓称 `loginex`，请求带 Digest 头） | **端点已确认（R17）；兑换往返仍未实测** | 见下方 §1.5.1：端点 URL、请求形状、Digest 头形状都有公开证据，且**端点存在性经本机实测**（405 / 对照 404 / 无效 AT → 200 + 业务码）；但"有效 AT 换到真会话"要用户授权扫码，本仓**没跑过** |
 | 账号 AT 有效期 | 审计事实 ≈ 1 小时 | 未实测；`isTokenExpired` 默认提前 60 秒判过期 |
 | 音乐会话有效期 | 审计事实 ≈ 7 天（到期字段提示） | 未实测完整周期；自动续期未打通，失效需重扫 |
 | 刷新账号 AT | 已实现（注入端点） | 华为是否轮换 RT 未知；实现按"响应不发新 RT 就沿用旧 RT"处理 |
+
+#### 1.5.1 `loginex`（R17 补全）：证据分三级，逐级如实标注
+
+**① 本机实测（R17，无凭据、不登录账号）**
+
+命令：`.tmp/r17-loginex-live.mjs`（临时探针，结论记在这里；探针只发一个**无效** AT，
+与 `scripts/probe-login.mjs` 的 `--include-token-probe` 同一口径）。实测结果：
+
+```
+DNS  api-drcn.music.dbankcloud.cn                  → 2407:c080:1400:61:40a0:d51a:7895:e27f（可解析）
+404  GET  /__r17_probe_not_a_path__                对照路径：网关错误页（说明下面那两行有区分力）
+405  GET  /music-odpapp-service/v5/service/userinfo/loginex         ← 路径存在，只收 POST
+200  POST /music-odpapp-service/v5/service/userinfo/loginex  {"result":{"resultCode":"990000","resultMessage":"System error!"}}
+       （体 {"accessToken":"PROBE-INVALID-ACCESS-TOKEN"} + 不含 token 的 Digest 头）
+401  GET  /music-userbehavior-service/v1/service/favorite/simple/exist  "check user authentication failed"
+```
+
+读法：**对照路径 404、目标路径 405/200-with-business-code** —— 这条链有真实的区分力，
+证明"路径存在、方法受限、请求被业务受理"。`990000` 是无效令牌的业务码，**不是**"端点不存在"。
+
+**② 公开来源（端点形状 / 请求形状 / Digest 细节）**
+
+来源：公开仓库 `talongao/huawei-music-desktop`（2026-10-18 推送；即本项目文档里反复提到的"旧仓"）
+的 `docs/API_CONTRACT.md`（核验日期 2026-10-14）与 `src/auth.mjs`。原文记录的是**该作者本人账号**
+的一次成功实验（"账号 Access Token → 音乐 loginex 兑换成功，业务码 `000000`"）：
+
+- **业务域**：`https://api-drcn.music.dbankcloud.cn`
+- **端点**（本项目默认值，逐字同一串）：
+  `https://api-drcn.music.dbankcloud.cn/music-odpapp-service/v5/service/userinfo/loginex`
+- **请求体**：`{"accessToken":"<账号 AT>"}`（Content-Type: application/json）
+- **请求头**：`Authorization: Digest username=app-music-baseline, nonce=<每请求随机>, created=<UTC ISO8601，无毫秒>`
+  （**不带** token 段；带音乐会话的业务调用才追加 `, token=<音乐 token>`）
+- **成功判据**：HTTP 2xx **且** `result.resultCode === "000000"`
+- **响应关注**：`result.resultCode`、`token`（音乐会话凭据）、`snsUserID`（音乐用户标识）、
+  `expireTime`（已见 14 位 `yyyyMMddHHmmss`；**时区尚未确认**）
+
+本项目据此接线的落点：`src/main/music-session.mjs`（端点常量 + Digest 构造 + 响应解析 + 可注入 fetch），
+默认值经 `src/main/auth-manager.ts` 的 `HUAWEI_OAUTH_ENDPOINTS.loginex` 注入。
+`expireTime` **刻意不换算**成 `expiresAt`（时区未确认，宁可留原样也不造一个偏 8 小时的"精确"时间戳）。
+
+**③ 仍未实测（本仓 untested，一条不漏）**
+
+| # | 项 | 为什么没验 |
+|---|---|---|
+| 1 | 用**有效** AT 换到真音乐会话（业务码 `000000` 那一档） | 需要用户授权扫码（用户在场的授权动作），本仓不代扫 |
+| 2 | `snsUserID` / `expireTime` 的真实取值与**时区** | 依赖第 1 条 |
+| 3 | 该 AT 是否被本客户端（`client_id=101444301`）签发的会被受理 | 依赖第 1 条 |
+| 4 | 音乐会话有效期与失效行为 | 依赖第 1 条；自动续期本来就没打通 |
+
+**顺带记录的音乐业务端点**（同为上述公开来源，**本仓一条都没实测**，故不接线）：
+收藏 `POST /music-userbehavior-service/v3/service/favorite/simple/all`、播放历史
+`GET /music-userbehavior-service/v1/service/recentlyplayed/query`、搜索
+`POST /music-search-service/v10/service/fuzzysearch`、播放地址
+`POST /music-play-service/v3/service/file/bycontentcode` 等（完整清单见该仓库的契约文档）。
+本机对 `favorite/simple/exist` 只做到"401 = 路径存在但要授权"这一步（见上表），
+其余路径未逐个探测——**"路径可能存在"不等于"请求形状已确认"**，所以 `data.musicEndpoints`
+仍然由设置文档注入、代码里不写死。
 
 ### 1.6 宿主契约（R7）：登录窗的导航 URL 如何交给 `consumeCallback`
 
@@ -169,6 +226,12 @@ auth:status → {loggedIn: boolean, busy: boolean, message?: string}
   而扫码要等好几分钟。`auth:login` **立刻回 `{started:true,...}`**，真正的结论经 `auth:status` 送达。
 - 启动期恢复也会广播一条（`{loggedIn:false, busy:false}`）：渲染层还没订阅时由 Rust 的
   `NoticeQueue` 排队，`core_renderer_ready` 时冲刷——"已登录"这个事实不会发进空气。
+- **广播答不了"现在的状态是什么"（R19 补上重查通道）**：`NoticeQueue` 的冲刷**只发生一次**，
+  渲染层 reload / 崩溃重启之后启动期那一条已经冲刷过了 → 门禁永远停在 `checking`
+  （"正在检查登录状态…"）、二维码不发起、且没有任何报错。所以渲染层挂载时会主动
+  `core_call(auth:get-status)` 问一次（与托盘可用性查询同款模式：状态由拥有者答），
+  应答**与上面这条广播同形状**（同一个载荷构造点）；查询**不触发广播**，
+  也**不带 `message`**——那是"刚发生的那件事"，属于广播，快照只答"现在是什么"。
 
 **已知缺口（R7 如实登记，不硬绕）**：wry 0.57（tauri 2.12 的 webview 层）只注册 WebView2 的
 `NavigationStarting`（主框架级），**没有** `FrameNavigationStarting`。官方页若从 **iframe** 内部发起
@@ -245,7 +308,21 @@ bundle 里没有任何硬编码的二维码端点字符串——这也是"必须
 
 **本项目落地位置**：`src/protocols/qr-login.mjs`（状态机，端点注入）、`src/main/qr-login.mjs`
 （探针确认的端点常量 `HUAWEI_QR_ENDPOINTS` + CAS 换码链）、`auth:qr-start` 请求频道、
-`auth:qr` 广播频道、渲染层 `login-gate.tsx`（`qrcode` 库画 canvas）。
+`auth:qr` 广播频道、渲染层 `login-gate.tsx`（画法在 `features/auth/qr-canvas.mjs`，库为 `qrcode`）。
+
+**R18 增补（两条路的互斥，用户指令）**：
+- 引导页有一个**常驻**的次要入口「在网页中打开登录」（`WEB_LOGIN_ENTRY_TEXT`），走既有
+  `auth:login` → R7 官方登录子窗；它与二维码流**互斥**：
+  - `auth-manager.login()` 在开窗**之前**调 `stopQrSession()`：停轮询 + 作废当前 `qrAttempt`，
+    **不广播**（紧接着就播 `busy:true`；多播一条 `busy:false` 会被渲染层读成"网页那条路已收场"）；
+  - 迟到的二维码确认（用户改走网页那条路之后手机才点了确认）在 `onConfirmed` 里按
+    `qrAttempt !== attempt` **丢弃**：不换码、不广播（否则一次作废的会话会多换一次码）；
+  - 网页那条路收场（`auth:status` 落 `busy:false` **且带一句给人看的话**）→ 渲染层回到二维码态、
+    重新武装自动发起（`officialNote` 记一句"它为什么结束了"，新码到达后退场）；
+  - 二维码**不占** `busy`（`startQrLogin` 不再播 `busy:true`）：`busy` 只描述"开窗那条路正在跑"，
+    否则常驻入口会在整个等扫码期间被 `disabled`。
+- 过期自动换新仍是 sidecar 的事（协议层 `createQrSession` 的 `expired → create()` 重建），
+  渲染层只是"内容变了就重画"；像素级的全链证据在 `test/qr-render.test.mjs`。
 
 ## 2. 音乐业务接口
 
@@ -655,13 +732,15 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 > 按**代码事实**补齐（真源：`src/shared/request-channels.ts` 的两份清单，Rust 侧为镜像副本）。
 > 本节只登记，不改任何实现。
 
-**请求频道（渲染层 → core，唯一业务通道 `core_call`）** —— 共 15 条，真源 `REQUEST_CHANNELS`：
+**请求频道（渲染层 → core，唯一业务通道 `core_call`）** —— 共 17 条，真源 `REQUEST_CHANNELS`：
 
 | 频道 | 载荷 | 应答 `data` | 失败类别 | 落地 |
 |---|---|---|---|---|
 | `auth:login` | 无 | `{started:true, loggedIn, epoch, loginInFlight}` | — | R4/R7 |
 | `auth:logout` | 无 | `{sessionCleared, cacheCleared, notes[]}` | 清不干净**不改写成成功**，原因进 `notes` | R4/R7 |
 | `auth:cancel-login` | 无 | `{cancelled}`（`false` = 本来就没有进行中的登录，**不是错误**） | — | R7 |
+| `auth:qr-start` | 无 | `{content, expiresInMs}`（二维码内容 + 有效期；之后的状态变化走 `auth:qr` 广播） | 建单失败 → 结构化类别 + `auth:qr{failed}` | R16 |
+| `auth:get-status` | 无 | `{loggedIn, busy}`（**与 `auth:status` 广播同形状**；不触发广播、不带 `message`） | 频道不可用即结构化错误（渲染层**不据此猜档位**，只把原因说到状态行上） | R19 |
 | `settings:get` | 无 | `{settings}` = 归一后的完整文档 | 读不到/读坏了 → 回默认文档（代理当没配）+ 一条日志，**不抛、不砸文件** | R6 |
 | `settings:set` | 二选一：`{patch:{...}}`（合并）或 `{reset:true}`（已知键回默认） | `{settings, restartRequired}` | `invalid_payload`（两个都给 / 都不给 / 类型不对，**不写盘**）；文件认不出 → 结构化错误并**保留原文件** | R6 |
 | `settings:test-proxy` | 见 §2.7 | 见 §2.7 | 见 §2.7 | R10（接 R6 的测试器） |
@@ -736,9 +815,17 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `ShortcutState` | 生效组合快照 | `src-tauri/src/shortcuts.rs` | R13：`setup` 里登记成托管状态（设置页后续可读；本任务只记 + 提示，不做 UI） |
 | `HUAWEI_QR_ENDPOINTS` | 见 §1.8（建单/轮询/CAS 换码三条） | `src/main/qr-login.mjs` | R16：二维码登录的端点表（探针确认值；协议层 `src/protocols/qr-login.mjs` 仍只收注入，不写死 URL） |
 | `AUTH_QR_START` / `AUTH_QR` | `"auth:qr-start"` / `"auth:qr"` | `src/shared/request-channels.ts` / `src/shared/channels.ts` | R16：二维码会话的请求频道与状态广播（Rust 镜像由 `test/channel-parity.test.mjs` 钉住） |
-| `QR_HINT_TEXT` | `"请使用华为手机上的华为账号扫码登录。"` | `src/renderer/features/auth/login-gate-logic.mjs` | R16：引导页那**一句**提示文字（界面与测试读同一份真源） |
+| `AUTH_GET_STATUS` | `"auth:get-status"` | `src/shared/request-channels.ts` | R19：登录状态**重查**频道（渲染层挂载时主动问一次；应答与 `auth:status` 同形状，Rust 镜像由 `test/channel-parity.test.mjs` 钉住） |
+| `QR_HINT_TEXT` | `"手机「控制中心」>「扫一扫」或者系统「设置」>「华为账号」>「扫一扫」。"` | `src/renderer/features/auth/login-gate-logic.mjs` | R16 立、**R18 按用户指令改文案**：引导页那**一句**提示文字（界面与测试读同一份真源；状态行不再复述它） |
+| `LOGIN_GATE_TITLE` | `"华为账号登录"` | `src/renderer/features/auth/login-gate-logic.mjs` | R18：引导页标题的唯一真源（居中放在二维码正上方；header 里那份已移除，全页只出现一次） |
+| `WEB_LOGIN_ENTRY_TEXT` / `WEB_LOGIN_ENTRY_TESTID` | `"在网页中打开登录"` / `"login-open-web"` | `src/renderer/features/auth/login-gate-logic.mjs` | R18：**常驻**次要入口的文案与测试锚点（走 R7 的 `auth:login` 开窗路径；与二维码互斥，见 §1.8） |
+| `QR_CANVAS_OPTIONS` / `QR_SIZE_PX` | `{width: 208, margin: 1, errorCorrectionLevel: "L"}` / `208` | `src/renderer/features/auth/qr-canvas.mjs` | R18：二维码画布的唯一画法（内容一换即重画；`npm run verify:live` 按 208×208 与墨迹占比复核） |
 | `QR_DEFAULT_INTERVAL_MS` / `QR_DEFAULT_MAX_POLL_FAILURES` | `2000` / `3` | `src/protocols/qr-login.mjs` | R16：轮询间隔兜底（真值由服务端下发）与连续失败几次收口 |
 | `MAX_URL_LOG_CHARS` | `160` | `src-tauri/src/login.rs` | R16：登录窗导航/加载日志里 URL 的截断上限（查询值一律不进日志） |
+| `HUAWEI_MUSIC_LOGINEX_ENDPOINT` | `https://api-drcn.music.dbankcloud.cn/music-odpapp-service/v5/service/userinfo/loginex` | `src/main/music-session.mjs`（默认值经 `auth-manager.ts` 的 `HUAWEI_OAUTH_ENDPOINTS.loginex` 注入） | R17：音乐会话兑换端点（证据分级见 §1.5.1）。协议层 `auth.mjs`/`music.mjs` 仍只收注入；`test/auth-manager.test.mjs` 拿本文件反查这串字面量 |
+| `MUSIC_SESSION_DIGEST_USERNAME` | `"app-music-baseline"` | `src/main/music-session.mjs` | R17：音乐业务请求 Digest 头的固定 `username`（不是凭据；只在请求头里出现，不进日志） |
+| `MUSIC_BUSINESS_OK` | `"000000"` | `src/main/music-session.mjs` | R17：业务成功码（HTTP 2xx **且** `result.resultCode === "000000"` 才算成功） |
+| `LOG_DIR_NAME` | `"logs"` | `src-tauri/src/lib.rs` | R17：日志目录在数据根下的一级子目录名；`HWMUSIC_DATA_DIR` 可用时日志写 `<数据根>/logs`（`log_plugin_targets` 的唯一构造点） |
 
 ## 4. 红线（任何后续任务不得越过）
 
@@ -812,3 +899,27 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
   （URL 只留 origin+path+参数名，`MAX_URL_LOG_CHARS` 截断）+ debug 构建开 devtools。
   §3 增补六行常量。**仍未联调**：真实扫码确认后的兑换（`loginex` 端点仍缺，见 §1.5）、
   真机 dev 跑一次的验证（由用户在场所做）。
+- 2026-10-20（Task R17）：**`loginex` 从「待联调」升到「端点 + 形状已确认」**——§1.5 改名并新增
+  §1.5.1，把证据分三级逐条标注（① 本机实测：405 / 对照 404 / 无效 AT → 200 + 业务码 `990000`；
+  ② 公开来源：业务域 + 端点 + 请求体 + Digest 头形状 + 成功判据；③ 仍未实测：有效 AT 的兑换往返、
+  `expireTime` 时区）。落地：新增 `src/main/music-session.mjs`（端点常量 / Digest 构造 / 响应解析 /
+  可注入 fetch 的端口），`auth-manager.ts` 的默认 `loginex` 端点改指确认值（显式注入 `null` 仍是
+  「关掉」且一次请求都不发）。同轮顺带记录**音乐业务端点**的公开来源候选（收藏/历史/搜索/播放地址），
+  **本仓一条都没实测**，故 `data.musicEndpoints` 仍由设置文档注入、代码不写死。
+  **仍未联调**：真实扫码确认后的完整兑换（§1.5.1 的 untested 清单）。
+- 2026-10-20（Task R17，日志落点）：`tauri-plugin-log` 的文件目标从插件的默认 `LogDir`
+  改为**跟随数据根**（`HWMUSIC_DATA_DIR` 可用时写 `<数据根>/logs`）——受限环境里 `%LOCALAPPDATA%`
+  可能不可写，而建窗本来就走数据根，两者绑在一起才不会出现"窗口能起、日志打开失败"。详见 §3。
+- 2026-10-20（Task R18，**补记**：当时只改了正文、漏了本节）：§1.8 增补"两条路互斥"
+  （引导页常驻的「在网页中打开登录」与二维码流互斥：开窗前停轮询 + 作废尝试、迟到确认按身份
+  比对丢弃、二维码不占 `busy`）；§3 增补 `LOGIN_GATE_TITLE` / `WEB_LOGIN_ENTRY_TEXT` /
+  `WEB_LOGIN_ENTRY_TESTID` / `QR_CANVAS_OPTIONS` 四行并更新 `QR_HINT_TEXT` 的值。
+- 2026-10-20（Task R19）：**新增请求频道 `auth:get-status`**（§1.7 增补说明、§2.11 与 §3 登记）。
+  它是渲染层 reload / 崩溃重启之后门禁卡在 `checking` 的修复：`auth:status` 是广播，而 Rust
+  `NoticeQueue` 的冲刷**只发生一次**，重启后的渲染层再也等不到那条一次性通知——
+  "现在的状态是什么"只能靠一次有应答的查询（与 `core_get_tray_available` 同款模式）。
+  三条边界：**不触发广播**、**不带 `message`**（那是"刚发生的那件事"）、**不推结论**
+  （未验证的会话不会因为被问了一句就变成"已登录"）。渲染层挂载时在订阅就位、`rendererReady()`
+  之后查一次，应答与广播喂同一条状态事件；查询本身失败时**不猜档位**（仍 `checking`），
+  只把原因写到状态行上。`npm run verify:live` 相应地把"等二维码"改成轮询 canvas 与状态行
+  （等不到时报出卡住的那一档），断言条数不变。**仍未联调**：真机重跑 18/18 由控制器执行。

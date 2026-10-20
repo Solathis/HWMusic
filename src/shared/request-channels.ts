@@ -21,6 +21,27 @@ export const AUTH_CANCEL_LOGIN = "auth:cancel-login" as const;
  * 渲染层只画二维码、只看广播；重复调用 = 换一张新二维码（用户重试就是想要这个）。
  */
 export const AUTH_QR_START = "auth:qr-start" as const;
+/**
+ * 登录状态**重查**（R19 增补）：渲染层挂载时主动问一次"现在是什么状态"，应答与
+ * `auth:status` 广播**同形状**（`{loggedIn, busy, message?}`）。
+ *
+ * 为什么必须有这条（真缺陷，不是锦上添花）：`auth:status` 只在 sidecar 启动时广播一次
+ * （渲染层没就绪时由 Rust 的 NoticeQueue 排队，`core_renderer_ready` 时冲刷——但**只冲刷一次**）。
+ * 渲染层 reload / 崩溃重启之后，那一条已经冲刷过了，于是门禁永远停在 `checking`
+ * （"正在检查登录状态…"）：既不自动发起二维码，也没有任何报错。广播是"变化时通知"，
+ * 它天生回答不了"**现在的**状态是什么"——那需要一次有应答的查询。
+ *
+ * 与托盘可用性查询（`core_get_tray_available`，挂载时问一次）同款模式：**状态由拥有者答**，
+ * 渲染层不猜、也不靠"等一条可能已经错过的通知"。
+ *
+ * 三条边界：
+ * 1. **不触发广播**：查询有应答，再播一条只会让渲染层把同一件事处理两遍；
+ * 2. **只答状态，不答历史**：`message` 是"刚发生的那件事"（失败原因），它随广播走、不随快照走
+ *    ——重查回答的是"现在是什么"，不是"上次怎么了"；
+ * 3. **不推结论**：答的就是 `authManager` 的当前事实（会话有没有、开窗那条路忙不忙），
+ *    未经验证的会话不会因为被问了一句就变成"已登录"（`restore` 的诚实性规矩不变）。
+ */
+export const AUTH_GET_STATUS = "auth:get-status" as const;
 export const SETTINGS_GET = "settings:get" as const;
 export const SETTINGS_SET = "settings:set" as const;
 
@@ -89,6 +110,7 @@ export const REQUEST_CHANNELS = [
   AUTH_LOGOUT,
   AUTH_CANCEL_LOGIN,
   AUTH_QR_START,
+  AUTH_GET_STATUS,
   SETTINGS_GET,
   SETTINGS_SET,
   SETTINGS_TEST_PROXY,

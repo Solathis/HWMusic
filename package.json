@@ -16,6 +16,7 @@
     "test": "node --test test/*.test.mjs",
     "test:acceptance": "node scripts/acceptance.mjs",
     "test:browser": "node scripts/test-browser.mjs",
+    "verify:live": "node scripts/verify-live.mjs",
     "smoke:build": "node scripts/tauri-smoke.mjs",
     "dist:sidecar": "node scripts/build-sidecar.mjs",
     "dist:win": "node scripts/dist-win.mjs",

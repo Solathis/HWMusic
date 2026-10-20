@@ -36,11 +36,17 @@ use crate::MAIN_WINDOW_LABEL;
 ///
 /// R16 增补 `auth:qr-start`：引导页**自动**发起二维码会话（R7 的 `auth:login` 是"开官方登录窗"
 /// 那条路）。少了它，引导页只会拿到 `unknown_channel`，用户看到的是一张显示不出来的二维码。
+///
+/// R19 增补 `auth:get-status`：渲染层主动查一次当前登录状态。`auth:status` 只在 sidecar 启动时
+/// 广播一次（`NoticeQueue` 冲刷**只发生一次**），渲染层 reload/崩溃重启之后那一条已经错过了 ——
+/// 门禁会永远停在 `checking`（"正在检查登录状态…"）。少了这条频道，`core_call` 会在**这里**
+/// 就被拒（`unknown_channel`），而渲染层看到的仍然只是"一直在检查"。
 pub const REQUEST_CHANNELS: &[&str] = &[
     "auth:login",
     "auth:logout",
     "auth:cancel-login",
     "auth:qr-start",
+    "auth:get-status",
     "settings:get",
     "settings:set",
     "settings:test-proxy",

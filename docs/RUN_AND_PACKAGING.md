@@ -11,6 +11,25 @@ npm run dev          # tauri dev：起 vite（devUrl 1420）+ 编译 Rust + 开�
 npm run dev:web      # 只起渲染层（改界面时更快，但没有宿主能力）
 ```
 
+> ⚠️ **`npm run dev` 不会重建 sidecar**（`tauri.conf.json` 的 `beforeDevCommand` 只有
+> `npm run dev:web`，有意如此：把它塞进去会让每次 dev 启动都慢几十秒）。改了
+> `src/main/**`、`src/protocols/**`、`src/host/**`、`src/sidecar/**` 之后**必须先**：
+>
+> ```powershell
+> npm run dist:sidecar        # 期望输出：自验证 PASS 2/2（memory-only、secure）
+> copy src-tauri\binaries\hwmusic-core-x86_64-pc-windows-msvc.exe src-tauri\target\debug\hwmusic-core.exe
+> ```
+>
+> 否则跑的是**上一次**的 `hwmusic-core.exe`：请求频道对不上（门禁页显示"未知请求频道：
+> `auth:qr-start`"、二维码画不出来），而**一切退出码都是 0**——R17 抓到过一次真事故
+> （当时的 sidecar 日志说"入向请求频道 15 条"，而真源已经是 16 条）。排障时用这两个旋钮把宿主指到
+> 新鲜产物上（`src-tauri/src/sidecar.rs` 的 `HWMUSIC_NODE_BIN` / `HWMUSIC_SIDECAR_SCRIPT`），
+> 免得每次都复制二进制。
+>
+> 判据是 sidecar 自己那句日志：`帧协议 v1；入向请求频道 17 条；…`——条数与
+> `src/shared/request-channels.ts` 的 `REQUEST_CHANNELS` 一致才算新鲜（R19 起是 **17** 条：
+> 加的是 `auth:get-status`）。
+
 真窗跑不起来（容器/无桌面会话、WebView2 数据目录不可写 → `os error 5`）时**如实记 untested**，
 不要用"SSR 渲出静态标记"冒充"窗口起来了"。
 
