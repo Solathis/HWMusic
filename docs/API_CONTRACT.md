@@ -337,6 +337,50 @@ auth:status → {loggedIn: boolean, busy: boolean, message?: string}
 真实登录链路上这条参数的影响（需要真实账号；探针只到公开页面为止）。UA 伪装那条路**没有采纳**，
 因此也不在验证清单里。
 
+**官方登录页的真深色 + 屏外加载（R27 实探 · 可复现 · 待用户裁决推翻 R26 的"不伪装 UA"）**
+
+用户指令（R27 之 1+2，2026-10-20）：①"切换深色后官方页仍是白色"**继续修**——控制器裁决
+**推翻 R26 的"不伪装 UA"**，登录 webview 改用 HarmonyOS 移动 UA；②点"在网页中打开登录"之后
+官方页加载慢（数秒白屏）——**加载动画**。
+
+复现：`node scripts/probe-login-mobile-ua.mjs`（摘要在 `.probe/r27-mobile-ua-probe.json`，已
+gitignore；`--no-browser` 只跑公开接口那两段）。**只碰公开页面与公开接口**：不登录、不输账号、
+不提交凭据、不扫码；`state` 与 `code_challenge` 是探针自己的一次性/占位串。
+
+交付的探针跑 5 条链路变体（桌面 UA 对照 + 4 个移动候选）+ 45 组服务端裁决（9 个 `themeName` 取值
+× 5 类 UA）+ 10 档真浏览器计算样式。**结论**：
+
+| # | 问题 | 实测结果 |
+|---|---|---|
+| ① | 移动 UA 下链路每一跳变了吗？白名单要不要补？ | **逐跳相同**：`getLoginWay` 200 → `/CAS/remoteLogin` 302 → `/CAS/portal/loginAuth.html`，hosts 全在白名单内（4 个移动候选 + 桌面 UA 五条链的 `hostsOutsideWhitelist` 都是 `[]`）→ **白名单一个字都不用改** |
+| ② | 移动 UA 下服务端认哪些 `themeName`？ | 认 **{red, huawei, blue, harmony, dark, harmonydark}**；**认不出的值一律回落 `huawei`**（桌面 UA 则一律回落 `red`）。所以移动档的"默认浅色"就是 `huawei`，而 `lightred` 在移动档**回落成 `huawei`**（桌面档它是自己的一个值） |
+| ③ | 哪个值给出真黑底？ | **`dark`**：页面加载 `index-dark.css`，body `rgb(0,0,0)`、`.hwid-root` `rgb(0,0,0)`（1280×752 与 390×844 两种尺寸下一致）。**`harmonydark` 不行**（加载了 `index-harmonydark.css`，但 html/body/root 三段背景全是 `rgba(0,0,0,0)` 透明 → 露出来的是宿主底色，不是真黑） |
+| ④ | 不带参数（想靠"跟随系统"）行吗？ | **不行，而且危险**：移动 UA + 无参数 + 系统深色 → 页面自己拿 `prefers-color-scheme` 去问服务端，拿到 `index-dark.css` + `rgb(0,0,0)`——**应用当时处于浅色档**。于是"浅色档不挂参数"在移动 UA 下不再等于浅色（这正是 R27 把 [`login_theme_name`] 从 `Option` 改成"三态总有值"的原因） |
+| ⑤ | 移动版式长什么样？用户在窗里能做什么？ | 页面按 `isMobileWap()` 换成 `login/mobile/index`：**8 个输入框**（账号/密码、手机号/短信验证码、隐藏 `hwmeta` 等）+ 「短信验证码登录」/「忘记密码」/「登录」/「注册账号」；**没有可见的二维码入口**（`qrMarkers` 只剩 `qrcode` 这个类名，桌面门户页那一档才有「二维码」/「扫一扫」/「扫码」三种标记 + 1 个 canvas + 2 张图） |
+
+**落点（R27）**：
+1. **UA 伪装**：登录 webview 建窗时 `WebviewBuilder::user_agent(login::LOGIN_MOBILE_UA)`
+   （`Mozilla/5.0 (Phone; HarmonyOS 4.0) … Mobile Safari/537.36`）。**只有建窗时能设**
+   （运行期没有 setter）——这一条决定了下面第 3 条；
+2. **三态总给一个具体值**（`login::login_theme_name`）：`light` → `huawei`（移动档服务端的回落值，
+   实测白底）、`dark` → `dark`、`system` → 读一次系统深浅再定。**浅色档也要显式挂**：理由见上表 ④；
+3. **切主题 = 关掉重开**（`login::reapply_login_theme` → `rebuild_login_view`）：UA 与主题参数都在
+   **创建时**定死，重建比事后改 UA 可靠。重建复用既有收尾链（关掉旧那份 + 两个浮动控件，
+   **不删数据目录**——同一个目录 = 复用同一个 WebView2 环境）与既有建页链；重建窗口由
+   `LoginSession::begin_rebuild/end_rebuild` 挡住"页没了 → `Closed`"的兜底，重建失败则如实按
+   `Closed` 收场（不留一个没有页面的会话）；
+4. **屏外加载**（用户之 2）：登录页建在**客户区左沿之外**（`offscreen_rect`，`x = -(宽+8)`），
+   首载 `Finished` 或首载期限（30 秒）到才 `set_position` 摆进内容区（`placement_due`）。
+   屏外期间**不跟随**主窗几何（跟随会把那一份摆回内容区，用户当场看到还在加载的白页），
+   浮动控件照常跟随（那一段里它们是唯一可点的东西）；门禁层此刻显示转圈 +
+   「正在打开华为官方登录页…」（`loginOpeningIndicator` / `LOGIN_OPENING_TEXT`）；
+5. **如实登记的代价**：移动版式**没有二维码入口**——用户在这一页上能做的只有输账号/密码或
+   短信验证码（原来桌面门户页那个"手机扫一扫"入口没有了）。见 `docs/KNOWN_LIMITATIONS.md` B18。
+
+**未实测（如实登记）**：真窗上"移动 UA 下登录能不能走完 `hms://` 回调"（要真实账号，探针只到
+公开页面为止）、"切主题重开那一瞬的观感"（本环境起不了真窗）、服务端风控对"伪装成 HarmonyOS
+客户端"的反应（同上）。**这三条都在用户/控制器的真机验证清单里**，见 task-27 报告的未验证项。
+
 **未联调（untested）**：真实扫码登录（需要用户在场 + 真实账号）、音乐会话兑换（loginex，见 §1.5）、
 `tauri dev` 真窗验证（本环境的子进程沙箱里应用起不来：`tauri-plugin-log` 初始化 `os error 5`）。
 
@@ -1029,7 +1073,12 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `QR_DEFAULT_MAX_UNKNOWN_CODES` | `5` | `src/protocols/qr-login.mjs` | R22：连续几个**认不出**的 `resultCode` 就熔断成 `failed`（`unknown_result_code`）。陌生码当成功是最严重的误判，但"一直陌生"同样致命：协议真变了时它会 2 秒一次打到总期限，用户全程停在等待态、日志里什么都没有 |
 | `QR_LOCAL_EXPIRY_GRACE_MS` | `3_000` | `src/protocols/qr-login.mjs` | R22 立（15 秒）、**R26 收窄到 3 秒**：本地到期兜底的宽限。R26 起落点从"轮询落地"改成**建单/刷新时挂的一次性定时器**（延迟 = 服务端 TTL + 宽限），到点时服务端还是**什么都没说** → 本地主动转 `expired`（服务端给出 `expired`/`scanned`/`confirmed` 时让位）。它同时是渲染层「正在确认过期…」那一档的**上界**：归零之后最多 3 秒必有出口 |
 | `LOGIN_THEME_PARAM` | `"themeName"` | `src-tauri/src/login.rs` | R26：官方登录页认的主题查询参数（CAS 门户页按它选 `index-<theme>.css`）。probe 实测见 §1.7 的 R26 段 |
-| `LOGIN_THEME_NAME_DARK` | `"dark"` | `src-tauri/src/login.rs` | R26：深色档挂上去的值。**实测边界**：桌面 UA 下服务端只放 {red, huawei, blue, lightred}，`dark` 会被回落成 `red`（浅色）——这条通路今天拿不到深色页面（登记在 `KNOWN_LIMITATIONS.md` B18）。浅色档**不动这个参数**（服务端桌面默认就是浅色，显式换一套浅色是没人要过的变更） |
+| `LOGIN_THEME_NAME_DARK` | `"dark"` | `src-tauri/src/login.rs` | R26 立、**R27 起真的出深色**：登录 webview 换移动 UA 之后服务端认 `dark`（R27 探针：`getBaseSwitchInfo` 回 `dark`，页面加载 `index-dark.css`，body/root 计算背景 `rgb(0,0,0)`）。R26 那句"桌面 UA 只放 {red, huawei, blue, lightred}、`dark` 回落 `red`"仍然成立——它描述的是**桌面 UA**那一档 |
+| `LOGIN_THEME_NAME_LIGHT` | `"huawei"` | `src-tauri/src/login.rs` | **R27 新增**：浅色档挂上去的值（移动 UA 下服务端的回落值，探针实测白底 `rgb(255,255,255)`）。R26 的"浅色档不动这个参数"在移动 UA 下站不住——不带参数时页面会拿 `prefers-color-scheme` 去问服务端，系统深色就自己变黑（R27 探针实测），那会变成"应用是浅的、登录页是黑的" |
+| `LOGIN_MOBILE_UA` | `Mozilla/5.0 (Phone; HarmonyOS 4.0) … Mobile Safari/537.36` | `src-tauri/src/login.rs` | **R27 新增**：登录 webview 的 UA（控制器裁决推翻 R26 的"不伪装 UA"）。它是唯一一条能出真黑底的路；代价是页面换成移动版式且**没有二维码入口**（R27 探针 ⑤ + B18） |
+| `OFFSCREEN_MARGIN` | `8.0` | `src-tauri/src/login.rs` | **R27 新增**：屏外摆放的横向余量（物理像素）。登录页先摆在 `x = -(宽 + 8)`（客户区左沿之外，子窗被父窗客户区裁剪），首载完成或 30 秒期限到才摆进内容区 |
+| `LOGIN_OPENING_TEXT` / `LOGIN_OPENING_TESTID` | `"正在打开华为官方登录页…"` / `"login-opening"` | `src/renderer/features/auth/login-gate-logic.mjs` | **R27 新增**：官方页还在**屏外加载**那一刻，门禁状态行那一句（旁边带一个 `Loader2Icon animate-spin`）。R20 那句「已在网页中打开登录。」保留给**另一档**：渲染层 reload 之后只剩 `busy:true`（`path` 丢了），那一刻页多半早画好了——说"正在打开"是编造（判定见 `loginOpeningIndicator`） |
+| `SESSION_DIAG_LABEL` | `"登录态持久化诊断"` | `src/main/session-diagnostic.mjs` | **R27 新增**：启动诊断那一行的开头（grep 用）。内容是"数据根 + 它是哪来的 + 那个根里有没有 `session.enc` + 恢复档位"——`数据根漂移`（调试根 vs `%APPDATA%` 根）一眼可判。Rust 侧另有一行 `数据根：<路径>（来源：…）`（`lib.rs::data_root_note`） |
 | `QR_TTL_DIFF` / `QR_TTL_LEGACY`（内部两条路，不是导出常量） | `expiredTime − qrCodeCreateTime` / `expiredTime − now()` | `src/protocols/qr-login.mjs` 的 `resolveExpiresInMs` | R22：有效期换算。两条都是**服务端值**相减时免疫本地时钟偏差；`qrCodeCreateTime` 缺失/非法才回退老公式——**已知偏差风险**：本地钟快 1 小时，倒计时就早归零 1 小时（用户看到的是"卡在正在确认过期…"）。两值矛盾或 `expiredTime` 不可信 → `null`（不猜，界面少一行倒计时） |
 | `MAX_URL_LOG_CHARS` | `160` | `src-tauri/src/login.rs` | R16：登录窗导航/加载日志里 URL 的截断上限（查询值一律不进日志） |
 | `HUAWEI_MUSIC_LOGINEX_ENDPOINT` | `https://api-drcn.music.dbankcloud.cn/music-odpapp-service/v5/service/userinfo/loginex` | `src/main/music-session.mjs`（默认值经 `auth-manager.ts` 的 `HUAWEI_OAUTH_ENDPOINTS.loginex` 注入） | R17：音乐会话兑换端点（证据分级见 §1.5.1）。协议层 `auth.mjs`/`music.mjs` 仍只收注入；`test/auth-manager.test.mjs` 拿本文件反查这串字面量 |
@@ -1265,3 +1314,28 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
      量法：把 HEAD 的两个源文件临时换回 `src-tauri/src/`（`git show` 只读），跑完再换回来。
   测试：cargo **235 pass + 1 ignored**、node 689 → **695 / 0 fail**（qr-login +6、登录门禁若干断言改写）、
   tsc 0 错、vite 三入口构建通过、acceptance 6/0/0。真机复验项见 `KNOWN_LIMITATIONS.md` B18。
+- 2026-10-20（Task R27）：**用户三项**——① 官方登录页真深色（**控制器裁决推翻 R26 的"不伪装 UA"**）；
+  ② 点「在网页中打开登录」之后的加载动画；③ 登录态持久化诊断。三项都先写失败测试再修：
+  1. **① 移动 UA**：先 probe 全链 + 45 组服务端裁决 + 10 档真浏览器计算样式（结论见 §1.7 的 R27 段）。
+     实测：链路逐跳与桌面 UA 相同（白名单不用改）、移动档服务端认 `dark` 并真的加载 `index-dark.css`
+     （body/root `rgb(0,0,0)`）、`harmonydark` **不出黑**（三段背景全透明）、不带参数时会跟着**系统**
+     深色走（所以浅色档也必须显式挂 `huawei`）。落点：`LOGIN_MOBILE_UA` +
+     `login_theme_name` 从 `Option` 改成"三态总有值" + **切主题 = 关掉重开**（`rebuild_login_view`，
+     UA 是建窗属性、运行期没有 setter）——重建复用既有收尾/建页链，重建窗口由
+     `LoginSession::begin_rebuild/end_rebuild` 挡住"页没了 → `Closed`"的兜底，失败则按 `Closed` 收场；
+  2. **② 屏外加载**：登录页建在客户区左沿之外（`offscreen_rect`），首载 `Finished` 或 30 秒期限到
+     才 `set_position` 摆进内容区；屏外期间**不跟随**主窗几何（否则等于把还在加载的白页摆回用户眼前），
+     浮动控件照常跟随；门禁层显示 `Loader2Icon animate-spin` +「正在打开华为官方登录页…」
+     （`loginOpeningIndicator`，与状态行文案同一个判定）；
+  3. **③ 诊断**：新增 `src/main/session-diagnostic.mjs` + sidecar 启动那一行
+     （数据根 + 来源 + `session.enc` 存在性 + 恢复档位）；Rust 侧 `lib.rs::data_root_note` 另落一行
+     「数据根 + 来源」。真机实测：调试根（`HWMUSIC_DATA_DIR=.tmp/live-data`）与用户根
+     （`%APPDATA%\org.hwmusicdesktop.unofficial.internal`）**都没有 `session.enc`**——
+     当前"每次都要重登"的可观测原因是**一次真实登录都没落过盘**，数据根漂移是**尚未咬人**的陷阱
+     （见 task-27 报告 §3）；
+  4. **测试基线**：HEAD（R26 之后）实测 **235 pass + 1 ignored**（lib 212 + login_policy 19 + 另一目标 4），
+     本轮 = **241 pass + 1 ignored**（lib 217、login_policy 20；新增 login.rs 4 条 / lib.rs 1 条 /
+     login_policy 1 条，另 1 条改写）。
+  测试：cargo **241 pass + 1 ignored**、node 695 → **708 / 0 fail**（新增 `test/session-diagnostic.test.mjs`
+  9 条 + 登录门禁 R27 4 条、2 处断言按新文案改写）、tsc 0 错、acceptance 6/0/0。
+  真机复验项见 `KNOWN_LIMITATIONS.md` B18（R27 段）。

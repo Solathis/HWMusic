@@ -352,12 +352,18 @@ fn login_state_is_exclusive() {
     assert!(!state.is_active());
 
     let first = LoginSession::new();
-    assert!(state.begin(std::sync::Arc::clone(&first)), "第一次登录应当登记成功");
+    assert!(
+        state.begin(std::sync::Arc::clone(&first), spec_for("p1")),
+        "第一次登录应当登记成功"
+    );
     assert!(state.is_active());
     assert!(state.session().is_some());
 
     let second = LoginSession::new();
-    assert!(!state.begin(second), "已有进行中的登录时必须拒绝第二次（调用方转而聚焦既有窗）");
+    assert!(
+        !state.begin(second, spec_for("p2")),
+        "已有进行中的登录时必须拒绝第二次（调用方转而聚焦既有窗）"
+    );
     assert!(
         std::sync::Arc::ptr_eq(&state.session().expect("既有会话仍在"), &first),
         "拒绝第二次不得把既有会话换掉"
@@ -365,10 +371,50 @@ fn login_state_is_exclusive() {
 
     state.finish();
     assert!(!state.is_active());
-    assert!(state.begin(LoginSession::new()), "收尾之后可以重新开始");
+    assert!(
+        state.begin(LoginSession::new(), spec_for("p3")),
+        "收尾之后可以重新开始"
+    );
     state.finish();
     state.finish(); // 幂等：重复收尾不 panic
     assert!(!state.is_active());
+}
+
+/// R27 的建窗参数（切主题重开要按同一份数据根/数据目录把页面重开一份，见 `login::LoginBuildSpec`）。
+///
+/// `base_url` 是**未挂主题参数**的那一条（重建时现挂），`theme` 是这一份用的主题名。
+fn spec_for(partition: &str) -> huawei_music_desktop_lib::login::LoginBuildSpec {
+    huawei_music_desktop_lib::login::LoginBuildSpec {
+        data_root: std::path::PathBuf::from("C:\\root"),
+        login_data: login_data_dir(std::path::Path::new("C:\\root"), partition),
+        base_url: AUTHORIZE.to_string(),
+        theme: huawei_music_desktop_lib::login::LOGIN_THEME_NAME_DARK,
+    }
+}
+
+/// R27：切主题重开**回写**这一份的主题名——第二次切回同一个档位时"值没变就不重开"读的就是它。
+#[test]
+fn a_theme_rebuild_remembers_the_theme_it_just_used() {
+    let state = LoginState::default();
+    assert!(
+        state.begin(LoginSession::new(), spec_for("p1")),
+        "登记一次登录"
+    );
+    assert_eq!(
+        state.spec().expect("建窗参数要留着（重建要用）").theme,
+        huawei_music_desktop_lib::login::LOGIN_THEME_NAME_DARK
+    );
+
+    state.set_theme(huawei_music_desktop_lib::login::LOGIN_THEME_NAME_LIGHT);
+    assert_eq!(
+        state.spec().expect("回写之后参数仍在").theme,
+        huawei_music_desktop_lib::login::LOGIN_THEME_NAME_LIGHT,
+        "重开成功之后要记下「现在这一份用的是哪个主题」"
+    );
+    // 没有进行中的登录时不许 panic（收尾之后可能还有晚到的一次回写）
+    state.finish();
+    state.set_theme(huawei_music_desktop_lib::login::LOGIN_THEME_NAME_DARK);
+    assert!(state.spec().is_none());
 }
 
 // ---------------------------------------------------------------------------

@@ -115,6 +115,24 @@ export const WEB_LOGIN_BACK_TEXT = "返回扫码登录";
 export const WEB_LOGIN_BACK_TESTID = "login-back-to-qr";
 
 /**
+ * R27（用户指令 2026-10-20）：「在网页中打开登录」按下之后那一行 —— **正在打开华为官方登录页…**。
+ *
+ * 为什么必须有这一档（用户报的现象）：点完入口之后官方页要好**几秒**才画出来，而登录 webview
+ * 一建出来就铺满整个内容区，于是那几秒里用户看到的是一片白。R27 的修法是**两层配合**——
+ * Rust 侧把登录页先摆在**屏外**（`login::offscreen_rect`，客户区左沿之外），首载完成或 30 秒
+ * 首载期限到才摆进内容区；渲染层这一侧因此在屏外那一段时间里仍然看得见，它要显示的就是这一行。
+ *
+ * 与 R20 那句「已在网页中打开登录」的区别是**诚实**：`busy` 为真只说明那条路在跑，此刻官方页
+ * 一个字都还没画出来。"已打开"会把"还在加载"描述成"就是白的"——那正是用户报的那个现象。
+ * 那一句仍然保留给**另一档**：渲染层 reload / 崩溃重启之后只剩 `busy:true`（`path` 丢了），
+ * 那一刻页面多半早就画好了，我们没有理由说它在加载（判定见 [`loginOpeningIndicator`]）。
+ */
+export const LOGIN_OPENING_TEXT = "正在打开华为官方登录页…";
+
+/** 加载动画的测试锚点（真窗守卫按它点名这个转圈）。 */
+export const LOGIN_OPENING_TESTID = "login-opening";
+
+/**
  * 二维码容器可点刷新的**可达名字**（R20 要求 2）。
  *
  * 容器本身是个 `<button>`：不写这一条，读屏与键盘用户只会听到"按钮"两个字，
@@ -402,6 +420,28 @@ export function reduceGateState(state, event) {
   }
 }
 
+/**
+ * 「正在打开华为官方登录页…」这一档现在显不显示（R27 用户三项之 2）。
+ *
+ * 判据只有两条同时成立才算：**这条路是用户按出来的**（`path === "official"`）且**它还在跑**
+ * （`busy`）。为什么不只看 `busy`：R19 那个场景（渲染层 reload / 崩溃重启之后靠
+ * `auth:get-status` 重建状态）里 `path` 是 `null` 而 `busy` 仍为真——那一刻官方页多半早就
+ * 画好了，说"正在打开"是编造。反过来只看 `path` 也不行：那条路收场之后 `path` 还留着，
+ * 而页面已经回到二维码态，转圈就该停。
+ *
+ * 与 [`loginGateStatusLine`] 的关系：这个判定同时驱动**那一行的文案**（同一个 `role="status"`
+ * 区域）与**旁边那个转圈**。两处读同一个判定，就不会出现"看见在转、读屏却被告知已打开"。
+ *
+ * @param {object} state 门禁状态
+ * @returns {{showing: boolean, text: string}} `text` 恒为 [`LOGIN_OPENING_TEXT`]（唯一真源）
+ */
+export function loginOpeningIndicator(state) {
+  return {
+    showing: state?.busy === true && state?.path === "official",
+    text: LOGIN_OPENING_TEXT,
+  };
+}
+
 /** 该显示门禁吗？（`phase` 不是"已登录"就显示门禁，包括"还不知道"） */
 export function shouldShowLoginGate(state) {
   return state?.phase !== LOGIN_GATE_PHASE.loggedIn;
@@ -509,6 +549,11 @@ export function qrContentOf(state) {
  * 还把用户的选择挤到更下面。**遮罩因此是过期态的唯一提示载体**（R21 立的那条终止档语义不变：
  * 过期仍然不自动换新，换新仍然只能由用户点容器触发）。
  *
+ * R27（用户真机反馈之 2）：官方页**还在加载**那一刻（[`loginOpeningIndicator`]）说的是
+ * 「正在打开华为官方登录页…」，不再是 R20 那句「已在网页中打开登录。」——那一刻页面还在屏外
+ * 加载，一个字都没画出来。只按 `busy` 判会误伤 R19 那个 reload 场景（没有本地 `path`），
+ * 所以这一档的判据不在 `busy` 上（见该函数）。
+ *
  * @param {object} state 门禁状态
  * @returns {string|null} 要显示的那一行；`null` = 这一档不显示状态行
  */
@@ -520,6 +565,9 @@ export function loginGateStatusLine(state) {
   if (typeof state?.officialNote === "string" && state.officialNote !== "") return state.officialNote;
 
   if (state?.phase === LOGIN_GATE_PHASE.checking) return "正在检查登录状态…";
+
+  // R27：官方页还在加载（用户刚按下入口、页还在屏外）→ 如实说"正在打开"
+  if (loginOpeningIndicator(state).showing) return LOGIN_OPENING_TEXT;
 
   // 官方页那条路（次要入口）跑起来时，说的是"窗已经开了"，而不是二维码现在到哪一步
   if (state?.path === "official") {

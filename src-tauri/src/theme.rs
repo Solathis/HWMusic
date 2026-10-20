@@ -274,8 +274,10 @@ pub fn set_theme<R: tauri::Runtime>(
         crate::bridge::THEME_CHANGED,
         json!({ "theme": applied.setting() }),
     );
-    // R26（用户四项之 1+2）：登录页开着的时候，官方页的主题要跟着走——把它导航到
-    // "同一条 URL + 新 themeName"。这一步**不改回执**：官方页重载失败不该让"改主题"看起来失败了。
+    // R26（用户四项之 1+2）立、R27 改落点：登录页开着的时候，官方页的主题要跟着走。
+    // R26 是"导航到同一条 URL + 新 themeName"，**R27 改成"关掉重开一份"**
+    // （`user_agent` 是建 webview 时的属性，运行期没有 setter——切 UA 只能靠重建，
+    //  详见 `login::reapply_login_theme`）。这一步**不改回执**：登录页重开失败不该让"改主题"看起来失败了。
     crate::login::reapply_login_theme(app);
     Ok(applied)
 }
@@ -461,12 +463,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// R26（用户四项之 1+2）：改主题之后要把**已经开着**的登录页带上新主题重载一次
-    /// （否则用户得关掉重开才看得到），而且**重载不改回执**——登录页重载失败不该让
+    /// R26（用户四项之 1+2）立、R27 改落点：改主题之后要把**已经开着**的登录页按新主题重来一次
+    /// （否则用户得自己关掉重开才看得到），而且**它不改回执**——登录页重开失败不该让
     /// 「改主题」看起来失败了。
     ///
     /// 源码钉子：这一条链路横跨两个模块（`theme::set_theme` 是主题的唯一写入口，
-    /// 重载落在 `login::reapply_login_theme`），所以在这里扫主题侧那一半。
+    /// 重开落在 `login::reapply_login_theme`），所以在这里扫主题侧那一半。
+    /// R27 那一半（"关掉重开"+ 重建窗口）扫在 `login.rs` 的
+    /// `a_theme_change_reopens_the_page_instead_of_navigating_the_old_one` 里。
     #[test]
     fn changing_the_theme_reapplies_it_to_an_open_login_page() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/theme.rs"))
@@ -481,11 +485,11 @@ mod tests {
         let block = &production[set..];
         assert!(
             block.contains("crate::login::reapply_login_theme("),
-            "改完主题要把已开着的登录页重新导航一次：{block}"
+            "改完主题要把已开着的登录页按新主题重来一次：{block}"
         );
         assert!(
             block.contains("Ok(applied)"),
-            "重载不改回执（回执是**实际生效**的档位，与登录页重载成功与否无关）：{block}"
+            "登录页重开不改回执（回执是**实际生效**的档位，与它成功与否无关）：{block}"
         );
     }
 }

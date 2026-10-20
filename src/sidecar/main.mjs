@@ -26,6 +26,11 @@ import { createLoginHost } from "../main/huawei.ts";
 import { createMusicService } from "../main/music-service.mjs";
 import { applyStartupProxy, testProxyConnection } from "../main/proxy.mjs";
 import { createSessionStore } from "../main/session-store.mjs";
+import {
+  dataDirSource,
+  readSessionFileState,
+  sessionDiagnosticLine,
+} from "../main/session-diagnostic.mjs";
 import { createSettingsHandlers, createSettingsStore } from "../main/settings.mjs";
 import { APP_NOTICE } from "../shared/channels.ts";
 import {
@@ -207,6 +212,20 @@ const restored = await authManager.restore();
 log(
   `登录状态恢复：${restored.loggedIn ? "已登录" : "未登录"}（${restored.reason}` +
     `${restored.verified ? "" : "，未验证"}${restored.error ? `；${restored.error.message}` : ""}）`,
+);
+
+// R27（用户三项之 3）：**启动诊断**——数据根 + 它是哪来的 + 那个根里有没有 session.enc + 恢复档位，
+// 一行看全。为什么必须有：用户报"每次重启都要重登"，而最可能的原因根本不是代码——
+// 调试用的根（`HWMUSIC_DATA_DIR=.tmp/live-data`）与用户自跑时读的根（`%APPDATA%\<bundle>`）
+// **互不相通**，而 R27 之前那行"登录状态恢复：未登录（no_session）"看不出它读的是哪个根。
+// 只查存在性、不读内容（信封里是凭据密文），见 `src/main/session-diagnostic.mjs`。
+log(
+  sessionDiagnosticLine({
+    dataDir,
+    source: dataDirSource(process.argv.slice(2)),
+    sessionFile: await readSessionFileState(dataDir),
+    restore: restored,
+  }),
 );
 
 // 启动提示：代理是"环境变量兜底"来的（或环境变量写坏了被忽略），用户必须看得见——

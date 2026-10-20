@@ -72,6 +72,7 @@
  * R25 起登录页**不再**从它下面开始（官方页铺满整窗），它不再是"给子窗让位"的几何契约。
  */
 import { useCallback, useEffect, useRef, useState } from "react"
+import { Loader2Icon } from "lucide-react"
 
 import { AUTH_QR, AUTH_STATUS } from "../shared/channels.ts"
 import { LOGIN_VIEW_TOP_INSET } from "../shared/login-inset.mjs"
@@ -86,6 +87,8 @@ import { coreCall, isCoreError, onCoreEvent, rendererReady } from "./host-api"
 import {
   LOGIN_GATE_EVENT,
   LOGIN_GATE_TITLE,
+  LOGIN_OPENING_TESTID,
+  LOGIN_OPENING_TEXT,
   QR_COUNTDOWN_TESTID,
   QR_COUNTDOWN_TICK_MS,
   QR_EXPIRED_BOX_HINT,
@@ -98,6 +101,7 @@ import {
   canRetryQr,
   initialGateState,
   loginGateStatusLine,
+  loginOpeningIndicator,
   qrContentOf,
   qrCountdownText,
   reduceGateState,
@@ -344,6 +348,8 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
   const countdown = qrCountdownText(state)
   const expired = state.qr.status === QR_GATE_STATUS.expired
   const entry = webLoginEntry(state)
+  /** R27：官方页还在屏外加载那一刻（那一行的文案与转圈读**同一个判定**）。 */
+  const opening = loginOpeningIndicator(state)
 
   /**
    * 次要入口（**只有一处定义**）。
@@ -421,9 +427,21 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
         <p className="max-w-xs text-center text-sm text-muted-foreground">{QR_HINT_TEXT}</p>
         {/* 状态行：`null` 的那一档（R26：二维码过期）**整行不渲染**——遮罩上那两行已经是全部提示，
             再复述一遍等于同一句话说两次，还会把用户的选择挤下去。空着的那一行不是"留白"，是
-            白白多占一个 gap-3 的间距（所以是隐掉整行，不是渲染一句空话）。 */}
+            白白多占一个 gap-3 的间距（所以是隐掉整行，不是渲染一句空话）。
+
+            R27（用户真机反馈之 2）：官方页**还在加载**那一刻（页在屏外，见 Rust 侧
+            `login::offscreen_rect`）这一行说的是「正在打开华为官方登录页…」，并在前面加一个
+            转圈——那几秒里用户看到的不能再是一片白。两个东西在**同一个 `role="status"` 区域**里：
+            读屏听到的就是他看到的那句（判定见 `loginOpeningIndicator`，与文案只有一个真源）。 */}
         {status === null ? null : (
-          <p className="text-center text-sm text-muted-foreground" role="status">
+          <p className="flex items-center justify-center gap-2 text-center text-sm text-muted-foreground" role="status">
+            {opening.showing ? (
+              <Loader2Icon
+                className="size-4 animate-spin"
+                aria-hidden="true"
+                data-testid={LOGIN_OPENING_TESTID}
+              />
+            ) : null}
             {status}
           </p>
         )}

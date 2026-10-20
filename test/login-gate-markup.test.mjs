@@ -40,6 +40,7 @@ import { APP_BRAND_LABEL } from "../src/shared/app-name.mjs";
 import {
   LOGIN_GATE_EVENT,
   LOGIN_GATE_TITLE,
+  LOGIN_OPENING_TEXT,
   QR_COUNTDOWN_TESTID,
   QR_EXPIRED_BOX_HINT,
   QR_EXPIRED_BOX_TEXT,
@@ -500,7 +501,10 @@ test("标记：R25 起「返回扫码登录」**不由 gate 渲染**（它浮在
   // 正文里那两种形态此刻都不该出现：官方页开着 = 不该再发起第二次登录（只会撞 login_in_progress），
   // 「返回」则由浮动控件负责（见上一条）。
   assert.doesNotMatch(html, new RegExp(`data-testid="${WEB_LOGIN_ENTRY_TESTID}"`), "开窗时不渲染「打开」形态");
-  assert.match(statusTextOf(html) ?? "", /已在网页中打开登录/, "状态行说清现在是哪条路");
+  // R27：这一刻官方页还在**屏外**加载（Rust 侧 `login::offscreen_rect`），一个字都没画出来
+  // ——状态行说的是「正在打开…」而不是「已打开」，而且旁边真的有一个转圈（见下一条用例）。
+  assert.equal(statusTextOf(html), LOGIN_OPENING_TEXT, "状态行说清此刻在等什么（不是「已打开，就是白的」）");
+  assert.match(html, /animate-spin/, "同一个状态区里有一个转圈动画");
 
   // 主题控件还在 header 里（gate 视图那一份；被盖住时由浮动 login-theme 顶上）
   assert.match(headerTag(html), new RegExp(`data-testid="${THEME_CONTROL_TESTID}"`), "主题控件不随官方页退场");

@@ -110,6 +110,29 @@ pub fn log_dir(data_root: &Path) -> PathBuf {
     data_root.join(LOG_DIR_NAME)
 }
 
+/// 启动诊断那一行：**数据根是哪个路径** + **它是哪来的**（R27 用户三项之 3）。
+///
+/// 为什么这一行值得单独存在：用户报"每次重启都要重登"，而最可能的原因根本不是代码——
+/// 调试用的根（`HWMUSIC_DATA_DIR=.tmp/live-data`）与用户自跑时读的根
+/// （`%APPDATA%\{bundle}`）**互不相通**，两个根里的 `session.enc` 各归各的。
+/// 没有这一行时，"会话为什么不在"只能靠人回忆当时那个进程读的是哪个根。
+///
+/// 报的是**实际用的那个根**（`root`，走完了三级回退之后的结果），不是旋钮里的原始写法：
+/// 那两者在"旋钮没设 / 设了空白 / 设了相对路径"这三种情况下是**不一样**的，而日志要回答的是
+/// "这一次到底写哪儿了"。来源只分两档（旋钮生效 / 没生效）——第三级回退（应用数据目录 →
+/// 缓存目录）的区分已经体现在路径本身里（`%APPDATA%` vs `%LOCALAPPDATA%`）。
+///
+/// sidecar 那一侧另有一行更完整的诊断（同一个根 + `session.enc` 存在性 + 恢复档位，
+/// 见 `src/main/session-diagnostic.mjs`）；两处说的是**同一个**根（宿主经 `--data-dir` 交给它）。
+pub fn data_root_note(raw: Option<&str>, root: &Path) -> String {
+    let source = if data_root_override(raw).is_some() {
+        format!("{DATA_DIR_ENV} 覆盖")
+    } else {
+        "应用数据目录（未设覆盖旋钮）".to_string()
+    };
+    format!("数据根：{}（来源：{source}）", root.display())
+}
+
 /// 日志落点决议：`HWMUSIC_DATA_DIR` 是可用的绝对路径时给出 `<该值>/logs`，否则 `None`。
 ///
 /// `None` 的含义是"**沿用插件的默认落点**"（`LogDir` = `%LOCALAPPDATA%\{bundle}\logs`），
@@ -291,6 +314,12 @@ pub fn run() {
             // 关窗行为**先于建窗**恢复：窗一建出来用户就可能关它，而那一刻读的就是这里恢复出来的
             // 值。顺序反了 = 第一次关窗按默认走，用户会以为"设置没生效"（R11 的顺序契约）。
             let data_root = webview_data_root(handle)?;
+            // R27（用户三项之 3）：数据根与它的来源先落一行——"会话为什么不在"的一半答案在这里。
+            // 位置在建窗之前：建窗失败（`os error 5` 那类）时，这一行是唯一说出"当时读的是哪个根"的记录。
+            log::info!(
+                "{}",
+                data_root_note(std::env::var(DATA_DIR_ENV).ok().as_deref(), &data_root)
+            );
             app.manage(close_behavior::CloseBehaviorState::restore(&data_root));
 
             // 主题（R25）：与关窗行为同一个位置（**先于建窗**读盘）。三个 webview
@@ -494,6 +523,37 @@ mod tests {
     fn data_root_override_tolerates_surrounding_whitespace() {
         let raw = format!("  {}\t", abs_str("hwmusic-data"));
         assert_eq!(data_root_override(Some(&raw)), Some(abs("hwmusic-data")));
+    }
+
+    /// R27（用户三项之 3）：启动诊断要把**数据根**与**它是哪来的**写成一行。
+    ///
+    /// 为什么非要有它：用户报"每次重启都要重登"，而最可能的原因不是代码——调试用的根
+    /// （`HWMUSIC_DATA_DIR=.tmp/live-data`）与用户自跑时读的根（`%APPDATA%\<bundle>`）
+    /// **互不相通**。日志里没有这一行时，"会话为什么不在"要靠人去推断当时那个进程读的是哪个根。
+    /// sidecar 那一侧还有一行完整的诊断（数据根 + `session.enc` 存在性 + 恢复档位，
+    /// 见 `src/main/session-diagnostic.mjs`），两处说的是**同一个**根（宿主经 `--data-dir` 交给它）。
+    #[test]
+    fn the_startup_note_names_the_data_root_and_where_it_came_from() {
+        let root = abs("hwmusic-data");
+
+        // 旋钮生效：报出路径 + 报出是哪个旋钮给的
+        let via_override = data_root_note(Some(&abs_str("tmp-live-data")), &root);
+        assert!(via_override.contains(DATA_DIR_ENV), "旋钮生效时必须报出来：{via_override}");
+        assert!(
+            via_override.contains(&root.to_string_lossy().to_string()),
+            "报的是**实际用的**那个根（不是旋钮里那个原始写法）：{via_override}"
+        );
+
+        // 旋钮没设：报路径 + 说清来自应用数据目录（**不许**提那个旋钮——提了会让人以为它生效了）
+        let fallback = data_root_note(None, &root);
+        assert!(fallback.contains(&root.to_string_lossy().to_string()), "{fallback}");
+        assert!(fallback.contains("数据目录"), "{fallback}");
+        assert!(!fallback.contains(DATA_DIR_ENV), "旋钮没设就不许提它：{fallback}");
+
+        // 空白旋钮 = 未设置（与 data_root_override 同一口径）
+        assert_eq!(data_root_note(Some("   "), &root), fallback);
+        // 一行日志：不许带换行（日志文件是行导向的）
+        assert!(!fallback.contains('\n') && !via_override.contains('\n'));
     }
 
     #[test]

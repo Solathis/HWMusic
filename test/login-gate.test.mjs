@@ -60,6 +60,7 @@ import {
   LOGIN_GATE_EVENT,
   LOGIN_GATE_PHASE,
   LOGIN_GATE_TITLE,
+  LOGIN_OPENING_TEXT,
   QR_COUNTDOWN_TESTID,
   QR_EXPIRED_BOX_HINT,
   QR_EXPIRED_BOX_TEXT,
@@ -77,6 +78,7 @@ import {
   canStartLogin,
   initialGateState,
   loginGateStatusLine,
+  loginOpeningIndicator,
   qrContentOf,
   qrCountdownText,
   reduceGateState,
@@ -293,7 +295,7 @@ test("状态机：失败带原文案，后续事件不得把它静默吞掉；�
 // 4. R18 要求 4：常驻的「在网页中打开登录」+ 与二维码互斥（停了才开窗，窗关回二维码）
 // ---------------------------------------------------------------------------
 
-test("互斥：发起网页登录时状态行说的是「已在网页中打开登录」，不再复述二维码那条失败", () => {
+test("互斥：发起网页登录时状态行说的是「正在打开华为官方登录页…」，不再复述二维码那条失败", () => {
   let state = loggedOut();
   state = reduceGateState(state, {
     type: LOGIN_GATE_EVENT.qr,
@@ -304,7 +306,9 @@ test("互斥：发起网页登录时状态行说的是「已在网页中打开�
   state = reduceGateState(state, { type: LOGIN_GATE_EVENT.started });
   assert.equal(state.path, "official");
   assert.equal(state.busy, true);
-  assert.match(loginGateStatusLine(state), /已在网页中打开登录/);
+  // R27：这一刻官方页还在**屏外**加载（Rust 侧 `login::offscreen_rect`），一个字都没画出来
+  // ——说"已在网页中打开登录"等于把"还在加载"描述成"就是白的"（用户报的正是那个现象）。
+  assert.equal(loginGateStatusLine(state), LOGIN_OPENING_TEXT);
   assert.equal(canStartLogin(state), false, "窗已经开了：入口先禁用（不然就是并排第二次）");
 
   // 官方页那条路也失败时，最新那一句必须盖过二维码的旧文案
@@ -968,3 +972,88 @@ test("R21 倒计时：钟在渲染层——门禁源码要真的开表与停表�
     "QR_REFRESH_NOTICE 整条链删除（常量、状态字段、退场规则都不留）",
   );
 });
+
+// ---------------------------------------------------------------------------
+// 13. R27（用户指令 2026-10-20）：切「在网页中打开登录」之后的**加载动画**
+// ---------------------------------------------------------------------------
+//
+// 现象：点完入口之后官方页要好几秒才画出来，那几秒里用户看到的是一片白——因为登录 webview
+// 一建出来就铺满了整个内容区。R27 的修法是**两层配合**：
+//
+// - Rust 侧把登录页先摆在**屏外**（`login::offscreen_rect`，客户区左沿之外），首载完成或
+//   30 秒首载期限到才 `set_position` 摆进内容区；
+// - 渲染层这一侧于是在屏外那一段时间里**仍然看得见**，它要显示的是加载动画
+//   （`loginOpeningIndicator`），而不是让用户盯着一个看起来"已经打开、就是白的"页面。
+//
+// 文案从 R20 那句「已在网页中打开登录。」改成「正在打开华为官方登录页…」，理由是**诚实**：
+// `busy` 为真只说明那条路在跑，此刻官方页一个字都还没画出来（它还在屏外加载）。
+// 说"已打开"把"还在加载"描述成了"就是白的"——那正是用户报的那个现象。
+//
+// 两条边界**不改**：
+// 1. 渲染层 reload 之后（`path` 丢了、只剩 `busy:true`，R19 那个场景）**不**说"正在打开"
+//    ——那一刻页面多半早就画出来了，我们没有理由说它在加载（见下面第二条用例）；
+// 2. 这条链的收场仍由宿主广播判定（`busy` 落下来 + 带一句话）→ 立刻停转。
+//
+// 转圈与文案在**同一行**（同一个 `role="status"` 区域）：读屏用户听到的就是他看到的那一句，
+// 不会出现"看见在转、读屏却被告知已打开"。
+
+test("R27 加载动画：官方页还没画出来时说的是「正在打开华为官方登录页…」，收场就停", () => {
+  // 还没点入口：没有"正在打开"这回事
+  assert.equal(loginOpeningIndicator(loggedOut()).showing, false);
+
+  const opening = reduceGateState(loggedOut(), { type: LOGIN_GATE_EVENT.started });
+  assert.equal(opening.busy, true);
+  assert.deepEqual(
+    loginOpeningIndicator(opening),
+    { showing: true, text: LOGIN_OPENING_TEXT },
+    "点了入口、页还没画出来 → 转圈 + 说清在等什么",
+  );
+  assert.equal(
+    loginGateStatusLine(opening),
+    LOGIN_OPENING_TEXT,
+    "状态行与转圈说同一句话（一个 role=status 区域，不做两个说法）",
+  );
+
+  // 那条路收场（宿主广播 busy 落下来 + 一句为什么）：立刻停止转圈
+  const ended = reduceGateState(opening, {
+    type: LOGIN_GATE_EVENT.status,
+    loggedIn: false,
+    busy: false,
+    message: "官方登录页打不开：请检查网络或代理。",
+  });
+  assert.equal(loginOpeningIndicator(ended).showing, false, "那条路收场了就不该再转圈");
+  assert.match(loginGateStatusLine(ended), /官方登录页打不开/, "收场那句为什么照旧说话");
+
+  // 取消同一条规矩
+  assert.equal(loginOpeningIndicator(reduceGateState(opening, { type: LOGIN_GATE_EVENT.cancelled })).showing, false);
+});
+
+test("R27 加载动画：reload 之后（只有 busy、没有本地 path）不说「正在打开」——那一刻页多半早画好了", () => {
+  const afterReload = { ...loggedOut(), busy: true };
+  assert.equal(afterReload.path, null, "这份夹具要的正是「没有本地 path」那一档");
+  assert.equal(
+    loginOpeningIndicator(afterReload).showing,
+    false,
+    "没有本地 path 就不敢说「正在打开」：R19 那条路上页面可能早就画出来了",
+  );
+  assert.notEqual(
+    loginGateStatusLine(afterReload),
+    LOGIN_OPENING_TEXT,
+    "状态行也不许出现「正在打开」（同一个判定，两处不可能各说各的）",
+  );
+});
+
+test("R27 加载动画：文案是「正在打开…」这一档，不再谎报「已在网页中打开登录」", () => {
+  assert.equal(LOGIN_OPENING_TEXT, "正在打开华为官方登录页…");
+  assert.doesNotMatch(LOGIN_OPENING_TEXT, /已在/, "「已在网页中打开登录」说的是「窗开着」，不是「页画出来了」");
+});
+
+test("R27 加载动画：门禁源码真的画出来（Loader2 转圈 + 那一行文案），且只在官方页那一档", () => {
+  const gate = gateSource();
+  assert.match(gate, /loginOpeningIndicator\(/, "显示与否交给纯函数判定（不在 JSX 里手写条件）");
+  assert.match(gate, /Loader2Icon/, "用既有图标库的 Loader2（不手写转圈动画）");
+  assert.match(gate, /animate-spin/, "转圈靠工具类，不写自定义 CSS");
+  assert.match(gate, /LOGIN_OPENING_TEXT/, "文案只许有一处字面量（常量）");
+  assert.match(gate, /role="status"/, "加载动画与状态行是同一个状态区：读屏听到的就是看到的");
+});
+
