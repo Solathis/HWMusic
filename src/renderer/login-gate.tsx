@@ -7,17 +7,29 @@
  * R18 起（用户指令 2026-10-20）形态是**自上而下居中一列**：
  *
  * ```
- *   ┌ 顶部 header（高度 = LOGIN_VIEW_TOP_INSET，品牌）────────────┐
+ *   ┌ 顶部 header（高度 = LOGIN_VIEW_TOP_INSET，R20 起**没有任何文字**）─────────┐
  *   │  华为账号登录                                               │ ← 标题（只在正上方这一处）
  *   │  ┌───────────┐                                             │
  *   │  │  二维码    │  ← 带边框的容器（令牌 + 工具类，零自定义 CSS）  │
- *   │  └───────────┘                                             │
+ *   │  └───────────┘     R20 起它本身是个 <button>：点它就是刷新      │
  *   │  手机「控制中心」>「扫一扫」…。（提示文字，唯一真源）            │
  *   │  等待扫码…（状态行，克制一行）                                │
  *   │  [重试]（只在失败态）                                        │
  *   │  在网页中打开登录（**常驻**次要入口，走既有 auth:login 路径）    │
  *   └────────────────────────────────────────────────────────────┘
  * ```
+ *
+ * R20（用户真机验收反馈三项）在这一页上改了四处：
+ * 1. **header 里那句品牌删掉**——它与窗口标题栏重复；header 结构保留（48px 契约、对位），
+ *    只是不再有任何可见文字；
+ * 2. **二维码容器可点刷新**：容器本身是 shadcn 的 `Button`（键盘可达、有可达名字
+ *    [`QR_REFRESH_LABEL`]），点击 = `startQr`（换一张新码）；
+ * 3. **过期码不留屏**：`expired` 到达时逻辑层撤掉内容 → 这里自然回到同尺寸占位
+ *    （死码留在屏上=让用户去扫一张必然没反应的码）；
+ * 4. **网页登录窗开着时入口变形**：子窗铺满内容区（顶部只留那条 header），正文里的一切都
+ *    在窗底下——所以「返回扫码登录」这一形态**挪进 header**（那一刻唯一可达的控件），
+ *    点击走 `auth:cancel-login`（关窗）→ 那条路的收场广播 → R18 的 `returnToQr` 链回到二维码态
+ *    并重新发码。入口元素只有一处定义（`entry`），两种形态共用它。
  *
  * 三条要点：
  * - 二维码由成熟库 `qrcode`（MIT）渲染到 canvas——不手写二维码组件、不自己编码；
@@ -26,8 +38,8 @@
  *   点了走 R7 的官方登录子窗；**两条路互斥**——sidecar 开窗前会停掉二维码会话，
  *   窗关掉/失败之后界面自动回到二维码态（判定见 `login-gate-logic.mjs` 的不变量 6）；
  * - 顶部那条 header 的高度 = `LOGIN_VIEW_TOP_INSET`（与 Rust 子窗让出的位置**同一常量**）：
- *   走网页入口时子窗正好落在那条下面，正文不被遮住。R18 起标题搬到了二维码正上方，
- *   header 里只剩品牌——**标题全页只出现一次**。
+ *   走网页入口时子窗正好落在那条下面，正文不被遮住；R20 起它同时是"返回"控件在窗开着时的
+ *   唯一落点。
  *
  * 视觉只用 shadcn 原语 + Tailwind 工具类：不写 `<style>`、不写内联视觉样式
  * （唯一的例外就是那条几何契约的 `style={{height: LOGIN_VIEW_TOP_INSET}}`——它是几何不是视觉）。
@@ -38,10 +50,14 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react"
 
-import { APP_BRAND_LABEL } from "../shared/app-name.mjs"
 import { AUTH_QR, AUTH_STATUS } from "../shared/channels.ts"
 import { LOGIN_VIEW_TOP_INSET } from "../shared/login-inset.mjs"
-import { AUTH_LOGIN, AUTH_GET_STATUS, AUTH_QR_START } from "../shared/request-channels.ts"
+import {
+  AUTH_CANCEL_LOGIN,
+  AUTH_LOGIN,
+  AUTH_GET_STATUS,
+  AUTH_QR_START,
+} from "../shared/request-channels.ts"
 import { Button } from "./components/ui/button"
 import { Skeleton } from "./components/ui/skeleton"
 import { coreCall, isCoreError, onCoreEvent, rendererReady } from "./host-api"
@@ -50,15 +66,16 @@ import {
   LOGIN_GATE_TITLE,
   QR_GATE_STATUS,
   QR_HINT_TEXT,
-  WEB_LOGIN_ENTRY_TESTID,
-  WEB_LOGIN_ENTRY_TEXT,
+  QR_REFRESH_LABEL,
+  QR_REFRESH_TESTID,
+  canRefreshQr,
   canRetryQr,
-  canStartLogin,
   initialGateState,
   loginGateStatusLine,
   qrContentOf,
   reduceGateState,
   shouldAutoStartQr,
+  webLoginEntry,
 } from "./features/auth/login-gate-logic.mjs"
 import { QR_SIZE_PX, paintQrCanvas } from "./features/auth/qr-canvas.mjs"
 
@@ -80,10 +97,12 @@ export interface QrStatusPayload {
 
 export interface AuthGate {
   state: ReturnType<typeof initialGateState>
-  /** 发起 / 重新发起二维码（自动开始与"重试"都走这一条） */
+  /** 发起 / 重新发起二维码（自动开始、二维码容器点击、"重试"都走这一条） */
   startQr: () => void
-  /** 次要入口：打开华为官方登录窗（既有的 auth:login 路径；sidecar 会先停掉二维码会话） */
+  /** 次要入口（打开形态）：打开华为官方登录窗（既有的 auth:login 路径；sidecar 会先停掉二维码会话） */
   startLogin: () => void
+  /** 次要入口（返回形态，R20）：关掉官方登录窗（auth:cancel-login），之后自动回到二维码态 */
+  backToQr: () => void
 }
 
 /**
@@ -218,6 +237,32 @@ export function useAuthGate(): AuthGate {
     })()
   }, [])
 
+  /**
+   * 「返回扫码登录」（R20）：把官方登录窗关掉。
+   *
+   * 界面**不自己做状态跳转**：窗在 Rust 手里，"关掉了"这件事只有宿主知道。取消成功之后
+   * sidecar 的登录流程收场（结论 cancelled）→ `failWith` 播一条 `busy:false` **带文案**的
+   * `auth:status` → 渲染层按 R18 的判据（带话的收场）回到二维码态并重新发码
+   * （`isOfficialFinish` / `returnToQr`，见 login-gate-logic）。
+   *
+   * 这一条调用**失败**时才本地收场（`failed` 在 official 那条路上同样走 `returnToQr`）：
+   * 卡在"已在网页中打开登录"上等一条永不到来的广播，用户就真的没有出路了。
+   */
+  const backToQr = useCallback(() => {
+    void (async () => {
+      try {
+        await coreCall(AUTH_CANCEL_LOGIN, null)
+      } catch (failure) {
+        setState((current) =>
+          reduceGateState(current, {
+            type: LOGIN_GATE_EVENT.failed,
+            message: isCoreError(failure) ? failure.message : "返回扫码登录失败（详情见日志）",
+          }),
+        )
+      }
+    })()
+  }, [])
+
   // 自动发起：四条件齐备才发起（见 login-gate-logic.mjs）；界面上没有任何按钮做这件事。
   //
   // StrictMode 会把 effect 跑两遍（第二遍拿到的还是同一份旧状态），所以用 ref 挡住重复建单
@@ -230,7 +275,7 @@ export function useAuthGate(): AuthGate {
     startQr()
   }, [state, startQr])
 
-  return { state, startQr, startLogin }
+  return { state, startQr, startLogin, backToQr }
 }
 
 /** 二维码画布：内容换一张就重画（编码与纠错全交给库，这里不碰二维码算法）。 */
@@ -257,16 +302,37 @@ function QrCanvas({ content }: { content: string }) {
 
 /** 引导页本体。 */
 export function LoginGate({ gate }: { gate: AuthGate }) {
-  const { state, startQr, startLogin } = gate
+  const { state, startQr, startLogin, backToQr } = gate
   const status = loginGateStatusLine(state)
   const content = qrContentOf(state)
+  const entry = webLoginEntry(state)
+
+  /**
+   * 次要入口（**只有一处定义**，两种形态共用）。
+   *
+   * `open`：打开官方登录窗（既有的 auth:login）。
+   * `back`（R20）：关掉它（auth:cancel-login）——窗铺满内容区时，它是用户**唯一**能点到的控件。
+   */
+  const entryButton = (
+    <Button
+      variant="link"
+      size="sm"
+      className="text-xs text-muted-foreground"
+      onClick={entry.form === "back" ? backToQr : startLogin}
+      disabled={entry.disabled}
+      data-testid={entry.testid}
+    >
+      {entry.text}
+    </Button>
+  )
 
   return (
     <div className="flex h-full w-full flex-col bg-background text-foreground">
       {/* 几何契约：这条的高度就是 Rust 登录子窗顶部让出的那一块（同一共享常量）。
-          R18 起标题搬到二维码正上方，这条只留品牌——标题全页只出现一次。 */}
-      <header className="flex items-center px-4" style={{ height: LOGIN_VIEW_TOP_INSET }}>
-        <span className="text-sm font-medium">{APP_BRAND_LABEL}</span>
+          R20：品牌（与窗口标题栏重复的那句）已删——没有子窗时它是一条空占位；
+          子窗铺满内容区时它是**唯一**还看得见、点得到的一条，所以"返回扫码登录"落在它里面。 */}
+      <header className="flex items-center justify-end px-4" style={{ height: LOGIN_VIEW_TOP_INSET }}>
+        {entry.form === "back" ? entryButton : null}
       </header>
 
       <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
@@ -274,14 +340,21 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
         <h1 className="text-center text-lg font-medium">{LOGIN_GATE_TITLE}</h1>
 
         {/* 二维码容器：边框与圆角走设计令牌 + 工具类（零自定义 CSS）；还没有内容时给同尺寸占位，
-            界面不跳、用户知道"马上就来" */}
-        <div className="rounded-lg border border-border bg-card p-3">
+            界面不跳、用户知道"马上就来"。R20 起容器本身可点（换一张新码），过期也在这里换新。 */}
+        <Button
+          variant="ghost"
+          className="h-auto rounded-lg border-border bg-card p-3 hover:bg-card"
+          onClick={startQr}
+          disabled={!canRefreshQr(state)}
+          aria-label={QR_REFRESH_LABEL}
+          data-testid={QR_REFRESH_TESTID}
+        >
           {content === null ? (
             <Skeleton className="h-52 w-52 rounded-md" />
           ) : (
             <QrCanvas content={content} />
           )}
-        </div>
+        </Button>
 
         <p className="max-w-xs text-center text-sm text-muted-foreground">{QR_HINT_TEXT}</p>
         <p className="text-center text-sm text-muted-foreground" role="status">
@@ -294,16 +367,7 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
           </Button>
         ) : null}
 
-        <Button
-          variant="link"
-          size="sm"
-          className="text-xs text-muted-foreground"
-          onClick={startLogin}
-          disabled={!canStartLogin(state)}
-          data-testid={WEB_LOGIN_ENTRY_TESTID}
-        >
-          {WEB_LOGIN_ENTRY_TEXT}
-        </Button>
+        {entry.form === "open" ? entryButton : null}
       </div>
     </div>
   )

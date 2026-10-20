@@ -26,7 +26,12 @@
  * 用法：
  *   node scripts/probe-qr.mjs                     # 默认：建单 + 轮询 3 次（间隔取页面配置）
  *   node scripts/probe-qr.mjs --polls 1           # 只轮询一次
+ *   node scripts/probe-qr.mjs --until-expired     # 轮询到档位变化（实测「服务端失效时 poll 返回什么」）
  *   node scripts/probe-qr.mjs --out .probe/qr.json
+ *
+ * `--until-expired`（R20 增补）：R16 只观测到 `103000200`（未扫），协议表里的 `103000201`（过期）
+ * 一直是"未观测"档。这一模式一直轮询到 resultCode 变化（或越过 `expiredTime` + 宽限 / 硬上限），
+ * 把每一次采样与"到底观测到没有"如实写进结果——R20 的本地到期回退方案就取决于这个答案。
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -63,6 +68,12 @@ const pollCount = (() => {
   const value = index === -1 ? 3 : Number(process.argv[index + 1]);
   return Number.isInteger(value) && value >= 0 ? value : 3;
 })();
+/** 轮询到档位变化（R20：实测「服务端失效时 poll 返回什么档位」）。 */
+const untilExpired = args.has("--until-expired");
+/** 越过 `expiredTime` 之后还给多久才放弃（过了有效期服务端可能并不立刻改档位）。 */
+const EXPIRY_GRACE_MS = 60_000;
+/** 硬上限：无论如何都不在探针里跑过这个时长。 */
+const POLL_HARD_CAP_MS = 300_000;
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
@@ -317,8 +328,14 @@ if (qrToken === "") {
 // ---------------------------------------------------------------------------
 
 const intervalMs = Number.isFinite(Number(mobile.qrcodeRequestInterval)) ? Number(mobile.qrcodeRequestInterval) : 2000;
+/** 建单响应给的有效期（`--until-expired` 用它算"越过了多久"）。 */
+const expiredTimeMs = Number(qr?.expiredTime) > 0 ? Number(qr.expiredTime) : null;
+const createTimeMs = Number(qr?.qrCodeCreateTime) > 0 ? Number(qr.qrCodeCreateTime) : null;
+const probeStartedMs = Date.now();
 const polls = [];
-for (let index = 0; index < pollCount; index += 1) {
+/** 轮询到档位变化为止（或越过有效期 + 宽限 / 撞上硬上限）。 */
+let stoppedBecause = null;
+for (let index = 0; untilExpired || index < pollCount; index += 1) {
   if (index > 0) await sleep(intervalMs);
   const polled = await request(`${pollEndpoint}&t=${Math.random()}`, {
     method: "POST",
@@ -330,8 +347,12 @@ for (let index = 0; index < pollCount; index += 1) {
     body: new URLSearchParams({ qrToken }).toString(),
   });
   const body = jsonOf(polled);
+  const elapsedMs = Date.now() - probeStartedMs;
   const entry = {
     index,
+    elapsedMs,
+    /** 相对 `expiredTime` 的位置（负数 = 还没到期；null = 建单没给有效期） */
+    pastExpiryMs: expiredTimeMs === null ? null : Date.now() - expiredTimeMs,
     status: polled.status,
     verdict: verdictOf(polled.status),
     resultCode: body?.resultCode ?? null,
@@ -344,7 +365,69 @@ for (let index = 0; index < pollCount; index += 1) {
   step(`⑥ 轮询 #${index + 1}`, {
     status: polled.status,
     verdict: entry.verdict,
-    note: `resultCode=${entry.resultCode}`,
+    note: `resultCode=${entry.resultCode} t+${Math.round(elapsedMs / 1000)}s`,
+  });
+
+  if (!untilExpired) continue;
+  // 档位变了（不再是实探到的"未扫"那一档）就停：这就是要观测的那个答案
+  if (entry.resultCode !== "103000200") {
+    stoppedBecause = "tier_changed";
+    break;
+  }
+  if (expiredTimeMs !== null && Date.now() - expiredTimeMs > EXPIRY_GRACE_MS) {
+    stoppedBecause = "grace_after_expiry_elapsed";
+    break;
+  }
+  if (elapsedMs > POLL_HARD_CAP_MS) {
+    stoppedBecause = "hard_cap";
+    break;
+  }
+}
+
+/** 观测结论：服务端失效时是否**真的**给出过期档位（R20 的裁决依据）。 */
+const observedResultCodes = [...new Set(polls.map((entry) => entry.resultCode))];
+const expiredTier = {
+  requested: untilExpired,
+  stoppedBecause,
+  polls: polls.length,
+  durationMs: polls.length === 0 ? 0 : polls.at(-1).elapsedMs,
+  expiredTimeMs,
+  qrCodeCreateTimeMs: createTimeMs,
+  ttlMs: expiredTimeMs !== null && createTimeMs !== null ? expiredTimeMs - createTimeMs : null,
+  observedResultCodes,
+  expiredTierObserved: observedResultCodes.includes("103000201"),
+  /** 越过有效期之后采样到的档位（最关心的一段） */
+  afterExpiryResultCodes:
+    expiredTimeMs === null
+      ? null
+      : [...new Set(polls.filter((entry) => entry.pastExpiryMs > 0).map((entry) => entry.resultCode))],
+  afterExpirySamples: polls.filter((entry) => entry.pastExpiryMs !== null && entry.pastExpiryMs > 0).length,
+};
+
+/** 过期之后再建一张：证明"旧码作废之后还能不能换新的"（换新链路的可行性）。 */
+let renewal = null;
+if (untilExpired) {
+  const again = await request(createBase, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      origin: CAS_ORIGIN,
+      referer: mobileUrl,
+    },
+    body: createForm.toString(),
+  });
+  const renewed = jsonOf(again);
+  renewal = {
+    status: again.status,
+    ok: typeof renewed?.qrToken === "string" && renewed.qrToken !== "",
+    responseKeys: renewed ? Object.keys(renewed) : [],
+    sameTokenAsFirst: renewed?.qrToken === qrToken,
+    content: fingerprint(renewed?.content),
+  };
+  step("⑦ 过期后重新建单", {
+    status: again.status,
+    verdict: verdictOf(again.status),
+    note: renewal.ok ? `新码已下发（与新会话= ${!renewal.sameTokenAsFirst}）` : "没有 qrToken",
   });
 }
 
@@ -381,6 +464,8 @@ writeReport({
       formKeys: ["qrToken"],
       intervalMs,
       resultCodeMeaning: RESULT_CODE_MEANING,
+      expiredTier,
+      renewal,
       samples: polls,
     },
   },

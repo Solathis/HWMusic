@@ -384,3 +384,76 @@ test("会话：start 之前的状态是 idle，重复 start 不会开出第二�
   assert.equal(world.calls.filter((call) => call.url.includes("getqrInfo")).length, 2, "第二次 start 是重新建单（用户重试语义）");
   assert.equal(session.isRunning(), true);
 });
+
+// ---------------------------------------------------------------------------
+// R20：活动会话期间重启（手动刷新）—— 迟到的旧会话事件一律不许广播
+// ---------------------------------------------------------------------------
+
+test("会话：取消之后才落地的轮询响应不再广播（迟到的「过期」不许顶掉新码）", async () => {
+  const world = harness({ createResponses: [{ body: createPayload() }], pollResponses: [] });
+  let releasePoll;
+  const inFlight = new Promise((resolve) => {
+    releasePoll = resolve;
+  });
+  let polls = 0;
+  const fetchImpl = async (url) => {
+    const target = String(url);
+    if (target.includes("getqrInfo")) {
+      return { ok: true, status: 200, async text() { return JSON.stringify(createPayload()); } };
+    }
+    polls += 1;
+    await inFlight; // 这一次轮询挂住：模拟"请求在飞的时候用户按了刷新"
+    return { ok: true, status: 200, async text() { return JSON.stringify({ resultCode: "103000201" }); } };
+  };
+  const events = [];
+  const session = createQrSession({
+    createUrl: CREATE_URL,
+    pollUrl: POLL_URL,
+    intervalMs: world.intervalMs,
+    fetchImpl,
+    now: () => 1_700_000_000_000,
+    setTimer: world.setTimer,
+    clearTimer: world.clearTimer,
+    onEvent: (event) => events.push(event),
+  });
+
+  await session.start();
+  await world.tick(); // 轮询发出（挂在 inFlight 上）
+  session.cancel();
+  releasePoll();
+  for (let round = 0; round < 16; round += 1) await Promise.resolve();
+
+  assert.deepEqual(
+    events.map((event) => event.status),
+    [QR_LOGIN_STATUS.pending],
+    "取消之后到达的「过期」不许广播（否则它会顺手再建一张新码，把刷新出来的那张顶掉）",
+  );
+  assert.equal(polls, 1, "挂住的那次轮询确实发出去过（这条断言不是空转）");
+  assert.equal(session.isRunning(), false);
+});
+
+test("会话：过期自动换新之后 current() 报的是新那张（换码链要带当前这张的 qrCode）", async () => {
+  const world = harness({
+    createResponses: [
+      { body: createPayload({ content: "https://id1.cloud.huawei.com/qrcode/login.jsp?qRCode=OLD", qrCode: "R-OLD", qrToken: "tok-old" }) },
+      { body: createPayload({ content: "https://id1.cloud.huawei.com/qrcode/login.jsp?qRCode=NEW", qrCode: "R-NEW", qrToken: "tok-new" }) },
+    ],
+    pollResponses: [{ body: { resultCode: "103000201" } }],
+  });
+  const session = createQrSession({
+    createUrl: CREATE_URL,
+    pollUrl: POLL_URL,
+    intervalMs: world.intervalMs,
+    fetchImpl: world.fetchImpl,
+    now: () => 1_700_000_000_000,
+    setTimer: world.setTimer,
+    clearTimer: world.clearTimer,
+    onEvent: () => undefined,
+  });
+
+  await session.start();
+  assert.equal(session.current().qrCode, "R-OLD");
+  await world.tick(); // 过期 → 当场重建
+  assert.match(session.current().content, /qRCode=NEW/);
+  assert.equal(session.current().qrCode, "R-NEW", "换新之后当前那张是新码：拿旧 qrCode 去换码只会换回一次失败");
+});

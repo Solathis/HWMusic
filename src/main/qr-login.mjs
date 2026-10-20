@@ -24,6 +24,13 @@
  * **未实测的一档（如实登记）**：`codeRemoteLogin` 之后的 `callbackURL → code → 令牌兑换`需要
  * 一次**真实扫码 + 手机确认**（用户在场的授权动作），本任务交付到"轮询状态机就绪"为止；
  * 那一步的形状来自页面 bundle 的调用代码，且失败时是结构化错误（不猜、不静默）。
+ *
+ * R20 增补（手动刷新 = 活动会话期间重启）：
+ * - `start()` 天然就是"停旧会话 + 开新会话"（旧会话 `cancel()`，新会话新 qrToken/qrCode）；
+ * - 迟到的旧会话事件按**身份**（`session !== mine`）丢弃：旧码那次在飞的轮询落地时，
+ *   不许把界面上那张新码顶掉（协议层另有一道 `running` 复检，见 src/protocols/qr-login.mjs）；
+ * - 换码链读的是**当前**那张的 `qrCode`（`session.current()`），不是建单时的一份快照——
+ *   过期自动换新之后，旧 qrCode 已经作废。
  */
 import { LOGIN_TIMEOUT_MS } from "../protocols/login-callback.mjs";
 import { QR_LOGIN_STATUS, createQrSession } from "../protocols/qr-login.mjs";
@@ -122,7 +129,6 @@ export function createHuaweiQrPort(options = {}) {
 
   const jar = createCookieJar();
   let session = null;
-  let current = null;
 
   async function request(url, init = {}) {
     const headers = {
@@ -256,7 +262,7 @@ export function createHuaweiQrPort(options = {}) {
   }
 
   /** 已确认 → 用 CAS 门户接口换回带 code 的回调 URL。 */
-  async function exchangeForCallback(authorizeUrl, payload) {
+  async function exchangeForCallback(authorizeUrl, payload, session) {
     const context = await resolveCasContext(authorizeUrl);
     if (!context.ok) return context;
     const chain = context.data;
@@ -270,7 +276,9 @@ export function createHuaweiQrPort(options = {}) {
       loginChannel: chain.loginChannel,
       lang: chain.lang,
       appID: new URL(endpoints.create).searchParams.get("appID") ?? "",
-      qrCode: current?.qrCode ?? "",
+      // **当前**那张码的 qrCode：过期自动换新之后，最早建单那一张已经作废，
+      // 拿它的 qrCode 去换码只会白跑一趟（R20 修：原来读的是 start() 时的一份快照）
+      qrCode: session?.current()?.qrCode ?? "",
     });
     // 确认载荷里的字段原样带上（页面自己也是这么传的：userID/siteID/accountType/code/userAccount/opType）
     for (const name of ["userID", "siteID", "accountType", "code", "userAccount", "opType"]) {
@@ -305,14 +313,28 @@ export function createHuaweiQrPort(options = {}) {
 
   return {
     /**
-     * 发起一次二维码会话。
+     * 发起一次二维码会话（**重新发起 = 停旧会话 + 开新会话**）。
+     *
+     * 手动刷新（用户点二维码容器，R20）走的就是"再调一次 start"：新码一到，旧码作废。
+     * 旧会话当时可能正有一次轮询在飞，所以**每一条出向通路都按身份比对**
+     * （`session !== mine` 就丢弃）——包括那个"确认之后再换码"的异步尾巴：
+     * 它落地时如果会话已经换了一轮，那次换码的结果不属于现在这条路。
      *
      * @param {{authorizeUrl: string, onEvent: (event: object) => void,
      *          onConfirmed: (result: {callbackUrl: string}) => void}} params
      */
     async start({ authorizeUrl, onEvent, onConfirmed }) {
       session?.cancel();
-      session = createSession({
+      /** 这一轮会话的身份（迟到的事件/换码结果按它丢弃）。 */
+      let mine = null;
+      const emit = (event) => {
+        if (session !== mine) {
+          log("二维码事件到达时那次会话已作废：不广播（迟到的旧码不属于现在这一张）");
+          return;
+        }
+        onEvent(event);
+      };
+      mine = createSession({
         createUrl: endpoints.create,
         pollUrl: endpoints.poll,
         intervalMs: endpoints.intervalMs,
@@ -324,14 +346,19 @@ export function createHuaweiQrPort(options = {}) {
         random,
         log,
         onEvent: (event) => {
-          onEvent(event);
+          emit(event);
           if (event.status !== QR_LOGIN_STATUS.confirmed) return;
           // 确认之后的换码链是"用户已经动过手"的时刻才走：失败也只是这一次的失败
           void (async () => {
-            const exchanged = await exchangeForCallback(authorizeUrl, event.payload);
+            const exchanged = await exchangeForCallback(authorizeUrl, event.payload, mine);
+            // 换码期间用户又刷了一次：这一次的结果作废（不广播失败、也不交回调）
+            if (session !== mine) {
+              log("换码结果到达时会话已作废：丢弃（用户已经换了一张新码）");
+              return;
+            }
             if (!exchanged.ok) {
               log(`二维码换码失败：${exchanged.error.message}`);
-              onEvent({
+              emit({
                 status: QR_LOGIN_STATUS.failed,
                 message: exchanged.error.message,
                 errorKind: exchanged.error.kind,
@@ -342,10 +369,10 @@ export function createHuaweiQrPort(options = {}) {
           })();
         },
       });
+      session = mine;
 
       const started = await session.start();
       if (!started.ok) return started;
-      current = session.current();
       return started;
     },
 

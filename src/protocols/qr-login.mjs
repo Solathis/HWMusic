@@ -25,6 +25,11 @@
  *    再发一次 `auth:qr-start` 只会多一条出错路径；广播通道保持"当前二维码"的唯一事实来源；
  * 4. **错误不静默**：建单失败、连续轮询失败都广播 `failed`（带一句人话），界面才有东西可显示。
  *
+ * R20 增补第五条（手动刷新的竞态）：**取消之后落地的响应一律不广播**（`running` 复检）。
+ * 用户点一下二维码容器就是"停旧会话 + 开新会话"，而旧会话可能正好有一次轮询在飞——
+ * 它落地时若照常广播，会把刚画出来的新码顶掉（还会顺手再建一张）。会话自己就知道它被
+ * 取消了，所以判据放在这里，而不是指望调用方在每条路上补一遍。
+ *
  * 全部依赖注入（fetch/计时器/时钟），所以整条状态机在测试里跑得完，不碰网络也不碰真实时间。
  */
 import { err, ok } from "../shared/result.ts";
@@ -280,6 +285,8 @@ export function createQrSession(options = {}) {
     if (!parsed.ok) return parsed;
     current = parsed.data;
     failures = 0;
+    // 取消之后才落地的建单响应：不再广播（这一档属于一次已经作废的会话）
+    if (!running) return parsed;
     moveTo(QR_LOGIN_STATUS.pending, {
       content: parsed.data.content,
       expiresInMs: parsed.data.expiresInMs,
@@ -343,6 +350,10 @@ export function createQrSession(options = {}) {
     }
 
     failures = 0;
+    // 取消（或重启）之后才落地的响应：**不广播、不排下一次**。
+    // 没有这一道，一次在飞的轮询会在用户已经换了一张新码之后，把旧会话的 expired/scanned
+    // 甚至 confirmed 播出去，把界面上那张新码顶掉（R20 手动刷新的竞态钉在 test/qr-login.test.mjs）。
+    if (!running) return;
     const classified = classifyQrPoll(payload);
     if (classified.unknownResultCode !== undefined) {
       log(`二维码轮询返回了不认识的 resultCode=${classified.unknownResultCode}（按"继续等待"处理）`);

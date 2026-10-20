@@ -31,6 +31,20 @@
  *    （`busy` 落下来 **且带一句给人看的话**）时回到二维码态、重新武装自动发起。
  *    只认"带话的收场"是有原因的：二维码会话自己也会播 `busy:false`（没有文案），
  *    把它当成"网页那条路结束了"会让界面在窗还开着的时候跳回二维码。
+ *
+ * R20（用户真机验收反馈三项，2026-10-20）又加了三件事：
+ * 1. **过期码绝不留在屏上**（`applyQrEvent` 的 expired 分支撤掉 content）：留在屏上的旧码
+ *    是"扫了没反应"的死码——用户会以为是自己手机的问题；
+ * 2. **过期提示要可感知**（`qrNotice` + [`QR_REFRESH_NOTICE`]）：sidecar 换新只隔一次
+ *    `create` 请求，原来那句提示在新 `pending` 到达的瞬间就被"等待扫码…"顶掉（用户看不见）。
+ *    现在它**挺过**那一跳，直到下次扫码状态变化（scanned/confirmed/failed）或用户自己动手；
+ * 3. **二维码容器可点刷新**（[`canRefreshQr`]）：过期不必靠"重试"按钮，容器本身就是那个控件
+ *    （键盘可达，可达名字 [`QR_REFRESH_LABEL`]）；点击 = `startQr`（与自动发起同一条路）。
+ *
+ * 诊断依据（可复现：`node scripts/probe-qr.mjs --until-expired`，摘要 `.probe/qr-expiry-diag.json`）：
+ * 服务端**会**给出过期档位——TTL 181s，实测 t+177.4s 时 `103000200` → `103000201`，
+ * 过期之后重新建单照常下发新码。所以"过期没有任何变化"不是 poll 静默挂，
+ * **本地到期计时**这条回退方案因此不需要（见 task-20-report.md）。
  */
 
 /** 门禁的三个阶段。 */
@@ -73,6 +87,37 @@ export const WEB_LOGIN_ENTRY_TEXT = "在网页中打开登录";
 
 /** 次要入口的测试锚点（真窗守卫 `npm run verify:live` 按它点名这个入口）。 */
 export const WEB_LOGIN_ENTRY_TESTID = "login-open-web";
+
+/**
+ * 网页登录那条路开着时，次要入口**变形的文案**（R20 要求 3）。
+ *
+ * "打开"与"返回"是两件事，用同一句话表示会让用户以为点了没用：窗已经开着，再点一次
+ * `auth:login` 只会撞上 `login_in_progress`。这一档点的必须是 `auth:cancel-login`（关窗）。
+ */
+export const WEB_LOGIN_BACK_TEXT = "返回扫码登录";
+
+/** 变形之后的测试锚点（与"打开"分开，真窗守卫/测试才能各点各的）。 */
+export const WEB_LOGIN_BACK_TESTID = "login-back-to-qr";
+
+/**
+ * 二维码容器可点刷新的**可达名字**（R20 要求 2）。
+ *
+ * 容器本身是个 `<button>`：不写这一条，读屏与键盘用户只会听到"按钮"两个字，
+ * 而它做的事（换一张新码）在页面上没有任何文字说明。
+ */
+export const QR_REFRESH_LABEL = "刷新二维码";
+
+/** 刷新控件的测试锚点。 */
+export const QR_REFRESH_TESTID = "login-qr-refresh";
+
+/**
+ * 过期提示（R20 要求 2）：**要挺过紧随其后的新 pending**，不能被它瞬间吞掉。
+ *
+ * 为什么必须挺住：sidecar 的换新只在过期那一跳之后隔一次 `create` 请求，原来这句提示
+ * 在那条应答到达时就被"等待扫码…"顶掉了——用户眼里就是"过期了什么也没发生"，而那时候他恰恰
+ * 需要知道"刚才那张扫不了，请扫这张新的"。
+ */
+export const QR_REFRESH_NOTICE = "二维码已刷新，请重新扫码。";
 
 /** 网页那条路收场、广播里却没带文案时的兜底说明（"刚退回来"这个标记永远不为空）。 */
 export const OFFICIAL_ENDED_NOTE = "网页登录已结束（没有完成登录）。";
@@ -119,6 +164,14 @@ export function initialGateState() {
      * 等新二维码真的到了（`pending` 带内容）再退场。
      */
     officialNote: null,
+    /**
+     * 二维码刚被换新时留下的一句提示（R20，[`QR_REFRESH_NOTICE`]）。
+     *
+     * 与 `officialNote` 同款（一条"刚发生的事"），但退场条件不同：它**不**被紧随其后的
+     * 新 `pending` 清掉——那一跳正是它存在的理由；退场要等真正的下一步
+     * （scanned/confirmed/failed）或用户自己动手（`qrRequested`）。
+     */
+    qrNotice: null,
   };
 }
 
@@ -140,6 +193,8 @@ function returnToQr(state, note) {
     qrAttempted: false,
     qr: initialQrState(),
     officialNote: typeof note === "string" && note !== "" ? note : OFFICIAL_ENDED_NOTE,
+    // 两句话不许叠在一起：这一档要说的是"网页那条路怎么了"，二维码那条已作废
+    qrNotice: null,
   };
 }
 
@@ -157,6 +212,12 @@ function applyQrEvent(qr, event) {
   const next = { ...qr, status };
   if (typeof event.content === "string" && event.content !== "") next.content = event.content;
   if (typeof event.expiresInMs === "number") next.expiresInMs = event.expiresInMs;
+  if (status === QR_GATE_STATUS.expired) {
+    // R20 要求 2：屏幕上那张已经**扫不动**了。留着一张死码是最坏的一种"没反应"
+    // ——用户会反复对着它扫，然后以为是自己手机/网络的问题。当场撤掉，新码随即就到。
+    next.content = null;
+    next.expiresInMs = null;
+  }
   if (status === QR_GATE_STATUS.failed) {
     next.message = typeof event.message === "string" && event.message !== "" ? event.message : "二维码登录失败（详情见日志）";
     next.errorKind = typeof event.errorKind === "string" ? event.errorKind : null;
@@ -166,6 +227,26 @@ function applyQrEvent(qr, event) {
     next.errorKind = null;
   }
   return next;
+}
+
+/**
+ * 过期提示的去留（R20）：**只有真正的下一步才把它清掉**。
+ *
+ * - `expired`：记上（就是这一刻旧码作废了）；
+ * - `pending`：**留着**——换新与它在同一次轮询里前后脚发生，清掉就等于没有提示；
+ * - `scanned`/`confirmed`/`failed`：清掉（用户已经在扫码路上，或这次会话收场了）；
+ * - 其余（含认不出的档位）：原样（不猜）。
+ */
+function noticeAfterQr(current, status) {
+  if (status === QR_GATE_STATUS.expired) return QR_REFRESH_NOTICE;
+  if (
+    status === QR_GATE_STATUS.scanned ||
+    status === QR_GATE_STATUS.confirmed ||
+    status === QR_GATE_STATUS.failed
+  ) {
+    return null;
+  }
+  return current;
 }
 
 /** 事件 → 新状态（纯函数：不改写入参，未知事件原样返回）。 */
@@ -186,12 +267,18 @@ export function reduceGateState(state, event) {
       return base;
     }
     case LOGIN_GATE_EVENT.qrRequested:
-      return { ...state, qrAttempted: true, path: "qr", message: null, qr: initialQrState() };
+      return { ...state, qrAttempted: true, path: "qr", message: null, qr: initialQrState(), qrNotice: null };
     case LOGIN_GATE_EVENT.qr: {
       const qr = applyQrEvent(state.qr, event);
       // 新二维码真的到了（pending 带内容）：网页那条路留下的那句话可以退场了
       const landed = qr.status === QR_GATE_STATUS.pending && qr.content !== null;
-      return { ...state, qr, officialNote: landed ? null : state.officialNote };
+      return {
+        ...state,
+        qr,
+        officialNote: landed ? null : state.officialNote,
+        // 过期提示**不在这里退场**：换新的那一跳正需要它（见 noticeAfterQr）
+        qrNotice: noticeAfterQr(state.qrNotice, qr.status),
+      };
     }
     case LOGIN_GATE_EVENT.qrFailed:
       return {
@@ -205,15 +292,20 @@ export function reduceGateState(state, event) {
       };
     case LOGIN_GATE_EVENT.started:
       // 走网页那条路：清掉上一轮的说明（这次是用户自己按的），二维码会话由 sidecar 停掉
-      return { ...state, busy: true, attempted: true, path: "official", message: null, officialNote: null };
+      return { ...state, busy: true, attempted: true, path: "official", message: null, officialNote: null, qrNotice: null };
     case LOGIN_GATE_EVENT.succeeded:
       return { ...state, phase: LOGIN_GATE_PHASE.loggedIn, busy: false, message: null };
     case LOGIN_GATE_EVENT.failed: {
       if (state?.path === "official") return returnToQr(state, event.message);
       return { ...state, busy: false, message: event.message ?? "登录未完成（详情见日志）" };
     }
-    case LOGIN_GATE_EVENT.cancelled:
-      return { ...state, busy: false, message: "已取消登录（可以重新打开官方登录页）" };
+    case LOGIN_GATE_EVENT.cancelled: {
+      // 与 `failed` 同一条规矩：取消"网页那条路"= 那条路收场 → 回二维码态并重新发码。
+      // （留在 official 上而 busy 已落，会让入口变回"打开"形态——窗若还开着就又没人可点）
+      const message = event.message ?? "已取消登录（可以重新打开官方登录页）";
+      if (state?.path === "official") return returnToQr(state, message);
+      return { ...state, busy: false, message };
+    }
     default:
       return state;
   }
@@ -245,10 +337,55 @@ export function canRetryQr(state) {
 }
 
 /**
- * 常驻次要入口可用吗？（R18）
+ * 二维码容器现在点得动吗？（R20 要求 2：过期/等待时不必去找"重试"按钮）
  *
- * 只有"网页那条路正在跑"时禁用（那时再点一次只会撞上 `login_in_progress`）。
- * 二维码在准备/等待/过期/失败**都不占** busy，所以这些档位下入口一直点得动。
+ * 点击的语义就是 `startQr`（= `auth:qr-start`，sidecar 会停掉旧会话、换一张新码），
+ * 所以"点得动"的判据是"再发一次有意义"：
+ * - `pending`/`scanned`：有码在屏上，换一张是用户明确想要的（旧的那张他不想扫了）；
+ * - `expired`：那张已经废了，点它就是"再来一张"（换新通常已经自动发生，但自动那条链失败时
+ *   这里是唯一出路——例如换新请求超时）；
+ * - `failed`：与「重试」同一件事（两个入口都留着，用户按哪个都行）；
+ * - `preparing`：已经有一次请求在飞，再点一次只是**重复建单**（还会白白换掉马上要到的码）；
+ * - `confirmed`：正在换码，这时换一张新码只会把已经成功的那次作废；
+ * - 网页那条路开着：那层被窗盖住（点不到），而且此刻不该建第二张码（两条路互斥，不变量 6）。
+ */
+export function canRefreshQr(state) {
+  if (state?.path === "official") return false;
+  const status = state?.qr?.status;
+  if (status === QR_GATE_STATUS.pending || status === QR_GATE_STATUS.scanned) return true;
+  if (status === QR_GATE_STATUS.expired || status === QR_GATE_STATUS.failed) return true;
+  return false;
+}
+
+/**
+ * 次要入口现在是什么形态（R20 要求 3）：`"open"`（打开网页登录）还是 `"back"`（返回扫码登录）。
+ *
+ * 判据是 [`canStartLogin`]（= "那条路没在跑"），**不是** `path === "official"`：`path` 是渲染层
+ * 这一次点击留下的本地猜测，渲染层 reload / 崩溃重启之后就没了——而那时窗很可能还开着
+ * （`auth:get-status` 的应答会说 `busy:true`），恰恰是用户最需要这条返回路径的时刻。
+ * `busy` 是 sidecar 自己的事实（R19 起查询与广播同源），所以形态跟着它走。
+ *
+ * 两种形态都**可点**（`disabled: false`）：打开与返回各自是那一刻唯一该做的事。
+ * R17 抓过的那类坑正是"最需要某个控件时它恰好是灰的"，这里不再留任何一个灰的入口。
+ *
+ * 为什么要有"返回"这一档：走网页那条路时子窗**铺满内容区**（顶部只留 48px header），
+ * 正文里的一切（包括原来那个入口）都在窗底下——点不到。用户唯一能碰到的就是那条 header，
+ * 所以这一档的入口要挪进 header，点它走 `auth:cancel-login`（窗在 Rust 手里，只有它能拆）。
+ */
+export function webLoginEntry(state) {
+  if (!canStartLogin(state)) {
+    return { form: "back", text: WEB_LOGIN_BACK_TEXT, testid: WEB_LOGIN_BACK_TESTID, disabled: false };
+  }
+  return { form: "open", text: WEB_LOGIN_ENTRY_TEXT, testid: WEB_LOGIN_ENTRY_TESTID, disabled: false };
+}
+
+/**
+ * "网页那条路现在没在跑"吗？（R18 立、R20 扩用：它同时是次要入口**形态**的判据）
+ *
+ * `busy` 只描述开窗那条路（二维码在准备/等待/过期/失败**都不占** busy），所以：
+ * - 它为真时，入口是「在网页中打开登录」（发起那条路）；
+ * - 它为假时，入口是「返回扫码登录」（见 `webLoginEntry`）——eq. 窗开着，正文被盖住，
+ *   用户需要的不是"再打开一次"（那只会撞上 `login_in_progress`）而是"关掉它"。
  */
 export function canStartLogin(state) {
   return state?.busy !== true;
@@ -264,16 +401,20 @@ export function qrContentOf(state) {
  * 状态行文案（克制：一行，告诉用户现在是什么状态、下一步能做什么）。
  *
  * 优先级：**最新一次明确的失败/取消** → 会话阶段 → **网页那条路刚收场留下的那句话** →
- * 当前那条路的状态。失败文案排最前是有意的：出错时用户最需要看到的就是那一句
- * （而不是"正在准备二维码…"）。
+ * **二维码刚被换新的提示** → 当前那条路的状态。失败文案排最前是有意的：出错时用户最需要
+ * 看到的就是那一句（而不是"正在准备二维码…"）。两条"刚发生的事"（`officialNote` /
+ * `qrNotice`）排在"现状"之前，理由同 R19：它们说的是**刚刚发生了什么**，而
+ * "正在检查登录状态…"只是"还不知道"。
  */
 export function loginGateStatusLine(state) {
   if (typeof state?.message === "string" && state.message !== "") return state.message;
   if (state?.phase === LOGIN_GATE_PHASE.loggedIn) return "已登录。";
 
   // 刚从网页那条路退回来、新码还没到：先说清楚那条路是怎么结束的
-  // （排在"正在检查登录状态…"之前：那句话是"还不知道"，而这句是**刚发生的事**）
   if (typeof state?.officialNote === "string" && state.officialNote !== "") return state.officialNote;
+
+  // 二维码刚被换新（R20）：这一句要挺过紧随其后的新 pending，否则用户根本看不见它
+  if (typeof state?.qrNotice === "string" && state.qrNotice !== "") return state.qrNotice;
 
   if (state?.phase === LOGIN_GATE_PHASE.checking) return "正在检查登录状态…";
 
@@ -294,8 +435,9 @@ export function loginGateStatusLine(state) {
     case QR_GATE_STATUS.confirmed:
       return "已确认，正在完成登录…";
     case QR_GATE_STATUS.expired:
-      // 短暂档：sidecar 紧接着就会播新的 pending（几秒内），之后回到"等待扫码…"
-      return "二维码已刷新，请重新扫码。";
+      // 短暂档：sidecar 紧接着就会播新的 pending（实测只隔一次 create 请求）。
+      // 提示由 `qrNotice` 保管——它会挺过那一跳，所以这里只说同一句话（唯一真源）
+      return QR_REFRESH_NOTICE;
     case QR_GATE_STATUS.failed:
       return qr.message ?? "二维码登录失败（详情见日志）";
     default:

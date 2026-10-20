@@ -16,6 +16,7 @@ import {
   canStartLogin,
   initialGateState,
   reduceGateState,
+  shouldAutoStartQr,
 } from "../src/renderer/features/auth/login-gate-logic.mjs";
 
 const MUSIC_SESSION = { musicSession: "user$abc", userId: "42" };
@@ -456,4 +457,117 @@ test("互斥：确认之后的换码不会被迟到的二维码事件顶掉（at
 
   settle({ status: "cancelled" });
   await pending;
+});
+
+// ---------------------------------------------------------------------------
+// R20：手动刷新（会话期间重启）与「返回扫码登录」（网页那条路的回退）
+// ---------------------------------------------------------------------------
+
+test("R20 手动刷新：会话期间再次 auth:qr-start → 端口被再次 start（换一对新 PKCE），走的是 restart 语义", async () => {
+  const { auth, qrPort } = managerOf();
+  await auth.startQrLogin();
+  await auth.startQrLogin();
+
+  assert.equal(qrPort.state.starts.length, 2, "点一次二维码容器 = 再发起一次（换一张新码）");
+  const first = new URL(qrPort.state.starts[0].authorizeUrl).searchParams;
+  const second = new URL(qrPort.state.starts[1].authorizeUrl).searchParams;
+  assert.notEqual(second.get("state"), first.get("state"), "每次会话一对新的 state");
+  assert.notEqual(second.get("code_challenge"), first.get("code_challenge"), "PKCE 也是新的一对");
+});
+
+test("R20 手动刷新：旧会话迟到的确认（带第一次的 state）不会换码；当前那张照常能换", async () => {
+  // ① 旧那张发的确认：属于已经作废的尝试
+  const exchanged = [];
+  const stale = managerOf({
+    exchangeCode: async ({ code }) => {
+      exchanged.push(code);
+      return { ok: true, data: ACCOUNT_TOKENS };
+    },
+  });
+  await stale.auth.startQrLogin();
+  const oldState = new URL(stale.qrPort.state.starts[0].authorizeUrl).searchParams.get("state");
+  await stale.auth.startQrLogin();
+
+  stale.qrPort.confirm({ callbackUrl: `hms://redirect_uri?code=STALE&state=${oldState}` });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(exchanged, [], "旧那张的确认属于已作废的尝试：一次兑换都不许发");
+  assert.equal(qrEvents(stale.broadcasts).at(-1).status, "failed", "这条链收口成失败：界面才有「重试」可按");
+
+  // ② 干净的一轮：当前那张（刷新出来的新码）照常走完整条兑换链
+  const fresh = managerOf({
+    exchangeCode: async ({ code }) => {
+      exchanged.push(code);
+      return { ok: true, data: ACCOUNT_TOKENS };
+    },
+  });
+  await fresh.auth.startQrLogin();
+  await fresh.auth.startQrLogin();
+  const currentState = new URL(fresh.qrPort.state.starts[1].authorizeUrl).searchParams.get("state");
+
+  fresh.qrPort.confirm({ callbackUrl: `hms://redirect_uri?code=FRESH&state=${currentState}` });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(exchanged, ["FRESH"], "当前这张的确认照常兑换");
+  assert.equal(fresh.auth.status().loggedIn, true);
+});
+
+test("R20 返回扫码登录：点击走 auth:cancel-login（关窗），收场广播带文案 → 渲染层回二维码态并重新发码", async () => {
+  const qrPort = fakeQrPort();
+  let settle;
+  const host = {
+    openLoginPage: () =>
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    /** 宿主关窗：Rust 把结论槽结算成 Cancelled（窗随即被拆掉） */
+    cancelLogin: () => {
+      settle({ status: "cancelled" });
+      return Promise.resolve({ ok: true, data: { cancelled: true } });
+    },
+    cleanup() {},
+  };
+  const { auth, broadcasts, qrPort: port } = managerOf({ qrPort, host });
+
+  // 渲染层：点了「在网页中打开登录」→ started（path=official，busy=true）
+  let state = reduceGateState(reduceGateState(initialGateState(), { type: LOGIN_GATE_EVENT.status, loggedIn: false }), {
+    type: LOGIN_GATE_EVENT.started,
+  });
+  const running = auth.login();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(port.state.cancelled, 1, "开窗之前先停掉二维码会话（R18 的互斥）");
+
+  // 点了「返回扫码登录」→ auth:cancel-login
+  const cancelled = await auth.cancelLogin();
+  assert.equal(cancelled.ok, true);
+  await running;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // 渲染层按广播推进（真窗守则的同一份映射：status 广播 → 状态机）
+  for (const { channel, payload } of broadcasts) {
+    const type = channel === AUTH_STATUS ? LOGIN_GATE_EVENT.status : LOGIN_GATE_EVENT.qr;
+    state = reduceGateState(state, { type, ...payload });
+  }
+
+  const last = statusEvents(broadcasts).at(-1);
+  assert.equal(last.busy, false);
+  assert.match(last.message, /取消/, "收场必须带一句给人看的话（渲染层靠它判「这条路结束了」）");
+  assert.equal(state.path, "qr", "回到二维码态");
+  assert.equal(shouldAutoStartQr(state), true, "重新武装自动发起：眼前立刻又有一张能扫的码");
+  assert.equal(canStartLogin(state), true, "入口也回到可用（不再是「返回扫码登录」那条形态）");
+});
+
+test("R20 返回扫码登录：没有进行中的登录时如实回 cancelled:false（不惊动宿主、也不假装关了什么）", async () => {
+  let hostCancels = 0;
+  const host = {
+    openLoginPage: () => new Promise(() => undefined),
+    cancelLogin: () => {
+      hostCancels += 1;
+      return Promise.resolve({ ok: true, data: { cancelled: true } });
+    },
+    cleanup() {},
+  };
+  const { auth } = managerOf({ host });
+  const answer = await auth.cancelLogin();
+  assert.equal(answer.ok, true);
+  assert.equal(answer.data.cancelled, false, "什么都没取消也是如实的一句话，不是错误");
+  assert.equal(hostCancels, 0, "没有进行中的登录就不去打扰宿主");
 });

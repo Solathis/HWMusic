@@ -300,3 +300,157 @@ test("端口：CAS 跳到白名单外的域 → 明确报出来（导航白名�
   assert.equal(failure.errorKind, QR_PORT_ERROR_KINDS.qrConfigUnavailable);
   assert.match(failure.message, /evil\.example\.com/);
 });
+
+// ---------------------------------------------------------------------------
+// R20：活动会话期间重启（手动刷新）——迟到的旧会话事件按身份丢弃
+// ---------------------------------------------------------------------------
+
+/** 建单响应里带一个可区分的 qrCode/qrToken（用来证明"换码带的是当前这张"）。 */
+const createPayloadFor = (round) => ({
+  ...CREATE_PAYLOAD,
+  content: `https://id1.cloud.huawei.com/qrcode/login.jsp?qRCode=R${round}&loginChannel=7000700`,
+  qrCode: `R${round}`,
+  qrToken: `qr-token-${round}`,
+});
+
+test("端口：活动会话期间再次 start（手动刷新）→ 停旧会话 + 新会话；旧会话迟到的事件与建单一律丢弃", async () => {
+  const clock = timers();
+  let creates = 0;
+  let polls = 0;
+  let releaseOldPoll;
+  const oldPollInFlight = new Promise((resolve) => {
+    releaseOldPoll = resolve;
+  });
+  const calls = [];
+  const fetchImpl = async (url, init = {}) => {
+    const target = String(url);
+    calls.push(target);
+    const answer = (status, body) => ({
+      ok: status >= 200 && status < 300,
+      status,
+      headers: { get: () => null, getSetCookie: () => [] },
+      async text() {
+        return JSON.stringify(body ?? {});
+      },
+    });
+    if (target.includes("getqrInfo")) {
+      creates += 1;
+      return answer(200, createPayloadFor(creates));
+    }
+    if (target.includes("DimensionalCode/async")) {
+      polls += 1;
+      if (polls === 1) {
+        // 第一次 start 那条会话的轮询：挂住 —— 模拟"旧码的那次请求正在飞"
+        await oldPollInFlight;
+        return answer(200, { resultCode: "103000201" });
+      }
+      return answer(200, { resultCode: "103000200", errorDesc: "Please to login." });
+    }
+    throw new Error(`假 fetch 不认识这个地址：${target}`);
+  };
+
+  const eventsOld = [];
+  const eventsNew = [];
+  const port = createHuaweiQrPort({
+    fetchImpl,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    now: () => 1_700_000_000_000,
+    random: () => 0.5,
+    log: () => undefined,
+    timeoutMs: null,
+  });
+
+  await port.start({ authorizeUrl: AUTHORIZE_URL, onEvent: (event) => eventsOld.push(event), onConfirmed: () => undefined });
+  await clock.tick(); // 旧会话的轮询发出（挂着）
+  assert.equal(polls, 1);
+
+  // 用户点了二维码容器（手动刷新）：restart 语义——停旧会话、开新会话
+  await port.start({ authorizeUrl: AUTHORIZE_URL, onEvent: (event) => eventsNew.push(event), onConfirmed: () => undefined });
+  assert.equal(creates, 2, "重新 start 要真的换一张新码");
+  assert.deepEqual(eventsOld.map((event) => event.status), [QR_LOGIN_STATUS.pending]);
+
+  releaseOldPoll();
+  for (let round = 0; round < 16; round += 1) await Promise.resolve();
+
+  assert.deepEqual(
+    eventsOld.map((event) => event.status),
+    [QR_LOGIN_STATUS.pending],
+    "旧会话迟到的「过期」不许广播：它会把刚刷出来的新码顶掉（而且会再建一张）",
+  );
+  assert.equal(creates, 2, "旧会话的 expired 不许触发第三次建单");
+  assert.equal(port.status(), QR_LOGIN_STATUS.pending, "当前这条会话还在等扫码");
+  assert.deepEqual(eventsNew.map((event) => event.status), [QR_LOGIN_STATUS.pending]);
+});
+
+test("端口：过期自动换新之后换码带的是**新**那张的 qrCode（拿旧码去换只会白跑一趟）", async () => {
+  const clock = timers();
+  let creates = 0;
+  let polls = 0;
+  const calls = [];
+  const fetchImpl = async (url, init = {}) => {
+    const target = String(url);
+    calls.push({ url: target, body: String(init.body ?? "") });
+    const answer = (status, body, headers = {}) => ({
+      ok: status >= 200 && status < 300,
+      status,
+      headers: { get: (name) => headers[name.toLowerCase()] ?? null, getSetCookie: () => [] },
+      async text() {
+        return typeof body === "string" ? body : JSON.stringify(body ?? {});
+      },
+    });
+    if (target.includes("getqrInfo")) {
+      creates += 1;
+      return answer(200, createPayloadFor(creates));
+    }
+    if (target.includes("DimensionalCode/async")) {
+      polls += 1;
+      // 第一张过期 → 端口自动换新 → 第二张被扫确认
+      return polls === 1
+        ? answer(200, { resultCode: "103000201" })
+        : answer(200, { resultCode: "0", userAccount: "u", code: "c", userID: "1", siteID: "1", accountType: "1", opType: "4" });
+    }
+    if (target.includes("/oauth2/ajax/getLoginWay")) {
+      return answer(200, { isSuccess: "true", loginInteractInfo: { cas: { casLoginRedirectUrl: CAS_REDIRECT } } });
+    }
+    if (target.startsWith("https://id1.cloud.huawei.com/CAS/remoteLogin")) {
+      return answer(302, "", { location: PORTAL_URL });
+    }
+    if (target.includes("/CAS/mobile/standard/login.html")) return answer(200, "<html></html>");
+    if (target.includes("/login/getPageInfo")) return answer(200, PAGE_INFO);
+    if (target.includes("/codeRemoteLogin")) {
+      return answer(200, { isSuccess: "1", callbackURL: "hms://redirect_uri?code=CODE&state=STATE" });
+    }
+    throw new Error(`假 fetch 不认识这个地址：${target}`);
+  };
+
+  const confirmations = [];
+  const port = createHuaweiQrPort({
+    fetchImpl,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    now: () => 1_700_000_000_000,
+    random: () => 0.5,
+    log: () => undefined,
+    timeoutMs: null,
+  });
+  await port.start({
+    authorizeUrl: AUTHORIZE_URL,
+    onEvent: () => undefined,
+    onConfirmed: (result) => confirmations.push(result),
+  });
+
+  await clock.tick(); // 过期 → 自动换新（同一次 tick 内换第二张）
+  assert.equal(creates, 2);
+  await clock.tick(); // 第二张：已确认 → 换码
+  for (let round = 0; round < 8; round += 1) await Promise.resolve();
+
+  assert.equal(confirmations.length, 1);
+  const confirmCall = calls.find((call) => call.url.includes("/codeRemoteLogin"));
+  assert.ok(confirmCall, "确认之后要走换码链");
+  assert.equal(
+    new URLSearchParams(confirmCall.body).get("qrCode"),
+    "R2",
+    "带的是**换新之后**那张的 qrCode（端口里缓存的那份是旧会话的快照）",
+  );
+});

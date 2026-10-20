@@ -19,6 +19,15 @@
  * `checking`。查询应答喂**同一条** status 事件（共用 `statusEventOf` 映射），
  * 所以"查询来的状态"与"广播来的状态"不可能各有一套解释。
  *
+ * R20 增补（本文件 §11，用户真机验收反馈三项）：
+ * 1. header 里那句品牌与窗口标题栏重复 → 删掉（header 只剩 48px 几何占位）；
+ * 2. 二维码过期：expired 到达**当场撤掉旧码**（不可扫的码不许留在屏上），
+ *    "二维码已刷新，请重新扫码。"这条提示**挺过**紧随其后的新 pending（不被吞掉），
+ *    容器本身可点手动刷新（`canRefreshQr` + `aria-label`）；
+ * 3. 网页登录窗铺满内容区（顶部只留 48px）时，次要入口**变形为「返回扫码登录」并挪进那条
+ *    可见的 header**——它是那一刻唯一可达的控件，点击走 `auth:cancel-login`（关窗）→
+ *    那条路的收场广播 → `returnToQr`（R18 已有，本文件 §4 钉住）。
+ *
  * 五条硬要求里的前四条仍是源码扫描（R16 起）：
  * 1. 未登录**绝不渲染 app-shell**：门禁分支必须在 App() 里排在 app-shell 之前；
  * 2. 正常路径**只有一个可操作元素**（常驻的网页入口）；"重试"只在失败态出现；
@@ -38,8 +47,14 @@ import {
   LOGIN_GATE_TITLE,
   QR_GATE_STATUS,
   QR_HINT_TEXT,
+  QR_REFRESH_LABEL,
+  QR_REFRESH_NOTICE,
+  QR_REFRESH_TESTID,
+  WEB_LOGIN_BACK_TESTID,
+  WEB_LOGIN_BACK_TEXT,
   WEB_LOGIN_ENTRY_TESTID,
   WEB_LOGIN_ENTRY_TEXT,
+  canRefreshQr,
   canRetryQr,
   canStartLogin,
   initialGateState,
@@ -48,6 +63,7 @@ import {
   reduceGateState,
   shouldAutoStartQr,
   shouldShowLoginGate,
+  webLoginEntry,
 } from "../src/renderer/features/auth/login-gate-logic.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -307,7 +323,7 @@ test("互斥：二维码会话自己的 busy 起伏（不带文案）不许把�
   assert.equal(state.qrAttempted, false);
 });
 
-test("常驻入口：任何「还没登录」的档位下它都可点（只有开窗那条路在跑时才禁用）", () => {
+test("常驻入口：任何「还没登录」的非 busy 档位下它都是「打开」形态且可点", () => {
   const states = [
     initialGateState(),
     loggedOut(),
@@ -318,6 +334,8 @@ test("常驻入口：任何「还没登录」的档位下它都可点（只有�
   ];
   for (const state of states) {
     assert.equal(canStartLogin(state), true, `档位 ${state.qr.status} 下入口被禁用了：${loginGateStatusLine(state)}`);
+    assert.equal(webLoginEntry(state).form, "open", `档位 ${state.qr.status} 下入口形态不对`);
+    assert.equal(webLoginEntry(state).disabled, false);
   }
 });
 
@@ -437,23 +455,22 @@ test("二维码：用成熟库 qrcode 渲染到 canvas（不手写二维码组�
   assert.match(gate, /paintQrCanvas/, "画法只有一处：features/auth/qr-canvas.mjs（画面与测试共用同一个入口）");
 });
 
-test("二维码边框（要求 2）：容器用令牌工具类，不写自定义 CSS、不硬编码颜色", () => {
+test("二维码边框（要求 2 / R20）：宿主容器用令牌工具类，不写自定义 CSS、不硬编码颜色", () => {
   const source = gateSource();
   const jsx = gateJsx();
-  // 二维码容器 = LoginGate 里包着 QrCanvas / Skeleton 的那个 <div>
+  // 二维码宿主 = LoginGate 里包着 QrCanvas / Skeleton 的那个 <Button>（R20 起它可点刷新）
   const qrHostAt = jsx.indexOf("<QrCanvas");
   assert.ok(qrHostAt > -1, "LoginGate 里要挂 QrCanvas");
-  const containerAt = jsx.lastIndexOf("<div", qrHostAt);
-  assert.ok(containerAt > -1, "二维码要有一个容器 div");
+  const containerAt = jsx.lastIndexOf("<Button", qrHostAt);
+  assert.ok(containerAt > -1, "二维码要有一个宿主容器");
   const container = jsx.slice(containerAt, jsx.indexOf(">", containerAt) + 1);
-  assert.match(container, /className="[^"]*\bborder\b/, `二维码容器要有边框宽度类：${container}`);
   assert.match(container, /border-border\b/, `边框颜色走设计令牌（border-border）：${container}`);
   assert.match(container, /rounded-(?:md|lg|xl)\b/, `圆角走工具类：${container}`);
   assert.doesNotMatch(container, /border-(?:white|black)|#[0-9a-fA-F]{3,8}|rgb\(/, `不得硬编码颜色：${container}`);
   assert.equal(/<style[\s>]/.test(source), false, "零自定义 CSS");
 });
 
-test("标题（要求 5）：文案来自唯一真源，且本文件里只出现一次（header 里那份已删）", () => {
+test("标题（要求 5 / R20 要求 1）：文案来自唯一真源，全页只出现一次（header 里那份已删）", () => {
   const gate = read("src/renderer/login-gate.tsx");
   const source = stripComments(gate);
   const jsx = gateJsx();
@@ -464,53 +481,57 @@ test("标题（要求 5）：文案来自唯一真源，且本文件里只出现
     0,
     "源码里不许再写一份标题字面量（包括 header 里那份）",
   );
-  // header（几何契约）那条里不许再有标题：R18 起它只剩品牌
+  // header（几何契约）那条里不许有品牌：R20 起它与**窗口标题栏**重复的那句已删，
+  // header 只剩"48px 的几何占位"（走网页入口时子窗正好落在那条下面）。
   const headerAt = jsx.indexOf("<header");
-  const headerTag = jsx.slice(headerAt, jsx.indexOf("</header>", headerAt));
-  assert.match(headerTag, /APP_BRAND_LABEL/, `header 只留品牌：${headerTag}`);
-  assert.doesNotMatch(headerTag, /LOGIN_GATE_TITLE/, "标题不许留在 header 里（全页只出现一次）");
+  assert.ok(headerAt > -1, "顶部 header 结构必须保留（LOGIN_VIEW_TOP_INSET 的对位契约）");
+  const headerTag = jsx.slice(headerAt, jsx.indexOf(">", headerAt) + 1);
+  assert.match(
+    headerTag,
+    /style=\{\{\s*height:\s*LOGIN_VIEW_TOP_INSET\s*\}\}/,
+    `header 高度仍来自共享常量（几何契约不许破）：${headerTag}`,
+  );
+  assert.doesNotMatch(jsx, /APP_BRAND_LABEL/, "品牌不再进引导页（窗口标题栏已经有它）");
+  assert.doesNotMatch(gate, /app-name\.mjs/, "连那个 import 一起删掉（留着就是下一次被误用）");
 
   // 标题在二维码容器之前（自上而下的形态：标题 → 二维码 → 提示 → 状态行 → 次要入口）
   const titleAt = jsx.indexOf("LOGIN_GATE_TITLE");
   assert.ok(titleAt > -1 && titleAt < jsx.indexOf("<QrCanvas"), "标题必须排在二维码容器之前");
 });
 
-test("常驻入口（要求 4）：源码里那个 <Button> 不被条件包裹，且走既有 auth:login 路径", () => {
+test("常驻入口（要求 4 / R20 要求 3）：那个 <Button> 不被错误条件包裹，形态与文案来自唯一真源", () => {
   const source = gateSource();
   const jsx = gateJsx();
   assert.equal(WEB_LOGIN_ENTRY_TEXT, "在网页中打开登录");
-  assert.match(jsx, /\{WEB_LOGIN_ENTRY_TEXT\}/, "入口文案来自逻辑模块的唯一真源");
-  assert.match(jsx, /data-testid=\{WEB_LOGIN_ENTRY_TESTID\}/, "常驻入口要有测试锚点（真窗守据点名它）");
-
-  const entryAt = jsx.indexOf("{WEB_LOGIN_ENTRY_TEXT}");
-  const retryConditional = jsx.indexOf(") : null}", jsx.indexOf("canRetryQr("));
-  assert.ok(retryConditional > -1, "「重试」仍是条件渲染（只在失败态出现）");
-  assert.ok(entryAt > retryConditional, "形态顺序：…状态行 → 重试（失败态）→ 常驻入口");
-  assert.doesNotMatch(
-    jsx.slice(retryConditional, entryAt),
-    /\?/,
-    "入口之前没有第二个条件渲染：它是常驻的（不再是「只在协议不可用时出现」）",
+  assert.equal(WEB_LOGIN_BACK_TEXT, "返回扫码登录");
+  assert.match(jsx, /\{entry\.text\}/, "入口文案来自逻辑模块的唯一真源（两种形态都是它）");
+  assert.match(jsx, /data-testid=\{entry\.testid\}/, "入口要有测试锚点（真窗守据点名它）");
+  assert.match(jsx, /disabled=\{entry\.disabled\}/, "可用性也由逻辑模块裁决（外壳不自己算）");
+  assert.equal(
+    jsx.split("<Button").length - 1,
+    3,
+    "源码里恰好三个 shadcn Button：二维码刷新 / 重试（失败态）/ 入口",
+  );
+  assert.equal(
+    jsx.split("{entry.text}").length - 1,
+    1,
+    "入口元素只有一处定义（在 header 与正文之间搬位置，不是各写一份）",
   );
   assert.doesNotMatch(source, /shouldOfferOfficialFallback|OFFICIAL_FALLBACK_KINDS/, "按错误类别决定入口是否出现的那套判定已删除");
 });
 
-test("入口与重试的数量：源码里恰好两个 <Button>（正常路径只有常驻入口那一个）", () => {
-  const source = gateJsx();
-  const buttons = [...source.matchAll(/<Button\b/g)].map((match) => match.index);
-  assert.equal(buttons.length, 2, `只允许「重试」与常驻入口两个（实际 ${buttons.length} 个）`);
-  assert.doesNotMatch(source, />\s*打开官方登录页\s*</, "旧按钮流必须删掉");
-});
-
-test("接线：门禁经 coreCall 调 auth:qr-start（自动）与 auth:login（常驻入口），并订阅 auth:qr / auth:status", () => {
+test("接线：门禁经 coreCall 调 auth:qr-start（自动/刷新）与 auth:login（入口），并订阅 auth:qr / auth:status", () => {
   const gate = read("src/renderer/login-gate.tsx");
   assert.match(gate, /AUTH_QR_START/, "发起二维码走 auth:qr-start 请求频道");
   assert.match(gate, /AUTH_STATUS/, "会话状态来自 auth:status 广播");
   assert.match(gate, /AUTH_QR/, "二维码状态来自 auth:qr 广播");
   assert.match(gate, /AUTH_LOGIN/, "常驻入口仍走 auth:login");
-  assert.equal(
-    gate.includes("AUTH_CANCEL_LOGIN"),
-    false,
-    "引导页没有取消按钮：停二维码轮询由 sidecar 在开窗时自己做（两条路互斥，见 auth-manager.login）",
+  // R20 要求 3：网页登录窗铺满内容区时，唯一的回退路径就是这条（关窗 → 那条路收场 → 回二维码态）
+  assert.match(gate, /AUTH_CANCEL_LOGIN/, "「返回扫码登录」走 auth:cancel-login（窗在 Rust 手里，只有它能拆）");
+  assert.match(
+    gate,
+    /import\s*\{[^}]*AUTH_CANCEL_LOGIN[^}]*\}\s*from\s*"\.\.\/shared\/request-channels\.ts"/,
+    "频道名来自共享常量表（唯一真源，不写字面量）",
   );
   assert.doesNotMatch(gate, /["']auth:(login|logout|cancel-login|qr-start|get-status|status|qr)["']/, "频道名一律 import 共享常量，不写字面量");
 });
@@ -636,4 +657,178 @@ test("重查（R19）：挂载 effect 里**订阅之后**先报就绪、再查�
     2,
     "effect 里广播回调与查询应答各喂一次，且都经 statusEventOf",
   );
+});
+
+// ---------------------------------------------------------------------------
+// 11. R20：真机验收的三项修复
+// ---------------------------------------------------------------------------
+//
+// 诊断先行（可复现证据 `.probe/qr-expiry-diag.json`，`node scripts/probe-qr.mjs --until-expired`）：
+// 服务端**会**给出过期档位——建单 TTL 181s，轮询到 t+177.4s 时 `103000200` → `103000201`，
+// 过期之后重新建单照常下发新码。所以"过期没有任何变化"不是 poll 静默挂，而是**渲染层**：
+// 旧码留在屏上、那句提示被紧随其后的新 pending 顶掉。本地到期计时回退因此**不需要**（见报告）。
+
+/** 走到"已经拿到一张码"的状态。 */
+function pendingState(content = "OLD") {
+  let state = reduceGateState(loggedOut(), { type: LOGIN_GATE_EVENT.qrRequested });
+  return reduceGateState(state, { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.pending, content, expiresInMs: 181_000 });
+}
+
+test("R20 过期：expired 到达当场撤掉旧码（不可扫的过期码绝不留在屏上让人扫）", () => {
+  const expired = reduceGateState(pendingState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.expired });
+  assert.equal(expired.qr.status, QR_GATE_STATUS.expired);
+  assert.equal(qrContentOf(expired), null, "画面必须回到占位：留着旧码就是让用户去扫一张死码");
+  assert.equal(expired.qr.expiresInMs, null, "有效期一起清掉（它已经是过去时）");
+
+  // 新码到了自然又有内容（sidecar 自动换新那一跳）
+  const renewed = reduceGateState(expired, { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.pending, content: "NEW" });
+  assert.equal(qrContentOf(renewed), "NEW");
+});
+
+test("R20 过期提示：新 pending 到了也不许吞掉「二维码已刷新，请重新扫码。」（要挺到下次扫码状态变化）", () => {
+  const expired = reduceGateState(pendingState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.expired });
+  assert.equal(loginGateStatusLine(expired), QR_REFRESH_NOTICE);
+
+  // sidecar 换新的那一跳紧接着就来（实测只隔一次 create 请求）：提示**不许**在这一跳里消失
+  const renewed = reduceGateState(expired, { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.pending, content: "NEW" });
+  assert.equal(loginGateStatusLine(renewed), QR_REFRESH_NOTICE, "换新之后正是要请用户重扫的时刻，提示必须还在");
+
+  // 下次扫码状态变化才退场
+  const scanned = reduceGateState(renewed, { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.scanned });
+  assert.match(loginGateStatusLine(scanned), /确认/, "已扫码：改说下一步");
+  assert.notEqual(loginGateStatusLine(scanned), QR_REFRESH_NOTICE);
+});
+
+test("R20 过期提示：用户自己按了刷新/重试就退场；网页那条路的说明同理（两句话不许叠在一起）", () => {
+  const expired = reduceGateState(pendingState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.expired });
+  const rearmed = reduceGateState(expired, { type: LOGIN_GATE_EVENT.qrRequested });
+  assert.match(loginGateStatusLine(rearmed), /正在准备二维码/, "他已经按了刷新：这句比「已刷新」更贴当下");
+
+  // 从网页那条路退回来（R18 的 returnToQr）：officialNote 说的是**刚发生的另一件事**
+  const back = reduceGateState(
+    reduceGateState(loggedOut(), { type: LOGIN_GATE_EVENT.started }),
+    { type: LOGIN_GATE_EVENT.status, loggedIn: false, busy: false, message: "已取消登录" },
+  );
+  assert.doesNotMatch(loginGateStatusLine(rearmed), /已取消登录/, "两条状态互不串台");
+  assert.match(loginGateStatusLine(back), /取消/);
+  assert.doesNotMatch(loginGateStatusLine(back), /二维码已刷新/);
+
+  // 失败档位也一样清掉：屏幕上要留的是"为什么失败"
+  const failed = reduceGateState(expired, { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.failed, message: "轮询失败" });
+  assert.equal(loginGateStatusLine(failed), "轮询失败");
+});
+
+test("R20 手动刷新：二维码容器可点（等待/已扫/过期/失败都点得动；准备中、已确认、网页那条路开着时不可点）", () => {
+  assert.equal(canRefreshQr(pendingState()), true, "等待扫码：点它就是换一张新码");
+  assert.equal(
+    canRefreshQr(reduceGateState(pendingState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.scanned })),
+    true,
+  );
+  assert.equal(
+    canRefreshQr(reduceGateState(pendingState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.expired })),
+    true,
+  );
+  assert.equal(
+    canRefreshQr(reduceGateState(pendingState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.failed, message: "x" })),
+    true,
+    "失败态下点容器 = 重来一张（「重试」按钮做的是同一件事）",
+  );
+
+  assert.equal(canRefreshQr(loggedOut()), false, "还没有内容（准备中）：再点一次只是重复建单");
+  assert.equal(
+    canRefreshQr(reduceGateState(pendingState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.confirmed })),
+    false,
+    "已确认：正在换码，这时换一张新码只会把已经成功的那次作废",
+  );
+  assert.equal(
+    canRefreshQr(reduceGateState(loggedOut(), { type: LOGIN_GATE_EVENT.started })),
+    false,
+    "网页那条路开着：那一层被窗盖住",
+  );
+});
+
+test("R20 手动刷新：文案与锚点是唯一真源，点击走 startQr（与自动发起同一条路：换一张新码）", () => {
+  assert.equal(QR_REFRESH_LABEL, "刷新二维码");
+  assert.equal(QR_REFRESH_TESTID, "login-qr-refresh");
+  assert.equal(QR_REFRESH_NOTICE, "二维码已刷新，请重新扫码。");
+
+  const jsx = gateJsx();
+  assert.match(jsx, /aria-label=\{QR_REFRESH_LABEL\}/, "可点元素要有可达名字（键盘/读屏都要能用）");
+  assert.match(jsx, /data-testid=\{QR_REFRESH_TESTID\}/, "真窗守据点名它");
+  assert.match(jsx, /disabled=\{!canRefreshQr\(state\)\}/, "不可点的档位由逻辑模块裁决");
+
+  // 点击语义：容器与"重试"是同一件事（startQr = qrRequested + auth:qr-start）
+  const refreshAt = jsx.indexOf("<Button", jsx.indexOf("QR_REFRESH_TESTID") - 400);
+  const block = jsx.slice(refreshAt, jsx.indexOf("</Button>", refreshAt));
+  assert.match(block, /onClick=\{startQr\}/, `刷新要绑 startQr：${block}`);
+  assert.match(block, /onClick=\{startQr\}[\s\S]*QR_REFRESH_TESTID|QR_REFRESH_TESTID[\s\S]*onClick=\{startQr\}/, "同一个元素上");
+});
+
+test("R20 返回扫码登录：网页那条路开着时入口变形，而且挪进那条唯一可见的 48px header", () => {
+  const official = reduceGateState(loggedOut(), { type: LOGIN_GATE_EVENT.started });
+  const entry = webLoginEntry(official);
+  assert.equal(entry.form, "back");
+  assert.equal(entry.text, WEB_LOGIN_BACK_TEXT);
+  assert.equal(entry.testid, WEB_LOGIN_BACK_TESTID);
+  assert.equal(entry.disabled, false, "窗开着时它必须点得动：那是用户唯一的回退路径");
+
+  // 非 official 档：还是原来那个常驻入口
+  const normal = webLoginEntry(pendingState());
+  assert.equal(normal.form, "open");
+  assert.equal(normal.text, WEB_LOGIN_ENTRY_TEXT);
+  assert.equal(normal.testid, WEB_LOGIN_ENTRY_TESTID);
+  assert.equal(normal.disabled, false);
+
+  // 源码：back 形态要放进 header（网页窗盖住正文时那是唯一可达的一条），且只放一份
+  const jsx = gateJsx();
+  const headerAt = jsx.indexOf("<header");
+  const headerOpen = jsx.indexOf(">", headerAt);
+  const headerTag = jsx.slice(headerAt, headerOpen);
+  assert.match(headerTag, /justify-end|justify-between|ml-auto/, `返回控件要摆在 header 里：${headerTag}`);
+  assert.match(jsx.slice(headerOpen, jsx.indexOf("</header>", headerOpen)), /entry\.form === "back"/, "header 里只在 back 形态下放它");
+});
+
+test("R20 返回扫码登录：形态判据是 busy（不是本地那个 path）——渲染层 reload 之后返回路径照样在", () => {
+  // R19 的场景：reload 之后门禁靠 auth:get-status 重建状态，那时 `path` 是 null，
+  // 只有 sidecar 的 `busy:true` 说明"窗还开着"。若按 path 判形态，入口会退回"打开"形态
+  // ——而它此刻点不动（窗盖着正文），用户就没有任何回去的路。
+  const afterReload = { ...initialGateState(), phase: LOGIN_GATE_PHASE.loggedOut, busy: true };
+  const entry = webLoginEntry(afterReload);
+  assert.equal(entry.form, "back", "窗还开着：入口必须是「返回扫码登录」");
+  assert.equal(entry.disabled, false);
+
+  // 两种形态永远可点（R17 的教训：最需要它的场景里它不许是灰的）
+  for (const state of [
+    initialGateState(),
+    loggedOut(),
+    pendingState(),
+    reduceGateState(loggedOut(), { type: LOGIN_GATE_EVENT.qrFailed, message: "建单失败" }),
+    reduceGateState(loggedOut(), { type: LOGIN_GATE_EVENT.started }),
+  ]) {
+    assert.equal(webLoginEntry(state).disabled, false, `档位 ${loginGateStatusLine(state)} 下入口被禁用了`);
+  }
+});
+
+test("R20 返回扫码登录：点击走 auth:cancel-login，那条路收场后回到二维码态并重新发码（R18 链不变）", () => {
+  const official = reduceGateState(loggedOut(), { type: LOGIN_GATE_EVENT.started });
+  assert.equal(shouldAutoStartQr(official), false, "窗还开着时不起二维码");
+
+  // sidecar：cancelLogin → 宿主关窗 → 结论 cancelled → failWith("已取消登录") → 广播带文案
+  const returned = reduceGateState(official, {
+    type: LOGIN_GATE_EVENT.status,
+    loggedIn: false,
+    busy: false,
+    message: "已取消登录",
+  });
+  assert.equal(returned.path, "qr", "回到二维码态");
+  assert.equal(shouldAutoStartQr(returned), true, "重新武装自动发起：眼前立刻要有一张能扫的码");
+  assert.match(loginGateStatusLine(returned), /取消/, "先说清那条路怎么了");
+  assert.equal(webLoginEntry(returned).form, "open", "入口变回「在网页中打开登录」");
+
+  // 同一条规矩也管本地的 `cancelled` 事件：留在 official 上而 busy 已落，
+  // 入口会变回"打开"形态——窗若还开着就又没人可点（R20 自审修的那一处）
+  const localCancel = reduceGateState(official, { type: LOGIN_GATE_EVENT.cancelled });
+  assert.equal(localCancel.path, "qr");
+  assert.equal(shouldAutoStartQr(localCancel), true);
+  assert.equal(webLoginEntry(localCancel).form, "open");
 });

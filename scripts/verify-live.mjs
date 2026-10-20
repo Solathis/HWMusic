@@ -55,7 +55,19 @@
  * 卡住的那一档报出来（"当时状态行「正在检查登录状态…」"），而不是只留一句"canvas 没出现"。
  * 断言条数不变（同一个位置，成功/失败两种证据）。
  *
- * 用法：`node scripts/verify-live.mjs [--port 9223] [--out .tmp/r17-live] [--timeout 60000]`
+ * ## R20 增补（用户真机验收反馈三项；可量的两项都在这里量）
+ *
+ * 1. header 里那句品牌已删 → 量的是**渲染后的可见文字**（`headerText` 必须是空串），
+ *    不是"类名里没有某个字符串"；
+ * 2. 二维码容器本身可点刷新 → 量它的 `aria-label`（可达名字）与 `disabled`，并把
+ *    "正常路径恰好两个可操作元素（刷新容器 + 常驻入口）"钉住；
+ * 3. 「返回扫码登录」要先把网页登录窗打开才量得到——那会真的开一个子窗、走一次真实网络，
+ *    而且守卫必须在收尾前把它关回去，所以它是**显式开关**：
+ *    `node scripts/verify-live.mjs --check-back-path`（默认不跑）。跑起来的那一段：
+ *    点入口 → 等 header 里出现「返回扫码登录」→ 点它 → 等回到二维码态。
+ *
+ * 用法：`node scripts/verify-live.mjs [--port 9223] [--out .tmp/r17-live] [--timeout 60000]
+ *        [--check-back-path]`
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -90,6 +102,8 @@ const argValue = (name, fallback) => {
 const PORT = Number(argValue("--port", "9223"));
 const OUT_DIR = argValue("--out", ".tmp/r17-live");
 const TIMEOUT_MS = Number(argValue("--timeout", "60000"));
+/** R20：显式开关——开着才会真的点开网页登录窗（会开子窗、走真实网络，收尾前必须关回去）。 */
+const CHECK_BACK_PATH = args.includes("--check-back-path");
 const CDP_URL = `http://127.0.0.1:${PORT}`;
 
 const results = [];
@@ -213,6 +227,7 @@ export function measureGateLayoutInPage(params) {
   const status = document.querySelector('[role="status"]');
   const entry = document.querySelector('[data-testid="' + entryTestid + '"]');
   const buttons = [...document.querySelectorAll("button")];
+  const header = document.querySelector("header");
 
   return {
     titleCount: titleNodes.length,
@@ -226,6 +241,9 @@ export function measureGateLayoutInPage(params) {
     entryText: textOf(entry),
     entryBox: rectOf(entry),
     entryDisabled: entry === null ? null : entry.disabled === true,
+    /** R20：header 里渲染后的可见文字（品牌那句删掉之后必须是空串） */
+    headerText: textOf(header),
+    headerBox: rectOf(header),
     paragraphs: paragraphs.map((node) => textOf(node)),
     containerBorder: containerStyle === null
       ? null
@@ -234,7 +252,13 @@ export function measureGateLayoutInPage(params) {
           style: containerStyle.borderTopStyle,
           radius: containerStyle.borderTopLeftRadius,
         },
-    buttons: buttons.map((node) => ({ text: textOf(node), disabled: node.disabled === true })),
+    /** R20：可操作元素的形状——文案 / 可达名字（aria-label）/ 锚点 / 是否禁用 */
+    buttons: buttons.map((node) => ({
+      text: textOf(node),
+      label: node.getAttribute("aria-label") ?? "",
+      testid: node.getAttribute("data-testid") ?? "",
+      disabled: node.disabled === true,
+    })),
   };
 }
 
@@ -276,6 +300,31 @@ export async function waitForQrTier(page, { testid, timeoutMs, pollMs = 400 }) {
   }
 }
 
+/**
+ * R20：量「返回扫码登录」那一条（只在 `--check-back-path` 下跑）。
+ *
+ * 三条一起判：文案是逻辑模块那份唯一真源、它**在 header 里**（网页登录窗铺满内容区时，
+ * 那条 48px 是唯一还看得见、点得到的地方）、此刻可点；同时"打开"形态必须已经退场
+ * （同一时刻只有一个入口形态）。
+ *
+ * 同其余 measure* 函数的纪律：会被序列化送进页面，不许闭包引用外部变量。
+ */
+export function measureBackEntryInPage(params) {
+  const { backTestid, openTestid, backText } = params;
+  const textOf = (element) => (element === null ? "" : (element.textContent ?? "").trim());
+  const back = document.querySelector('[data-testid="' + backTestid + '"]');
+  const openEntry = document.querySelector('[data-testid="' + openTestid + '"]');
+  const header = document.querySelector("header");
+  return {
+    found: back !== null,
+    text: textOf(back),
+    expectedText: backText,
+    disabled: back === null ? null : back.disabled === true,
+    inHeader: back !== null && header !== null && header.contains(back),
+    openEntryGone: openEntry === null,
+  };
+}
+
 async function main() {
   await mkdir(path.join(ROOT, OUT_DIR), { recursive: true });
   let version;
@@ -290,9 +339,16 @@ async function main() {
   record(true, `CDP 端点 ${CDP_URL} 可连`, `${version.Browser ?? "?"} / ${version["WebKit-Version"] ?? "?"}`);
 
   // 门禁状态机的文案真源：断言拿的就是界面读到的那一份
-  const { LOGIN_GATE_TITLE, QR_HINT_TEXT, WEB_LOGIN_ENTRY_TESTID, WEB_LOGIN_ENTRY_TEXT } = await import(
-    pathToFileURL(path.join(ROOT, "src/renderer/features/auth/login-gate-logic.mjs")).href
-  );
+  const {
+    LOGIN_GATE_TITLE,
+    QR_HINT_TEXT,
+    QR_REFRESH_LABEL,
+    QR_REFRESH_TESTID,
+    WEB_LOGIN_BACK_TEXT,
+    WEB_LOGIN_BACK_TESTID,
+    WEB_LOGIN_ENTRY_TESTID,
+    WEB_LOGIN_ENTRY_TEXT,
+  } = await import(pathToFileURL(path.join(ROOT, "src/renderer/features/auth/login-gate-logic.mjs")).href);
 
   const browser = await chromium.connectOverCDP(CDP_URL);
   try {
@@ -424,10 +480,28 @@ async function main() {
       `入口文案 "${layout.entryText}"，disabled=${layout.entryDisabled}`,
     );
 
-    const onlyEntry = layout.buttons.length === 1 && layout.buttons[0].text === WEB_LOGIN_ENTRY_TEXT;
+    // R20 要求 1：header 里那句品牌与窗口标题栏重复 → 删掉。量的是**渲染后的可见文字**
     record(
-      onlyEntry,
-      "正常路径恰好一个按钮：常驻入口（「重试」只在失败态出现）",
+      layout.headerText === "",
+      "header 里没有任何可见文字（R20：与窗口标题栏重复的品牌已删）",
+      layout.headerText === "" ? "空" : `header 文本「${layout.headerText}」`,
+    );
+
+    // R20 要求 2：二维码容器本身可点刷新（可达名字 + 当前可点）
+    const refresh = layout.buttons.find((button) => button.testid === QR_REFRESH_TESTID);
+    record(
+      refresh !== undefined && refresh.label === QR_REFRESH_LABEL && refresh.disabled === false,
+      "二维码容器可点刷新（有可达名字，等待扫码时可点）",
+      refresh === undefined
+        ? `页面里没有 [data-testid="${QR_REFRESH_TESTID}"]：${JSON.stringify(layout.buttons)}`
+        : `aria-label="${refresh.label}"，disabled=${refresh.disabled}`,
+    );
+
+    // R20 要求 2 的另一半：正常路径的可操作元素集合（「重试」只在失败态出现）
+    const buttonIds = layout.buttons.map((button) => button.testid || button.text);
+    record(
+      buttonIds.length === 2 && buttonIds[0] === QR_REFRESH_TESTID && buttonIds[1] === WEB_LOGIN_ENTRY_TESTID,
+      "正常路径恰好两个可操作元素：二维码刷新容器 + 常驻入口",
       `实际 ${layout.buttons.length} 个：${JSON.stringify(layout.buttons)}`,
     );
 
@@ -463,6 +537,50 @@ async function main() {
         ? "量不到标题或二维码的盒子"
         : `标题底 ${boxes.title.y + boxes.title.height} ≤ 二维码顶 ${boxes.qr.y}；中心横坐标 ${boxes.title.centerX} vs ${boxes.qr.centerX}（容差 ${CENTER_TOLERANCE_PX}px）`,
     );
+
+    // R20 要求 3（显式开关）：网页登录窗铺满内容区时，header 里那条「返回扫码登录」是
+    // 用户唯一能点到的控件——点开它、量它、再点它，看门禁是不是回到二维码态。
+    if (CHECK_BACK_PATH) {
+      const entrySelector = `[data-testid="${WEB_LOGIN_ENTRY_TESTID}"]`;
+      const backSelector = `[data-testid="${WEB_LOGIN_BACK_TESTID}"]`;
+      let opened = false;
+      let openDetail = "";
+      try {
+        await page.click(entrySelector, { timeout: TIMEOUT_MS });
+        await page.waitForSelector(backSelector, { timeout: TIMEOUT_MS });
+        opened = true;
+        openDetail = "header 里出现了返回控件";
+      } catch (error) {
+        openDetail = String(error.message ?? error).slice(0, 200);
+      }
+      record(opened, "点开网页登录之后，header 里出现「返回扫码登录」", openDetail);
+
+      if (opened) {
+        const back = await page.evaluate(measureBackEntryInPage, {
+          backTestid: WEB_LOGIN_BACK_TESTID,
+          openTestid: WEB_LOGIN_ENTRY_TESTID,
+          backText: WEB_LOGIN_BACK_TEXT,
+        });
+        record(
+          back.found && back.text === WEB_LOGIN_BACK_TEXT && back.inHeader && back.disabled === false && back.openEntryGone,
+          "「返回扫码登录」文案正确、在 header 里、可点，且「打开」形态已退场",
+          JSON.stringify(back),
+        );
+
+        let returned = { seen: false, status: "" };
+        try {
+          await page.click(backSelector, { timeout: TIMEOUT_MS });
+          returned = await waitForQrTier(page, { testid: QR_TESTID, timeoutMs: TIMEOUT_MS });
+        } catch (error) {
+          returned = { seen: false, status: String(error.message ?? error).slice(0, 200) };
+        }
+        record(
+          returned.seen,
+          "点「返回扫码登录」之后回到二维码态（新码重新发出来，状态行不再是那条路）",
+          returned.seen ? "新二维码已画出来" : `没回到二维码态；当时状态行「${returned.status || "（空）"}」`,
+        );
+      }
+    }
 
     // 证据落盘（信息，不是断言）
     const shot = path.join(ROOT, OUT_DIR, "main-window.png");
