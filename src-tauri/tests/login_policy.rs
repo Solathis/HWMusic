@@ -13,9 +13,10 @@ use std::time::Duration;
 use huawei_music_desktop_lib::bridge::CoreError;
 use huawei_music_desktop_lib::login::{
     abandon_build_data_dir, abandon_build_data_dir_with,
-    deadline_conclusion, deliver_build_result, layout_target, login_data_dir, navigation_for,
-    parse_config, shutdown_failures, BuildDelivery, DiscardableWindow, LoginConclusion, LoginSession,
-    LoginState, Navigation, ShutdownFailure, ShutdownOutcome, LOGIN_ALLOWED_ORIGINS,
+    deadline_conclusion, deliver_build_result, layout_for, layout_target, login_data_dir,
+    navigation_for, parse_config, shutdown_failures, BuildDelivery, ClientArea, DiscardableWindow,
+    Layout, LoginConclusion, LoginSession, LoginState, Navigation, Rect, ShutdownFailure,
+    ShutdownOutcome, LOGIN_ALLOWED_ORIGINS,
     LOGIN_ALLOWED_URLS, LOGIN_LOAD_DEADLINE_SECS, LOGIN_LOAD_TIMEOUT_MESSAGE, LOGIN_TIMEOUT_SECS,
     LOGIN_TOTAL_TIMEOUT_MESSAGE, LOGIN_VIEW_TOP_INSET, MAX_TOP_INSET, MIN_LOGIN_HEIGHT,
     MIN_LOGIN_WIDTH, PARTITION_MAX_LEN,
@@ -410,6 +411,64 @@ fn layout_target_fills_the_main_client_area_below_the_header() {
     assert_eq!(flush.x, 0.0);
     assert_eq!(flush.y, 0.0);
     assert_eq!(flush.height, 768.0);
+}
+
+/// R24：几何的**输入**也可能"量不到"——真机 2026-10-20 同一个进程里那两行日志就是这个契约的两端：
+/// 主窗可测量 → `rect=(0,48,1280,752)`；主窗最小化（`inner_size()` 是 `(0,0)`）→ **没有几何**，
+/// 而不是 `rect=(0,48,320,160)`（那是两条钳制下限凑出来的假盒子：登录页真的被摆成了 320×160，
+/// 创建日志一次、跟随每 250ms 又一次）。
+#[test]
+fn an_unmeasurable_client_area_has_no_geometry() {
+    let measurable = ClientArea {
+        width: 1280.0,
+        height: 800.0,
+        scale: 1.0,
+        minimized: false,
+    };
+    assert_eq!(
+        layout_for(&measurable, LOGIN_VIEW_TOP_INSET),
+        Layout::Target(Rect {
+            x: 0.0,
+            y: LOGIN_VIEW_TOP_INSET,
+            width: 1280.0,
+            height: 800.0 - LOGIN_VIEW_TOP_INSET,
+        }),
+        "真机日志里那条正确的 rect=(0,48,1280,752)"
+    );
+    assert_eq!(
+        measurable.describe(),
+        "inner_size=(1280,800) scale=1 minimized=false",
+        "原始读数要能进日志（简报 R24 要求）"
+    );
+
+    // 主窗最小化：tao 的 inner_size 就是 GetClientRect 的结果，真机读数是 (0,0)
+    let minimized = ClientArea {
+        width: 0.0,
+        height: 0.0,
+        scale: 1.0,
+        minimized: true,
+    };
+    assert_eq!(
+        layout_for(&minimized, LOGIN_VIEW_TOP_INSET),
+        Layout::HostUnmeasurable,
+        "量不到不是尺寸：不许钳成 MIN_LOGIN_WIDTH×MIN_LOGIN_HEIGHT"
+    );
+    assert_eq!(minimized.describe(), "inner_size=(0,0) scale=1 minimized=true");
+
+    // 半边为 0 / 非有限值同样是"量不到"
+    for (width, height) in [(0.0, 800.0), (1280.0, 0.0), (f64::NAN, 800.0)] {
+        let area = ClientArea {
+            width,
+            height,
+            scale: 1.0,
+            minimized: false,
+        };
+        assert_eq!(
+            layout_for(&area, LOGIN_VIEW_TOP_INSET),
+            Layout::HostUnmeasurable,
+            "({width},{height}) 不是尺寸"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

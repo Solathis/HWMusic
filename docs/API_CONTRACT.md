@@ -197,7 +197,11 @@ DNS  api-drcn.music.dbankcloud.cn                  → 2407:c080:1400:61:40a0:d5
 （`tauri::webview::WebviewBuilder` + `Window::add_child`，label `login`），不是独立子窗。
 于是应用自己的 header（含「返回扫码登录」）**始终**在主窗 webview 上、始终可见可点——它是
 `LOGIN_VIEW_TOP_INSET`（48 CSS px）让出来的那一条，登录页铺在它下面。几何是**客户区相对**物理像素
-（`login::layout_target(width, height, topInset×scale)`：`x` 恒为 0），没有屏幕坐标、没有跨窗换算。
+（`login::layout_for(客户区读数, topInset)`：客户区尺寸是**物理**像素、只有 `topInset` 乘缩放比，
+`x` 恒为 0），没有屏幕坐标、没有跨窗换算。**R24 追加一条前提**：客户区**量不到**时没有几何——
+主窗最小化时 `Window::inner_size()` 是 `(0,0)`（tao 直接 `GetClientRect`），这一档**不许**被钳成
+`MIN_LOGIN_WIDTH×MIN_LOGIN_HEIGHT`：创建路先把主窗恢复（`focus_main`）再量一次、仍量不到就结构化失败，
+跟随路保持登录页现有几何、等主窗回来那一 tick 重新摆。
 "返回" = 关掉这个 webview（`shutdown_login_view`），主窗一动不动。
 
 **宿主要求（core → 宿主，payload 形状由两侧测试互钉）**
@@ -1107,3 +1111,21 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
      一次性数据目录 + 退避删除 / 先答复再拆 —— 只换了承载与坐标。渲染层与 sidecar **一行未改**。
   测试：cargo 201+1 → **204 pass + 1 ignored**（新增 4 条：宿主形状、label 相异、客户区相对几何、
   守卫扫描；删掉 1 条随宿主消失的 `show()` 回滚用例，见报告 §自审）；node 674 / 0 不变。
+- 2026-10-20（Task R24）：**真机证据：登录页被摆成 `rect=(0,48,320,160)`，而主窗是 1280×800**。
+  先核实（vendored 源码 + 真机窗口树），再修：
+  1. **单位真相**：`Window::inner_size()` = tao `GetClientRect`（**物理**像素客户区）、
+     `Window::scale_factor()` = DPI 缩放比、`add_child`/`set_position`/`set_size` 收的也是**物理**像素
+     且相对父窗客户区（wry `webview2/mod.rs:1553-1560`）⇒ R23 的换算**本来就是对的**
+     （简报里"疑似被 4 除"经核实**不成立**：同一个进程里 09:08:56Z 那次就是对的
+     `rect=(0,48,1280,752)`）；
+  2. **真根因**：主窗**最小化**时 `inner_size()` 是 `(0,0)`（真机窗口树：`client=0x0 iconic=True`），
+     而 R23 只有一种输出——把任何输入都钳成 `MIN_LOGIN_WIDTH×MIN_LOGIN_HEIGHT`。于是"量不到"
+     变成了 320×160 的**假盒子**：创建时一次（`rect=(0,48,320,160)`），跟随每 250ms 又一次
+     （真机工作实例里那个先摆对成 1280×752、随后被跟随改成 320×160 的登录 webview 就是它）；
+  3. **修法**：几何决策长出第二档 `Layout::HostUnmeasurable`（`login::layout_for`）——量不到**没有几何**：
+     创建路先 `focus_main`（unminimize + show + set_focus，与托盘/单实例同一动作）再量一次，仍量不到
+     则结构化失败（绝不建假盒子）；跟随路保持登录页现有几何，等主窗回来重摆；
+  4. **诊断**：创建那一次与跟随的每次状态翻转都记一行**原始读数**
+     （`inner_size=(1280,800) scale=1 minimized=false`），事后不再只能看到钳过的结果。
+  测试：cargo 204+1 → **211 pass + 1 ignored**（lib 184→190、login_policy 16→17）；node/tsc/vite/
+  acceptance 不变。真机复验项见 `KNOWN_LIMITATIONS.md` B16。
