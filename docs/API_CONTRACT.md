@@ -606,6 +606,64 @@ bundle 里没有任何硬编码的二维码端点字符串——这也是"必须
 落到注入的 `log`）。**仍未验证**：真机上这两个现象是否真的消失——需要一次真会话（等 181 s）与
 一次偏钟环境，由用户/控制器在能起窗的场所验（见 `docs/KNOWN_LIMITATIONS.md` B14）。
 
+**R29（用户真机反馈之 4：扫码之后轮询仍停在"未扫"）——诊断结论 + 观测加强**。
+现场（可复现：`.tmp/dev-visible.log` 行 35–243）：四个二维码会话、每个连轮询约 90 轮，**全部**
+`resultCode=103000200` + `errorDesc="Please to login."`，**连 `103000202`（已扫待确认）都没出现过**
+——扫码从未关联到我们会话。桌面侧逐项实测健康，落点在**手机侧**：
+
+1. **建单参数保真度：与官方页逐参数相同**（现场比对，非"照抄历史探针"）。
+   官方移动页 `showQrcode` 的建单是 `POST localInfo.getqrContent.split("?")[0]`，表单
+   `{appID, confirmFlag, version, reqClientType, loginChannel, appBrand}` **+ `getDevInfo()`**；
+   我们（`HUAWEI_QR_ENDPOINTS.create` → `buildQrCreateBody`）发的是同一组值。
+   `scripts/probe-qr-phone.mjs` 现场比对（今天下发的模板 vs 我们的常量）：**六个值全等、路径全等**、
+   `asyncURL` 全等、`qrcodeRequestInterval` 全等（`appID=com.huawei.hwidweb`、`loginChannel=7000700`、
+   `reqClientType=700`、`confirmFlag=1`、`version=40200`、`appBrand=HUAWEI`）。
+   **简报假设的"reqClientType/loginChannel 错位"不成立**：页面 `localInfo` 里另有一套
+   `reqClientType="90"` / `loginChannel="90000300"`（那是 OAuth 客户端的上下文），而**二维码建单用的是
+   `getqrContent` 里的 700/7000700**——我们跟页面走的是同一条；若当初取了 `localInfo` 那套才是错位。
+2. **三处保真度偏差，本轮如实登记、不改行为**（没有任何证据表明它们影响"扫码关联"，改了就是赌）：
+   - **查询串**：页面把 `?…` 丢掉（`split("?")[0]`），我们把模板查询串**留在 URL 上**（表单里同时也带了
+     同样六个参数）。协议层是"参数从端点模板取"的唯一真源设计（`buildQrCreateBody`），改 URL 形状要连
+     契约一起改，而收益不明；
+   - **`deviceID`/`deviceType`**：页面在 `localStorage.hwid_cas_sid` 存在时补 `{deviceID, deviceType: 7}`
+     （`getDevInfo`），而这张页面的 `localInfo.isUsedDeviceFingerSite = true`（**设备指纹在这个站点上是
+     开着的**）。sidecar 没有浏览器 localStorage 那一份 `hwid_cas_sid`，目前**一个都不带**；
+   - **cookie**：页面两个调用都是 `withCredentials: true`（带的是它自己 CAS 会话的 cookie）。我们
+     建单/轮询**完全不依赖 cookie**——R16 的 `recon-stateless.mjs` 与 R29 的探针都在"零 cookie"下拿到
+     了正常建单响应与正常轮询档位（可复现），所以这不是"请求被拒"的问题；至于它会不会影响**扫码关联**，
+     本环境无法判定（见第 4 条）。
+3. **轮询请求保真度：形状相同，节奏略有差异**。页面 `asyncRequest`：`POST asyncURL + "&t=" + Math.random()`、
+   表单只有 `qrToken`、`Content-Type: x-www-form-urlencoded`、超时 30 s、`withCredentials: true`；
+   我们除 cookie 外逐项相同（`buildQrPollBody` 也只有 `qrToken`）。**节奏**：页面按"上一轮**发出**时刻 +
+   `qrcodeRequestInterval`"排下一轮（`loopCheck`：先算 `now − lastRequestTime`，不够就补差），我们排在
+   **上一轮落地之后**再等一整个 `intervalMs`（等价于 `interval + 往返`）。只影响采样密度，不影响档位判定；
+   R29 起日志把节奏记下来（见第 6 条），真机据此就能核对。
+4. **手机侧（这是结论的落点）**：二维码 content 指向 `https://id1.cloud.huawei.com/qrcode/login.jsp?…`，
+   手机打开后 **302 → `/CAS/mobile/confirmQRLogin.html?…&callbackURL=…`**。该页的页面代码里**只有一个
+   出向请求**：用户按「登录」时的 `pi.confirmQRLogin({qRCode})`（`.confirmQRLogin(` **1 处**、
+   `.qrRemoteLogin(` **0 处**、`scanQRCode` **0 处**——`qrRemoteLogin` 只作为共享 SDK 的**声明**存在，
+   本页组件从不调用）。也就是说**"把那个链接打开"本身并不上报扫码**：探针用手机 UA 打开 content URL
+   （无账号会话）前后各轮询两次，档位始终 `103000200`／`"Please to login."`。
+   于是"压根没扫"与"扫了但手机侧那台设备**没有登录华为账号**"在服务端是**同一档**；而
+   `errorDesc` 那句 "Please to login." 正是服务端在说后者。
+   **仍未验证的关键一跳**：一台已登录华为账号的手机扫这张码，是否会依次给出 `103000202` → `0`
+   ——需要真实账号（本任务与探针都禁止登录），如实登记为 `docs/KNOWN_LIMITATIONS.md` **B19**
+   并给出用户步骤（手机侧先登录，再看日志里是否出现 `103000202`）。
+5. **`errorDesc` 的处置**：页面 bundle 只认 `0`/`103000201`/`103000202`，其余（含 `103000200`）一律
+   "继续轮询"，所以**状态码本身分不出上面那两种情况**，而 `errorDesc` 可以。它是服务端固定文案
+   （不带会话信息），因此 R29 起**进日志**（压成一行、超长截断 `QR_ERROR_DESC_MAX = 80`）。
+6. **观测加强（本轮交付的可判性）**，两条，都在协议层（`src/protocols/qr-login.mjs`）：
+   - **建单一行** `二维码建单：content=/qrcode/login.jsp?loginChannel=…&reqClientType=…&qrSiteID=…
+     &appBrand=…&familySharing=…；有效期=181s`——只留**非敏感**参数（`describeQrContent` 丢掉
+     `qRCode`/任何 token/session 类参数），真机再报"不关联"时先看这张码指向哪、带什么上下文；
+   - **轮询每行带时刻与节奏 + errorDesc**：`二维码轮询 #7（15:09:31，t+18.2s）：resultCode=103000200
+     （errorDesc="Please to login."）`（陌生码的"连续 n/5"照旧跟在后面）。`qrToken`/`qrCode`/整串
+     content 仍然**一律不进日志**。
+7. 钉在：`test/qr-login.test.mjs` 的 5 条 R29 用例（`sanitizeErrorDesc` 单行+截断、
+   `describeQrContent` 丢掉 `qRCode`、建单一行只此一条且不含凭据、轮询行的时刻与 `t+…s`、陌生码那行
+   格式不分叉）；探针 `scripts/probe-qr-phone.mjs` + 摘要 `.probe/r29-phone.json`。
+   **未改任何行为**：参数/链路/cookie 一处未动（依据见第 2 条），本轮交付的是**结论 + 可判性**。
+
 ## 2. 音乐业务接口
 
 ### 2.1 结论：**端点全部待确认**（K1 风险未消除，如实登记）

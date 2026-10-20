@@ -36,6 +36,7 @@ import assert from "node:assert/strict";
 
 import {
   QR_DEFAULT_MAX_UNKNOWN_CODES,
+  QR_ERROR_DESC_MAX,
   QR_ERROR_KINDS,
   QR_LOCAL_EXPIRY_GRACE_MS,
   QR_LOGIN_STATUS,
@@ -44,7 +45,9 @@ import {
   buildQrPollBody,
   classifyQrPoll,
   createQrSession,
+  describeQrContent,
   parseQrCreate,
+  sanitizeErrorDesc,
 } from "../src/protocols/qr-login.mjs";
 
 /** 建单端点的实探形状（探针里的模板查询串原样搬来）。 */
@@ -1120,4 +1123,123 @@ test("R26 收尾：cancel / 新建会话之后到期定时器不残留（不留�
   // 再建一次（手动刷新的语义）：新会话重新挂一张，旧的那张不许复活
   await at.session.start();
   assert.deepEqual(at.timers(), [2_000, 181_000 + QR_LOCAL_EXPIRY_GRACE_MS]);
+});
+
+// ---------------------------------------------------------------------------
+// R29 诊断加强：真机扫码之后轮询仍停在"未扫"（103000200，服务端原话 "Please to login."）
+// 时，日志要能回答两个问题——① 我们建的这张码到底指向哪、带什么上下文参数；
+// ② 每一轮是什么时候发的、服务端除了状态码还说了什么。
+//
+// 两条纪律不变：**日志里不许出现 qrToken / qrCode / 整串 content**（它们是一次性凭据），
+// 而 errorDesc 是服务端的固定文案，它恰恰是"手机侧登没登录"的唯一线索，所以要记。
+// ---------------------------------------------------------------------------
+
+const R29_CONTENT =
+  "https://id1.cloud.huawei.com/qrcode/login.jsp?qRCode=R29-SECRET-CODE&loginChannel=7000700&reqClientType=700&qrSiteID=1&appBrand=HUAWEI&familySharing=0";
+
+/** R29 的假世界：一个可手动推进的钟（轮询时刻要能算出来）+ 可编排的响应。 */
+function r29World({ createOverrides = {}, pollResponses } = {}) {
+  const world = harness({
+    createResponses: [{ body: createPayload({ content: R29_CONTENT, qrCode: "R29-SECRET-CODE", ...createOverrides }) }],
+    pollResponses,
+  });
+  let clock = 1_700_000_000_000;
+  const logs = [];
+  const session = createQrSession({
+    createUrl: CREATE_URL,
+    pollUrl: POLL_URL,
+    intervalMs: world.intervalMs,
+    fetchImpl: world.fetchImpl,
+    now: () => clock,
+    setTimer: world.setTimer,
+    clearTimer: world.clearTimer,
+    onEvent: () => undefined,
+    log: (message) => logs.push(message),
+  });
+  return {
+    ...world,
+    session,
+    logs,
+    /** 让本地钟走这么多毫秒（轮询的"节奏"就是它算出来的）。 */
+    advance: (ms) => {
+      clock += ms;
+    },
+  };
+}
+
+test("R29 诊断：errorDesc 压成一行并截断（服务端文案要能进日志，但不许把日志撑破或注入换行）", () => {
+  assert.equal(sanitizeErrorDesc("Please to login."), "Please to login.");
+  assert.equal(sanitizeErrorDesc(undefined), null, "没有 errorDesc 就不写空壳");
+  assert.equal(sanitizeErrorDesc(""), null);
+  assert.equal(sanitizeErrorDesc("   "), null);
+
+  const injected = sanitizeErrorDesc("boom\nsecond line");
+  assert.equal(injected.includes("\n"), false, "换行要压平：一行日志就是一行");
+
+  const long = sanitizeErrorDesc("x".repeat(500));
+  assert.equal(long.length <= QR_ERROR_DESC_MAX + 1, true, `超长要截断：${long.length}`);
+  assert.equal(long.endsWith("…"), true, "截断要看得出来（省略号）");
+});
+
+test("R29 诊断：content 的摘要只留非敏感参数（qRCode 与整串 content 都不进日志）", () => {
+  const summary = describeQrContent(R29_CONTENT);
+  assert.ok(summary.includes("/qrcode/login.jsp"), `要能看出这张码指向哪个页面：${summary}`);
+  for (const pair of ["loginChannel=7000700", "reqClientType=700", "qrSiteID=1", "appBrand=HUAWEI", "familySharing=0"]) {
+    assert.ok(summary.includes(pair), `非敏感参数要逐个记下来：${pair}`);
+  }
+  assert.equal(summary.includes("R29-SECRET-CODE"), false, "qRCode 是一次性凭据，不许出现在摘要里");
+  assert.equal(summary.includes(R29_CONTENT), false, "整串 content 也不许出现");
+  assert.equal(describeQrContent(""), null, "没有内容就没有摘要");
+  assert.equal(describeQrContent("not-a-url"), null, "认不出的东西不猜");
+});
+
+test("R29 诊断：建单时留一行 content 摘要（真机再报「未扫」时，先看这张码指向哪）", async () => {
+  const world = r29World({ pollResponses: [{ body: { resultCode: "103000200" } }] });
+  await world.session.start();
+
+  const lines = world.logs.filter((line) => line.includes("二维码建单"));
+  assert.equal(lines.length, 1, `建单只记一行：${JSON.stringify(world.logs)}`);
+  const line = lines[0];
+  assert.ok(line.includes("/qrcode/login.jsp"));
+  assert.ok(line.includes("loginChannel=7000700"));
+  assert.ok(line.includes("qrSiteID=1"));
+  assert.ok(line.includes("181s"), `建单给了可信 TTL 就要记下来：${line}`);
+
+  const joined = world.logs.join("\n");
+  assert.equal(joined.includes("R29-SECRET-CODE"), false, "qRCode 不许进日志");
+  assert.equal(joined.includes(R29_CONTENT), false, "整串 content 不许进日志");
+  assert.equal(joined.includes(createPayload().qrToken), false, "qrToken 不许进日志");
+});
+
+test("R29 诊断：轮询行带时刻与节奏（t+…s），真机看得出轮询到底有没有在跑、隔多久一轮", async () => {
+  const world = r29World({ pollResponses: [{ body: { resultCode: "103000200", errorDesc: "Please to login." } }] });
+  await world.session.start();
+
+  world.advance(3_400);
+  await world.tick();
+  world.advance(2_600);
+  await world.tick();
+
+  const rounds = world.logs.filter((line) => line.includes("轮询 #"));
+  assert.equal(rounds.length, 2);
+  assert.match(rounds[0], /轮询 #1（\d{2}:\d{2}:\d{2}，t\+3\.4s）/, `第一轮的节奏要看得出来：${rounds[0]}`);
+  assert.match(rounds[1], /轮询 #2（\d{2}:\d{2}:\d{2}，t\+6\.0s）/, `第二轮同理：${rounds[1]}`);
+  for (const line of rounds) assert.match(line, /resultCode=103000200/);
+  for (const line of rounds) {
+    assert.ok(line.includes('errorDesc="Please to login."'), `服务端原话是判"手机侧登没登录"的线索：${line}`);
+  }
+  assert.equal(world.logs.join("\n").includes(createPayload().qrToken), false);
+});
+
+test("R29 诊断：认不出的码那一行照样带时刻与 errorDesc（熔断前后都留痕，格式不分叉）", async () => {
+  const world = r29World({ pollResponses: [{ body: { resultCode: "103009999", errorDesc: "protocol changed" } }] });
+  await world.session.start();
+  world.advance(1_250);
+  await world.tick();
+
+  const round = world.logs.find((line) => line.includes("轮询 #"));
+  assert.match(round, /t\+1\.3s/, `四舍五入到 0.1 秒：${round}`);
+  assert.ok(round.includes("103009999"));
+  assert.ok(round.includes("连续 1/5"), `陌生码的连续计数要在同一行：${round}`);
+  assert.ok(round.includes('errorDesc="protocol changed"'));
 });

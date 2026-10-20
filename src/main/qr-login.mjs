@@ -39,6 +39,13 @@
  * - 轮询每轮一行脱敏 `resultCode` 诊断日志，落点是本端口注入的 `log`
  *   （sidecar 默认 `console.error` → **stderr**，见 `src/main/auth-manager.ts` 的 `defaultLog`）。
  * 所以这个 `log` 参数不是可选的装饰：真机再报"卡住"时，它是唯一的现场记录。
+ *
+ * R29 增补（用户真机反馈之 4：扫码之后轮询仍是"未扫"）：诊断结论是"扫码从未关联到我们会话，
+ * 而落点在**手机侧**"，因此**本文件的参数与链路一处未改**——为什么不动见
+ * `docs/API_CONTRACT.md` §1.8 的 R29 段（建单/轮询与官方页逐参数相同，三处偏差登记在案）。
+ * 交付的是**可判性**：协议层现在多记两样东西（建单一行 content 非敏感摘要、轮询行带时刻/节奏/
+ * `errorDesc`），本端口只是把 `log` 照旧传下去。下一轮真机扫码时，日志里那句
+ * `errorDesc="Please to login."` 就是"手机侧那台设备没有登录华为账号"的原话。
  */
 import { LOGIN_TIMEOUT_MS } from "../protocols/login-callback.mjs";
 import { QR_LOGIN_STATUS, createQrSession } from "../protocols/qr-login.mjs";

@@ -57,6 +57,16 @@
  * 与轮询在不在飞无关；服务端仍然优先（它说话时那张网直接撤掉）。
  *
  * 全部依赖注入（fetch/计时器/时钟），所以整条状态机在测试里跑得完，不碰网络也不碰真实时间。
+ *
+ * R29（用户真机反馈之 4：扫码之后轮询仍是"未扫"）在这一层只落**观测**，不落行为：
+ * 诊断结论是"扫码从未关联到我们会话，而落点在手机侧"（四条证据见 `docs/API_CONTRACT.md` §1.8 的
+ * R29 段：建单/轮询与官方页逐参数相同、页面代码里 `confirmQRLogin` 是唯一出向请求、手机 UA 打开
+ * content URL 不翻档、真机四会话 90 轮全是 `103000200`/`"Please to login."`）。所以本层**一行行为
+ * 都没改**，只把下一轮真机可判所需的两样东西记下来：
+ * - **建单一行**（[`describeQrContent`]）：这张码指向哪、带哪些**非敏感**上下文参数
+ *   （`qRCode` 与 token/session 类参数一律丢掉）；
+ * - **轮询每行**（[`sanitizeErrorDesc`] + 时刻 + `t+…s` 节奏）：`errorDesc` 是**唯一**能区分
+ *   "压根没扫"与"扫了但手机侧没登录"的那句话——状态码 `103000200` 两种情况共用。
  */
 import { err, ok } from "../shared/result.ts";
 
@@ -134,6 +144,73 @@ export const QR_LOCAL_EXPIRY_GRACE_MS = 3_000;
 
 /** 建单表单里那些"从端点模板查询串取"的参数名。 */
 export const QR_CREATE_PARAMS = ["appID", "confirmFlag", "version", "reqClientType", "loginChannel", "appBrand"];
+
+/**
+ * `errorDesc` 进日志时的长度上限（R29）。
+ *
+ * 为什么要有上限：它是**服务端文案**，长度不由我们决定；超出部分对诊断没有增量信息，
+ * 却能把一行日志撑成几屏。截断处留 `…`，看得出"这里被截了"。
+ */
+export const QR_ERROR_DESC_MAX = 80;
+
+/**
+ * 服务端 `errorDesc` → 一行可安全写进日志的文案（R29；`null` = 没有 / 全是空白）。
+ *
+ * 真机现场（R29）：轮询 36 轮全 `resultCode=103000200`、`errorDesc="Please to login."`——
+ * 状态码只说"还没结果"，**那句话才是线索**（服务端在说"扫码那一侧还没登录"）。
+ * 而 R22 起的诊断日志只记了状态码，等于把唯一有用的那句话扔了。
+ *
+ * 两条处理：换行/连续空白压成一个空格（一行日志必须是一行）；超长截断（见 [`QR_ERROR_DESC_MAX`]）。
+ * 它**不是凭据**（固定文案，不带会话信息），所以与 qrToken/qrCode 的纪律不同，可以进日志。
+ *
+ * @param {unknown} value 响应里的 `errorDesc`
+ * @param {number} [max] 长度上限
+ * @returns {string|null}
+ */
+export function sanitizeErrorDesc(value, max = QR_ERROR_DESC_MAX) {
+  if (typeof value !== "string") return null;
+  const flat = value.replace(/\s+/g, " ").trim();
+  if (flat === "") return null;
+  return flat.length <= max ? flat : `${flat.slice(0, max)}…`;
+}
+
+/** 摘要里要丢掉的参数名（一次性凭据：留着就等于把会话令牌写进日志）。 */
+function isSecretParam(name) {
+  return /token/i.test(name) || /^qrcode$/i.test(name) || /^code$/i.test(name) || /^session/i.test(name) || /ticket/i.test(name);
+}
+
+/**
+ * `content`（二维码里编码的那串 URL）→ 一行**非敏感**摘要（R29；`null` = 认不出）。
+ *
+ * 现场要回答的第一个问题：我们建的这张码到底指向哪、带什么上下文参数？手机扫的是**屏幕上那张**，
+ * 而"扫码从不关联"最可能的两种解释（参数错位 / 手机侧没登录）都要靠这一行才能分开。所以记
+ * path + 非敏感查询参数，**丢掉 `qRCode` 与任何 token/session 类参数**（见 [`isSecretParam`]）。
+ *
+ * 认不出（空串、不是 http(s) URL）时回 `null`：日志里不猜一个形状。
+ *
+ * @param {unknown} content 建单响应里的 `content`
+ * @returns {string|null} 形如 `/qrcode/login.jsp?loginChannel=7000700&reqClientType=700`
+ */
+export function describeQrContent(content) {
+  if (typeof content !== "string" || content.trim() === "") return null;
+  let url;
+  try {
+    url = new URL(content);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  const safe = [...url.searchParams.entries()].filter(([name]) => !isSecretParam(name));
+  const query = safe.map(([name, value]) => `${name}=${value}`).join("&");
+  return query === "" ? url.pathname : `${url.pathname}?${query}`;
+}
+
+/** 日志里的钟（本地时刻 `HH:MM:SS`）；只用于人读日志，不参与任何判定。 */
+function clockText(ms) {
+  const at = new Date(ms);
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}`;
+}
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -312,6 +389,13 @@ export function createQrSession(options = {}) {
   /** 已轮询多少轮（R22 诊断日志的轮次；每次 start 归零）。 */
   let pollRound = 0;
   /**
+   * 本次会话开始的本地时刻（R29 诊断日志的"节奏"零点；每次 start 重设）。
+   *
+   * 为什么记节奏而不是只记绝对时刻：真机上要回答的是"扫码那一刻，轮询到底在不在跑、
+   * 隔多久一轮"。`t+…s` 与随行的本地时刻一起给，既能数节奏，也能和 sidecar 的其它日志对齐。
+   */
+  let startedAtLocal = null;
+  /**
    * 本地到期锚（R22 兜底）：建单响应落地那一刻的本地钟 + 服务端 TTL。
    *
    * 为什么取"响应落地"而不是"请求发出"：服务端 TTL 从它的 `qrCodeCreateTime` 起算，
@@ -406,6 +490,12 @@ export function createQrSession(options = {}) {
     expiresAtLocal = parsed.data.expiresInMs === null ? null : now() + parsed.data.expiresInMs;
     // 取消之后才落地的建单响应：不再广播（这一档属于一次已经作废的会话）
     if (!running) return parsed;
+    // R29 诊断：建单成功就留一行**非敏感**摘要——真机再报"扫码不关联"时，先看这张码指向哪、
+    // 带的是哪些上下文参数（qRCode 与 token 一律不进；见 describeQrContent）。
+    log(
+      `二维码建单：content=${describeQrContent(parsed.data.content) ?? "不是 HTTP URL（形状变了？）"}` +
+        (parsed.data.expiresInMs === null ? "" : `；有效期=${Math.round(parsed.data.expiresInMs / 1_000)}s`),
+    );
     moveTo(QR_LOGIN_STATUS.pending, {
       content: parsed.data.content,
       expiresInMs: parsed.data.expiresInMs,
@@ -534,9 +624,16 @@ export function createQrSession(options = {}) {
     if (unknown) unknownCodes += 1;
     else unknownCodes = 0;
     // R22 诊断（修 3）：**每轮一行**——真机再报"卡在正在确认过期…"时，日志要能回答
-    // "轮询还在跑吗、服务端说了什么"。脱敏：只有轮次与状态码（qrToken/内容/cookie 都不进）。
+    // "轮询还在跑吗、服务端说了什么"。脱敏：轮次/时刻/节奏/状态码/errorDesc
+    // （qrToken、二维码内容、cookie 都不进）。
+    // R29 增补：带上本地时刻与"距本次会话开始多久"（节奏），并带上 errorDesc——状态码只说
+    // "还没结果"，服务端那句话才是线索（现场原话 "Please to login."）。
+    const atLocal = now();
+    const elapsedText = startedAtLocal === null ? "" : `，t+${((atLocal - startedAtLocal) / 1_000).toFixed(1)}s`;
+    const descText = sanitizeErrorDesc(isRecord(payload) ? payload.errorDesc : undefined);
     log(
-      `二维码轮询 #${round}：resultCode=${code === "" ? "（响应里没有）" : code}` +
+      `二维码轮询 #${round}（${clockText(atLocal)}${elapsedText}）：resultCode=${code === "" ? "（响应里没有）" : code}` +
+        (descText === null ? "" : `（errorDesc="${descText}"）`) +
         (unknown ? `（认不出的码，连续 ${unknownCodes}/${maxUnknownCodes}）` : ""),
     );
 
@@ -612,6 +709,8 @@ export function createQrSession(options = {}) {
       // R22：新会话 = 新的计数与新的到期锚（上一次那张码的这两个事实一律作废）
       unknownCodes = 0;
       pollRound = 0;
+      // R29：节奏零点（诊断日志的 `t+…s` 从这里算）
+      startedAtLocal = now();
       expiresAtLocal = null;
       status = QR_LOGIN_STATUS.idle;
       running = true;
