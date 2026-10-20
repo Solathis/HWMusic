@@ -110,15 +110,24 @@ function timers() {
   return {
     setTimer: (fn, ms) => {
       const id = nextId++;
-      pending.set(id, fn);
+      pending.set(id, { fn, delay: ms });
       return id;
     },
     clearTimer: (id) => pending.delete(id),
+    /**
+     * 跑到**最早到点**的那个挂起计时器。
+     *
+     * R26 起会话里同时挂着轮询（2 秒）与本地到期兜底（TTL + 宽限）两张网，按"谁先挂上谁先跑"
+     * 推会让"下一次轮询"变成那张远未来的网——真实时间是按到点先后走的，这里跟着它走。
+     */
     async tick() {
-      const [id, fn] = [...pending.entries()][0] ?? [];
-      if (fn === undefined) return false;
-      pending.delete(id);
-      fn();
+      let pick = null;
+      for (const [id, entry] of pending) {
+        if (pick === null || entry.delay < pick.entry.delay) pick = { id, entry };
+      }
+      if (pick === null) return false;
+      pending.delete(pick.id);
+      pick.entry.fn();
       for (let round = 0; round < 16; round += 1) await Promise.resolve();
       return true;
     },

@@ -43,12 +43,18 @@
  *   与本地钟无关（老公式 `expiredTime − now()` 把两个时钟相减，本地钟快 1 小时，倒计时一上来
  *   就归零 → 用户看到的正是"一直不过期"）。`qrCodeCreateTime` 缺失/非法时才回退老公式
  *   （偏差风险如实写在 [`parseQrCreate`] 的注释里），字段不可信或两个值互相矛盾 → `null`（不猜）。
- * - **B. 本地到期权威兜底**：轮询期间若"本地到期锚 + 宽限 [`QR_LOCAL_EXPIRY_GRACE_MS`] 已过"
- *   而服务端**什么话都没说**（仍 pending 或缺省/陌生码；网络失败也算），主动转 `expired`
- *   并停轮询——渲染层那档「正在确认过期…」因此**必有出口**（最长 0 + 15 秒）。
+ * - **B. 本地到期权威兜底**：建单/刷新时就把"到期锚 + 宽限 [`QR_LOCAL_EXPIRY_GRACE_MS`]"这一时刻
+ *   排进**一次性定时器**（R26 改的落点，见下），到点时若服务端**什么话都没说**（仍 pending 或缺省/
+ *   陌生码）就主动转 `expired` 并停轮询。轮询落地点那条检查**保留成第二张网**。
  *   **服务端一律优先**：它给出 `expired`/`scanned`/`confirmed` 时本地兜底让位（不抢、不改判）。
  * - **C. 轮询诊断日志**：每轮一行 resultCode（只有轮次与状态码；`qrToken`、二维码内容、
  *   cookie 一律不进日志）。真机再报"卡住"时，日志能直接指出轮询有没有在跑、服务端说了什么。
+ *
+ * R26（用户真机反馈之 3：倒计时到 0 之后「正在确认过期…」要等很久才变过期）只改**落点**：
+ * R22 的兜底挂在**轮询落地**那一步 → 归零之后还得再排一整轮轮询（间隔 2 秒、实探往返约 8 秒），
+ * 叠上 15 秒宽限，最长约 25 秒。现在到期时刻在**建单/刷新时就排进一次性定时器**，宽限同时
+ * 收窄到 3 秒（理由写在 [`QR_LOCAL_EXPIRY_GRACE_MS`]）→ 倒计时归零之后**最多 3 秒**必有出口，
+ * 与轮询在不在飞无关；服务端仍然优先（它说话时那张网直接撤掉）。
  *
  * 全部依赖注入（fetch/计时器/时钟），所以整条状态机在测试里跑得完，不碰网络也不碰真实时间。
  */
@@ -109,14 +115,22 @@ export const QR_DEFAULT_MAX_POLL_FAILURES = 3;
 export const QR_DEFAULT_MAX_UNKNOWN_CODES = 5;
 
 /**
- * 本地到期兜底的宽限（R22）：本地到期锚过了这么久、服务端还是**什么话都没说**，
- * 就由本层裁定"过期"。
+ * 本地到期兜底的宽限（R22 立、R26 收窄到 3 秒）：本地到期锚过了这么久、服务端还是
+ * **什么话都没说**，就由本层裁定"过期"。
  *
- * 15 秒是给"服务端那条 `expired` 正在路上"留的余量（实探：服务端通常在本地归零**之前**
- * 就给 `103000201`，所以这一档只在服务端沉默时兜底）。它同时是渲染层「正在确认过期…」
- * 那一档的**上界**：倒计时数到 0 之后最多再等 15 秒，界面必有出口。
+ * 为什么是 3 秒（R26 用户真机反馈：倒计时到 0 之后「正在确认过期…」要等很久）：
+ * 兜底**只差一个落点**。R22 把检查放在**轮询落地**那一步，而轮询间隔 2 秒、实探一次往返约 8 秒
+ * （见 R22 报告 §1.3 的实探节奏），于是"归零 → 判死"之间除了宽限还要再排一整轮轮询
+ * （最长约 10 秒）——用户的 ~25 秒就是这么来的。R26 改挂**一次性定时器**（建单/刷新时就算好
+ * 到点时刻，见 [`createQrSession`] 的 `armLocalExpiry`），轮询在不在飞都不影响，那 10 秒先没了。
+ *
+ * 剩下的 3 秒只承担一件事：给"服务端那条 `expired` 正在路上"留出余量。而这个余量本身不必大
+ * ——到期锚取的是**建单响应落地**那一刻（比服务端真正的到期时刻**晚**一个往返，宁晚不早，见
+ * `expiresAtLocal` 的说明），判死本来就落在一个已经保守的刻度上；实探也显示服务端通常在本地
+ * 归零**之前**就给 `103000201`（TTL 181s、t+177.4s 观测到），所以这一档只在服务端沉默时兜底。
+ * 它同时是渲染层「正在确认过期…」那一档的**上界**：倒计时数到 0 之后最多再等 3 秒必有出口。
  */
-export const QR_LOCAL_EXPIRY_GRACE_MS = 15_000;
+export const QR_LOCAL_EXPIRY_GRACE_MS = 3_000;
 
 /** 建单表单里那些"从端点模板查询串取"的参数名。 */
 export const QR_CREATE_PARAMS = ["appID", "confirmFlag", "version", "reqClientType", "loginChannel", "appBrand"];
@@ -288,6 +302,8 @@ export function createQrSession(options = {}) {
   let status = QR_LOGIN_STATUS.idle;
   let timer = null;
   let deadlineTimer = null;
+  /** R26：本地到期那张**一次性**定时器（建单/刷新时算好到点时刻，与轮询在不在飞无关）。 */
+  let expiryTimer = null;
   let running = false;
   let failures = 0;
   let current = null;
@@ -324,6 +340,7 @@ export function createQrSession(options = {}) {
       clearTimer(deadlineTimer);
       deadlineTimer = null;
     }
+    clearLocalExpiry();
   }
 
   /** 只有状态真的变了才广播（轮询 2 秒一次，重复播报只会把通道刷成噪声）。 */
@@ -421,6 +438,35 @@ export function createQrSession(options = {}) {
     moveTo(QR_LOGIN_STATUS.expired, {});
   }
 
+  /** 撤掉本地到期那张网（服务端说了话、或整场收尾时都要撤）。 */
+  function clearLocalExpiry() {
+    if (expiryTimer === null) return;
+    clearTimer(expiryTimer);
+    expiryTimer = null;
+  }
+
+  /**
+   * 挂上本地到期那张**一次性**定时器（R26 修 3：把"到点"排进计时器，不再等下一次轮询落地）。
+   *
+   * 为什么是一次性而不是"每秒看一眼"：本地在这里**只做一次裁决**——到点那一刻服务端还没说话
+   * 就是过期，之后没有"再看一次"的语义（会话已经收了）。轮询那张网仍然在（见 [`poll`]），
+   * 所以即使这次定时器因为时钟异常没到点，下一轮轮询落地还会再检查一次。
+   *
+   * 没有可信 TTL（`expiresAtLocal === null`）时**一次都不挂**：没有本地权威就没有本地裁决。
+   */
+  function armLocalExpiry() {
+    if (expiresAtLocal === null) return;
+    const delay = expiresAtLocal + QR_LOCAL_EXPIRY_GRACE_MS - now();
+    expiryTimer = setTimer(() => {
+      expiryTimer = null;
+      if (!running) return;
+      // 服务端说过话就让位：`scanned`/`confirmed` 到达时这张网已经撤了，这里再兜一道
+      if (status === QR_LOGIN_STATUS.scanned || status === QR_LOGIN_STATUS.confirmed) return;
+      if (!localExpiryDue()) return;
+      expireLocally("到期定时器到点");
+    }, Math.max(0, delay));
+  }
+
   /**
    * 总期限（一次性）：等扫码期间轮询是 2 秒一次，没人扫就会一直跑下去——
    * 总期限保证"一直没人扫"有个尽头（R21 起过期本身就会停轮询，但等待期仍可能无限长）。
@@ -509,6 +555,10 @@ export function createQrSession(options = {}) {
     if (classified.status === QR_LOGIN_STATUS.scanned) {
       // 服务端**在说话**（已扫码、等确认）：本地兜底让位——把一条还活着的会话判死，
       // 代价是用户手机上那句"确认"按下去也没有了着落。
+      if (expiryTimer !== null) {
+        clearLocalExpiry();
+        log("服务端说已扫码：撤掉本地到期那张网（服务端是权威，不抢判）");
+      }
       moveTo(QR_LOGIN_STATUS.scanned, { payload: classified.payload });
       schedule();
       return;
@@ -571,6 +621,10 @@ export function createQrSession(options = {}) {
       if (!created.ok) return fail(created.error.message, created.error.kind);
       armDeadline();
       schedule();
+      // R26：到期那张网在**建单落地时**就挂上（延迟 = 服务端 TTL + 宽限）。
+      // 排在轮询之后挂是有意的：它不影响任何语义，只是让"第一个挂上的计时器 = 第一次轮询"
+      // 这个可观测顺序保持稳定（真机日志与测试都按它读）。
+      armLocalExpiry();
       return ok({ content: created.data.content, expiresInMs: created.data.expiresInMs });
     },
 

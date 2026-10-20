@@ -31,12 +31,17 @@
  * 1. 过期**倒计时**：`expiresInMs` 由建单应答/广播带过来，渲染层本地按秒递减
  *    （`qrCountdownText`，钟在这一侧）；本地到 0 只是「正在确认过期…」，
  *    **过期判定仍以服务端 `expired` 广播为权威**；
- * 2. 过期态**不可扫**：expired 到达 → 撤掉旧码 + 「二维码已过期」占位 + 状态行
- *    `QR_EXPIRED_NOTICE`（R20 要求 2 的"死码不留屏"继续成立）；
+ * 2. 过期态**不可扫**：expired 到达 → 撤掉旧码 + 「二维码已过期」占位（R20 要求 2 的
+ *    "死码不留屏"继续成立）；
  * 3. **只能手动刷新**：过期不再自动重发 `auth:qr-start`（`shouldAutoStartQr` 在这一档为假），
  *    刷新由用户点击二维码容器或过期态那个显著的「刷新二维码」按钮触发。
  *    R20 的 `qrNotice` / `QR_REFRESH_NOTICE`（"已刷新，请重新扫码"）随之删除——
  *    不再自动换新，就不存在"刚换过"这一刻。
+ *
+ * R26 增补（用户真机反馈之 4）：**过期态的状态行不再显示「二维码已过期，点击刷新。」**——
+ * 二维码遮罩上已经是「二维码已过期」/「点击刷新」两行，状态行再复述一遍等于同一句话说两次。
+ * 于是 `loginGateStatusLine` 在 `expired` 这一档返回 `null`（**隐藏那一行**，不是显示一句空话），
+ * 遮罩成为过期态的**唯一提示载体**；`QR_EXPIRED_NOTICE` 随之删除（没有第二个读者）。
  *
  * 五条硬要求里的前四条仍是源码扫描（R16 起）：
  * 1. 未登录**绝不渲染 app-shell**：门禁分支必须在 App() 里排在 app-shell 之前；
@@ -58,7 +63,6 @@ import {
   QR_COUNTDOWN_TESTID,
   QR_EXPIRED_BOX_HINT,
   QR_EXPIRED_BOX_TEXT,
-  QR_EXPIRED_NOTICE,
   QR_EXPIRING_TEXT,
   QR_GATE_STATUS,
   QR_HINT_TEXT,
@@ -213,7 +217,11 @@ test("二维码状态：过期是终止档（R21：不再自动换新）——�
   let state = pendingState("OLD");
   state = reduceGateState(state, { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.expired });
   assert.equal(state.qr.status, QR_GATE_STATUS.expired);
-  assert.equal(loginGateStatusLine(state), QR_EXPIRED_NOTICE);
+  assert.equal(
+    loginGateStatusLine(state),
+    null,
+    "R26：过期态状态行不再复述遮罩那两行（遮罩是唯一的提示载体）",
+  );
   assert.equal(shouldAutoStartQr(state), false, "过期不许自动再发一次 qr-start（R21 推翻 R16/R20 的自动换新）");
 
   // 用户点了刷新（容器或过期态那个「刷新二维码」按钮 = startQr）之后，新码才到
@@ -721,9 +729,13 @@ test("R20 过期：expired 到达当场撤掉旧码（不可扫的过期码绝�
   assert.equal(qrContentOf(renewed), "NEW");
 });
 
-test("R21 状态行：过期说的是「已过期，点击刷新」，失败说的是为什么（不许互相冒充）", () => {
+test("R21 状态行：过期**不再**说一句话（R26），失败说的是为什么（不许互相冒充）", () => {
   const expired = reduceGateState(pendingState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.expired });
-  assert.equal(loginGateStatusLine(expired), QR_EXPIRED_NOTICE);
+  assert.equal(
+    loginGateStatusLine(expired),
+    null,
+    "R26：过期态状态行不显示（二维码遮罩那两行是唯一的提示载体，状态行复述一遍等于同一句话说两遍）",
+  );
 
   // 用户按了刷新：这句比「已过期」更贴当下
   const rearmed = reduceGateState(expired, { type: LOGIN_GATE_EVENT.qrRequested });
@@ -737,7 +749,7 @@ test("R21 状态行：过期说的是「已过期，点击刷新」，失败说�
   assert.match(loginGateStatusLine(back), /取消/);
   assert.doesNotMatch(loginGateStatusLine(back), /二维码已过期/);
 
-  // 失败档位：屏幕上要留的是"为什么失败"
+  // 失败档位：屏幕上要留的是"为什么失败"（这一档的状态行照旧要说话）
   const failed = reduceGateState(expired, { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.failed, message: "轮询失败" });
   assert.equal(loginGateStatusLine(failed), "轮询失败");
 });
@@ -925,7 +937,7 @@ test("R21 过期：只手动刷新——过期不重新武装自动发起，刷�
   const expired = reduceGateState(liveState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.expired });
   assert.equal(shouldAutoStartQr(expired), false, "过期不许自动再发一次 qr-start（R21 推翻自动换新）");
   assert.equal(canRefreshQr(expired), true, "手动那条路开着：容器与过期态的按钮都点得动");
-  assert.equal(loginGateStatusLine(expired), QR_EXPIRED_NOTICE);
+  assert.equal(loginGateStatusLine(expired), null, "R26：这一档状态行不显示（遮罩那两行就够）");
 
   const refreshed = reduceGateState(expired, { type: LOGIN_GATE_EVENT.qrRequested });
   assert.equal(refreshed.qr.status, QR_GATE_STATUS.preparing, "点了刷新 = 与自动发起同一条路（qrRequested → auth:qr-start）");

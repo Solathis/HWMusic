@@ -51,7 +51,7 @@
  *    sidecar 那条 `expired` 广播（实测 TTL 181s、t+177.4s 收到 `103000201`，服务端通常
  *    早于本地归零，所以这一档是罕见的兜底）；
  * 2. **过期态不可扫**：`expired` 到达撤掉 content（R20 的裁决继续成立）+ 界面写
- *    [`QR_EXPIRED_BOX_TEXT`]，状态行说 [`QR_EXPIRED_NOTICE`]——过期是一条**终止**档；
+ *    [`QR_EXPIRED_BOX_TEXT`]——过期是一条**终止**档；
  * 3. **只能手动刷新**：过期**不**重新武装自动发起（`shouldAutoStartQr` 在这一档为假，
  *    sidecar 也不再自己建单，见 `src/protocols/qr-login.mjs`）；刷新由用户点击触发
  *    （二维码容器，或过期态那个显著的「刷新二维码」按钮 → 都是 `startQr`）。
@@ -126,19 +126,11 @@ export const QR_REFRESH_LABEL = "刷新二维码";
 export const QR_REFRESH_TESTID = "login-qr-refresh";
 
 /**
- * 过期提示（R20 要求 2，R21 改写）：**过期是一条终止档**，界面上说的是"该怎么办"。
- *
- * R20 那句是「二维码已刷新，请重新扫码。」——那时 sidecar 会自动换一张，提示的使命是
- * "挺过新码到达的那一跳"。R21 按用户指令删掉自动换新，于是不再有"刚换过"这一刻，
- * 这句话连同 `qrNotice` 一起删除；现在说过期，并直接给出唯一的出路（点击刷新）。
- */
-export const QR_EXPIRED_NOTICE = "二维码已过期，点击刷新。";
-
-/**
  * 过期态里写在二维码**原位**的那句（R21 要求 2）。
  *
- * 与状态行那句分开是有意的：原位那句是"这块地方现在是什么"（二维码没了、它过期了），
- * 状态行那句是"你该做什么"。画布位置不留任何可扫的东西——留着死码是最坏的一种"没反应"。
+ * 与状态行的关系（R26 起）：**遮罩是过期态唯一的提示载体**——原位这两行说完"这块地方怎么了、
+ * 你该做什么"，状态行在过期档不再说话（见 [`loginGateStatusLine`]）。画布位置不留任何可扫的
+ * 东西——留着死码是最坏的一种"没反应"。
  */
 export const QR_EXPIRED_BOX_TEXT = "二维码已过期";
 
@@ -503,16 +495,22 @@ export function qrContentOf(state) {
 }
 
 /**
- * 状态行文案（克制：一行，告诉用户现在是什么状态、下一步能做什么）。
+ * 状态行文案（克制：一行，告诉用户现在是什么状态、下一步能做什么；`null` = 这一档不显示该行）。
  *
  * 优先级：**最新一次明确的失败/取消** → 会话阶段 → **网页那条路刚收场留下的那句话** →
  * 当前那条路的状态。失败文案排最前是有意的：出错时用户最需要看到的就是那一句
  * （而不是"正在准备二维码…"）；`officialNote` 排在"现状"之前，理由同 R19：
  * 它说的是**刚刚发生了什么**，而"正在检查登录状态…"只是"还不知道"。
  *
- * R21：倒计时**不进这一行**（它在二维码下方自成一行，见 [`qrCountdownText`]）；
- * `expired` 那一档说的是 [`QR_EXPIRED_NOTICE`]（"已过期，点击刷新"）——它现在是一条
- * **终止**档（不再跟着一条新 pending）。
+ * R21：倒计时**不进这一行**（它在二维码下方自成一行，见 [`qrCountdownText`]）。
+ *
+ * R26（用户真机反馈之 4）：`expired` 这一档**不说话**（返回 `null`，界面把那一行整个隐掉）——
+ * 二维码遮罩上已经是「二维码已过期」/「点击刷新」两行，状态行再复述一遍等于同一句话说两次，
+ * 还把用户的选择挤到更下面。**遮罩因此是过期态的唯一提示载体**（R21 立的那条终止档语义不变：
+ * 过期仍然不自动换新，换新仍然只能由用户点容器触发）。
+ *
+ * @param {object} state 门禁状态
+ * @returns {string|null} 要显示的那一行；`null` = 这一档不显示状态行
  */
 export function loginGateStatusLine(state) {
   if (typeof state?.message === "string" && state.message !== "") return state.message;
@@ -540,8 +538,8 @@ export function loginGateStatusLine(state) {
     case QR_GATE_STATUS.confirmed:
       return "已确认，正在完成登录…";
     case QR_GATE_STATUS.expired:
-      // R21：终止档——不会再自动来一张新码，所以这里直接说"该怎么办"
-      return QR_EXPIRED_NOTICE;
+      // R26（用户真机反馈之 4）：终止档且提示已经在二维码遮罩上了——状态行整行隐掉，不复述
+      return null;
     case QR_GATE_STATUS.failed:
       return qr.message ?? "二维码登录失败（详情见日志）";
     default:

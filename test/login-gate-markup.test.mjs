@@ -43,7 +43,6 @@ import {
   QR_COUNTDOWN_TESTID,
   QR_EXPIRED_BOX_HINT,
   QR_EXPIRED_BOX_TEXT,
-  QR_EXPIRED_NOTICE,
   QR_GATE_STATUS,
   QR_HINT_TEXT,
   QR_REFRESH_LABEL,
@@ -335,7 +334,11 @@ test("标记：过期态不可扫——canvas 撤下、二维码区域只写两�
   assert.doesNotMatch(block, /<canvas/, "二维码容器里也不许有 canvas");
   assert.match(block, new RegExp(QR_EXPIRED_BOX_TEXT), `二维码区域要写明已过期：${block}`);
   assert.doesNotMatch(html, /animate-pulse/, "过期不是「加载中」：占位说的是已过期，不是马上就来");
-  assert.equal(statusTextOf(html), QR_EXPIRED_NOTICE, "状态行给的是可操作的下一句（点击刷新）");
+  assert.equal(
+    statusTextOf(html),
+    null,
+    "R26：过期态**状态行不显示**——遮罩那两行已经是全部提示（同一句话说两遍只会挤掉用户的选择）",
+  );
 
   // R25（用户四项之 1）：过期占位**只有两行**，且删掉了 R21 那个显著的「刷新二维码」按钮
   assert.match(block, new RegExp(QR_EXPIRED_BOX_HINT), `第二行要说清"点哪儿"：${block}`);

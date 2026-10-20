@@ -300,6 +300,43 @@ auth:status → {loggedIn: boolean, busy: boolean, message?: string}
 `hms://` 跳转，Rust 侧看不到（顶部框架跳转与 302 都能看到）。关闭它要么等上游提供帧级事件，
 要么注入脚本监听——后者是硬边界明令禁止的（登录页零注入）。兜底：总期限仍会收口，不会永久挂住。
 
+**官方登录页的主题（R26 实探 · 可复现 · 结论带边界）**
+
+用户反馈（R26 之 1+2）："切换深色后，嵌入的官方页仍是白色"。**探针先跑，代码照证据落**。
+
+复现：`node scripts/probe-login-theme.mjs`（摘要在 `.probe/login-theme-probe.json`，已 gitignore；
+`--no-browser` 只跑公开接口那两段）。**全部请求只碰公开页面与公开接口**：不登录、不输账号、
+不提交凭据、不扫码；`state` 是探针自己的一次性串。浏览器那一段用 headless Chromium
+（与 `npm run test:browser` 同一套候选），量的是**计算样式**与页面**实际请求了哪一份主题 CSS**。
+
+实探结论（**实测**，2026-10-20，headless Chromium + 公开接口；交付的探针跑 6 条链路变体 +
+20 组服务端裁决（10 个 `themeName` 取值 × 2 类 UA）+ 3 档浏览器渲染，另有一轮 8 个候选 UA 的排查）：
+
+| # | 问题 | 实测结果 |
+|---|---|---|
+| ① | `themeName` 是不是 CAS 门户页的主题开关？ | **是**，但**不是 URL 说了算**：页面第一个脚本 `hwidConfig.js` 会**同步** POST `common/getBaseSwitchInfo`（表单里带 URL 上那个 `themeName`），再用**服务端回的那一份**覆盖 `_hwidFrontEndConfig.themeName`；主题 CSS 链接由 `getThemeFilePath(flowFilePath, null)` 按这个值拼出 `.../vuebuild/css/login/portal/index-<theme>[-small].css` |
+| ② | 桌面 UA 下服务端认哪些值？ | 只认 **{red, huawei, blue, lightred}**；`dark`/`harmonydark`/`harmony`/`DARK`/`0x01`/乱写**一律回落 `red`**（`index-dark-small.css` 本身 HTTP 200 存在，说明卡在**服务端裁决**而不是资源缺失） |
+| ③ | 那"跟随系统"呢？（`prefers-color-scheme`） | **无效**。页面脚本在没有 URL 参数时确实会用 `matchMedia("(prefers-color-scheme: dark)")` 推出 `dark` 去问服务端——服务端照样回落 `red`；而且三份主题 CSS 里都写着 `@media (prefers-color-scheme: dark){.hwid-html-portalBg,.hwid-body-background{background-color:#fff}}`（深色系统下**强制白底**） |
+| ④ | `themeName` 加在 **authorize 请求**上会传播吗？ | 会传播到 `/CAS/remoteLogin`（实测原样带上 `dark`/`huawei`/乱写值），**但 `302 → /CAS/portal/loginAuth.html` 那一步被服务端归一化回 `red`**（`huawei` 能过）——所以"加参数"这条路到不了深色 |
+| ⑤ | 有没有能拿到深色的 UA？ | 只有 **HarmonyOS 移动 UA**（服务端认 `dark` → 页面真的加载 `index-dark.css`，实测 body/root 背景 `rgb(0,0,0)`；同一个 UA 下它认 `harmony`/`harmonydark`，不认识的值回落 `huawei`；桌面 UA 则一律回落 `red`）。但那个 UA 会让页面按 `isMobileWap()`（`/android|mobile|iphone|ipad|hwid_clienttype=hmos|tablet/i`）换成 `login/mobile/index`——**移动版登录页**（手机号/邮箱 + 短信验证码/密码表单，8 个输入框 vs 桌面门户的 18 个），不是现在这套桌面门户版式；8 个候选 UA 里没有一个能"服务端认深色而版式仍是桌面门户" |
+
+**落点（R26 选型：只做机制，不伪装 UA——用户裁决）**：
+1. **三态映射**（`login::login_theme_name`）：`dark` → `themeName=dark`；`system` → 主窗 `Window::theme()`
+   读一次系统深浅（读不到按浅色，保守一侧）；**`light` → 不动这个参数**（服务端桌面默认就是浅色
+   （实探 `red`），显式写 `huawei`/`blue` 会把用户现在看到的观感换成另一套浅色，是没人要过的变更）；
+2. **打开时挂上**：`host:open-login` 落进 `open_login` 时按当前主题把参数挂到那条授权 URL 上
+   （白名单校验在先：多一个查询参数不改变 origin/path）；
+3. **切主题时重载**：`theme::set_theme` 改完并广播之后调 `login::reapply_login_theme`——把**已经开着**的
+   登录页导航到"同一条 URL + 新 `themeName`"（值没变就不重载；目标不在白名单里不重载；另起线程做，
+   因为同步命令在主线程上，dispatcher 往返不能在那儿等）。**不做**系统主题的实时监听（打开时取一次）。
+4. **今天的结果如实说明**：桌面 UA 下服务端仍然回落 `red`，所以"深色档"目前**看不到深色官方页**——
+   这条通路是唯一一条（服务端哪天放开桌面 UA，代码一个字都不用改），现状登记在
+   `docs/KNOWN_LIMITATIONS.md` B18。
+
+**未实测（如实登记）**：真窗上"切主题之后官方页重载一次"的观感（本环境起不了真窗）、
+真实登录链路上这条参数的影响（需要真实账号；探针只到公开页面为止）。UA 伪装那条路**没有采纳**，
+因此也不在验证清单里。
+
 **未联调（untested）**：真实扫码登录（需要用户在场 + 真实账号）、音乐会话兑换（loginex，见 §1.5）、
 `tauri dev` 真窗验证（本环境的子进程沙箱里应用起不来：`tauri-plugin-log` 初始化 `os error 5`）。
 
@@ -982,14 +1019,17 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `WEB_LOGIN_ENTRY_TEXT` / `WEB_LOGIN_ENTRY_TESTID` | `"在网页中打开登录"` / `"login-open-web"` | `src/renderer/features/auth/login-gate-logic.mjs` | R18：**常驻**次要入口的文案与测试锚点（走 R7 的 `auth:login` 开窗路径；与二维码互斥，见 §1.8） |
 | `WEB_LOGIN_BACK_TEXT` / `WEB_LOGIN_BACK_TESTID` | `"返回扫码登录"` / `"login-back-to-qr"` | `src/renderer/features/auth/login-gate-logic.mjs` | R20 立、**R25 改落点**：`webLoginEntry(state)` 仍是形态的唯一判据，但那个控件**不再由 gate 渲染**——它浮在官方页之上（浮动 webview `login-return`，`login-chrome.tsx`），点击走 `core_login_chrome {action:"return"}`（与 `auth:cancel-login` 落到同一个结论槽） |
 | `QR_REFRESH_LABEL` / `QR_REFRESH_TESTID` | `"刷新二维码"` / `"login-qr-refresh"` | `src/renderer/features/auth/login-gate-logic.mjs` | R20：二维码容器（`<button>`）的**可达名字**与锚点；点击 = `startQr`（换一张新码）。R25：它**就是**唯一的换码控件（过期态那个显著按钮已删） |
-| `QR_EXPIRED_NOTICE` / `QR_EXPIRED_BOX_TEXT` / `QR_EXPIRED_BOX_HINT` | `"二维码已过期，点击刷新。"` / `"二维码已过期"` / `"点击刷新"` | `src/renderer/features/auth/login-gate-logic.mjs` | R21 立、**R25 改成两行**：过期占位只写「二维码已过期」/「点击刷新」两行（用户指令），原来那个显著的「刷新二维码」按钮删掉——容器自己就是那个控件 |
+| `QR_EXPIRED_BOX_TEXT` / `QR_EXPIRED_BOX_HINT` | `"二维码已过期"` / `"点击刷新"` | `src/renderer/features/auth/login-gate-logic.mjs` | R21 立、**R25 改成两行**：过期占位只写「二维码已过期」/「点击刷新」两行（用户指令），原来那个显著的「刷新二维码」按钮删掉——容器自己就是那个控件。**R26：这两行是过期态唯一的提示载体**（状态行在过期档不再渲染，见 `loginGateStatusLine`） |
+| ~~`QR_EXPIRED_NOTICE`~~ | ~~`"二维码已过期，点击刷新。"`~~ | — | **R26 删除**（用户真机反馈之 4：它与二维码遮罩那两行重复、还把用户的选择挤下去。过期态状态行**整行隐掉**，不给第二份文案） |
 | `QR_EXPIRING_TEXT` | `"正在确认过期…"` | `src/renderer/features/auth/login-gate-logic.mjs` | R21：本地倒计时**数到 0** 时那一行。本地钟不是权威（服务端 `expired` 广播才是），所以这一档说的是"在等确认"，不是"已过期" |
 | `QR_COUNTDOWN_TICK_MS` / `QR_COUNTDOWN_TESTID` | `1000` / `"login-qr-countdown"` | `src/renderer/features/auth/login-gate-logic.mjs` | R21：倒计时的步长（秒级）与那一行的测试锚点；文案由 `qrCountdownText(state)` 从"到期时刻 − 渲染层的钟"算出 |
 | ~~`QR_REFRESH_ACTION_TESTID`~~ | ~~`"login-qr-refresh-action"`~~ | — | **R25 删除**（用户指令：过期遮罩只两行、删掉过期态那个刷新按钮，容器是唯一换码入口） |
 | `QR_CANVAS_OPTIONS` / `QR_SIZE_PX` | `{width: 208, margin: 1, errorCorrectionLevel: "L"}` / `208` | `src/renderer/features/auth/qr-canvas.mjs` | R18：二维码画布的唯一画法（内容一换即重画；`npm run verify:live` 按 208×208 与墨迹占比复核） |
 | `QR_DEFAULT_INTERVAL_MS` / `QR_DEFAULT_MAX_POLL_FAILURES` | `2000` / `3` | `src/protocols/qr-login.mjs` | R16：轮询间隔兜底（真值由服务端下发）与连续失败几次收口 |
 | `QR_DEFAULT_MAX_UNKNOWN_CODES` | `5` | `src/protocols/qr-login.mjs` | R22：连续几个**认不出**的 `resultCode` 就熔断成 `failed`（`unknown_result_code`）。陌生码当成功是最严重的误判，但"一直陌生"同样致命：协议真变了时它会 2 秒一次打到总期限，用户全程停在等待态、日志里什么都没有 |
-| `QR_LOCAL_EXPIRY_GRACE_MS` | `15_000` | `src/protocols/qr-login.mjs` | R22：本地到期兜底的宽限。到期锚（= 建单响应落地时刻 + 服务端 TTL）过了它、服务端还是**什么都没说**（pending/缺省/陌生码/请求失败）→ 本地主动转 `expired`（服务端给出 `expired`/`scanned`/`confirmed` 时让位）。它同时是渲染层「正在确认过期…」那一档的**上界** |
+| `QR_LOCAL_EXPIRY_GRACE_MS` | `3_000` | `src/protocols/qr-login.mjs` | R22 立（15 秒）、**R26 收窄到 3 秒**：本地到期兜底的宽限。R26 起落点从"轮询落地"改成**建单/刷新时挂的一次性定时器**（延迟 = 服务端 TTL + 宽限），到点时服务端还是**什么都没说** → 本地主动转 `expired`（服务端给出 `expired`/`scanned`/`confirmed` 时让位）。它同时是渲染层「正在确认过期…」那一档的**上界**：归零之后最多 3 秒必有出口 |
+| `LOGIN_THEME_PARAM` | `"themeName"` | `src-tauri/src/login.rs` | R26：官方登录页认的主题查询参数（CAS 门户页按它选 `index-<theme>.css`）。probe 实测见 §1.7 的 R26 段 |
+| `LOGIN_THEME_NAME_DARK` | `"dark"` | `src-tauri/src/login.rs` | R26：深色档挂上去的值。**实测边界**：桌面 UA 下服务端只放 {red, huawei, blue, lightred}，`dark` 会被回落成 `red`（浅色）——这条通路今天拿不到深色页面（登记在 `KNOWN_LIMITATIONS.md` B18）。浅色档**不动这个参数**（服务端桌面默认就是浅色，显式换一套浅色是没人要过的变更） |
 | `QR_TTL_DIFF` / `QR_TTL_LEGACY`（内部两条路，不是导出常量） | `expiredTime − qrCodeCreateTime` / `expiredTime − now()` | `src/protocols/qr-login.mjs` 的 `resolveExpiresInMs` | R22：有效期换算。两条都是**服务端值**相减时免疫本地时钟偏差；`qrCodeCreateTime` 缺失/非法才回退老公式——**已知偏差风险**：本地钟快 1 小时，倒计时就早归零 1 小时（用户看到的是"卡在正在确认过期…"）。两值矛盾或 `expiredTime` 不可信 → `null`（不猜，界面少一行倒计时） |
 | `MAX_URL_LOG_CHARS` | `160` | `src-tauri/src/login.rs` | R16：登录窗导航/加载日志里 URL 的截断上限（查询值一律不进日志） |
 | `HUAWEI_MUSIC_LOGINEX_ENDPOINT` | `https://api-drcn.music.dbankcloud.cn/music-odpapp-service/v5/service/userinfo/loginex` | `src/main/music-session.mjs`（默认值经 `auth-manager.ts` 的 `HUAWEI_OAUTH_ENDPOINTS.loginex` 注入） | R17：音乐会话兑换端点（证据分级见 §1.5.1）。协议层 `auth.mjs`/`music.mjs` 仍只收注入；`test/auth-manager.test.mjs` 拿本文件反查这串字面量 |
@@ -1203,3 +1243,25 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
   新增 theme.rs 6 条 / login.rs 4 条 / commands.rs 3 条 / lib.rs 2 条）；
   node 674 → **689 / 0 fail**（新增 `test/login-chrome.test.mjs` 11 条 + 各处同步）；
   tsc 0 错、vite 三入口构建通过、acceptance 6/0/0。真机复验项见 `KNOWN_LIMITATIONS.md` B17。
+- 2026-10-20（Task R26）：**用户四项（真机反馈）**——①+② 官方登录页跟随应用主题（深色）；
+  ③ 二维码倒计时到 0 之后「正在确认过期…」等太久；④ 过期态状态行不再复述遮罩那两行。
+  四项都**先写失败测试再修**，证据与选型如下：
+  1. **①+② 官方页主题**：先 probe 实测（结论见 §1.7 的 R26 段：`themeName` 由**服务端**
+     `getBaseSwitchInfo` 按 UA 裁决，桌面 UA 只放 {red,huawei,blue,lightred}，`dark` 一律回落
+     `red`；系统深色还会被 CSS 强制白底）。按**用户裁决**只做机制、不伪装 UA：
+     `login.rs` 新增 `LOGIN_THEME_PARAM`/`LOGIN_THEME_NAME_DARK`/`login_theme_name`/
+     `with_theme_name`/`theme_reload_target`/`effective_login_theme`/`system_is_dark`/
+     `reapply_login_theme`；`open_login` 打开时挂参数，`theme::set_theme` 改完重载已开着的页面
+     （另起线程，值没变/白名单外都不重载）。**今天的结果如实登记为"看不到深色官方页"**（B18）；
+  2. **③ 过期出口**：`QR_LOCAL_EXPIRY_GRACE_MS` 15_000 → **3_000**，兜底落点从"轮询落地"
+     改成**建单/刷新时挂的一次性定时器**（`armLocalExpiry`，延迟 = TTL + 宽限）——归零之后
+     最长等的不再是"一整轮轮询（实探往返约 8 秒）"，而是 3 秒；轮询落地点保留成第二张网，
+     服务端一律优先（`scanned` 到达时那张网直接撤掉）；
+  3. **④ 过期态状态行**：`QR_EXPIRED_NOTICE` **删除**，`loginGateStatusLine` 在 `expired` 档返回
+     `null`，`login-gate.tsx` 把那一行**整行隐掉**（不渲染空话）——二维码遮罩那两行成为唯一提示载体；
+  4. **测试基线的环境注记**：任务简报写的 `cargo 211/0/1` 是 **R25 之前**的旧基线。本轮**实测**：
+     HEAD（R25 之后）= **229 pass + 1 ignored**（lib 206 + login_policy 19 + 另一目标 4，与 R25 报告
+     逐字一致），本轮 = **235 pass + 1 ignored**（lib 206 → 212，新增 login.rs 5 条 / theme.rs 1 条）。
+     量法：把 HEAD 的两个源文件临时换回 `src-tauri/src/`（`git show` 只读），跑完再换回来。
+  测试：cargo **235 pass + 1 ignored**、node 689 → **695 / 0 fail**（qr-login +6、登录门禁若干断言改写）、
+  tsc 0 错、vite 三入口构建通过、acceptance 6/0/0。真机复验项见 `KNOWN_LIMITATIONS.md` B18。

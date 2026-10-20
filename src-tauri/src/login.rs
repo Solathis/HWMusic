@@ -57,6 +57,7 @@ use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
 use tauri::{AppHandle, Manager, Webview, WebviewUrl};
 
 use crate::bridge::{CoreError, CoreShared, Effect, APP_NOTICE};
+use crate::theme::ThemeChoice;
 use crate::{MAIN_WINDOW_LABEL, WebviewDataRoot};
 
 /// 登录页那个 **webview** 的 label（R23 起：它是主窗的子 webview，不再是窗口）。
@@ -370,6 +371,81 @@ pub fn partition_is_safe(partition: &str) -> bool {
 /// 收场即删；下次登录换一个 partition，天然隔离。
 pub fn login_data_dir(data_root: &Path, partition: &str) -> PathBuf {
     data_root.join("webview2").join("login").join(partition)
+}
+
+// ---------------------------------------------------------------------------
+// 官方登录页的主题（纯函数 + 一次重载；R26 用户四项之 1+2）
+// ---------------------------------------------------------------------------
+
+/// 官方登录页认的那个查询参数名（CAS 门户页按它挑主题 CSS）。
+///
+/// probe 实测（可复现证据登记在 `docs/API_CONTRACT.md` §1.7 的 R26 段）：
+/// 页面加载的第一个脚本会 `_utils.getThemeFilePath(flowFilePath, null)`，值取自
+/// `themeName || _hwidFrontEndConfig.themeName || getUrlParam("themeName")`，最终选
+/// `.../vuebuild/css/login/portal/index-<theme>[-small].css`。
+pub const LOGIN_THEME_PARAM: &str = "themeName";
+
+/// 深色档要挂上去的值（CAS 的主题名之一，对应 `index-dark.css`）。
+///
+/// **实测边界（R26，如实登记）**：桌面 UA 下服务端只放 {red, huawei, blue, lightred}
+/// ——页面加载时会同步 POST `common/getBaseSwitchInfo` 并把**服务端回的那一份**盖到本地配置上，
+/// 而它对 `dark`/`harmonydark` 一律回落成 `red`（浅色）。所以挂上这个值**今天拿不到深色页面**；
+/// 但它是唯一一条官方页主题通路，服务端哪天对桌面 UA 放开，这里一个字都不用改。
+/// 真机可验收项与结论见 `docs/KNOWN_LIMITATIONS.md` B18。
+pub const LOGIN_THEME_NAME_DARK: &str = "dark";
+
+/// 应用主题三态 → 登录页 URL 上的 `themeName`（`None` = **不动这个参数**）。
+///
+/// | 档位 | 值 | 为什么 |
+/// |---|---|---|
+/// | `light` | `None` | 服务端桌面默认就是浅色（实探 `themeName=red`）。显式写 `huawei`/`blue` 会把用户**现在**看到的观感换成另一套浅色——那是没人要过的变更 |
+/// | `dark` | `Some("dark")` | 唯一一处"我们比服务端默认更想要深色"的地方 |
+/// | `system` | 系统深色 → `Some("dark")`；否则 `None` | 打开登录页时取一次系统读数（不做实时监听，见任务简报的范围外说明） |
+pub fn login_theme_name(choice: ThemeChoice, system_dark: bool) -> Option<&'static str> {
+    match choice {
+        ThemeChoice::Dark => Some(LOGIN_THEME_NAME_DARK),
+        ThemeChoice::System if system_dark => Some(LOGIN_THEME_NAME_DARK),
+        ThemeChoice::Light | ThemeChoice::System => None,
+    }
+}
+
+/// 把 `themeName` 挂到一条 URL 上（已存在就**替换**，绝不留两个同名参数）。
+///
+/// `None` = 这条 URL 解析不了（调用方原样用，不硬拼一个字符串——那会把一条能开的登录页
+/// 弄成一条开不了的东西）。
+pub fn with_theme_name(url: &str, theme_name: &str) -> Option<String> {
+    let mut parsed = tauri::Url::parse(url).ok()?;
+    let others: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(name, _)| name != LOGIN_THEME_PARAM)
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect();
+    {
+        let mut query = parsed.query_pairs_mut();
+        query.clear();
+        for (name, value) in &others {
+            query.append_pair(name, value);
+        }
+        query.append_pair(LOGIN_THEME_PARAM, theme_name);
+    }
+    Some(parsed.to_string())
+}
+
+/// 主题变了之后该把登录页导航到哪（`None` = 什么都不做）。
+///
+/// 三道闸门：
+/// 1. `desired` 是 `None`（浅色档：不动这个参数）→ 不做；
+/// 2. 目标与当前 URL **一模一样** → 不做（值没变却重载一次，等于白丢用户已经输进去的东西）；
+/// 3. 目标不在导航白名单里 → 不做（导航闸门对"我们自己发起的重载"同样有效）。
+pub fn theme_reload_target(current: &str, desired: Option<&str>) -> Option<String> {
+    let target = with_theme_name(current, desired?)?;
+    if target == current {
+        return None;
+    }
+    match navigation_for(&target) {
+        Navigation::Allow => Some(target),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -709,7 +785,22 @@ pub fn open_login(
     request_id: &str,
     payload: &Value,
 ) -> Result<(), CoreError> {
-    let config = parse_config(payload)?;
+    let mut config = parse_config(payload)?;
+    // R26（用户四项之 1+2）：按**当前**主题给登录页 URL 挂上 `themeName`（深色档才挂，
+    // 浅色档不动这个参数，理由见 [`login_theme_name`]）。白名单校验在上面已经过了：
+    // 多一个查询参数不改变 origin/path，它仍然是那条能在登录页里打开的授权地址。
+    if let Some(theme_name) = effective_login_theme(app) {
+        match with_theme_name(&config.url, theme_name) {
+            Some(decorated) => {
+                log::info!(
+                    "登录页按应用主题挂上 {LOGIN_THEME_PARAM}={theme_name}（打开时取的主题；服务端桌面 UA 的主题白名单见 §1.7 R26 段）"
+                );
+                config.url = decorated;
+            }
+            // 解析不了就原样用：宁可少一个主题参数，也不能让这次登录开不起来
+            None => log::warn!("登录页 URL 解析不了，{LOGIN_THEME_PARAM} 没挂上（登录照常）"),
+        }
+    }
     let data_root = app
         .try_state::<WebviewDataRoot>()
         .map(|state| state.0.clone())
@@ -1666,6 +1757,84 @@ fn focus_login_view(app: &AppHandle) {
     }
 }
 
+/// 系统此刻是不是深色（只有 `system` 档才问这一句）。
+///
+/// 读数来自主窗（tao 在 Windows 上读的是系统"应用模式"）。**读不到就按浅色处理**：这是保守的
+/// 一侧——拿不到系统读数时不该替用户把登录页变成深色，而深色今天在桌面 UA 下本来也拿不到
+/// （见 [`LOGIN_THEME_NAME_DARK`]）。
+fn system_is_dark<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
+    match app.get_window(MAIN_WINDOW_LABEL).map(|window| window.theme()) {
+        Some(Ok(tauri::Theme::Dark)) => true,
+        Some(Ok(tauri::Theme::Light)) => false,
+        _ => {
+            log::warn!("读不到系统深浅：跟随系统这一档按浅色处理（不替用户把登录页变成深色）");
+            false
+        }
+    }
+}
+
+/// 当前**生效**的登录页主题名（`None` = 不动 `themeName`）。打开登录页与重载都走这一个入口，
+/// 两处因此不可能算出两个答案。
+fn effective_login_theme<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<&'static str> {
+    let choice = crate::theme::current_theme(app);
+    let system_dark = matches!(choice, ThemeChoice::System) && system_is_dark(app);
+    login_theme_name(choice, system_dark)
+}
+
+/// 主题改了之后，把**已经开着**的登录页导航到"同一条 URL + 新 `themeName`"（R26 用户四项之 2）。
+///
+/// 什么时候什么都不做：
+/// - 没有进行中的登录（登录页没开着）——主题只影响**下一次**打开；
+/// - 浅色档，或算出来的目标与当前 URL 一模一样（见 [`theme_reload_target`]）。
+///
+/// 为什么另起一条线程：调用方是 [`crate::theme::set_theme`]，而它由**同步**命令
+/// `core_login_chrome` 在主线程上执行；`Webview::url()` 与 `Webview::navigate()` 都要经
+/// dispatcher 回到主线程，在主线程上同步等它 = 自锁。回执不受这里影响：重载失败只是
+/// "官方页还是旧主题"，而"主题改了"这件事已经成立。
+pub fn reapply_login_theme<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let app = app.clone();
+    let spawned = std::thread::Builder::new()
+        .name("login-theme".to_string())
+        .spawn(move || {
+            let Some(state) = app.try_state::<Arc<LoginState>>() else {
+                return; // 状态没登记：登录也开不起来，这里更无事可做
+            };
+            if !state.is_active() {
+                return;
+            }
+            let Some(webview) = app.get_webview(LOGIN_WEBVIEW_LABEL) else {
+                return;
+            };
+            let current = match webview.url() {
+                Ok(url) => url,
+                Err(source) => {
+                    log::warn!("登录页主题重载：读不到当前 URL（{source}）：这次不改，登录照常");
+                    return;
+                }
+            };
+            let Some(target) = theme_reload_target(current.as_str(), effective_login_theme(&app)) else {
+                return;
+            };
+            let parsed = match tauri::Url::parse(&target) {
+                Ok(url) => url,
+                Err(source) => {
+                    log::warn!("登录页主题重载：目标 URL 解析不了（{source}）：官方页保持原样");
+                    return;
+                }
+            };
+            match webview.navigate(parsed) {
+                Ok(()) => log::info!(
+                    "登录页主题重载：导航到 {}（同一条 URL + 新 {LOGIN_THEME_PARAM}）",
+                    describe_navigation_for_log(&target)
+                ),
+                Err(source) => log::warn!("登录页主题重载失败（{source}）：官方页保持原样，登录照常"),
+            }
+        });
+    if let Err(source) = spawned {
+        log::warn!("登录页主题重载线程起不来（{source}）：官方页保持原样，主题本身已经改了");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2303,5 +2472,121 @@ mod tests {
         assert_eq!(navigation_for("https://id1.cloud.huawei.com/CAS/portal/loginAuth.html").log_label(), "allow");
         assert_eq!(navigation_for("https://evil.example.com/").log_label(), "block");
         assert_eq!(navigation_for("hms://redirect_uri?code=C").log_label(), "callback");
+    }
+
+    // -----------------------------------------------------------------------
+    // R26：官方登录页的主题（用户四项之 1+2）
+    //
+    // 用户反馈："切换深色后嵌入官方页仍是白色"。probe 实测（证据登记在
+    // docs/API_CONTRACT.md §1.7 的 R26 段）：官方页的主题 CSS 由 **URL 上的 themeName**
+    // 经 CAS 链选出来（`getThemeFilePath`：`login/portal/index-<theme>.css`），
+    // 但**服务端对桌面 UA 只放 {red, huawei, blue, lightred}**——`dark` 会被回落成 `red`。
+    // 所以这里落地的是一条**通路**（三态 → URL 参数 → 重载），而不是"今天就能变深"：
+    // 今天的结果如实登记在 KNOWN_LIMITATIONS B18。
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_login_theme_name_follows_the_three_state_choice() {
+        assert_eq!(LOGIN_THEME_PARAM, "themeName");
+        assert_eq!(LOGIN_THEME_NAME_DARK, "dark");
+
+        assert_eq!(login_theme_name(ThemeChoice::Dark, false), Some("dark"));
+        assert_eq!(login_theme_name(ThemeChoice::Dark, true), Some("dark"), "强制深色与系统深浅无关");
+        assert_eq!(
+            login_theme_name(ThemeChoice::Light, true),
+            None,
+            "浅色档**不动**这个参数：服务端桌面默认就是浅色（实探 themeName=red），显式换一套浅色是没人要过的变更"
+        );
+        assert_eq!(login_theme_name(ThemeChoice::Light, false), None);
+        assert_eq!(login_theme_name(ThemeChoice::System, true), Some("dark"), "跟随系统=深色时挂深色");
+        assert_eq!(login_theme_name(ThemeChoice::System, false), None);
+    }
+
+    #[test]
+    fn with_theme_name_replaces_the_param_and_keeps_every_other_one() {
+        let source = "https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize?response_type=code&client_id=101444301&state=S";
+        let decorated = with_theme_name(source, "dark").expect("能解析的 URL 要能挂上");
+        assert!(decorated.starts_with("https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize?"));
+        assert!(decorated.contains("themeName=dark"));
+        assert!(
+            decorated.contains("response_type=code") && decorated.contains("state=S"),
+            "其余参数一个都不许丢：{decorated}"
+        );
+
+        // 已经有 themeName（服务端自己给的那一份）：**替换**，不许出现两个
+        let replaced = with_theme_name(&decorated, "huawei").expect("替换也要能成");
+        assert_eq!(
+            replaced.matches("themeName=").count(),
+            1,
+            "只许有一个 themeName（两个的话读哪个由服务端定，不猜）：{replaced}"
+        );
+        assert!(replaced.contains("themeName=huawei"));
+
+        assert_eq!(with_theme_name("not a url", "dark"), None, "解析不了就如实说，不硬拼一个字符串");
+    }
+
+    #[test]
+    fn the_reload_target_only_exists_when_it_would_really_change_an_allowed_page() {
+        let current = "https://id1.cloud.huawei.com/CAS/portal/loginAuth.html?lang=zh-cn&themeName=red";
+        let target = theme_reload_target(current, Some("dark")).expect("red → dark 是一次真的变化");
+        assert!(target.contains("themeName=dark"));
+        assert!(navigation_for(&target) == Navigation::Allow, "重载的目标仍然要在白名单里");
+
+        assert_eq!(
+            theme_reload_target(current, Some("red")),
+            None,
+            "值没变就不重载：否则点一下主题就白刷一次页面（用户输入的东西全丢）"
+        );
+        assert_eq!(theme_reload_target(current, None), None, "浅色档不动这个参数：连重载都不需要");
+        assert_eq!(
+            theme_reload_target("https://evil.example.com/login?themeName=red", Some("dark")),
+            None,
+            "白名单外的页面绝不重载（导航闸门对重载同样有效）"
+        );
+        assert_eq!(theme_reload_target("about:blank", Some("dark")), None);
+    }
+
+    /// 打开登录页时就把主题挂上去（这是**唯一**一条官方页主题通路：URL 参数 → CAS 链 → 主题 CSS）。
+    #[test]
+    fn opening_the_login_page_puts_the_current_theme_on_the_url() {
+        let production = production_source();
+        let open = production
+            .find("pub fn open_login(")
+            .expect("open_login 是登录页的唯一入口");
+        let block = &production[open..];
+        let block = &block[..block.find("\npub fn cancel_login(").expect("cancel_login 紧随其后")];
+        assert!(
+            block.contains("effective_login_theme(") && block.contains("with_theme_name("),
+            "打开登录页时要按当前主题把 {LOGIN_THEME_PARAM} 挂到 URL 上：{block}"
+        );
+        assert!(
+            block.contains("config.url ="),
+            "挂上去的那一份 URL 才是真正被打开的那一条（不是只在日志里好看）"
+        );
+    }
+
+    /// 重载**不能**在主线程上做：`core_login_chrome` 是同步命令（主线程），而
+    /// `Webview::url()` / `navigate()` 都要经 dispatcher 回到主线程——同步等它 = 自锁。
+    #[test]
+    fn the_theme_reload_runs_off_the_main_thread() {
+        let production = production_source();
+        let reapply = production
+            .find("pub fn reapply_login_theme<")
+            .expect("重载要有具名函数");
+        let block = &production[reapply..];
+        let block = &block[..block.find("\n/// ").unwrap_or(block.len())];
+        assert!(
+            block.contains("std::thread::Builder::new()"),
+            "必须另起线程（dispatcher 往返不能在主线程上同步等）：{block}"
+        );
+        assert!(block.contains("navigate("), "重载的落点就是导航到那条新 URL");
+        assert!(
+            block.contains("effective_login_theme("),
+            "重载与打开登录页必须走同一个入口算主题名（两处各算一遍早晚会漂移）"
+        );
+        assert!(
+            block.contains("LOGIN_WEBVIEW_LABEL"),
+            "只对登录页那条 webview 生效（主窗与浮动控件不碰）"
+        );
     }
 }

@@ -22,8 +22,14 @@
  *    才回退老公式（偏差风险已知）、字段不可信或两值矛盾 → `null`（不猜）；
  * 2. **熔断**：连续 5 个认不出的 `resultCode` → `failed`（`unknown_result_code`）+ 停轮询，
  *    中间认出一个码就重新计数；
- * 3. **本地到期兜底**：到期锚 + 15 秒宽限的**边界逐个钉**（锚前不触发 / +14.999s 不触发 /
- *    +15s 触发 / 服务端先到或仍在说话时一律让位 / 没有可信 TTL 就不设锚），外加每轮诊断日志的脱敏。
+ * 3. **本地到期兜底**：到期锚 + 宽限的**边界逐个钉**（锚前不触发 / 差 1ms 不触发 /
+ *    到点触发 / 服务端先到或仍在说话时一律让位 / 没有可信 TTL 就不设锚），外加每轮诊断日志的脱敏。
+ *
+ * R26（用户真机反馈之 3：倒计时到 0 之后「正在确认过期…」要等很久才变过期）把兜底的**落点**
+ * 换了：R22 挂在**轮询落地点**上（轮询间隔 2 秒、实探一次往返 ~8 秒 + 15 秒宽限 → 最长 ~25 秒），
+ * R26 改成**建单/刷新时就挂一个一次性定时器**（到期锚 + 3 秒），到点即裁决；轮询落地点那条路
+ * 保留成第二张网；**服务端一律优先**（它说过 expired/scanned/confirmed 时这张网让位）。文件末尾
+ * 的 R26 段用"按延迟精确取用"的假计时器钉住它（与 `harness` 的"推进一步"语义分开，互不干扰）。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -152,18 +158,36 @@ function harness({ createResponses, pollResponses, intervalMs = 2000 }) {
   const scheduled = [];
   const setTimer = (fn, ms) => {
     const id = nextTimerId++;
-    timers.set(id, fn);
+    timers.set(id, { fn, delay: ms });
     scheduled.push(ms);
     return id;
   };
   const clearTimer = (id) => timers.delete(id);
-  /** 跑到下一个挂起的计时器（一次只推进一步：状态机的每一步都单独可断言）。 */
+  /**
+   * 跑到**最早到点**的那个挂起计时器（一次只推进一步：状态机的每一步都单独可断言）。
+   *
+   * 按延迟排序而不是"谁先挂上谁先跑"（R26 改）：真实时间是这么走的，而 R26 起会话里同时挂着
+   * 轮询（2 秒）与本地到期兜底（TTL + 宽限，几分钟后）两张网——按插入顺序推会让"下一步"变成
+   * 那张远未来的网，每个用例的每一步都错位。
+   */
   const tick = async () => {
-    const [id, fn] = [...timers.entries()][0] ?? [];
-    if (fn === undefined) return false;
-    timers.delete(id);
-    fn();
+    let pick = null;
+    for (const [id, entry] of timers) {
+      if (pick === null || entry.delay < pick.entry.delay) pick = { id, entry };
+    }
+    if (pick === null) return false;
+    timers.delete(pick.id);
+    pick.entry.fn();
     // 被测代码是一串 await（fetch → text → 事件 → 排下一次轮询）：把微任务队列抽干再断言
+    for (let round = 0; round < 12; round += 1) await Promise.resolve();
+    return true;
+  };
+  /** 按**延迟**精确跑一个挂起的计时器（专给"远未来"的那张网：总期限 / 本地到期）。 */
+  const fireDelay = async (ms) => {
+    const found = [...timers.entries()].find(([, entry]) => entry.delay === ms);
+    assert.ok(found !== undefined, `没有延迟为 ${ms} 的挂起计时器：${JSON.stringify([...timers.values()].map((e) => e.delay))}`);
+    timers.delete(found[0]);
+    found[1].fn();
     for (let round = 0; round < 12; round += 1) await Promise.resolve();
     return true;
   };
@@ -185,7 +209,7 @@ function harness({ createResponses, pollResponses, intervalMs = 2000 }) {
   };
 
   const events = [];
-  return { setTimer, clearTimer, tick, fetchImpl, calls, events, intervalMs, scheduled };
+  return { setTimer, clearTimer, tick, fireDelay, fetchImpl, calls, events, intervalMs, scheduled };
 }
 
 test("会话：start 建单 → 广播 pending（带二维码内容）→ 轮询到已扫/已确认各广播一次", async () => {
@@ -409,7 +433,7 @@ test("会话：总期限到了就收口成 failed（二维码会自动续期，�
 
   await session.start();
   assert.equal(world.scheduled.includes(10 * 60_000), true, "总期限要真的排上（否则过期重建会让它永远跑下去）");
-  await world.tick(); // 第一个挂起的计时器就是总期限
+  await world.fireDelay(10 * 60_000); // 总期限到点（按延迟精确取用：轮询那张 2 秒的更早，不该替它先跑）
 
   assert.equal(world.events.at(-1).status, QR_LOGIN_STATUS.failed);
   assert.match(world.events.at(-1).message, /超时/);
@@ -718,9 +742,9 @@ function expiryWorld({ pollResponses, ttlMs = 181_000, startMs = 1_700_000_000_0
   };
 }
 
-test("R22 兜底：服务端一直说 pending，本地到期锚 + 15s 宽限到点 → 主动转 expired 并停轮询", async () => {
+test("R22 兜底：服务端一直说 pending，本地到期锚 + 宽限到点 → 主动转 expired 并停轮询", async () => {
   const at = expiryWorld({ pollResponses: [{ body: { resultCode: "103000200", errorDesc: "Please to login." } }] });
-  assert.equal(QR_LOCAL_EXPIRY_GRACE_MS, 15_000, "宽限是契约值：15 秒");
+  assert.equal(QR_LOCAL_EXPIRY_GRACE_MS, 3_000, "宽限是契约值（R26 起 3 秒：R22 那 15 秒是在替「轮询落地点」那条路补时间，现在由一次性定时器顶上）");
   await at.session.start();
 
   // 到期锚**之前**：本地不许抢跑（服务端还没说过期，码也许还能扫）
@@ -913,4 +937,187 @@ test("R22 诊断：熔断那一刻留下一条说明（为什么停）", async (
     1,
     "熔断是一条一次性说明，不是每轮都喊",
   );
+});
+
+// ---------------------------------------------------------------------------
+// R26 · 用户真机反馈之 3：过期出口太慢（兜底改挂一次性定时器）
+//
+// RED（用户真机）：倒计时数到 0 之后「正在确认过期…」要等**很久**才变过期。根因是落点：
+// R22 的兜底只在**轮询落地**那一步检查（轮询间隔 2 秒、实探一次往返 ~8 秒），再叠 15 秒宽限
+// → 最长 ~25 秒。R26 改成"建单/刷新时就把那个时刻**排进计时器**"（到期锚 + 3 秒），到点即裁决，
+// 与轮询在不在飞、飞多久都无关；轮询落地点仍是第二张网；服务端一律优先。
+//
+// 为什么单独一套假计时器：`harness.tick()` 是"推进一步"的顺序语义（第一个挂上的先跑），
+// 多挂一个远未来的计时器会把既有用例的每一步都错位；R26 要断言的是**延迟本身**与
+// "到点那一刻发生了什么"，所以这里按延迟精确取用。
+// ---------------------------------------------------------------------------
+
+/**
+ * R26 到期定时器专用假世界：`setTimer` 把 `(fn, 延迟)` 都记下来，测试可以按延迟精确触发。
+ *
+ * @param {{ttlMs?: number, startMs?: number, createOverrides?: object,
+ *          pollResponses?: Array<object|Error>}} [options]
+ */
+function expiryTimerWorld({
+  ttlMs = 181_000,
+  startMs = 1_700_000_000_000,
+  createOverrides = {},
+  pollResponses = [{ body: { resultCode: "103000200", errorDesc: "Please to login." } }],
+} = {}) {
+  const pending = new Map();
+  let nextId = 1;
+  let clock = startMs;
+  let pollRound = 0;
+  const events = [];
+  const logs = [];
+
+  const setTimer = (fn, delay) => {
+    const id = nextId++;
+    pending.set(id, { delay, fn });
+    return id;
+  };
+  const clearTimer = (id) => {
+    pending.delete(id);
+  };
+  const fetchImpl = async (url) => {
+    if (String(url).includes("getqrInfo")) {
+      const body = createPayload({ qrCodeCreateTime: startMs, expiredTime: startMs + ttlMs, ...createOverrides });
+      return { ok: true, status: 200, async text() { return JSON.stringify(body); } };
+    }
+    const next = pollResponses.length > 1 ? pollResponses[Math.min(pollRound++, pollResponses.length - 1)] : pollResponses[0];
+    if (next instanceof Error) throw next;
+    return { ok: true, status: 200, async text() { return JSON.stringify(next.body ?? {}); } };
+  };
+
+  const session = createQrSession({
+    createUrl: CREATE_URL,
+    pollUrl: POLL_URL,
+    intervalMs: 2_000,
+    fetchImpl,
+    now: () => clock,
+    setTimer,
+    clearTimer,
+    onEvent: (event) => events.push(event),
+    log: (message) => logs.push(message),
+  });
+
+  const world = {
+    session,
+    events,
+    logs,
+    /** 本地到期锚 = 建单响应落地那一刻的本地钟 + 服务端 TTL。 */
+    anchor: () => startMs + ttlMs,
+    at: (value) => {
+      clock = value;
+    },
+    /** 挂起的计时器（延迟列表，升序）。 */
+    timers: () => [...pending.values()].map((entry) => entry.delay).sort((left, right) => left - right),
+    /** 按延迟精确触发一个挂起的计时器（轮询那张 = 2000；到期那张 = TTL + 宽限）。 */
+    async fire(delay) {
+      const found = [...pending.entries()].find(([, entry]) => entry.delay === delay);
+      assert.ok(found !== undefined, `没有延迟为 ${delay} 的挂起计时器：${JSON.stringify(world.timers())}`);
+      pending.delete(found[0]);
+      found[1].fn();
+      for (let round = 0; round < 12; round += 1) await Promise.resolve();
+      return true;
+    },
+    /** 走一轮轮询（轮询那张计时器到点）。 */
+    poll: () => world.fire(2_000),
+  };
+  return world;
+}
+
+test("R26 宽限：契约值 3 秒，且建单落地就挂上一次性到期定时器（延迟 = 服务端 TTL + 宽限）", async () => {
+  const at = expiryTimerWorld();
+  await at.session.start();
+
+  assert.equal(QR_LOCAL_EXPIRY_GRACE_MS, 3_000, "宽限是契约值：3 秒");
+  assert.deepEqual(
+    at.timers(),
+    [2_000, 181_000 + QR_LOCAL_EXPIRY_GRACE_MS],
+    "两个计时器各就各位：轮询那张 2 秒、到期那张一次性（TTL + 宽限）",
+  );
+});
+
+test("R26 出口：时钟跨过 到期锚 + 宽限 之后，**不依赖任何轮询落地**就转过期", async () => {
+  const at = expiryTimerWorld();
+  await at.session.start();
+
+  // 只推钟 + 让那张一次性到期计时器到点：一次轮询都不发生（真机上轮询可能有 8 秒往返在飞）
+  at.at(at.anchor() + QR_LOCAL_EXPIRY_GRACE_MS);
+  await at.fire(181_000 + QR_LOCAL_EXPIRY_GRACE_MS);
+
+  assert.equal(at.session.status(), QR_LOGIN_STATUS.expired, "到点即裁决：出口不再等下一次轮询落地");
+  assert.equal(at.session.isRunning(), false);
+  assert.deepEqual(
+    at.events.map((event) => event.status),
+    [QR_LOGIN_STATUS.pending, QR_LOGIN_STATUS.expired],
+    "expired 是终点档：这条路也只播这一条",
+  );
+  assert.deepEqual(at.timers(), [], "裁决之后一个挂起的计时器都不剩（轮询那张一起清）");
+  assert.equal(
+    at.logs.some((line) => line.includes("本地到期")),
+    true,
+    "本地裁决要留痕：日志里看得出这次 expired 不是服务端说的",
+  );
+});
+
+test("R26 边界：还没到 到期锚 + 宽限 就到点的定时器**不判死**（码也许还能扫）", async () => {
+  const at = expiryTimerWorld();
+  await at.session.start();
+
+  at.at(at.anchor() + QR_LOCAL_EXPIRY_GRACE_MS - 1);
+  await at.fire(181_000 + QR_LOCAL_EXPIRY_GRACE_MS);
+
+  assert.equal(at.session.status(), QR_LOGIN_STATUS.pending, "本地钟不是权威：没到线就不许把会话判死");
+  assert.equal(at.session.isRunning(), true);
+  assert.equal(at.logs.some((line) => line.includes("本地到期")), false);
+});
+
+test("R26 服务端优先：服务端说过 expired / scanned / confirmed 时，本地那张网让位", async () => {
+  // 服务端自己说过期：本地兜底那条路根本不该被走到
+  const server = expiryTimerWorld({ pollResponses: [{ body: { resultCode: "103000201" } }] });
+  await server.session.start();
+  await server.poll();
+  assert.equal(server.session.status(), QR_LOGIN_STATUS.expired);
+  assert.deepEqual(server.timers(), [], "服务端收口：到期那张一次性计时器一起清掉");
+  assert.equal(server.logs.some((line) => line.includes("本地到期")), false, "服务端先到，本地不抢");
+
+  // 服务端说"已扫码"：会话还活着（用户手机上那句话还没按），本地不许判死，且撤掉这张网
+  const scanned = expiryTimerWorld({ pollResponses: [{ body: { resultCode: "103000202" } }] });
+  await scanned.session.start();
+  await scanned.poll();
+  assert.equal(scanned.session.status(), QR_LOGIN_STATUS.scanned);
+  assert.equal(scanned.session.isRunning(), true);
+  assert.deepEqual(scanned.timers(), [2_000], "scanned 之后只剩轮询那张：本地到期网撤掉（服务端是权威）");
+
+  // 服务端说"已确认"：整场收口，一次成功的登录绝不能被本地打回过期
+  const confirmed = expiryTimerWorld({ pollResponses: [{ body: { resultCode: "0", code: "c" } }] });
+  await confirmed.session.start();
+  await confirmed.poll();
+  assert.equal(confirmed.session.status(), QR_LOGIN_STATUS.confirmed);
+  assert.deepEqual(confirmed.timers(), []);
+});
+
+test("R26 不猜：建单没给出可信 TTL 时不挂到期定时器（没有本地权威就没有本地裁决）", async () => {
+  const at = expiryTimerWorld({ createOverrides: { expiredTime: "soon" } });
+  await at.session.start();
+
+  assert.deepEqual(at.timers(), [2_000], "只有轮询那张：一个到期计时器都不许挂");
+  at.at(at.anchor() + 3_600_000);
+  assert.equal(at.session.status(), QR_LOGIN_STATUS.pending);
+  assert.equal(at.session.isRunning(), true);
+});
+
+test("R26 收尾：cancel / 新建会话之后到期定时器不残留（不留下一条会改判的死计时器）", async () => {
+  const at = expiryTimerWorld();
+  await at.session.start();
+  assert.equal(at.timers().includes(181_000 + QR_LOCAL_EXPIRY_GRACE_MS), true, "先确认它真的挂着");
+
+  at.session.cancel();
+  assert.deepEqual(at.timers(), [], "取消之后一个挂起的计时器都不剩");
+
+  // 再建一次（手动刷新的语义）：新会话重新挂一张，旧的那张不许复活
+  await at.session.start();
+  assert.deepEqual(at.timers(), [2_000, 181_000 + QR_LOCAL_EXPIRY_GRACE_MS]);
 });

@@ -419,9 +419,14 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
         )}
 
         <p className="max-w-xs text-center text-sm text-muted-foreground">{QR_HINT_TEXT}</p>
-        <p className="text-center text-sm text-muted-foreground" role="status">
-          {status}
-        </p>
+        {/* 状态行：`null` 的那一档（R26：二维码过期）**整行不渲染**——遮罩上那两行已经是全部提示，
+            再复述一遍等于同一句话说两次，还会把用户的选择挤下去。空着的那一行不是"留白"，是
+            白白多占一个 gap-3 的间距（所以是隐掉整行，不是渲染一句空话）。 */}
+        {status === null ? null : (
+          <p className="text-center text-sm text-muted-foreground" role="status">
+            {status}
+          </p>
+        )}
 
         {canRetryQr(state) ? (
           <Button variant="secondary" size="sm" onClick={startQr}>
