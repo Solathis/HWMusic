@@ -31,6 +31,14 @@
  *   不许把界面上那张新码顶掉（协议层另有一道 `running` 复检，见 src/protocols/qr-login.mjs）；
  * - 换码链读的是**当前**那张的 `qrCode`（`session.current()`），不是建单时的一份快照——
  *   过期自动换新之后，旧 qrCode 已经作废。
+ *
+ * R22 增补（用户真机反馈两项：① 倒计时到 0 后卡在「正在确认过期…」一直不过期；② 过期时间正确性）：
+ * 三处修法都落在**协议层**（`src/protocols/qr-login.mjs`），本端口只负责把它们接上真端点：
+ * - TTL 由两个服务端值相减（`expiredTime − qrCodeCreateTime`），本地钟偏多少都不会平移倒计时；
+ * - 本地到期锚 + 15 秒宽限兜底、连续陌生 `resultCode` 熔断——界面那档「正在确认过期…」必有出口；
+ * - 轮询每轮一行脱敏 `resultCode` 诊断日志，落点是本端口注入的 `log`
+ *   （sidecar 默认 `console.error` → **stderr**，见 `src/main/auth-manager.ts` 的 `defaultLog`）。
+ * 所以这个 `log` 参数不是可选的装饰：真机再报"卡住"时，它是唯一的现场记录。
  */
 import { LOGIN_TIMEOUT_MS } from "../protocols/login-callback.mjs";
 import { QR_LOGIN_STATUS, createQrSession } from "../protocols/qr-login.mjs";

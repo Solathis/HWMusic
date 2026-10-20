@@ -126,7 +126,12 @@ function timers() {
   };
 }
 
-function build({ pageInfo = PAGE_INFO, confirm = { isSuccess: "1", callbackURL: "hms://redirect_uri?code=CODE&state=STATE" } } = {}) {
+function build({
+  pageInfo = PAGE_INFO,
+  confirm = { isSuccess: "1", callbackURL: "hms://redirect_uri?code=CODE&state=STATE" },
+  now = () => 1_700_000_000_000,
+  log = () => undefined,
+} = {}) {
   const clock = timers();
   const world = makeFetch({ pageInfo, confirm });
   const events = [];
@@ -135,9 +140,9 @@ function build({ pageInfo = PAGE_INFO, confirm = { isSuccess: "1", callbackURL: 
     fetchImpl: world.fetchImpl,
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
-    now: () => 1_700_000_000_000,
+    now,
     random: () => 0.5,
-    log: () => undefined,
+    log,
     // 总期限关掉：本文件要手动推进"下一次轮询"，总期限计时器会插在队列最前面
     timeoutMs: null,
   });
@@ -472,4 +477,49 @@ test("端口：过期不再自动换新（只播 expired、停轮询）；用户
     "R2",
     "带的是**手动刷新之后**那张的 qrCode（旧那张已经作废）",
   );
+});
+
+// ---------------------------------------------------------------------------
+// R22（用户真机反馈两项）：端口这一层要证明"渲染层拿到的那个数是对的"
+// ---------------------------------------------------------------------------
+
+test("端口（R22）：本地钟快 1 小时，交回渲染层的 expiresInMs 仍是服务端 TTL（倒计时不被平移）", async () => {
+  // 建单响应给的是服务端纪元：建单 1_700_000_000_000、到期 +181s（两个字段都在）
+  const localSkew = 3_600_000;
+  const { port, events, clock } = build({ now: () => CREATE_PAYLOAD.qrCodeCreateTime + localSkew });
+
+  const started = await port.start({
+    authorizeUrl: AUTHORIZE_URL,
+    onEvent: (event) => events.push(event),
+    onConfirmed: () => undefined,
+  });
+
+  assert.equal(
+    started.data.expiresInMs,
+    181_000,
+    "本地钟偏 1 小时不影响有效期（老公式在这里会算出 0 → 倒计时一上来就归零）",
+  );
+  assert.equal(events[0].expiresInMs, 181_000, "广播给渲染层的也是同一个数（两侧一个真源）");
+  port.cancel();
+  assert.equal(clock.size(), 0);
+});
+
+test("端口（R22）：轮询诊断日志经端口落到注入的 log（stderr）——只有轮次与状态码", async () => {
+  const logs = [];
+  const { port, clock } = build({ log: (message) => logs.push(message) });
+
+  await port.start({
+    authorizeUrl: AUTHORIZE_URL,
+    onEvent: () => undefined,
+    onConfirmed: () => undefined,
+  });
+  await clock.tick(); // 未扫（103000200）
+  await clock.tick(); // 已确认（0）
+
+  const rounds = logs.filter((line) => line.includes("轮询 #"));
+  assert.equal(rounds.length, 2, "每轮一行：两侧（协议层与端口注入的 log）确实是同一条通路");
+  assert.match(rounds[0], /#1/);
+  assert.match(rounds[0], /resultCode=103000200/);
+  assert.match(rounds.at(-1), /resultCode=0/);
+  assert.equal(logs.join("\n").includes(CREATE_PAYLOAD.qrToken), false, "日志不带 qrToken（会话令牌只在进程内用）");
 });

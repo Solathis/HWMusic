@@ -15,12 +15,23 @@
  *    广播——停轮询、不建新单，换新只能由用户手动触发（渲染层再发一次 `auth:qr-start`，
  *    端口本来就是 restart 语义）。原来的理由是"渲染层什么都做不了"，但那样用户会看到码
  *    在眼皮底下自己换掉、却不知道自己该做什么；现在过期态明确停住并请用户点刷新。
+ *
+ * R22（用户真机反馈两项：① 倒计时到 0 后卡在「正在确认过期…」一直不过期；② 过期时间正确性）
+ * 增补三组断言，都写在文件末尾：
+ * 1. **TTL 无偏差换算**：两个服务端值相减（本地钟偏多少都不平移倒计时）、缺 `qrCodeCreateTime`
+ *    才回退老公式（偏差风险已知）、字段不可信或两值矛盾 → `null`（不猜）；
+ * 2. **熔断**：连续 5 个认不出的 `resultCode` → `failed`（`unknown_result_code`）+ 停轮询，
+ *    中间认出一个码就重新计数；
+ * 3. **本地到期兜底**：到期锚 + 15 秒宽限的**边界逐个钉**（锚前不触发 / +14.999s 不触发 /
+ *    +15s 触发 / 服务端先到或仍在说话时一律让位 / 没有可信 TTL 就不设锚），外加每轮诊断日志的脱敏。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  QR_DEFAULT_MAX_UNKNOWN_CODES,
   QR_ERROR_KINDS,
+  QR_LOCAL_EXPIRY_GRACE_MS,
   QR_LOGIN_STATUS,
   QR_RESULT_CODES,
   buildQrCreateBody,
@@ -87,7 +98,7 @@ test("建单解析：content/qrToken 齐备才算成功，有效期由 expiredTi
   assert.equal(parsed.ok, true);
   assert.equal(parsed.data.content.endsWith("qRCode=PROBE&loginChannel=7000700&reqClientType=700"), true);
   assert.equal(parsed.data.qrToken, "0123456789abcdef0123456789abcdef");
-  assert.equal(parsed.data.expiresInMs, 181_000, "有效期 = expiredTime - 建单时刻");
+  assert.equal(parsed.data.expiresInMs, 181_000, "有效期 = expiredTime − qrCodeCreateTime（R22 起走双服务端值；本夹具两值之差恰为 181s）");
   assert.equal(parsed.data.qrCode, "PROBE-QR-CODE");
 });
 
@@ -504,4 +515,402 @@ test("会话：过期之后手动刷新，current() 报的是新那张（换码�
   await session.start(); // 用户手动刷新
   assert.match(session.current().content, /qRCode=NEW/);
   assert.equal(session.current().qrCode, "R-NEW", "换新之后当前那张是新码：拿旧 qrCode 去换码只会换回一次失败");
+});
+
+// ---------------------------------------------------------------------------
+// R22（用户真机反馈两项）· A：TTL 无偏差换算
+//
+// 老公式 `expiredTime − 本地 now()` 把**两个时钟**相减，本地钟偏多少、倒计时就平移多少
+// （RED 实测：本地钟快 1 小时 → `expiresInMs` 直接 0，倒计时一上来就归零；慢 1 小时 →
+// 63 分钟）。R22 改成两个**都是服务端值**的字段相减：`expiredTime − qrCodeCreateTime`。
+// ---------------------------------------------------------------------------
+
+test("R22 建单解析：有效期取两个服务端值之差——本地钟偏多少都不平移倒计时", () => {
+  const server = 1_700_000_000_000;
+  const payload = createPayload({ qrCodeCreateTime: server, expiredTime: server + 181_000 });
+  // 0 = 对表；±1 分钟 = 小偏差；±1 小时 / +1 天 = 真机上见得到的偏差档
+  for (const skew of [0, 60_000, -60_000, 3_600_000, -3_600_000, 86_400_000]) {
+    const parsed = parseQrCreate(payload, { now: () => server + skew });
+    assert.equal(parsed.ok, true);
+    assert.equal(
+      parsed.data.expiresInMs,
+      181_000,
+      `本地钟偏 ${skew}ms 不该改变有效期（老公式在这里会给出 181000 - ${skew}，还可能直接 ≤ 0）`,
+    );
+  }
+});
+
+test("R22 建单解析：qrCodeCreateTime 缺失/非法 → 回退 expiredTime − now()（偏差风险写在源码注释里）", () => {
+  const server = 1_700_000_000_000;
+  for (const broken of [undefined, null, "", "soon", 0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const parsed = parseQrCreate(createPayload({ qrCodeCreateTime: broken }), { now: () => server });
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.data.expiresInMs, 181_000, `回退路径要真的给出有效期：qrCodeCreateTime=${String(broken)}`);
+  }
+  // 回退路径**确实**以本地钟为基准（这正是它的代价：钟偏多少，倒计时平移多少）
+  const skewed = parseQrCreate(createPayload({ qrCodeCreateTime: undefined }), { now: () => server + 60_000 });
+  assert.equal(skewed.data.expiresInMs, 121_000, "缺 createTime 时只能拿本地 now() 当基准（已知偏差风险，不是意外）");
+});
+
+test("R22 建单解析：字段不可信/互相矛盾一律 null（不猜一个 TTL 出来）", () => {
+  const server = 1_700_000_000_000;
+  for (const broken of [undefined, null, "", "soon", 0, -1]) {
+    const parsed = parseQrCreate(createPayload({ expiredTime: broken }), { now: () => server });
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.data.expiresInMs, null, `expiredTime=${String(broken)} 时不许编造有效期`);
+  }
+  // 两个服务端值互相矛盾（到期不晚于建单）：宁可没有倒计时，也不猜一个数出来
+  for (const expiredTime of [server, server - 1_000]) {
+    const parsed = parseQrCreate(createPayload({ qrCodeCreateTime: server, expiredTime }), { now: () => server });
+    assert.equal(parsed.data.expiresInMs, null, "矛盾的一对服务端值不猜");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// R22 · B1：未知 resultCode 熔断
+//
+// RED 实测：连着 5 个陌生码，会话仍在轮询（`isRunning: true`）。协议真要变了，
+// 这条会话会一直 2 秒一次打到总期限，用户全程看着一张不会变的界面。
+// ---------------------------------------------------------------------------
+
+test("R22 熔断：连续 5 个不认识的 resultCode → failed 带 unknownResultCode 并停轮询", async () => {
+  const world = harness({
+    createResponses: [{ body: createPayload() }],
+    pollResponses: [{ body: { resultCode: "103009999", errorDesc: "?" } }],
+  });
+  const session = createQrSession({
+    createUrl: CREATE_URL,
+    pollUrl: POLL_URL,
+    intervalMs: world.intervalMs,
+    fetchImpl: world.fetchImpl,
+    now: () => 1_700_000_000_000,
+    setTimer: world.setTimer,
+    clearTimer: world.clearTimer,
+    onEvent: (event) => world.events.push(event),
+  });
+
+  await session.start();
+  assert.equal(QR_DEFAULT_MAX_UNKNOWN_CODES, 5, "熔断阈值是契约值：连续 5 个陌生码");
+  for (let round = 1; round <= QR_DEFAULT_MAX_UNKNOWN_CODES - 1; round += 1) {
+    await world.tick();
+    assert.equal(session.isRunning(), true, `还只见到 ${round} 个陌生码：给协议变更留出余量，不许急着判死`);
+  }
+
+  await world.tick(); // 第 5 个
+  const last = world.events.at(-1);
+  assert.equal(last.status, QR_LOGIN_STATUS.failed, "连续陌生码是一条终点：不能无限轮询下去");
+  assert.equal(last.errorKind, QR_ERROR_KINDS.unknownResultCode, "失败类别要说清是「认不出的码」");
+  assert.match(last.message, /103009999/, "把那颗陌生的码带进文案（排查协议变更的第一手线索）");
+  assert.equal(session.isRunning(), false);
+  assert.equal(await world.tick(), false, "熔断之后不再安排轮询");
+  assert.equal(
+    world.calls.filter((call) => call.url.includes("DimensionalCode/async")).length,
+    QR_DEFAULT_MAX_UNKNOWN_CODES,
+    "整整 5 次请求：熔断判据是「连续」，不是提前收口",
+  );
+});
+
+test("R22 熔断：中间认出一个码就重新计数（陌生的码不跨档累计）", async () => {
+  const unknown = { body: { resultCode: "103009999" } };
+  const world = harness({
+    createResponses: [{ body: createPayload() }],
+    pollResponses: [
+      unknown,
+      unknown,
+      unknown,
+      unknown,
+      { body: { resultCode: "103000200", errorDesc: "Please to login." } }, // 认得出 → 计数归零
+      unknown,
+      unknown,
+      unknown,
+      unknown,
+      unknown,
+    ],
+  });
+  const session = createQrSession({
+    createUrl: CREATE_URL,
+    pollUrl: POLL_URL,
+    intervalMs: world.intervalMs,
+    fetchImpl: world.fetchImpl,
+    now: () => 1_700_000_000_000,
+    setTimer: world.setTimer,
+    clearTimer: world.clearTimer,
+    onEvent: (event) => world.events.push(event),
+  });
+
+  await session.start();
+  for (let round = 1; round <= 9; round += 1) await world.tick(); // 4 陌生 + 1 认得 + 4 陌生
+  assert.equal(session.isRunning(), true, "「连续」是字面意思：中间那条 103000200 让计数归零");
+  assert.equal(session.status(), QR_LOGIN_STATUS.pending);
+
+  await world.tick(); // 归零之后的第 5 个陌生码
+  assert.equal(session.status(), QR_LOGIN_STATUS.failed);
+  assert.equal(session.isRunning(), false);
+});
+
+test("R22 熔断：阈值可注入（时钟之外，判据本身也是注入的）", async () => {
+  const world = harness({
+    createResponses: [{ body: createPayload() }],
+    pollResponses: [{ body: { resultCode: "1" } }],
+  });
+  const session = createQrSession({
+    createUrl: CREATE_URL,
+    pollUrl: POLL_URL,
+    intervalMs: world.intervalMs,
+    maxUnknownCodes: 2,
+    fetchImpl: world.fetchImpl,
+    now: () => 1_700_000_000_000,
+    setTimer: world.setTimer,
+    clearTimer: world.clearTimer,
+    onEvent: (event) => world.events.push(event),
+  });
+
+  await session.start();
+  await world.tick();
+  assert.equal(session.isRunning(), true);
+  await world.tick();
+  assert.equal(session.status(), QR_LOGIN_STATUS.failed);
+});
+
+// ---------------------------------------------------------------------------
+// R22 · B2：本地到期权威兜底
+//
+// 用户那句"卡在正在确认过期…一直不过期"要有一个**必有**的出口：`expiredTime` 已过 +
+// 宽限 15 秒仍未收到服务端 `expired` → 主动转 `expired`（停轮询 + 广播）。
+// 边界全部注入时钟钉死：过期前不触发 / 过期 +14.999s 不触发 / +15s 触发 /
+// 服务端先到（或仍在说话：scanned/confirmed）以服务端为准。
+// ---------------------------------------------------------------------------
+
+/**
+ * R22 兜底专用的假世界：**钟可以被推**（到期锚是一条时间线，跨过它才谈得上兜底），
+ * 其余与 `harness` 同一套（手动计时器 + 编排好的轮询响应）。
+ *
+ * @param {{pollResponses: Array<object|Error>, ttlMs?: number, startMs?: number,
+ *          createOverrides?: object}} options
+ */
+function expiryWorld({ pollResponses, ttlMs = 181_000, startMs = 1_700_000_000_000, createOverrides = {} }) {
+  const world = harness({
+    createResponses: [{ body: createPayload({ qrCodeCreateTime: startMs, expiredTime: startMs + ttlMs, ...createOverrides }) }],
+    pollResponses,
+  });
+  let clock = startMs;
+  const logs = [];
+  const session = createQrSession({
+    createUrl: CREATE_URL,
+    pollUrl: POLL_URL,
+    intervalMs: world.intervalMs,
+    fetchImpl: world.fetchImpl,
+    now: () => clock,
+    setTimer: world.setTimer,
+    clearTimer: world.clearTimer,
+    onEvent: (event) => world.events.push(event),
+    log: (message) => logs.push(message),
+  });
+  return {
+    world,
+    session,
+    logs,
+    /** 本地到期锚 = 建单响应落地那一刻的本地钟 + 服务端 TTL（`expiresInMs`）。 */
+    anchor: () => startMs + ttlMs,
+    at: (value) => {
+      clock = value;
+    },
+  };
+}
+
+test("R22 兜底：服务端一直说 pending，本地到期锚 + 15s 宽限到点 → 主动转 expired 并停轮询", async () => {
+  const at = expiryWorld({ pollResponses: [{ body: { resultCode: "103000200", errorDesc: "Please to login." } }] });
+  assert.equal(QR_LOCAL_EXPIRY_GRACE_MS, 15_000, "宽限是契约值：15 秒");
+  await at.session.start();
+
+  // 到期锚**之前**：本地不许抢跑（服务端还没说过期，码也许还能扫）
+  at.at(at.anchor() - 1);
+  await at.world.tick();
+  assert.equal(at.session.status(), QR_LOGIN_STATUS.pending);
+  assert.equal(at.session.isRunning(), true);
+
+  // 过期 +14.999s：仍在宽限里，继续等服务端
+  at.at(at.anchor() + QR_LOCAL_EXPIRY_GRACE_MS - 1);
+  await at.world.tick();
+  assert.equal(at.session.status(), QR_LOGIN_STATUS.pending, "还差 1ms 才到宽限：不许提前判死");
+  assert.equal(at.session.isRunning(), true);
+
+  // 过期 +15s：必须出口（「正在确认过期…」最长挂 15 秒）
+  at.at(at.anchor() + QR_LOCAL_EXPIRY_GRACE_MS);
+  await at.world.tick();
+  assert.equal(at.session.status(), QR_LOGIN_STATUS.expired, "到期 + 宽限到点：本地兜底收回这一次会话");
+  assert.equal(at.session.isRunning(), false);
+  assert.equal(await at.world.tick(), false, "兜底转过期之后一个挂起的计时器都不剩");
+  assert.deepEqual(
+    at.world.events.map((event) => event.status),
+    [QR_LOGIN_STATUS.pending, QR_LOGIN_STATUS.expired],
+    "expired 是终点档：兜底这条路也只播这一条",
+  );
+  assert.equal(
+    at.logs.some((line) => line.includes("本地到期")),
+    true,
+    "兜底是一次**主动裁决**：日志里要留下它（否则线上看不出这次 expired 从哪来）",
+  );
+});
+
+test("R22 兜底：服务端先给出 expired → 以服务端为准（本地锚还没到也照收）", async () => {
+  const at = expiryWorld({ pollResponses: [{ body: { resultCode: "103000201" } }] });
+  await at.session.start();
+  at.at(at.anchor() - 60_000); // 本地还早得很
+
+  await at.world.tick();
+  assert.equal(at.session.status(), QR_LOGIN_STATUS.expired, "服务端说了过期就是过期");
+  assert.equal(at.session.isRunning(), false);
+  assert.equal(
+    at.logs.some((line) => line.includes("本地到期")),
+    false,
+    "服务端先到：兜底那条路根本不该被走到（服务端广播优先）",
+  );
+});
+
+test("R22 兜底：服务端仍在说话（scanned / confirmed）时不许抢——服务端是权威", async () => {
+  // 已经本地过期一小时，但服务端说"已扫码"：会话还活着，本地不许把它判死
+  const scanned = expiryWorld({ pollResponses: [{ body: { resultCode: "103000202" } }] });
+  await scanned.session.start();
+  scanned.at(scanned.anchor() + 3_600_000);
+  await scanned.world.tick();
+  assert.equal(scanned.session.status(), QR_LOGIN_STATUS.scanned);
+  assert.equal(scanned.session.isRunning(), true, "服务端有话说的时候，本地兜底让位（继续轮询到服务端收口）");
+
+  // 同理：兜底绝不许把一次已经成功的确认打回过期
+  const confirmed = expiryWorld({ pollResponses: [{ body: { resultCode: "0", code: "c" } }] });
+  await confirmed.session.start();
+  confirmed.at(confirmed.anchor() + 3_600_000);
+  await confirmed.world.tick();
+  assert.equal(confirmed.session.status(), QR_LOGIN_STATUS.confirmed);
+  assert.equal(confirmed.session.isRunning(), false);
+});
+
+test("R22 兜底：建单没给出可信 TTL 时**不设锚点** → 一次都不主动判过期（不猜）", async () => {
+  const at = expiryWorld({
+    pollResponses: [{ body: { resultCode: "103000200" } }],
+    createOverrides: { expiredTime: "soon" },
+  });
+  await at.session.start();
+  at.at(at.anchor() + 3_600_000); // 锚点根本不存在，推多远都不该有本地裁决
+  await at.world.tick();
+  assert.equal(at.session.status(), QR_LOGIN_STATUS.pending);
+  assert.equal(at.session.isRunning(), true, "没有可信 TTL 就没有本地权威：宁可等服务端");
+});
+
+test("R22 兜底：网络断了又确实过了期 → 也走 expired 出口（不是把用户挂在等待上）", async () => {
+  const at = expiryWorld({ pollResponses: [new Error("ECONNRESET")] });
+  await at.session.start();
+
+  // 还没到期：网络失败照旧按次数收口（既有语义不变）
+  at.at(at.anchor() - 1_000);
+  await at.world.tick();
+  assert.equal(at.session.status(), QR_LOGIN_STATUS.pending);
+
+  at.at(at.anchor() + QR_LOCAL_EXPIRY_GRACE_MS);
+  await at.world.tick();
+  assert.equal(at.session.status(), QR_LOGIN_STATUS.expired, "到期 + 宽限已过：网络坏不坏都不该让用户继续等");
+  assert.equal(at.session.isRunning(), false);
+});
+
+// ---------------------------------------------------------------------------
+// R22 · B3：轮询诊断日志（脱敏）
+//
+// RED 实测：轮询里除了"陌生码"那一句，没有一行 resultCode。真机卡住时，日志上看不出
+// 是在轮询、还是轮询早就断了。R22 起**每轮记一行**：只有轮次与状态码。
+// ---------------------------------------------------------------------------
+
+test("R22 诊断：每轮 resultCode 进日志（只有轮次与状态码，没有 qrToken、没有二维码内容）", async () => {
+  const world = harness({
+    createResponses: [{ body: createPayload() }],
+    pollResponses: [{ body: { resultCode: "103000200", errorDesc: "Please to login." } }],
+  });
+  const logs = [];
+  const session = createQrSession({
+    createUrl: CREATE_URL,
+    pollUrl: POLL_URL,
+    intervalMs: world.intervalMs,
+    fetchImpl: world.fetchImpl,
+    now: () => 1_700_000_000_000,
+    setTimer: world.setTimer,
+    clearTimer: world.clearTimer,
+    onEvent: () => undefined,
+    log: (message) => logs.push(message),
+  });
+
+  await session.start();
+  await world.tick();
+  await world.tick();
+  await world.tick();
+
+  const rounds = logs.filter((line) => line.includes("轮询 #"));
+  assert.equal(rounds.length, 3, "每轮一行：真机卡住时要看得出轮询到底有没有在跑");
+  assert.match(rounds[0], /轮询 #1/);
+  assert.match(rounds.at(-1), /轮询 #3/);
+  for (const line of rounds) assert.match(line, /resultCode=103000200/);
+  const joined = logs.join("\n");
+  assert.equal(joined.includes(createPayload().qrToken), false, "日志里不许出现 qrToken（会话令牌只在进程内用）");
+  assert.equal(joined.includes("qRCode=PROBE"), false, "日志里不许出现二维码内容");
+});
+
+test("R22 诊断：认不出的码每轮都留痕，并记下它连续第几个（熔断前一目了然）", async () => {
+  const world = harness({
+    createResponses: [{ body: createPayload() }],
+    pollResponses: [{ body: { resultCode: "103009999" } }],
+  });
+  const logs = [];
+  const session = createQrSession({
+    createUrl: CREATE_URL,
+    pollUrl: POLL_URL,
+    intervalMs: world.intervalMs,
+    fetchImpl: world.fetchImpl,
+    now: () => 1_700_000_000_000,
+    setTimer: world.setTimer,
+    clearTimer: world.clearTimer,
+    onEvent: () => undefined,
+    log: (message) => logs.push(message),
+  });
+
+  await session.start();
+  await world.tick();
+  await world.tick();
+
+  assert.equal(
+    logs.some((line) => line.includes("103009999") && line.includes("连续 2/5")),
+    true,
+    `连续计数要写进日志：${JSON.stringify(logs)}`,
+  );
+  assert.equal(
+    logs.some((line) => line.includes("停止轮询")),
+    false,
+    "还没到阈值：这一轮只是继续等，不喊停",
+  );
+});
+
+test("R22 诊断：熔断那一刻留下一条说明（为什么停）", async () => {
+  const world = harness({
+    createResponses: [{ body: createPayload() }],
+    pollResponses: [{ body: { resultCode: "103009999" } }],
+  });
+  const logs = [];
+  const session = createQrSession({
+    createUrl: CREATE_URL,
+    pollUrl: POLL_URL,
+    intervalMs: world.intervalMs,
+    fetchImpl: world.fetchImpl,
+    now: () => 1_700_000_000_000,
+    setTimer: world.setTimer,
+    clearTimer: world.clearTimer,
+    onEvent: () => undefined,
+    log: (message) => logs.push(message),
+  });
+
+  await session.start();
+  for (let round = 0; round < QR_DEFAULT_MAX_UNKNOWN_CODES; round += 1) await world.tick();
+
+  assert.equal(
+    logs.filter((line) => line.includes("停止轮询")).length,
+    1,
+    "熔断是一条一次性说明，不是每轮都喊",
+  );
 });

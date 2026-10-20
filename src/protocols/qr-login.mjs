@@ -19,7 +19,10 @@
  * 已确认的值登记在契约文件里、由 `src/main/qr-login.mjs` 从配置表传入。
  *
  * 四条不妥协的规矩：
- * 1. **认不出的 resultCode 一律按"继续轮询"**：陌生码当成功 = 拿一个没确认的会话去换令牌；
+ * 1. **认不出的 resultCode 一律按"继续轮询"，但连续 N 个就熔断**（R22）：陌生码当成功 =
+ *    拿一个没确认的会话去换令牌；陌生码**一直**来 = 协议变了，无限轮询只会让界面永远停在
+ *    等待态（R22 用户反馈的那次"卡住"就有这一段），所以连续 [`QR_DEFAULT_MAX_UNKNOWN_CODES`]
+ *    个陌生码收口成 `failed`（带 `unknown_result_code`，停轮询）；
  * 2. **状态变化才广播**：2 秒一次 tick、扫码要好几分钟，每次 tick 都广播会把通道刷成噪声；
  * 3. **过期只报不换**（R21 用户指令，**推翻** R16/R20 的"过期自己重建"）：`expired` 是一条
  *    **终点**广播——停轮询、不建新单；换新只能由用户手动触发（渲染层再发一次 `auth:qr-start`，
@@ -32,6 +35,20 @@
  * 它落地时若照常广播，会把刚画出来的新码顶掉（还会顺手再建一张）。会话自己就知道它被
  * 取消了，所以判据放在这里，而不是指望调用方在每条路上补一遍。
  * R21 之后仍需要它：过期不再自动换新，但"取消的旧会话打回过期态"照样会毁掉新那一张。
+ *
+ * R22（用户真机反馈两项：① 倒计时到 0 后卡在「正在确认过期…」一直不过期；② 过期时间正确性）
+ * 在这一层落三件事，**渲染层一行都不用改**：
+ *
+ * - **A. TTL 无偏差换算**：`expiresInMs = expiredTime − qrCodeCreateTime`——两个都是**服务端值**，
+ *   与本地钟无关（老公式 `expiredTime − now()` 把两个时钟相减，本地钟快 1 小时，倒计时一上来
+ *   就归零 → 用户看到的正是"一直不过期"）。`qrCodeCreateTime` 缺失/非法时才回退老公式
+ *   （偏差风险如实写在 [`parseQrCreate`] 的注释里），字段不可信或两个值互相矛盾 → `null`（不猜）。
+ * - **B. 本地到期权威兜底**：轮询期间若"本地到期锚 + 宽限 [`QR_LOCAL_EXPIRY_GRACE_MS`] 已过"
+ *   而服务端**什么话都没说**（仍 pending 或缺省/陌生码；网络失败也算），主动转 `expired`
+ *   并停轮询——渲染层那档「正在确认过期…」因此**必有出口**（最长 0 + 15 秒）。
+ *   **服务端一律优先**：它给出 `expired`/`scanned`/`confirmed` 时本地兜底让位（不抢、不改判）。
+ * - **C. 轮询诊断日志**：每轮一行 resultCode（只有轮次与状态码；`qrToken`、二维码内容、
+ *   cookie 一律不进日志）。真机再报"卡住"时，日志能直接指出轮询有没有在跑、服务端说了什么。
  *
  * 全部依赖注入（fetch/计时器/时钟），所以整条状态机在测试里跑得完，不碰网络也不碰真实时间。
  */
@@ -72,12 +89,34 @@ export const QR_ERROR_KINDS = {
   invalidResponse: "invalid_response",
   /** 建单/轮询收口成的失败（广播出去的那一档） */
   failed: "qr_failed",
+  /** 连续若干个认不出的 resultCode（协议变更；R22 的熔断出口） */
+  unknownResultCode: "unknown_result_code",
 };
 
 /** 服务端没给间隔时的兜底（实探给的正是 2000ms；改这里等于改协议默认值，要同步契约文件）。 */
 export const QR_DEFAULT_INTERVAL_MS = 2_000;
 /** 连续轮询失败多少次收口（网络抖一下不算登录坏了）。 */
 export const QR_DEFAULT_MAX_POLL_FAILURES = 3;
+
+/**
+ * 连续多少个**认不出**的 resultCode 就收口（R22 熔断）。
+ *
+ * 为什么不是"永远继续等"：陌生码当成功是最严重的误判（拿没确认的会话去换令牌），但
+ * "一直陌生"同样致命——协议真变了的时候，这条会话会 2 秒一次打到总期限（10 分钟），
+ * 用户全程看着一张不会变的界面，日志里也什么都没有。5 个是一段"够看出是持续异常"的
+ * 观察窗（约 10~50 秒），比总期限早得多。
+ */
+export const QR_DEFAULT_MAX_UNKNOWN_CODES = 5;
+
+/**
+ * 本地到期兜底的宽限（R22）：本地到期锚过了这么久、服务端还是**什么话都没说**，
+ * 就由本层裁定"过期"。
+ *
+ * 15 秒是给"服务端那条 `expired` 正在路上"留的余量（实探：服务端通常在本地归零**之前**
+ * 就给 `103000201`，所以这一档只在服务端沉默时兜底）。它同时是渲染层「正在确认过期…」
+ * 那一档的**上界**：倒计时数到 0 之后最多再等 15 秒，界面必有出口。
+ */
+export const QR_LOCAL_EXPIRY_GRACE_MS = 15_000;
 
 /** 建单表单里那些"从端点模板查询串取"的参数名。 */
 export const QR_CREATE_PARAMS = ["appID", "confirmFlag", "version", "reqClientType", "loginChannel", "appBrand"];
@@ -114,6 +153,16 @@ export function classifyQrPoll(payload) {
 /**
  * 建单响应 → 内部形状。
  *
+ * **有效期（R22 要求 ②）**：优先用 `expiredTime − qrCodeCreateTime`——两个都是**服务端值**，
+ * 相减得到的是服务端自己的 TTL，与本地钟偏多少无关。老公式 `expiredTime − 本地 now()` 是拿
+ * 服务端纪元减本地钟，本地快 1 小时就会算出 0（倒计时一上来就归零，用户看到的是"卡在
+ * 正在确认过期…"），本地慢 1 小时则会多算出 63 分钟。
+ *
+ * `qrCodeCreateTime` 缺失/非法时**回退**老公式——**已知偏差风险**：那一条路径下倒计时会随
+ * 本地钟平移（典型症状是"早到"或"晚到"若干分钟）。回退是有意的：有偏差的倒计时仍好过没有，
+ * 但这条路径必须在日志与契约里看得见（契约 §3 登记了这一点）。字段本身不可信、或两个服务端值
+ * 互相矛盾（`expiredTime ≤ qrCodeCreateTime`）→ `null`：宁可界面少一行倒计时，也不猜一个数。
+ *
  * @param {unknown} payload 建单响应
  * @param {{now?: () => number}} [options]
  * @returns {{ok: true, data: object} | {ok: false, error: {message: string, kind: string}}}
@@ -132,9 +181,7 @@ export function parseQrCreate(payload, options = {}) {
     return err("二维码建单响应里没有 qrToken：无法轮询扫码状态", QR_ERROR_KINDS.invalidResponse);
   }
 
-  const expiredAt = Number(payload.expiredTime);
-  const expiresInMs =
-    Number.isFinite(expiredAt) && expiredAt > 0 ? Math.max(0, expiredAt - now()) : null;
+  const expiresInMs = resolveExpiresInMs(payload, now);
 
   return ok({
     content,
@@ -145,6 +192,39 @@ export function parseQrCreate(payload, options = {}) {
     version: payload.version === undefined || payload.version === null ? null : String(payload.version),
     expiresInMs,
   });
+}
+
+/** 服务端时间戳字段（纪元毫秒）：只认有限且为正的数（`"1792482545561"` 这种字符串也认）。 */
+function serverTimestampMs(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+/**
+ * 有效期（毫秒）：三条路，全都写在这里，不在调用点各算一遍（R22）。
+ *
+ * 1. 两个服务端值都在且 `expiredTime > qrCodeCreateTime` → **差值**（免疫本地时钟偏差）；
+ * 2. `expiredTime` 可信但 `qrCodeCreateTime` 缺失/非法 → 回退 `expiredTime − now()`
+ *    （**偏差风险**：这条路径下倒计时随本地钟平移，R22 之前的公式就是它）；
+ * 3. 其余（`expiredTime` 不可信 / 两个值矛盾）→ `null`（不猜）。
+ *
+ * @param {object} payload 建单响应
+ * @param {() => number} now 本地钟（只有回退路径读它）
+ * @returns {number|null} 毫秒；`null` = 不知道（调用方不许自己编一个）
+ */
+function resolveExpiresInMs(payload, now) {
+  const expiredAt = serverTimestampMs(payload.expiredTime);
+  if (expiredAt === null) return null;
+
+  const createdAt = serverTimestampMs(payload.qrCodeCreateTime);
+  if (createdAt !== null) {
+    // 两个服务端值互相矛盾（到期不晚于建单）：这不是"快到期"，是数据不可信 —— 不猜
+    if (expiredAt <= createdAt) return null;
+    return expiredAt - createdAt;
+  }
+
+  // 回退路径（已知偏差风险，见本函数说明与 docs/API_CONTRACT.md §3）
+  return Math.max(0, expiredAt - now());
 }
 
 /** 建单表单：参数从端点模板的查询串里取（唯一真源是契约文件登记的那个模板）。 */
@@ -194,6 +274,7 @@ export function createQrSession(options = {}) {
     pollUrl,
     intervalMs = QR_DEFAULT_INTERVAL_MS,
     maxPollFailures = QR_DEFAULT_MAX_POLL_FAILURES,
+    maxUnknownCodes = QR_DEFAULT_MAX_UNKNOWN_CODES,
     deadlineMs = null,
     fetchImpl = globalThis.fetch,
     now = Date.now,
@@ -210,6 +291,19 @@ export function createQrSession(options = {}) {
   let running = false;
   let failures = 0;
   let current = null;
+  /** 连续认不出的 resultCode 个数（R22 熔断；认出一个码就归零）。 */
+  let unknownCodes = 0;
+  /** 已轮询多少轮（R22 诊断日志的轮次；每次 start 归零）。 */
+  let pollRound = 0;
+  /**
+   * 本地到期锚（R22 兜底）：建单响应落地那一刻的本地钟 + 服务端 TTL。
+   *
+   * 为什么取"响应落地"而不是"请求发出"：服务端 TTL 从它的 `qrCodeCreateTime` 起算，
+   * 那个时刻落在一次往返之间，取落地时刻只会**晚**判（最多晚一个往返），而晚判是安全的
+   * 一侧——早判等于把一张其实还能扫的码撤掉。`null` = 建单没给出可信 TTL（此时**没有**
+   * 本地权威，兜底一次都不许触发，见 [`localExpiryDue`]）。
+   */
+  let expiresAtLocal = null;
 
   function emit(event) {
     try {
@@ -288,6 +382,11 @@ export function createQrSession(options = {}) {
     if (!parsed.ok) return parsed;
     current = parsed.data;
     failures = 0;
+    unknownCodes = 0;
+    pollRound = 0;
+    // R22 兜底锚：服务端 TTL 换成**本地**到期时刻（建单响应落地这一刻起算，宁晚不早）。
+    // `expiresInMs` 为 null（建单没给出可信 TTL）时锚点也是 null：没有本地权威就不许兜底。
+    expiresAtLocal = parsed.data.expiresInMs === null ? null : now() + parsed.data.expiresInMs;
     // 取消之后才落地的建单响应：不再广播（这一档属于一次已经作废的会话）
     if (!running) return parsed;
     moveTo(QR_LOGIN_STATUS.pending, {
@@ -296,6 +395,30 @@ export function createQrSession(options = {}) {
       version: parsed.data.version,
     });
     return parsed;
+  }
+
+  /**
+   * 本地到期锚 + 宽限已经过了吗？（R22 兜底；服务端**什么话都没说**时才问这一句）
+   *
+   * 两道闸门缺一不可：
+   * 1. `expiresAtLocal !== null`——建单给了可信 TTL 才谈得上"本地知道它过期了"；
+   * 2. `now() >= 锚 + 宽限`——归零那一刻不给判（服务端那条 `expired` 通常正在路上），
+   *    再等 [`QR_LOCAL_EXPIRY_GRACE_MS`]。
+   */
+  function localExpiryDue() {
+    return expiresAtLocal !== null && now() >= expiresAtLocal + QR_LOCAL_EXPIRY_GRACE_MS;
+  }
+
+  /**
+   * 本地裁定过期（R22 兜底出口）：停轮询 + 只播 `expired`。
+   *
+   * 与 R21 那条"服务端说过期"走**同一个终点档**：渲染层因此不用区分这两种来源
+   * （它那一档的处理完全一样：撤码、写"已过期，点击刷新"）。
+   */
+  function expireLocally(reason) {
+    log(`二维码本地到期兜底：${reason}（到期锚 + ${Math.round(QR_LOCAL_EXPIRY_GRACE_MS / 1000)}s 宽限已过），主动转 expired 并停轮询`);
+    stop();
+    moveTo(QR_LOGIN_STATUS.expired, {});
   }
 
   /**
@@ -321,6 +444,8 @@ export function createQrSession(options = {}) {
   async function poll() {
     if (!running) return;
 
+    pollRound += 1;
+    const round = pollRound;
     const url = `${pollUrl}${pollUrl.includes("?") ? "&" : "?"}t=${random()}`;
     let response;
     try {
@@ -358,9 +483,16 @@ export function createQrSession(options = {}) {
     // 甚至 confirmed 播出去，把界面上那张新码顶掉（R20 手动刷新的竞态钉在 test/qr-login.test.mjs）。
     if (!running) return;
     const classified = classifyQrPoll(payload);
-    if (classified.unknownResultCode !== undefined) {
-      log(`二维码轮询返回了不认识的 resultCode=${classified.unknownResultCode}（按"继续等待"处理）`);
-    }
+    const code = classified.resultCode ?? "";
+    const unknown = classified.unknownResultCode !== undefined;
+    if (unknown) unknownCodes += 1;
+    else unknownCodes = 0;
+    // R22 诊断（修 3）：**每轮一行**——真机再报"卡在正在确认过期…"时，日志要能回答
+    // "轮询还在跑吗、服务端说了什么"。脱敏：只有轮次与状态码（qrToken/内容/cookie 都不进）。
+    log(
+      `二维码轮询 #${round}：resultCode=${code === "" ? "（响应里没有）" : code}` +
+        (unknown ? `（认不出的码，连续 ${unknownCodes}/${maxUnknownCodes}）` : ""),
+    );
 
     if (classified.status === QR_LOGIN_STATUS.confirmed) {
       stop();
@@ -374,11 +506,39 @@ export function createQrSession(options = {}) {
       moveTo(QR_LOGIN_STATUS.expired, {});
       return;
     }
-    moveTo(classified.status, { payload: classified.status === QR_LOGIN_STATUS.scanned ? classified.payload : undefined });
+    if (classified.status === QR_LOGIN_STATUS.scanned) {
+      // 服务端**在说话**（已扫码、等确认）：本地兜底让位——把一条还活着的会话判死，
+      // 代价是用户手机上那句"确认"按下去也没有了着落。
+      moveTo(QR_LOGIN_STATUS.scanned, { payload: classified.payload });
+      schedule();
+      return;
+    }
+
+    // 到这一档时服务端**什么都没说**（未扫 / 缺省 / 认不出的码）：这是本地兜底唯一该出手的场合
+    if (localExpiryDue()) {
+      expireLocally(`服务端在第 ${round} 轮仍未给出 expired（resultCode=${code === "" ? "缺省" : code}）`);
+      return;
+    }
+    if (unknown && unknownCodes >= maxUnknownCodes) {
+      // R22 熔断（修 1）：协议真变了的时候，无限轮询只会让用户永远停在等待态
+      log(`二维码轮询连续 ${unknownCodes} 次返回认不出的 resultCode（最后一次 ${code}）：停止轮询`);
+      fail(
+        `二维码轮询连续 ${unknownCodes} 次返回认不出的 resultCode（最后一次 ${code}）：协议可能变了，请更新后重试。`,
+        QR_ERROR_KINDS.unknownResultCode,
+      );
+      return;
+    }
+    moveTo(classified.status, {});
     schedule();
   }
 
   function onPollFailure(message, kind) {
+    // R22 兜底：网络坏掉时服务端同样**什么都没说**——若本地到期锚 + 宽限早过了，
+    // 正确答案是"这码已经过期了"，而不是把用户继续挂在「正在确认过期…」上。
+    if (localExpiryDue()) {
+      expireLocally(`轮询失败且已过本地到期锚（${message}）`);
+      return;
+    }
     failures += 1;
     if (failures >= maxPollFailures) {
       fail(`${message}（连续 ${failures} 次：请检查网络或代理后重试）`, kind);
@@ -399,6 +559,10 @@ export function createQrSession(options = {}) {
       stop();
       failures = 0;
       current = null;
+      // R22：新会话 = 新的计数与新的到期锚（上一次那张码的这两个事实一律作废）
+      unknownCodes = 0;
+      pollRound = 0;
+      expiresAtLocal = null;
       status = QR_LOGIN_STATUS.idle;
       running = true;
       if (!endpointsReady()) return err("二维码登录端点未配置", QR_ERROR_KINDS.missingEndpoint);

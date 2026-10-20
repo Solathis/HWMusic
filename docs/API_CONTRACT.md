@@ -375,6 +375,45 @@ bundle 里没有任何硬编码的二维码端点字符串——这也是"必须
   `start()`，这条结论不变——过期之后端口不再自动换新，所以它手上那张一直是作废的，
   而 `confirmed` 不会再从一条已停的会话里冒出来）。
 
+**R22（用户真机反馈两项：① 倒计时到 0 后卡在「正在确认过期…」**一直不过期**；② 过期时间正确性）**
+在协议层落三件事，**渲染层一行未改**（简报的 C 项）。R21 那句"服务端通常在本地归零前就给
+`103000201`"由此从"通常"变成"不依赖"——现在**不依赖**服务端准时说话：
+
+1. **TTL 无偏差换算（根因 ②）**：`expiresInMs = expiredTime − qrCodeCreateTime`——两个都是**服务端值**，
+   相减得到服务端自己的 TTL，与本地钟偏多少无关。老公式 `expiredTime − 本地 now()` 是拿服务端纪元减
+   本地钟，本地快 1 小时就得到 `0`（倒计时一上来就归零，界面立刻变成「正在确认过期…」——**这正是用户
+   反馈 ① 的现场**），慢 1 小时则多算出 63 分钟。RED 实测（`parseQrCreate` 注入偏钟）：±1 小时 →
+   旧公式 `0` / `3781000`，新公式恒为 `181000`。`qrCodeCreateTime` 缺失/非法 → **回退**老公式
+   （**已知偏差风险**：那条路径下倒计时随本地钟平移，见 §3 的 `QR_TTL_*` 那一行）；`expiredTime`
+   本身不可信，或两个服务端值**互相矛盾**（`expiredTime ≤ qrCodeCreateTime`）→ `null`（不猜：
+   界面少一行倒计时，比显示一个不准的数好）。
+2. **卡死的三层修（根因 ①）**：
+   - **未知码熔断**：认不出的 `resultCode` 仍按"继续等"处理，但**连续 5 个**
+     （`QR_DEFAULT_MAX_UNKNOWN_CODES`）→ `failed`（`errorKind: "unknown_result_code"`，文案带上那颗码）
+     + 停轮询。RED 实测：修前连着 5 个陌生码会话**仍在轮询**（`isRunning: true`）——协议真变了就是
+     "一直打到总期限"，用户全程看着一张不会变的界面；
+   - **本地到期权威兜底**：`expiresAtLocal = 建单响应落地时刻 + 服务端 TTL`（取"落地"不取"发出"：
+     最多晚一个往返，而**晚判是安全的一侧**——早判等于撤掉一张其实还能扫的码）。轮询时若
+     "锚 + 15 秒宽限（`QR_LOCAL_EXPIRY_GRACE_MS`）"已过、而服务端**什么话都没说**
+     （`103000200` / 响应缺 `resultCode` / 陌生码，或轮询请求本身失败）→ **主动转 `expired`**
+     （停轮询 + 广播 + 日志留一行说明）。**服务端一律优先**：它给出 `expired`/`scanned`/`confirmed`
+     时兜底让位（`scanned` 是"会话还活着"，此时把会话判死 = 用户手机上那句确认按下去没有着落）；
+     建单没给出可信 TTL（`expiresInMs === null`）时**不设锚点**、一次都不主动判过期（不猜）。
+     界面由此**必有出口**：倒计时数到 0 之后最长 15 秒，「正在确认过期…」从"罕见兜底"变成"有上界的等待"；
+   - **轮询诊断日志**：**每轮一行** `二维码轮询 #N：resultCode=…`（认不出的码带"连续 n/5"），
+     **脱敏**——只有轮次与状态码，`qrToken` / 二维码内容 / cookie 一律不进日志。落点是端口注入的
+     `log`（sidecar 默认 `console.error` → **stderr**，`src/main/auth-manager.ts` 的 `defaultLog`）。
+3. **渲染层未改**：`expired` 那一档的处理（撤码、原位「二维码已过期」、状态行「二维码已过期，点击刷新。」）
+   R21 就在了；兜底只保证它**必达**。倒计时显示不变（仍是"到期时刻 − 渲染层的钟"，只是喂进去的
+   `expiresInMs` 现在不再被本地钟污染）。
+
+钉在：`test/qr-login.test.mjs`（TTL 双路径 + 矛盾值 → `null`；熔断边界 5、中间认出一个码即归零、
+阈值可注入；兜底边界 锚前不触发 / +14.999s 不触发 / +15s 触发 / 服务端先到优先 / `scanned`·`confirmed`
+让位 / 无 TTL 不设锚 / 网络失败也出口；诊断日志每轮一行且不含 `qrToken` 与内容）、
+`test/qr-port.test.mjs`（本地钟快 1 小时时交给渲染层的 `expiresInMs` 仍是 `181000`；诊断日志经端口
+落到注入的 `log`）。**仍未验证**：真机上这两个现象是否真的消失——需要一次真会话（等 181 s）与
+一次偏钟环境，由用户/控制器在能起窗的场所验（见 `docs/KNOWN_LIMITATIONS.md` B14）。
+
 ## 2. 音乐业务接口
 
 ### 2.1 结论：**端点全部待确认**（K1 风险未消除，如实登记）
@@ -878,6 +917,9 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `QR_REFRESH_ACTION_TESTID` | `"login-qr-refresh-action"` | `src/renderer/features/auth/login-gate-logic.mjs` | R21：过期态那个显著「刷新二维码」按钮的锚点（`expired` 是终止档，手动刷新是唯一的换码路径） |
 | `QR_CANVAS_OPTIONS` / `QR_SIZE_PX` | `{width: 208, margin: 1, errorCorrectionLevel: "L"}` / `208` | `src/renderer/features/auth/qr-canvas.mjs` | R18：二维码画布的唯一画法（内容一换即重画；`npm run verify:live` 按 208×208 与墨迹占比复核） |
 | `QR_DEFAULT_INTERVAL_MS` / `QR_DEFAULT_MAX_POLL_FAILURES` | `2000` / `3` | `src/protocols/qr-login.mjs` | R16：轮询间隔兜底（真值由服务端下发）与连续失败几次收口 |
+| `QR_DEFAULT_MAX_UNKNOWN_CODES` | `5` | `src/protocols/qr-login.mjs` | R22：连续几个**认不出**的 `resultCode` 就熔断成 `failed`（`unknown_result_code`）。陌生码当成功是最严重的误判，但"一直陌生"同样致命：协议真变了时它会 2 秒一次打到总期限，用户全程停在等待态、日志里什么都没有 |
+| `QR_LOCAL_EXPIRY_GRACE_MS` | `15_000` | `src/protocols/qr-login.mjs` | R22：本地到期兜底的宽限。到期锚（= 建单响应落地时刻 + 服务端 TTL）过了它、服务端还是**什么都没说**（pending/缺省/陌生码/请求失败）→ 本地主动转 `expired`（服务端给出 `expired`/`scanned`/`confirmed` 时让位）。它同时是渲染层「正在确认过期…」那一档的**上界** |
+| `QR_TTL_DIFF` / `QR_TTL_LEGACY`（内部两条路，不是导出常量） | `expiredTime − qrCodeCreateTime` / `expiredTime − now()` | `src/protocols/qr-login.mjs` 的 `resolveExpiresInMs` | R22：有效期换算。两条都是**服务端值**相减时免疫本地时钟偏差；`qrCodeCreateTime` 缺失/非法才回退老公式——**已知偏差风险**：本地钟快 1 小时，倒计时就早归零 1 小时（用户看到的是"卡在正在确认过期…"）。两值矛盾或 `expiredTime` 不可信 → `null`（不猜，界面少一行倒计时） |
 | `MAX_URL_LOG_CHARS` | `160` | `src-tauri/src/login.rs` | R16：登录窗导航/加载日志里 URL 的截断上限（查询值一律不进日志） |
 | `HUAWEI_MUSIC_LOGINEX_ENDPOINT` | `https://api-drcn.music.dbankcloud.cn/music-odpapp-service/v5/service/userinfo/loginex` | `src/main/music-session.mjs`（默认值经 `auth-manager.ts` 的 `HUAWEI_OAUTH_ENDPOINTS.loginex` 注入） | R17：音乐会话兑换端点（证据分级见 §1.5.1）。协议层 `auth.mjs`/`music.mjs` 仍只收注入；`test/auth-manager.test.mjs` 拿本文件反查这串字面量 |
 | `MUSIC_SESSION_DIGEST_USERNAME` | `"app-music-baseline"` | `src/main/music-session.mjs` | R17：音乐业务请求 Digest 头的固定 `username`（不是凭据；只在请求头里出现，不进日志） |
@@ -1013,3 +1055,16 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
   元素"说的是 `pending` 那一档（新增的按钮只在 `expired` 出现），它的"已知状态行"是从逻辑模块
   现算的（`Object.values(QR_GATE_STATUS)` 喂 `loginGateStatusLine`），自动跟着新文案走。
   **仍未联调**：真机点一次过期态的刷新按钮（`npm run verify:live`）由控制器/用户在场所跑。
+- 2026-10-20（Task R22）：**用户真机反馈两项**（① 倒计时到 0 后卡在「正在确认过期…」一直不过期；
+  ② 过期时间正确性），§1.8 增补 R22 段，**只改协议层、渲染层一行未动**：
+  1. **TTL 无偏差换算**：`expiresInMs = expiredTime − qrCodeCreateTime`（两个服务端值相减，
+     免疫本地时钟偏差——老公式 `expiredTime − 本地 now()` 在本地钟快 1 小时时得到 `0`，
+     倒计时一上来就归零，**这就是反馈 ① 的现场**）；缺 `qrCodeCreateTime` 时回退老公式并留注释记偏差风险；
+     字段不可信/两值矛盾 → `null`（不猜）；
+  2. **卡死三层修**：连续 5 个认不出的 `resultCode` → 熔断成 `failed`（`unknown_result_code`）；
+     本地到期锚 + **15 秒**宽限兜底 → 主动转 `expired`（停轮询 + 广播；服务端 `expired`/`scanned`/
+     `confirmed` 一律优先，无可信 TTL 时不设锚点）；轮询**每轮**记一行脱敏 `resultCode`（进 stderr）；
+  3. §3 增补三行常量（`QR_DEFAULT_MAX_UNKNOWN_CODES`、`QR_LOCAL_EXPIRY_GRACE_MS`、
+     `QR_TTL_DIFF`/`QR_TTL_LEGACY` 两条路的说明）。
+  测试：`test/qr-login.test.mjs` +14、`test/qr-port.test.mjs` +2（全量 658 → **674 / 0 fail**）。
+  **仍未验证**：真机上两个现象是否真的消失（需一次真会话 + 一次偏钟环境），登记在 KNOWN_LIMITATIONS B14。
