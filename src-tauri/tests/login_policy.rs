@@ -42,6 +42,10 @@ fn navigation_allows_only_explicit_whitelist_entries() {
     for allowed in [
         "https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize?client_id=1&state=S",
         "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?code=C&state=S",
+        // R16 增补：授权页把浏览器送到这里（https://id1.cloud.huawei.com:443/CAS/remoteLogin?… 的落地页）。
+        // 默认端口 `:443` 在 origin 里被归一化掉，两种写法都要放行。
+        "https://id1.cloud.huawei.com/CAS/portal/loginAuth.html?clientID=101444301&state=S",
+        "https://id1.cloud.huawei.com:443/CAS/portal/loginAuth.html?clientID=101444301",
         "https://login.cloud.huawei.com/",
         "https://login.cloud.huawei.com/sso/index.html?x=1#frag",
     ] {
@@ -53,6 +57,11 @@ fn navigation_allows_only_explicit_whitelist_entries() {
         "https://oauth-login1.cloud.huawei.com.attacker.invalid/oauth2/v3/authorize",
         "https://account.huawei.com.attacker.invalid/",
         "https://oauth-login2.cloud.huawei.com/oauth2/v3/authorize",
+        // id1 的同形/子域同样不许放行（白名单是显式条目，不是后缀通配）
+        "https://id1.cloud.huawei.com.attacker.invalid/CAS/portal/loginAuth.html",
+        "https://evil-id1.cloud.huawei.com/CAS/portal/loginAuth.html",
+        "https://id1.cloud.huawei.com:8443/CAS/portal/loginAuth.html",
+        "http://id1.cloud.huawei.com/CAS/portal/loginAuth.html",
         "https://huawei.com.evil.com/",
         "https://evil-huawei.com/",
         "https://user:pass@oauth-login1.cloud.huawei.com/oauth2/v3/authorize",
@@ -72,7 +81,8 @@ fn navigation_allows_only_explicit_whitelist_entries() {
     }
 
     // 白名单是**显式条目**，不是后缀通配：这一条钉的就是"别改成 endsWith(huawei.com)"
-    assert_eq!(LOGIN_ALLOWED_ORIGINS.len(), 2);
+    // R16 起是三条：oauth-login1（授权/令牌）+ id1（CAS 门户落地页）+ login（旧 CAS 域）
+    assert_eq!(LOGIN_ALLOWED_ORIGINS.len(), 3);
     assert_eq!(LOGIN_ALLOWED_URLS.len(), 1);
 }
 

@@ -608,6 +608,7 @@ test("广播帧形状：{channel, payload}，没有 id 也没有 ok（Rust class
     [
       APP_NOTICE,
       "auth:status",
+      "auth:qr",
       "player:command",
       "lyrics:toggle",
       "app:open-settings",
@@ -615,7 +616,7 @@ test("广播帧形状：{channel, payload}，没有 id 也没有 ok（Rust class
       "lyrics:progress",
       "lyrics:state",
     ],
-    "R7 增补 auth:status（登录状态）、R9 预登记 player:command（R11 托盘）、R11 增补托盘那两条、R12 增补歌词窗那三条",
+    "R7 增补 auth:status（登录状态）、R9 预登记 player:command（R11 托盘）、R11 增补托盘那两条、R12 增补歌词窗那三条、R16 增补 auth:qr（二维码生命周期）",
   );
 });
 

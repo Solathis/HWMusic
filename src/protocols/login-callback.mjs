@@ -80,7 +80,17 @@ export const LOGIN_TERMINAL_CALLBACK_ERROR_KINDS = Object.freeze([
  */
 export const LOGIN_ALLOWED_ORIGINS = [
   "https://oauth-login1.cloud.huawei.com", // OAuth 授权/令牌服务域（例外 URL 所在的域）
-  "https://login.cloud.huawei.com", // 华为帐号登录（CAS 系）页面域
+  /**
+   * R16 增补（**真机故障的直接原因**）：`getLoginWay` 的实探响应把浏览器送到这里——
+   * `loginInteractInfo.cas.casLoginRedirectUrl = https://id1.cloud.huawei.com:443/CAS/remoteLogin?…`
+   * （见 scripts/probe-qr.mjs 的 ③/④ 步与 .probe/qr-probe.json）。
+   *
+   * 少了这一条会怎样：授权页（oauth-login1）自身是个空壳 SPA，它拿到 `loginType = TICKET` 后就
+   * `location.href = <casLoginRedirectUrl>`；这条导航被拦下 → 窗里永远停在那个什么也没渲染的
+   * 授权页上。用户看到的正是"登录窗一片空白"，而日志里只会有一句"首载 30 秒没等到 Finished"。
+   */
+  "https://id1.cloud.huawei.com", // 华为帐号 CAS 门户域（授权页的落地页）
+  "https://login.cloud.huawei.com", // 华为帐号登录（CAS 系，旧域名，仍在跳转链里出现）
 ];
 
 /**

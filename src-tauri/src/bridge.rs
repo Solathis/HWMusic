@@ -31,6 +31,11 @@ pub const CORE_EVENT: &str = "core:event";
 pub const APP_NOTICE: &str = "app:notice";
 /// 登录状态广播频道（R7）：`{loggedIn: bool}`。
 pub const AUTH_STATUS: &str = "auth:status";
+/// 二维码登录状态广播频道（R16）：`{status, content?, expiresInMs?, message?, errorKind?}`。
+///
+/// 与 `auth:status` 分开：那一条说的是**会话**（登录了没有、忙不忙），这一条说的是
+/// **一张二维码的生命周期**（pending/scanned/confirmed/expired/failed）。门禁要同时知道两件事。
+pub const AUTH_QR: &str = "auth:qr";
 /// 播放控制广播频道（R9 预登记，发送方是 R11 的托盘）：`{command: "play"|"pause"|...}`。
 pub const PLAYER_COMMAND: &str = "player:command";
 /// 桌面歌词开关广播频道（R11）：`{checked: bool}` —— **目标态**（点完这一下之后应当是什么）。
@@ -55,6 +60,7 @@ pub const LYRICS_STATE: &str = "lyrics:state";
 pub const BROADCAST_CHANNELS: &[&str] = &[
     "app:notice",
     "auth:status",
+    "auth:qr",
     "player:command",
     "lyrics:toggle",
     "app:open-settings",
@@ -583,6 +589,7 @@ mod tests {
             [
                 APP_NOTICE,
                 AUTH_STATUS,
+                AUTH_QR,
                 PLAYER_COMMAND,
                 LYRICS_TOGGLE,
                 APP_OPEN_SETTINGS,
@@ -593,6 +600,7 @@ mod tests {
         );
         assert_eq!(APP_NOTICE, "app:notice");
         assert_eq!(AUTH_STATUS, "auth:status");
+        assert_eq!(AUTH_QR, "auth:qr");
         assert_eq!(PLAYER_COMMAND, "player:command");
         assert_eq!(LYRICS_TOGGLE, "lyrics:toggle");
         assert_eq!(APP_OPEN_SETTINGS, "app:open-settings");
@@ -757,6 +765,7 @@ mod tests {
         let expected: &[&str] = &[
             "app:notice",
             "auth:status",
+            "auth:qr",
             "player:command",
             "lyrics:toggle",
             "app:open-settings",
@@ -764,7 +773,7 @@ mod tests {
             "lyrics:progress",
             "lyrics:state",
         ];
-        assert_eq!(BROADCAST_CHANNELS, expected, "控制器裁决的广播集合（R12 起加上歌词窗那三条）");
+        assert_eq!(BROADCAST_CHANNELS, expected, "控制器裁决的广播集合（R16 起加上二维码那条）");
 
         let frame = r#"{"channel":"app:notice","payload":{"text":"已复制"}}"#;
         match classify_line(frame, &default_policy) {

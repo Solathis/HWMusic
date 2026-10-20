@@ -90,9 +90,14 @@ const DELETE_BACKOFF_MS: u64 = 50;
 
 /// **导航白名单的镜像**（Node 侧唯一真源：`src/protocols/login-callback.mjs`）。
 /// 显式条目表，不是 `*.huawei.com` 通配；条目由 parity 测试互钉。
-pub const LOGIN_ALLOWED_ORIGINS: [&str; 2] = [
+pub const LOGIN_ALLOWED_ORIGINS: [&str; 3] = [
     "https://oauth-login1.cloud.huawei.com", // OAuth 授权/令牌服务域
-    "https://login.cloud.huawei.com",        // 华为帐号登录（CAS 系）页面域
+    // R16 增补（真机"登录窗空白"的直接原因）：实探（scripts/probe-qr.mjs）证明授权页拿到
+    // `loginType = TICKET` 后会把浏览器跳到 `https://id1.cloud.huawei.com:443/CAS/remoteLogin?…`
+    // → `/CAS/portal/loginAuth.html`。这条导航原先被拦下，窗里就停在一个什么都没渲染的空壳上。
+    // 端口 443 是默认端口，`Url::origin()` 归一化后不带端口，所以这一条同时覆盖 `:443` 的写法。
+    "https://id1.cloud.huawei.com", // 华为帐号 CAS 门户域（授权页的落地页）
+    "https://login.cloud.huawei.com", // 华为帐号登录（CAS 系，旧域名，仍在跳转链里出现）
 ];
 
 /// 精确例外：扫码成功后回调落到这里，漏掉它就会卡在 CAS 页。
@@ -111,6 +116,70 @@ pub enum Navigation {
     Allow,
     /// 其余一律拦下（同形钓鱼域、降级 http、userinfo、非 443 端口、javascript: 等）
     Block,
+}
+
+impl Navigation {
+    /// 日志用的词（不参与任何判定逻辑，只为了让日志能被人读）。
+    pub fn log_label(&self) -> &'static str {
+        match self {
+            Navigation::Callback(_) => "callback",
+            Navigation::Allow => "allow",
+            Navigation::Block => "block",
+        }
+    }
+}
+
+/// 日志里 URL 的最大长度（字符数）：日志行不许被一个畸形 URL 撑爆。
+pub const MAX_URL_LOG_CHARS: usize = 160;
+
+/// 按字符截断（不是字节：中文/百分号编码都不能截出半个字符）。
+fn truncate_chars(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    let mut out: String = value.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// R16：把一次导航/加载的 URL 变成**可进日志**的一行描述。
+///
+/// 规则（与 `parse_config` 的"错误里不回显 url"同一条纪律，但目的相反——这里要的是可诊断性）：
+/// - `scheme://host/path` **原样保留**：诊断"到底去了哪一页"就是靠它；
+/// - **查询串只留参数名**（最多 8 个）：授权页 URL 里带着 `code_challenge`/`state`，
+///   登录回调里带着 `code`——旧仓把整段 URL 打进日志，等于把一次性凭据抄进了日志文件；
+/// - 超长截断（[`MAX_URL_LOG_CHARS`]）。
+pub fn describe_navigation_for_log(raw: &str) -> String {
+    let text = raw.trim();
+    if text.is_empty() {
+        return "(空 URL)".to_string();
+    }
+    let (head, query) = match text.split_once('?') {
+        Some((head, query)) => (head, Some(query)),
+        None => (text, None),
+    };
+    // `#` 之后是片段：保留 path 上的片段标记没意义，直接丢掉
+    let head = head.split('#').next().unwrap_or(head);
+
+    let mut described = head.to_string();
+    if let Some(query) = query {
+        let query = query.split('#').next().unwrap_or("");
+        let parts: Vec<&str> = query.split('&').filter(|part| !part.is_empty()).collect();
+        let names: Vec<&str> = parts
+            .iter()
+            .map(|part| part.split('=').next().unwrap_or(""))
+            .filter(|name| !name.is_empty())
+            .take(8)
+            .collect();
+        if !names.is_empty() {
+            described.push('?');
+            described.push_str(&names.join(","));
+            if parts.len() > names.len() {
+                described.push_str(",…");
+            }
+        }
+    }
+    truncate_chars(&described, MAX_URL_LOG_CHARS)
 }
 
 /// 抽 scheme：`hms://x` → `"hms"`；没有 `://` 就是空串（不是 URL 的形状）。
@@ -744,6 +813,15 @@ fn build_on_main_thread(
 ) -> Result<WebviewWindow, CoreError> {
     let title = format!("{} · 华为帐号登录", display_name(app));
 
+    // R16：把这次登录要打开的地址记下来（**只记形状**：origin+path+参数名，见 describe_navigation_for_log）。
+    // 真机"登录窗空白"当天，日志里缺的正是这一行：没有任何一条记录说得出"窗里到底停在哪一页"。
+    log::info!(
+        "登录窗创建：url={} partition={} topInset={}",
+        describe_navigation_for_log(&url.as_str()),
+        config_partition_hint(&login_data),
+        top_inset
+    );
+
     let mut builder = WebviewWindowBuilder::new(app, LOGIN_WINDOW_LABEL, WebviewUrl::External(url))
         .title(title)
         .decorations(false)
@@ -751,22 +829,49 @@ fn build_on_main_thread(
         .visible(false) // 先摆好几何再显示：避免在左上角闪一下
         .data_directory(login_data)
         // 白名单 + hms:// 拦截全部走导航事件（登录页零注入：不订阅 initialization_script 那条路）
-        .on_navigation(move |url| match navigation_for(url.as_str()) {
-            Navigation::Callback(original) => {
-                nav_session.settle(LoginConclusion::Callback { url: original });
-                false // 拦下不请求：`hms://` 交给 Node 侧判定与结算
+        .on_navigation(move |url| {
+            let decision = navigation_for(url.as_str());
+            let described = describe_navigation_for_log(url.as_str());
+            match &decision {
+                // 拦下必须留痕：这是"窗里为什么是空白/为什么没动"的第一手证据
+                Navigation::Block => log::warn!(
+                    "登录窗拦下一次不在白名单里的导航：{described}（如果窗里是空白页，多半就是这一步被拦下的）"
+                ),
+                Navigation::Callback(_) => {
+                    log::info!("登录窗收到登录回调：{described}（交给 core 判定真伪）")
+                }
+                Navigation::Allow => log::debug!("登录窗导航放行：{described}"),
             }
-            Navigation::Allow => true,
-            Navigation::Block => false,
+            match decision {
+                Navigation::Callback(original) => {
+                    nav_session.settle(LoginConclusion::Callback { url: original });
+                    false // 拦下不请求：`hms://` 交给 Node 侧判定与结算
+                }
+                Navigation::Allow => true,
+                Navigation::Block => false,
+            }
         })
         // 弹窗一律拒（官方页不需要开新窗；`window.open` 是攻击面）
         .on_new_window(|_url, _features| NewWindowResponse::Deny)
-        // 首载完成 → 解除首载期限
+        // 首载/失败都要记：只认 Finished 的话，"页面开始加载了但一直没完成"这件事在日志里
+        // 就是一片空白（首载 30 秒超时那条结论到了，却没人知道卡在哪一页）。
         .on_page_load(move |_window, payload| {
-            if payload.event() == PageLoadEvent::Finished {
-                load_session.mark_loaded();
+            let described = describe_navigation_for_log(payload.url().as_str());
+            match payload.event() {
+                PageLoadEvent::Started => log::info!("登录窗开始加载：{described}"),
+                PageLoadEvent::Finished => {
+                    log::info!("登录窗加载完成：{described}");
+                    load_session.mark_loaded();
+                }
             }
         });
+
+    // debug 构建给登录窗开 devtools：真机上"空白窗"的 console/网络错误只有在这里看得见。
+    // release 不开：官方登录页在生产环境不该多出一个可调试面板（那是身份边界上的输入面）。
+    #[cfg(debug_assertions)]
+    {
+        builder = builder.devtools(true);
+    }
 
     if let Some(proxy) = proxy {
         builder = builder.proxy_url(proxy);
@@ -815,6 +920,13 @@ fn display_name(app: &AppHandle) -> String {
         .product_name
         .clone()
         .unwrap_or_else(|| MAIN_WINDOW_LABEL.to_string())
+}
+
+/// 日志里的分区名（一次性数据目录的最后一段）：只为让"这次登录用的是哪个目录"可追。
+fn config_partition_hint(dir: &Path) -> String {
+    dir.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "(未知)".to_string())
 }
 
 /// 把登录窗摆到主窗内容区（顶部让出 `top_inset`，单位 CSS 像素 → 物理像素按主窗缩放比换算）。
@@ -1282,5 +1394,66 @@ mod tests {
             !production.contains("WebviewUrl::App("),
             "登录窗不得挂本地页面：那会变成「自绘登录页」，等于自实现登录协议"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // R16：真机"登录窗空白"的诊断设施
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn navigation_log_keeps_the_page_but_drops_every_query_value() {
+        // 诊断要的是"哪一页"，凭据要的是"值不进日志"：这两件事必须同时成立
+        let described = describe_navigation_for_log(
+            "https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize?response_type=code&client_id=101444301&code_challenge=SECRET-CHALLENGE&state=SECRET-STATE",
+        );
+        assert_eq!(
+            described,
+            "https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize?response_type,client_id,code_challenge,state"
+        );
+        assert!(!described.contains("SECRET"), "查询参数的值一律不进日志");
+    }
+
+    #[test]
+    fn navigation_log_describes_the_cas_landing_page_and_the_callback() {
+        // 真机那条链的落点（id1 的 CAS 门户页）：诊断"窗里停在哪一页"全靠它
+        let cas = describe_navigation_for_log(
+            "https://id1.cloud.huawei.com:443/CAS/portal/loginAuth.html?reqClientType=90&service=https%3A%2F%2Foauth-login1.cloud.huawei.com%2Foauth2%2Fv3%2FloginCallback%3Fcode%3DSECRET",
+        );
+        assert!(cas.starts_with("https://id1.cloud.huawei.com:443/CAS/portal/loginAuth.html?reqClientType,service"));
+
+        // `hms://` 回调：scheme+authority 保留、code 的值不留
+        assert_eq!(
+            describe_navigation_for_log("hms://redirect_uri?code=SECRET&state=SECRET2"),
+            "hms://redirect_uri?code,state"
+        );
+    }
+
+    #[test]
+    fn navigation_log_is_bounded_and_tolerates_junk() {
+        assert_eq!(describe_navigation_for_log(""), "(空 URL)");
+        assert_eq!(describe_navigation_for_log("   "), "(空 URL)");
+        assert_eq!(describe_navigation_for_log("https://host/path?a=1"), "https://host/path?a");
+
+        // 段数超过上限时截断并标记（8 个参数名 + "…"）
+        let many: Vec<String> = (0..20).map(|index| format!("p{index}=v")).collect();
+        let described = describe_navigation_for_log(&format!("https://host/path?{}", many.join("&")));
+        assert!(described.ends_with(",…"), "超出上限要看得出来被截过：{described}");
+        assert_eq!(described.matches(',').count(), 8, "参数名最多保留 8 个：{described}");
+
+        // 超长 URL 截断，且不截出半个字符
+        let long = format!("https://host/{}", "长".repeat(500));
+        let described = describe_navigation_for_log(&long);
+        assert!(described.chars().count() <= MAX_URL_LOG_CHARS);
+        assert!(described.ends_with('…'));
+
+        // 片段不进日志
+        assert_eq!(describe_navigation_for_log("https://host/p#section"), "https://host/p");
+    }
+
+    #[test]
+    fn navigation_log_labels_match_the_decisions() {
+        assert_eq!(navigation_for("https://id1.cloud.huawei.com/CAS/portal/loginAuth.html").log_label(), "allow");
+        assert_eq!(navigation_for("https://evil.example.com/").log_label(), "block");
+        assert_eq!(navigation_for("hms://redirect_uri?code=C").log_label(), "callback");
     }
 }

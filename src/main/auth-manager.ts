@@ -11,6 +11,11 @@
  * 音乐会话兑换（loginex，**注入式**：端点未知 → 结构化「待联调」，绝不猜 URL）→
  * `favorites` 验证会话 → 存盘（R5 DPAPI 信封）→ 广播 `auth:status`。
  *
+ * R16 增补**二维码路径**（`startQrLogin` / `cancelQrLogin`）：引导页直接显示二维码，
+ * 端口（`src/main/qr-login.mjs`）在 sidecar 里建单 + 轮询，状态变化经 `auth:qr` 广播；
+ * 用户手机确认后端口交回**同一个 shape 的回调 URL**，于是"确认之后"的部分与开窗路径
+ * **共用同一条兑换链**（`completeWithCode`）——两条路不可能各自演化出不同的登录语义。
+ *
  * 三条不妥协的诚实性规矩：
  * 1. **没验过的会话不广播"已登录"**：验证失败有两大类——"会话失效"与"没法验证"（端点还没确定），
  *    两者在返回值里分开报（`session_invalid` / `verify_unavailable`），绝不混成一个"未登录"。
@@ -23,11 +28,14 @@ import {
   LOGIN_ERROR_KINDS,
   LOGIN_FLOW_STATUS,
   LOGIN_TIMEOUT_MS,
+  consumeCallback,
   runLoginFlow,
 } from "../protocols/login-callback.mjs";
-import { AUTH_STATUS } from "../shared/channels.ts";
+import { AUTH_QR, AUTH_STATUS } from "../shared/channels.ts";
 import { CORE_ERROR_KINDS, err, ok } from "../shared/result.ts";
 
+import { QR_LOGIN_STATUS } from "../protocols/qr-login.mjs";
+import { createHuaweiQrPort } from "./qr-login.mjs";
 import {
   HOST_LOGIN_STATUS,
   LOGIN_PAGE_UNAVAILABLE_MESSAGE,
@@ -71,6 +79,8 @@ export const AUTH_ERROR_KINDS = {
   loginPageUnavailable: "login_page_unavailable",
   /** 已有一次登录在进行中 */
   loginInProgress: "login_in_progress",
+  /** 已经有会话了：再发一次二维码没有意义（渲染层此时本来也不该在门禁里） */
+  alreadyLoggedIn: "already_logged_in",
   /** 音乐会话兑换（loginex）端点未确定：待联调，绝不猜 URL */
   loginexPending: "loginex_pending",
   /** 会话验证明确判定失效 */
@@ -102,6 +112,38 @@ export interface AuthSessionStore {
   clearMusicSession: () => Promise<unknown>;
 }
 
+/** 二维码端口的广播事件（`auth:qr` 载荷的来源；`payload` 只在 confirmed 那一档有）。 */
+export interface QrEvent {
+  status: string;
+  content?: string;
+  expiresInMs?: number | null;
+  message?: string;
+  errorKind?: string;
+  /**
+   * 已确认那一档的**原始响应**（含 `code`/`userAccount` 等兑换所需字段）。
+   *
+   * **绝不进广播**：`broadcastQr` 只挑 status/content/expiresInMs/message/errorKind 五个字段，
+   * 这个载荷只在本进程内交给兑换链（渲染层拿不到任何凭据，与"渲染层拿不到 Token"同一条红线）。
+   */
+  payload?: unknown;
+}
+
+/**
+ * 二维码登录端口（R16）：建单 + 轮询 + 已确认后的换码。
+ *
+ * 生产实现是 `src/main/qr-login.mjs` 的 `createHuaweiQrPort`（探针确认的端点）；
+ * 测试注入假端口，于是"确认/失败/过期"这些档位都能被钉住，不需要真机扫码。
+ */
+export interface QrLoginPort {
+  start: (params: {
+    authorizeUrl: string;
+    onEvent: (event: QrEvent) => void;
+    onConfirmed: (result: { callbackUrl: string }) => void;
+  }) => Promise<CoreResult<{ content: string; expiresInMs: number | null }>>;
+  cancel: () => unknown;
+  status: () => string;
+}
+
 export interface AuthManagerDeps {
   /** 登录宿主端口（`createLoginHost` 的产物） */
   host: LoginHost;
@@ -122,6 +164,8 @@ export interface AuthManagerDeps {
   }) => Promise<CoreResult<unknown>>;
   /** 会话验证（默认：结构化「验证器未注入」——不谎报有效） */
   verifySession?: (session: unknown) => Promise<CoreResult<unknown>>;
+  /** 二维码登录端口（R16；默认用探针确认的华为端点） */
+  qrPort?: QrLoginPort;
   /** 个人数据缓存清理（登出用；未注入时如实报告"没清"） */
   clearPersonalCache?: () => Promise<CoreResult<unknown> | void> | void;
   /** 向渲染层广播（默认不广播，只记日志） */
@@ -186,10 +230,14 @@ export function createAuthManager(deps: AuthManagerDeps) {
   const broadcast = deps.broadcast ?? (() => undefined);
   const notify = deps.notify ?? ((text: string) => log(`提示：${text}`));
   const log = deps.log ?? defaultLog;
+  const qrPort: QrLoginPort =
+    deps.qrPort ?? (createHuaweiQrPort({ log }) as QrLoginPort);
 
   let epoch = 0;
   let session: unknown = null;
   let inFlight: Promise<CoreResult<{ session: unknown; epoch: number }>> | null = null;
+  /** 当前二维码会话的 PKCE 尝试（确认后兑换要用它的 code_verifier 与 state） */
+  let qrAttempt: ReturnType<typeof createAttempt> | null = null;
 
   /** 宿主交付物：结论，或"开窗本身就失败了"（后者的类别比任何结论都具体，别被改写成笼统的 failed）。 */
   type Deliverable =
@@ -343,7 +391,19 @@ export function createAuthManager(deps: AuthManagerDeps) {
     if (code === "") {
       return failWith(err("回调里没有授权码（详情见日志）", CORE_ERROR_KINDS.internal));
     }
+    return completeWithCode(code, attempt);
+  }
 
+  /**
+   * **授权码之后的那半条链**（开窗路径与二维码路径共用）。
+   *
+   * 抽出来的理由不是"少写几行"，而是让两条路不可能各自演化：谁能登录、什么算登录成功、
+   * 存盘失败怎么办，只有这一份实现。
+   */
+  async function completeWithCode(
+    code: string,
+    attempt: ReturnType<typeof createAttempt>,
+  ): Promise<CoreResult<{ session: unknown; epoch: number }>> {
     const tokens = await exchangeCode({
       endpoint: endpoints.token,
       code,
@@ -386,6 +446,85 @@ export function createAuthManager(deps: AuthManagerDeps) {
     return ok({ session, epoch });
   }
 
+  /**
+   * 二维码状态广播（R16）：`auth:qr` 的载荷**只带渲染层要用的东西**——
+   * 二维码内容、有效期、状态、以及失败时那一句人话；会话令牌（qrToken）留在 sidecar 里。
+   *
+   * **`failed` 必须顺带把 `busy` 落下来**（修复轮 1/5）：二维码会话的失败（轮询失败×3、
+   * 10 分钟期限、确认链拿不到页面配置）只发这一条广播，`auth:status` 那条**不会**再响——
+   * 而渲染层的官方页回退按钮是 `disabled={!canStartLogin(state)}`（只看 `busy`）。
+   * 不复位就等于：**恰好在最需要回退的场景（协议不可用）里，那个按钮是灰的**，
+   * 且页面上再没有别的路能把它弄回来。
+   */
+  function broadcastQr(event: {
+    status?: unknown;
+    content?: unknown;
+    expiresInMs?: unknown;
+    message?: unknown;
+    errorKind?: unknown;
+  }): void {
+    const payload: Record<string, unknown> = {
+      status: typeof event?.status === "string" ? event.status : "failed",
+    };
+    if (typeof event?.content === "string") payload.content = event.content;
+    if (typeof event?.expiresInMs === "number") payload.expiresInMs = event.expiresInMs;
+    if (typeof event?.message === "string" && event.message !== "") payload.message = event.message;
+    if (typeof event?.errorKind === "string" && event.errorKind !== "") payload.errorKind = event.errorKind;
+    // 先播状态再播二维码：二维码那条万一抛出去，busy 也已经复位了
+    if (payload.status === QR_LOGIN_STATUS.failed) announce({ busy: false });
+    try {
+      broadcast(AUTH_QR, payload);
+    } catch (cause) {
+      log(`二维码状态广播失败：${messageOf(cause)}`);
+    }
+  }
+
+  /**
+   * 二维码路径的失败收口（修复轮 1/5）：`failWith` 只让 `auth:status` 说"空闲 + 原因"，
+   * 而渲染层的**可操作元素**（重试 / 官方页入口）只看 `qr.status`。
+   *
+   * 少了后半条，确认之后收尾失败（state 不符、loginex 缺端点、令牌兑换失败）会让界面
+   * 停在"已确认，正在完成登录…"：错误行有、按钮一个没有，自动重启也不会来
+   * （`qrAttempted` 仍为 true）。所以失败时一并把 `auth:qr` 落到 `failed`。
+   */
+  function failQrWith(failure: CoreFail): CoreFail {
+    broadcastQr({
+      status: QR_LOGIN_STATUS.failed,
+      message: failure.error.message,
+      errorKind: failure.error.kind,
+    });
+    return failWith(failure);
+  }
+
+  /**
+   * 二维码确认之后收尾：端口交回的**是同形的回调 URL**（`hms://redirect_uri?code=…&state=…`），
+   * 所以判真伪、比 state、兑换都走与开窗路径完全一样的那一条链。
+   *
+   * 三条失败出口（尝试丢了 / state 不符 / `completeWithCode` 里任何一步）都经 `failQrWith`：
+   * 二维码这条路**每一步失败都得让界面知道"这条路走完了"**，用户才有"重试"可按。
+   *
+   * 注意 `completeWithCode` 是开窗路径共用的，它**不**播 `auth:qr`（那条路上没有二维码）——
+   * 所以"补一条二维码失败广播"的责任落在本函数里。
+   */
+  async function finishQrLogin(callbackUrl: string): Promise<CoreResult<{ session: unknown; epoch: number }>> {
+    const attempt = qrAttempt;
+    if (attempt === null) {
+      return failQrWith(err("二维码登录的授权尝试已丢失（详情见日志）", CORE_ERROR_KINDS.internal));
+    }
+    const consumed = consumeCallback(callbackUrl, {
+      expectedState: attempt.state,
+      createdAt: attempt.createdAt,
+      timeoutMs: LOGIN_TIMEOUT_MS,
+    });
+    if (!consumed.ok) {
+      return failQrWith(err(consumed.error.message, consumed.error.kind ?? CORE_ERROR_KINDS.internal));
+    }
+    qrAttempt = null;
+    const completed = await completeWithCode(consumed.data.code, attempt);
+    // 到这里 busy 已经由 completeWithCode 里的 failWith 复位过了，缺的只是 `auth:qr` 那一条
+    return completed.ok ? completed : failQrWith(completed);
+  }
+
   /** 上一次开窗失败的原始类别（`openLogin` 与流程收场之间的一次性传话）。 */
   return {
     /**
@@ -411,6 +550,59 @@ export function createAuthManager(deps: AuthManagerDeps) {
       });
       announce({ busy: true });
       return inFlight;
+    },
+
+    /**
+     * 发起二维码登录（R16）：引导页**自动**调这一条，界面上没有任何按钮。
+     *
+     * 立刻广播 `busy:true`（渲染层的状态行要知道"正在准备/等待扫码"），随后二维码会话的每一步
+     * 状态变化经 `auth:qr` 广播送达。返回值只带"这一张二维码是什么"（内容 + 有效期）——
+     * 渲染层拿它立刻就能画出来，不必等广播。
+     */
+    async startQrLogin(): Promise<CoreResult<{ content: string; expiresInMs: number | null }>> {
+      if (session !== null) {
+        const failure = err("已经登录了，无需再扫码", AUTH_ERROR_KINDS.alreadyLoggedIn);
+        announce({ busy: false, message: failure.error.message });
+        return failure;
+      }
+      if (inFlight !== null) {
+        // 并排第二次：开窗那条路正在跑，再开一张二维码只会让"点了没反应"更难查
+        return err("已有一次登录正在进行（登录窗口会被拉到前台）", AUTH_ERROR_KINDS.loginInProgress);
+      }
+
+      // 每次二维码会话一对**新的** PKCE/state：重开一次旧的就作废（与开窗路径同一语义）
+      const attempt = createAttempt({ authorizeEndpoint: endpoints.authorize });
+      qrAttempt = attempt;
+      announce({ busy: true });
+
+      const started = await qrPort.start({
+        authorizeUrl: attempt.authorizeUrl,
+        onEvent: (event) => broadcastQr(event),
+        onConfirmed: (result) => {
+          void finishQrLogin(result.callbackUrl);
+        },
+      });
+      if (!started.ok) {
+        // 建单失败要说给用户听：界面显示不了二维码时必须有人知道为什么
+        return failWith(err(started.error.message, started.error.kind ?? CORE_ERROR_KINDS.internal));
+      }
+      return started;
+    },
+
+    /**
+     * 停下进行中的二维码会话（门禁收起、用户取消、进程收尾都走这条）。
+     *
+     * 没有进行中的会话时**不去打扰端口**：什么都没停不是错误。
+     */
+    async cancelQrLogin(): Promise<CoreResult<{ cancelled: boolean }>> {
+      qrAttempt = null;
+      try {
+        qrPort.cancel();
+      } catch (cause) {
+        log(`停止二维码会话失败：${messageOf(cause)}`);
+      }
+      announce({ busy: false });
+      return ok({ cancelled: true });
     },
 
     /**

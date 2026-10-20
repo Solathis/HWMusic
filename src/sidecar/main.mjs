@@ -32,6 +32,7 @@ import {
   AUTH_CANCEL_LOGIN,
   AUTH_LOGIN,
   AUTH_LOGOUT,
+  AUTH_QR_START,
   REQUEST_CHANNELS,
   SETTINGS_GET,
   SETTINGS_SET,
@@ -180,6 +181,11 @@ dispatcher.register(AUTH_LOGIN, (request, respond) => {
 });
 dispatcher.register(AUTH_LOGOUT, () => authManager.logout());
 dispatcher.register(AUTH_CANCEL_LOGIN, () => authManager.cancelLogin());
+
+// R16：二维码登录。引导页**自动**调这一条（界面上没有按钮），应答里带回二维码内容与有效期，
+// 之后的状态变化走 `auth:qr` 广播（扫码要好几分钟，渲染层那条调用链只有 60 秒）。
+// 轮询在 sidecar 里跑：渲染层只画二维码，不碰协议、不碰会话令牌。
+dispatcher.register(AUTH_QR_START, () => authManager.startQrLogin());
 
 for (const channel of REQUEST_CHANNELS) {
   if (dispatcher.handlers().includes(channel)) continue;

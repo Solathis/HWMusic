@@ -7,7 +7,7 @@
 > **读法**：每条都给了「为什么没验」与「谁来验」。**它不在别处被悄悄说成"已支持"** ——
 > README 的功能清单与 [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) 的档位与本文一致。
 >
-> 共 **62 条**（A 5 / B 12 / C 12 / D 8 / E 15 / F 7 / G 3）。
+> 共 **64 条**（A 6 / B 13 / C 12 / D 8 / E 15 / F 7 / G 3）。
 
 ---
 
@@ -20,6 +20,7 @@
 | A3 | **音乐业务端点全部未知（风险 K1 未消除）** | pending | `music.huawei.com` 与三个候选主机**全部 ENOTFOUND**（域名不解析）；公开入口页脚本里 0 条 API 候选。所以代码走**端点注入式**（`data.musicEndpoints`，**现在仍是空表**），每个请求回结构化 `endpoint_unknown`，UI 显示「接口尚未配置（待联调确认）」——**这是如实，不是坏了**。受影响的：收藏 / 歌单列表 / 歌单曲目 / 搜索 / 专辑 / 歌手 / 播放历史 / 播放地址 / 歌词文本 | 授权 probe 或用户在场的授权联调；写入方只改配置 |
 | A4 | **token 端点没做过真实兑换** | untested | 无账号授权。「`client_id=101444301` 被受理」只是**弱证据**（token 端点对无效授权码回了「授权码无效」而不是「客户端未注册」），**不等于**该身份被授权使用；身份随时可能失效 | 同 A1；且**不做**「修身份式重试」 |
 | A5 | **请求参数名与响应字段名仍是占位** | pending | `music.mjs` 的参数名（`page`/`pageSize`/`keyword`/`id`）集中在 `queryNames` 一张表，测试验的是「间接层有效」（覆写后请求随之变化），**不是「名字正确」**；列表容器字段（`list/items/songs/records/tracks`）、曲目 ID 字段（`id/songId/musicId/resourceId/trackId`）、歌词响应键（6 个候选）都是**宽容读取**。另外**时长单位待联调**：`trackDurationOf` 只认 `duration` 并按秒解读，猜别的字段名会显示一个看不出来的错值 | 联调后收敛到确定的那一个键 |
+| A6 | **二维码"已确认之后"的换码链**（`codeRemoteLogin` → 带 `code` 的回调） | untested | 建单/轮询**已实测跑通**（`node scripts/probe-qr.mjs`，见契约 §1.8）：拿到真二维码内容、真 `qrToken`、真 `103000200` 未扫档。但 `0`（已确认）那一档**只有真人扫码 + 手机确认才会出现**——那是用户在场的授权动作。因此"确认之后的请求形状"读自华为页面 bundle 的调用代码（`codeRemoteLogin` 的字段逐个对应），代码里也按它实现（`src/main/qr-login.mjs`），但**没有一次真实往返**。失败时是结构化 `qr_confirm_failed`（带服务端 `errorCode`），不猜、不静默 | 用户在场扫一次码：门禁 → 手机确认 → 看 `auth:status` 与日志里的 `codeRemoteLogin` 往返 |
 
 连带影响（不单列条目，因为它们是 A3 的直接后果）：
 会话验证器**刻意没注入**（验证要打收藏接口）→ 启动恢复只报 `verify_unavailable`（会话仍在、没验过），
@@ -57,6 +58,7 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
 | B10 | **`<audio>` 的真实播放**：AMLL 背景/歌词在真 webview 里的观感与性能、rAF 推流的实际流畅度、Media Session 在 Windows 上是否被**系统媒体控件**识别、`<audio>` 经代理/CSP 的真实播放 | untested | 需要**一次真实音源联调**（依赖 A3） |
 | B11 | **「配代理 → 抓包」**：证明到「装配进了 dispatcher/浏览器参数、请求确实经过代理、凭据只给代理」这一层；**没有**用真实代理抓过华为业务流量，也没验证 WebView2 在真实代理下的封面/音频走向 | untested | 授权场景下的人工验证 |
 | B12 | **托盘「桌面歌词」勾选与窗存在性的正向同步**：「点一下真的建出窗」只有真机能验（失败路径的收口有单测） | untested | 同 B1 |
+| B13 | **R16 的登录窗空白修复（白名单增补 `id1.cloud.huawei.com`）** | untested | 根因是**证据性**的：实探拿到 `casLoginRedirectUrl = https://id1.cloud.huawei.com:443/CAS/remoteLogin?…`（契约 §1.8 ①②），而该域原先不在导航白名单里——授权页那个空壳 SPA 的跳转被拦下，窗里就停在什么都渲染不出来的授权页上。修复 = 加白名单条目 + 导航/加载日志（debug 构建并给登录窗开 devtools，能看到 console 与网络）。**但"修好了"必须由用户跑一次 dev 才算数**：本环境的沙箱里应用起不来真窗（见本节开头），自动化只能钉到"白名单放行这条 URL + 日志按形状脱敏" | 用户跑一次 `npm run dev`：若仍空白，日志里的 `登录窗开始加载/加载完成/拦下一次不在白名单里的导航` 三行会直接指出卡在哪一步 |
 
 **另有三项运行期缺口的如实登记**（不是"没测"，是"已知看不见"）：
 

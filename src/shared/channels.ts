@@ -101,9 +101,23 @@ export const LYRICS_PROGRESS = "lyrics:progress" as const;
  */
 export const LYRICS_STATE = "lyrics:state" as const;
 
+/**
+ * 二维码登录状态广播（R16 增补）：`{status, content?, expiresInMs?, message?, errorKind?}`。
+ *
+ * 为什么是独立频道而不是复用 `auth:status`：`auth:status` 的语义是**会话**状态（登录了没有、
+ * 忙不忙），而这里是**一张二维码的生命周期**（pending/scanned/confirmed/expired/failed）——
+ * 把它塞进 `auth:status` 会让"正在等待扫码"与"登录进行中"变成同一个字段的两种解释，
+ * 而门禁需要同时知道这两件事（会话还没建立 + 二维码正在等）。
+ *
+ * **二维码内容（`content`）只在广播里走**：渲染层不自己建单（那要拿着页面会话与协议参数），
+ * sidecar 才是唯一持有轮询状态的地方；会话令牌（qrToken）**不进广播**，留在 sidecar。
+ */
+export const AUTH_QR = "auth:qr" as const;
+
 export const BROADCAST_CHANNELS = [
   APP_NOTICE,
   AUTH_STATUS,
+  AUTH_QR,
   PLAYER_COMMAND,
   LYRICS_TOGGLE,
   APP_OPEN_SETTINGS,

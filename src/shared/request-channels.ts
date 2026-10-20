@@ -13,6 +13,14 @@
 export const AUTH_LOGIN = "auth:login" as const;
 export const AUTH_LOGOUT = "auth:logout" as const;
 export const AUTH_CANCEL_LOGIN = "auth:cancel-login" as const;
+/**
+ * 二维码登录（R16 增补）：发起一次二维码会话，应答 `{content, expiresInMs}`。
+ *
+ * 为什么是"发起并立刻回内容"而不是长轮询：扫码状态的变化走 `auth:qr` 广播（同 `auth:login`
+ * 的理由——渲染层那条调用链有 60 秒上限，而等待扫码要好几分钟）。轮询在 sidecar 里做，
+ * 渲染层只画二维码、只看广播；重复调用 = 换一张新二维码（用户重试就是想要这个）。
+ */
+export const AUTH_QR_START = "auth:qr-start" as const;
 export const SETTINGS_GET = "settings:get" as const;
 export const SETTINGS_SET = "settings:set" as const;
 
@@ -80,6 +88,7 @@ export const REQUEST_CHANNELS = [
   AUTH_LOGIN,
   AUTH_LOGOUT,
   AUTH_CANCEL_LOGIN,
+  AUTH_QR_START,
   SETTINGS_GET,
   SETTINGS_SET,
   SETTINGS_TEST_PROXY,

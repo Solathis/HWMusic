@@ -80,17 +80,30 @@ HTTP 400  content-type: application/json  {"error":1101,"error_description":"inv
 ### 1.4 登录域导航白名单（Node 侧唯一真源：`src/protocols/login-callback.mjs`）
 
 ```js
-LOGIN_ALLOWED_ORIGINS = ["https://oauth-login1.cloud.huawei.com", "https://login.cloud.huawei.com"]
+LOGIN_ALLOWED_ORIGINS = [
+  "https://oauth-login1.cloud.huawei.com",  // OAuth 授权/令牌服务域
+  "https://id1.cloud.huawei.com",           // R16 增补：CAS 门户域（授权页的落地页，见下）
+  "https://login.cloud.huawei.com",         // 华为帐号登录（CAS 系，旧域名）
+]
 LOGIN_ALLOWED_URLS    = ["https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback"]  // 精确例外
 ```
 
 - 是**显式条目表**，不是 `*.huawei.com` 通配（`test/login-parity.test.mjs` 扫源码禁止通配写法）；
 - **不放 `oauth-login2`**：换区域主机属显式决策，默认不放行（历史故障正是"漏了某个登录域"）；
+- **R16 增补 `https://id1.cloud.huawei.com`（真机"登录窗一片空白"的根因）**：
+  `POST /oauth2/ajax/getLoginWay` 的实探响应是
+  `loginInteractInfo.cas.casLoginRedirectUrl = https://id1.cloud.huawei.com:443/CAS/remoteLogin?…`
+  → 302 → `/CAS/portal/loginAuth.html?…`。授权页（oauth-login1）自身只是个空壳 SPA，它拿到
+  `loginType = TICKET` 后就 `location.href = <casLoginRedirectUrl>`；这条导航原先被白名单拦下，
+  于是窗里永远停在那个什么都没渲染的授权页上。**端口 443 是默认端口**，`Url::origin()` / `URL.origin`
+  归一化后都不带端口，所以一条 `https://id1.cloud.huawei.com` 同时覆盖 `:443` 的写法（两侧测试都钉了）。
+  证据：`.probe/qr-probe.json` 的 ①②③ 步（`node scripts/probe-qr.mjs` 可复现）。
 - `loginCallback` 例外是"扫码成功后 `hms://` 才会触发"的关键（旧仓历史故障根因：漏掉它 → 停在 CAS 页）；
 - 探针实测：`https://login.cloud.huawei.com/` → `403`（域存在，仅拒绝裸请求，属预期）；
 - **注**：bundle 里同时存在 `/oauth2/v2/loginCallback`。本项目只放 v3（审计事实点名的那个）。
   R7 联调若观测到回调真的落到 v2，必须**带证据**显式加条目并同步 parity 测试，不得改成通配。
-- Rust 侧镜像与互钉测试归 R7（`src-tauri/src/login.rs` + `test/login-parity.test.mjs` 已写好"存在即互钉"的钉子）。
+- Rust 侧镜像（`src-tauri/src/login.rs` 的 `LOGIN_ALLOWED_ORIGINS`）与互钉测试已落地：
+  改一侧就必须改另一侧 + `test/login-parity.test.mjs` + `src-tauri/tests/login_policy.rs`。
 
 ### 1.5 未确认：令牌链的后续环节
 
@@ -164,6 +177,75 @@ auth:status → {loggedIn: boolean, busy: boolean, message?: string}
 
 **未联调（untested）**：真实扫码登录（需要用户在场 + 真实账号）、音乐会话兑换（loginex，见 §1.5）、
 `tauri dev` 真窗验证（本环境的子进程沙箱里应用起不来：`tauri-plugin-log` 初始化 `os error 5`）。
+
+### 1.8 二维码（DimensionalCode）登录协议（R16 实探 · 可复现）
+
+用户指令要求引导页**直接显示二维码**而不是"打开官方页"按钮流，所以 R16 把华为的二维码登录链
+完整探了一遍。**全部证据来自公开页面**：不登录账号、不提交凭据、不扫码；探针自己建的二维码会话
+用完即弃，因此拿不到任何可用凭据。
+
+复现：`node scripts/probe-qr.mjs`（摘要落 `.probe/qr-probe.json`，已在 .gitignore）。
+
+**① 找到二维码配置的那条链**（桌面门户不下发二维码配置，移动登录页才下发）：
+
+| 步 | 请求 | 关键响应 |
+|---|---|---|
+| 1 | `POST https://oauth-login1.cloud.huawei.com/oauth2/ajax/getLoginWay?reflushCode=…&display=page`（头 `interfaceVersion: v3`、`fromLoginAuth: false`；表单 = 授权页查询串） | `loginInteractInfo.cas.casLoginRedirectUrl`（**对 client 101444301 一律是 TICKET/CAS 跳转**，没有 `loginType=CAS_JS_SDK` 那条路） |
+| 2 | `GET <casLoginRedirectUrl>` | `302` → `https://id1.cloud.huawei.com:443/CAS/portal/loginAuth.html?…` |
+| 3 | `GET /CAS/mobile/standard/login.html?<同一串参数>` | `200`（页面本身只是壳） |
+| 4 | `POST https://id1.cloud.huawei.com/CAS/IDM_W/ajaxHandler/login/getPageInfo?reflushCode=…&cVersion=UP_CAS_6.26.3.100`（表单 = 上一步 URL 的参数 + `pageName=login` + `urlParam=…` + `languageCode`） | 顶层 `pageToken` / `pageTokenKey`；`localInfo.service`（**带本次 `state` 的 loginCallback URL**）、`loginUrl`、`reqClientType`、`loginChannel`、`lang`；**`localInfo.getqrContent` / `asyncURL` / `qrcodeRequestInterval` 只在这张移动页上出现** |
+
+- **桌面门户（`/CAS/portal/loginAuth.html`）实测 `isQrlogin:false` 且不下发那三个二维码配置**——
+  这不是"华为没开二维码"，而是"桌面门户那条路不渲染二维码组件"；移动登录页的
+  `localInfo.isOpenDimensionalCode = true` 并给出完整配置。
+- `getPageInfo` 的 `pageToken` 只对**换码**那一步有用（见 ③）；建单/轮询（②）**完全无状态**：
+  实探证明不带任何 cookie、甚至用一个假 `qrToken` 也照样返回同一个 `103000200`。
+
+**② 建单 / 轮询（两步都已实测跑通）**：
+
+```
+建单  POST https://id1.cloud.huawei.com/DimensionalCode/getqrInfo
+          ?appID=com.huawei.hwidweb&loginChannel=7000700&reqClientType=700
+          &confirmFlag=1&version=40200&appBrand=HUAWEI
+      表单 {appID, confirmFlag, version, reqClientType, loginChannel, appBrand}（可带 deviceID/deviceType）
+      → {content, qrCode, qrToken, sessionID, qrCodeCreateTime, expiredTime, version:"40200"}
+
+轮询  POST https://id1.cloud.huawei.com/DimensionalCode/async?version=40200&t=<随机数>
+      表单 {qrToken} → {resultCode, errorDesc}
+```
+
+| `resultCode` | 含义 | 实探 |
+|---|---|---|
+| `0` | **已确认**（响应携带 `userAccount`/`code`/`userID`/`siteID`/`accountType`/`opType` 等） | 未能观测（需要真人扫码 + 手机确认） |
+| `103000202` | 已扫码，等待手机确认 | 未能观测（同上） |
+| `103000201` | 二维码过期 | 未能观测（有效期 181 秒内没等到） |
+| `103000200` | **未扫 / 会话未就绪**（服务端原话 `errorDesc: "Please to login."`） | ✅ 实测（连续 3 次轮询都是它） |
+| 其它 | 页面按"继续轮询"处理 | — |
+
+- `content`（**要编码进二维码的字符串**，实测 174 字符）形如
+  `https://id1.cloud.huawei.com/qrcode/login.jsp?loginChannel=…&reqClientType=…&qRCode=…&qrSiteID=…&familySharing=…&appBrand=HUAWEI`；
+  实探里 `expiredTime - qrCodeCreateTime = 181_000 ms`（二维码有效期 ≈ 3 分钟）。
+- 轮询间隔由服务端给：`qrcodeRequestInterval = 2000`（ms）。
+- `qrToken` 是会话令牌：**只在 sidecar 内使用**，不进广播、不写日志（`auth:qr` 只带 `content`）。
+
+**③ 已确认 → 换授权码（形状来自页面 bundle，**未实测**）**：
+
+```
+POST https://id1.cloud.huawei.com/CAS/IDM_W/ajaxHandler/codeRemoteLogin?reflushCode=…&cVersion=UP_CAS_6.26.3.100
+表单 {pageToken, pageTokenKey, loginUrl, reqClientType, service, loginChannel, lang, appID,
+      userID, siteID, accountType, code, qrCode, userAccount, opType}
+→ {callbackURL}      // = loginCallback URL（带 code，与扫码开窗那条链落到同一个地方）
+```
+
+这条链的**每一步都读自页面自己的代码**（`/CAS/static_rss/green/rss_20260904/CAS/vue3/vuebuild/js/login/portal/`
+的 `qrCodeLogin-legacy.js` 与 `index-entry-legacy.js`；`getqrContent`/`asyncURL` 只作为**服务端配置值**出现，
+bundle 里没有任何硬编码的二维码端点字符串——这也是"必须走 getPageInfo 拿配置"的原因）。
+**未实测的边界**：`codeRemoteLogin` 需要一次真实的"扫码 + 手机确认"，那是用户在场的授权动作
+（本任务交付到"轮询状态机就绪"）。失败时是结构化错误（`qr_confirm_failed` + 服务端 `errorCode`），不猜。
+
+**本项目落地位置**：`src/protocols/qr-login.mjs`（状态机，端点注入）、`src/main/qr-login.mjs`
+（探针确认的端点常量 `HUAWEI_QR_ENDPOINTS` + CAS 换码链）、`auth:qr-start` 请求频道、
+`auth:qr` 广播频道、渲染层 `login-gate.tsx`（`qrcode` 库画 canvas）。
 
 ## 2. 音乐业务接口
 
@@ -652,6 +734,11 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `LYRICS_SESSION_NOTICE` | 会话内说明文案 | `src/renderer/features/lyrics/lyrics-window.mjs` | R12：设置项旁边如实写"只在本次运行内生效、不写入设置文件" |
 | `SHORTCUT_BINDINGS` | 5 动作 / 主组合 + 备选链 | `src-tauri/src/shortcuts.rs` | R13：全局快捷键的唯一真源（媒体三键无备选；两条提示型组合各有 2 条备选）。每个组合都必须能被 `global-hotkey` 解析、且不许两个动作抢同一个组合（内联单测钉住） |
 | `ShortcutState` | 生效组合快照 | `src-tauri/src/shortcuts.rs` | R13：`setup` 里登记成托管状态（设置页后续可读；本任务只记 + 提示，不做 UI） |
+| `HUAWEI_QR_ENDPOINTS` | 见 §1.8（建单/轮询/CAS 换码三条） | `src/main/qr-login.mjs` | R16：二维码登录的端点表（探针确认值；协议层 `src/protocols/qr-login.mjs` 仍只收注入，不写死 URL） |
+| `AUTH_QR_START` / `AUTH_QR` | `"auth:qr-start"` / `"auth:qr"` | `src/shared/request-channels.ts` / `src/shared/channels.ts` | R16：二维码会话的请求频道与状态广播（Rust 镜像由 `test/channel-parity.test.mjs` 钉住） |
+| `QR_HINT_TEXT` | `"请使用华为手机上的华为账号扫码登录。"` | `src/renderer/features/auth/login-gate-logic.mjs` | R16：引导页那**一句**提示文字（界面与测试读同一份真源） |
+| `QR_DEFAULT_INTERVAL_MS` / `QR_DEFAULT_MAX_POLL_FAILURES` | `2000` / `3` | `src/protocols/qr-login.mjs` | R16：轮询间隔兜底（真值由服务端下发）与连续失败几次收口 |
+| `MAX_URL_LOG_CHARS` | `160` | `src-tauri/src/login.rs` | R16：登录窗导航/加载日志里 URL 的截断上限（查询值一律不进日志） |
 
 ## 4. 红线（任何后续任务不得越过）
 
@@ -714,3 +801,14 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
   顺带把 §2.4（CDN 域）那一段**整体上移到 §2.5 之前**——R8 修复轮插回标题时它落在 §2.10 之后，
   导致 §2 的物理顺序是 2.3→2.5…2.10→2.4；现在 §2.1–§2.11 按编号单调，且 §2.11 在末尾（纯挪行，内容一字未改）。
   其余各节（§1.1–§1.7、§2.1–§2.10、§3–§4）核对无缺漏。
+- 2026-10-20（Task R16）：**用户指令推翻 R7 的"按钮流"裁决**（引导页只展示二维码与提示文字），
+  为此新增 §1.8——二维码（DimensionalCode）登录协议的完整实探：getLoginWay → CAS 302 →
+  **移动登录页的 getPageInfo 才下发二维码配置**（桌面门户实测 `isQrlogin:false`）→
+  `DimensionalCode/getqrInfo` 建单（`content` 就是要编码的字符串，有效期 181 秒）→
+  `DimensionalCode/async` 轮询（`0`/`103000202`/`103000201`/其余，实探只见 `103000200`）→
+  `codeRemoteLogin` 换回带 `code` 的回调（**未实测**：需要真人扫码确认）。
+  同轮把 §1.4 的白名单增补一条 `https://id1.cloud.huawei.com`——**这就是真机"登录窗一片空白"的根因**
+  （授权页空壳 SPA 要跳到 CAS 门户，而那条导航被拦下）；配套落地：登录窗导航/加载日志
+  （URL 只留 origin+path+参数名，`MAX_URL_LOG_CHARS` 截断）+ debug 构建开 devtools。
+  §3 增补六行常量。**仍未联调**：真实扫码确认后的兑换（`loginex` 端点仍缺，见 §1.5）、
+  真机 dev 跑一次的验证（由用户在场所做）。

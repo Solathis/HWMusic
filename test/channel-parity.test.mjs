@@ -41,6 +41,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import {
+  AUTH_QR_START,
   HOST_REQUEST_CHANNELS,
   PLAYBACK_LYRICS,
   PLAYBACK_RESOLVE_URL,
@@ -48,6 +49,7 @@ import {
 } from "../src/shared/request-channels.ts";
 import {
   APP_OPEN_SETTINGS,
+  AUTH_QR,
   BROADCAST_CHANNELS,
   CORE_EVENT,
   LYRICS_DOCUMENT,
@@ -128,6 +130,7 @@ const SETTINGS_CHANNELS = ["settings:get", "settings:set", "settings:test-proxy"
 const BROADCAST_CHANNEL_NAMES = [
   "app:notice",
   "app:open-settings",
+  "auth:qr",
   "auth:status",
   "lyrics:document",
   "lyrics:progress",
@@ -146,6 +149,7 @@ test("一致性：请求频道白名单（Node 共享常量 ↔ Rust commands.rs
     "auth:cancel-login",
     "auth:login",
     "auth:logout",
+    "auth:qr-start",
     "library:album",
     "library:artist",
     "library:favorites",
@@ -291,4 +295,24 @@ test("反漂移：Node 运行期代码里不得出现频道名字面量（只有
     for (const match of source.matchAll(literal)) offenders.push(`${relative}: ${match[1]}`);
   }
   assert.deepEqual(offenders, [], `频道名出现在运行期代码里（应从 src/shared 导入）：${offenders.join("; ")}`);
+});
+
+test("一致性：R16 二维码登录的两条频道（请求 auth:qr-start + 广播 auth:qr，两侧逐字相等）", () => {
+  // 请求频道：引导页自动发起二维码会话；广播频道：二维码的生命周期（pending/scanned/…）
+  assert.equal(AUTH_QR_START, "auth:qr-start");
+  assert.equal(AUTH_QR, "auth:qr");
+  assert.ok(
+    REQUEST_CHANNELS.includes(AUTH_QR_START),
+    "auth:qr-start 必须在请求白名单里：不在的话 Rust 准入直接回 unknown_channel（引导页只看到加载失败）",
+  );
+  assert.ok(
+    rustChannelLiterals(rustProduction(rustSource("commands.rs")), "auth:").includes(AUTH_QR_START),
+    "Rust 侧命令白名单同样必须含 auth:qr-start",
+  );
+  assert.ok(BROADCAST_CHANNELS.includes(AUTH_QR), "auth:qr 必须在广播白名单里（否则状态广播被当白名单外帧丢掉）");
+  assert.ok(
+    rustStringArray(rustSource("bridge.rs"), "BROADCAST_CHANNELS").includes(AUTH_QR),
+    "Rust 侧广播白名单同样必须含 auth:qr",
+  );
+  assert.equal(rustStringConst(rustSource("bridge.rs"), "AUTH_QR"), AUTH_QR);
 });
