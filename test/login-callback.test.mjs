@@ -277,6 +277,33 @@ test("runLoginFlow：超时时长可注入，默认取 LOGIN_TIMEOUT_MS（10 分
   await defaults.flow.settled;
 });
 
+/**
+ * R36：`createdAt` 让消费者按**尝试**的寿命算过期，而不是按"窗开了多久"。
+ *
+ * 为什么需要它：二维码那条路的最后一跳是"确认之后才开窗"——attempt 建立在前（扫码也是它换来的），
+ * 窗却开在后。若消费者的起点取"开窗那一刻"，一次 9 分钟才确认的扫码会换来一扇可以再等 10 分钟的窗，
+ * 于是**已经作废的 PKCE 对**会被送去兑换（服务端只会回一个 invalid_grant，用户看到的是一句莫名其妙的
+ * 兑换失败）。按 attempt 的建立时刻算，"过期"这条判断仍然只说一件事：这次尝试的寿命到了。
+ */
+test("runLoginFlow：createdAt 把过期锚定在 attempt 上（窗开得晚，寿命不会因此变长）", async () => {
+  const attemptCreatedAt = 1_000;
+  const lateNow = () => attemptCreatedAt + LOGIN_TIMEOUT_MS + 1;
+  const { flow, host } = flowOf({ flow: { createdAt: attemptCreatedAt, now: lateNow } });
+
+  const consumed = flow.consumeCallback(OK_URL);
+  assert.equal(consumed.ok, false, "attempt 已过期：回调不许被当成成功收下");
+  assert.equal(consumed.error.kind, LOGIN_ERROR_KINDS.expired);
+  const settled = await flow.settled;
+  assert.equal(settled.status, LOGIN_FLOW_STATUS.failed, "过期是终局错误：结算成 failed（不是静默继续等）");
+  assert.equal(settled.error.kind, LOGIN_ERROR_KINDS.expired);
+
+  // 反面控制：同一个"很晚"的钟，但 attempt 是刚刚建的 → 这条回调照常收下
+  const fresh = flowOf({ flow: { createdAt: lateNow(), now: lateNow } });
+  assert.equal(fresh.flow.consumeCallback(OK_URL).ok, true, "没给 createdAt 时按开窗那一刻起算（默认行为不变）");
+  assert.equal((await fresh.flow.settled).status, LOGIN_FLOW_STATUS.callback);
+  assert.equal(host.count("cleanup"), 1);
+});
+
 test("runLoginFlow：宿主把窗内每个导航 URL 都喂进来（not_callback）不结算 —— 登录流照常等真回调", async () => {
   const { flow, host, timer } = flowOf();
 

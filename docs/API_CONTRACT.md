@@ -736,7 +736,7 @@ R29 是被动读代码推断，R31 换了方法：**用 headless Chromium 真开
    `test/qr-login.test.mjs` 的 R31 3 条（建单 URL 去查询串、建单请求形状、轮询请求形状）、
    `test/qr-port.test.mjs` 的 R31 4 条（上下文链 + cookie 罐；降级；空 sid 不猜；CAS 链只走一遍）。
 
-**R33（用户真机证据 2026-10-21：扫码关联已通，卡在最后一跳）——`callbackURL` 是 https 中转页，要跟着它拿 `hms://`**。
+**R33（用户真机证据 2026-10-21：扫码关联已通，卡在最后一跳）——`callbackURL` 是 https 中转页，要跟着它拿 `hms://`**。**（R36 已整体退役：见本节末的 R36 段——真机上那一页不是 302 中转页。以下保留为历史。）**
 
 真机事实链：用户扫码 + 手机确认之后，轮询见到了 `0`（已确认）、`codeRemoteLogin` 跑通并回了
 `callbackURL`（R31 的保真生效了），但界面报「不是登录回调 URL（只接受 hms://redirect_uri）」。
@@ -774,7 +774,7 @@ codeRemoteLogin → {callbackURL: "https://oauth-login1.cloud.huawei.com/oauth2/
 `redirect: "manual"`、cookie 罐、UA、Referer 逐项）/ 两跳 / 5 跳边界与超限 /
 200 无 `Location` / `Location` 是别的 hms 域 / 跟随那一跳网络失败 / 形状不认不外发请求。
 
-**R34（用户真机证据 + 用户澄清 2026-10-21）：最后一跳改成三策略按证据序收尾。**
+**R34（用户真机证据 + 用户澄清 2026-10-21）：最后一跳改成三策略按证据序收尾。****（R36 已整体退役：三条策略全部落空，见本节末的 R36 段。以下保留为历史。）**
 
 真机把 R33 那条路**走出了界**：R33 的"跟随 302 读 Location"在真机上**没有走到**——服务端 fetch 那份
 https 中转页拿到的是 **HTTP 200**（一张 HTML 页面，浏览器里靠页面自己的 JS 跳 `hms://`），
@@ -833,7 +833,78 @@ state 接线（含反面控制）。R33 那条"跟随那一跳网络失败"的�
 仍走结构化失败；`&amp;` 这一类**本轮不处理**，按"原文不加不减"的口径登记在此）→
 `docs/KNOWN_LIMITATIONS.md` A6。
 
+**R36（用户真机诊断定案 2026-10-21）：确认链的最后一跳**改走登录 webview**——服务端解析整体退役。**
+
+R35 的诊断日志把真实形状钉死了，R33/R34/R35 的假设**全部落空**：
+
+| 观测（R35 真机日志） | 它推翻了什么 |
+|---|---|
+| `loginCallback` 页的查询里**没有 `code`**（只有 `ticket`/`siteID`/`flowID` 一类的 OAuth 票据参数） | R34 策略①"参数直构"没有立足点（**没有 code 可构**） |
+| 那一跳回的是 **HTTP 200**（不是 3xx），**没有 `Location`** | R33/R34 策略②"跟随 302"在真机上根本不会发生 |
+| 那份 200 的 14KB HTML 里**连 `hms` 字样都没有** | R34 策略③"响应体提取"也没有立字点（跳转目标是页面 JS 现拼的） |
+
+⇒ **服务端 fetch 这一页结构性地拿不到授权码**：它不是"回一份带 code 的中转页"，而是**一张靠自己的
+JS 完成最后一跳的页面**。所以 R33（跟随 302）、R34（三策略按证据序）、R35（脱敏诊断）
+**整体退役**——不是"哪条修得不对"，而是"在服务端收场"这个前提本身不成立。
+
+**定案依据是同一个应用里的对照组**：**账号密码网页登录实证走通**，走的正是
+"**webview 里**加载官方页 → 页面自己的 JS 执行 → 跳 `hms://` → 被导航拦截器接住"。
+于是二维码这条链的最后一跳复用同一条路：
+
+```
+手机确认 → 轮询 resultCode=0 → codeRemoteLogin → {callbackURL}（https 登录收尾页）
+  → auth-manager.finishQrLogin：经宿主要求开一扇登录 webview（既有 host:open-login 那条路径）
+       LoginConfig.url = callbackURL（宿主白名单：https + loginCallback 精确例外，两侧都已登记）
+  → 页面自己的 JS 跳 hms:// → Rust 导航拦截 → LoginConclusion::Callback{url}（原样）
+  → 同一条兑换链：consumeCallback（expectedState = attempt.state）→ exchangeCode（PKCE）
+       → loginex → 会话落地 → auth:status{loggedIn:true}
+```
+
+**两流合一（选型）**：`finishQrLogin` 的这半段**直接复用 R7 的 `runLoginFlow`**
+（`src/protocols/login-callback.mjs`），auth-manager 里只有一个装配点（`startLoginFlow`）——
+开窗/回调/取消/关窗/超时/首载失败六种交付物的结算与"结束必清理"只有一份实现。
+QR 的 attempt 通过 `expectedState` + `createdAt` 传进同一条流（**同一个 OAuth attempt**：
+R34 已核实建单链的 `state` 就是 `attempt.state`），所以 state 校验天然成立，
+"过期"也仍然只说一件事：**这次尝试的寿命到了**（`runLoginFlow` 为此新增可选参数 `createdAt`，
+默认仍是"开窗那一刻"）。
+
+**端口的职责因此收窄成"搬运"**（`src/main/qr-login.mjs`）：`codeRemoteLogin` 交回的 `callbackURL`
+**原样**交给登录链路——一个多余请求都不发（不 fetch 那份收尾页）、一个形状判断都不做。
+判真伪是 `isCallback`/`parseCallback` 的唯一职责，能不能开窗是宿主白名单的职责
+（Rust `login.rs` 的 `parse_config`：必须 https 且在导航白名单内）。
+日志只记形状：`二维码换码：callbackURL 形状=<scheme>://<host><path> → 原样交给登录链路…`
+（**不含查询串**：`code`/`state`/`ticket` 一个字符都不进日志）。
+
+`auth-manager` 的两条分支与三处接线：
+
+1. **`callbackURL` 已经是回调**（`hms://redirect_uri?code&state`）→ 不开窗，`consumeCallback` 后照旧兑换
+   （既有链零改动；宿主那只收 https 的登录页，喂 `hms://` 给它是白跑一趟）；
+2. **是 https 收尾页**（真机形状）→ 开登录 webview，等它的结论；四收场各归各的类别
+   （取消 / 关窗 / 超时 / 首载失败），一律经 `failQrWith` 落到 `auth:qr{failed}`（界面才有"重试"）；
+3. **那扇窗登记在 `qrWindow` 上**：跑着的时候 `login()` 如实拒（`login_in_progress`），
+   `cancelLogin()` 也关得掉它（用户能看见的窗，就得能取消）；窗开着期间 `busy: true`
+   （`busy` 描述的就是"开窗那条路在跑"，渲染层 reload 之后只凭它也知道窗开着）。
+
+**可见性**：这扇 webview 用的是**既有登录 webview 的全部策略**（Rust 侧一行未改）——
+白名单导航、`hms://` 拦截、R25/R27 的静默窗摆进、浮动「返回扫码登录」/主题控件、关窗收尾。
+所以"用户能不能看见官方收尾页"由既有策略决定：页面在静默窗（每次加载 `Finished` 后 1.5 秒内无新导航）
+之后摆进内容区——**没有额外确认步骤就跳走的页面，用户可能只看到门禁**；要再确认一步的页面，用户看得见。
+
+**门禁状态行（渲染层零改动）**：确认之后那一行是既有的
+「**已确认，正在完成登录…**」（QR 这条路的 `path` 一直是 `qr`）。契约里那句「已在网页中打开登录。」
+属于 `path === "official"`（渲染层**自己按了入口**的那条路）；而且在当前渲染层里它与 R27 的
+「正在打开华为官方登录页…」判据相同、后者先命中，**是不可达的一句**——R36 不动渲染层，
+这个差异如实登记在 `task-36-report.md`。
+
+钉在：`test/qr-port.test.mjs` 的 R36 5 条（原样交回、查询里没有 code 也原样交回、`hms://` 也原样交回、
+**不做形状裁决**、以及一条源码扫描钉住三策略+诊断**整体退役**）＋ state 接线 1 条（收尾页 URL 带
+`attempt.state`、webview 结论过**真的** `consumeCallback`）；`test/auth-qr.test.mjs` 的 R36 7 条
+（两流合一全链 / `hms://` 直通 / 用户取消 / `cancelLogin` 关得掉那扇窗 / 陌生 state / 首载失败与超时 /
+门禁状态行）；`test/login-callback.test.mjs` 的 R36 1 条（`createdAt` 把过期锚在 attempt 上，
+含"不给它时行为不变"的反面控制）。
+
 **R35（用户真机证据 2026-10-21：三策略全败 → 不再猜形状，先把真实形状留在日志里）——只加脱敏诊断，不改行为。**
+**（R36 已整体退役：下面这段描述的诊断输出格式**不再存在**，保留它是因为 R36 的定案正是靠它拿到的形状。）**
 
 真机链路（用户交回的证据链）：扫码确认 ✅ → `codeRemoteLogin` ✅ → `callbackURL` → ①参数直构 ✗
 （查询里没有可判的 `code`+`redirect_uri` 组合）→ ②跟随得 **HTTP 200**（非 3xx）→ ③页面提取 ✗

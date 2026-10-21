@@ -250,8 +250,12 @@ function messageOf(cause) {
  *
  * @param {{authorizeUrl: string, expectedState: string,
  *          host: {openLogin(url): unknown, closeLogin(): void, cleanup(): void},
- *          timeoutMs?: number, now?: () => number,
+ *          timeoutMs?: number, createdAt?: number, now?: () => number,
  *          setTimer?: Function, clearTimer?: Function}} options
+ *        `createdAt`（R36 增补）：这次登录**尝试**的建立时刻（默认 = 开窗那一刻）。
+ *        二维码那条路的最后一跳是"确认之后才开窗"（attempt 建立在前、窗开在后），
+ *        传它进去才能让"过期"仍然只说一件事：**这次尝试的寿命到了**（理由见调用点与
+ *        `test/login-callback.test.mjs` 的 R36 那条）。
  * @returns {{settled: Promise<object>, isSettled(): boolean,
  *           consumeCallback(url: string): {ok: true, data: {code: string, state: string}} | {ok: false, error: {message: string, kind: string}},
  *           cancel(): {ok: boolean}, close(): {ok: boolean},
@@ -263,6 +267,7 @@ export function runLoginFlow(options = {}) {
     expectedState,
     host,
     timeoutMs = LOGIN_TIMEOUT_MS,
+    createdAt,
     now = Date.now,
     setTimer = setTimeout,
     clearTimer = clearTimeout,
@@ -280,7 +285,7 @@ export function runLoginFlow(options = {}) {
   if (typeof host.cleanup !== "function") throw new TypeError("host.cleanup 必须是函数（结束必清浏览数据与临时目录）");
 
   const effectiveTimeout = timeoutMs ?? LOGIN_TIMEOUT_MS;
-  const consumer = createCallbackConsumer({ expectedState, timeoutMs: effectiveTimeout, now });
+  const consumer = createCallbackConsumer({ expectedState, timeoutMs: effectiveTimeout, now, createdAt });
 
   let settled = false;
   let timerHandle = null;

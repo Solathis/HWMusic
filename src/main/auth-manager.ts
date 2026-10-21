@@ -14,8 +14,18 @@
  *
  * R16 增补**二维码路径**（`startQrLogin` / `cancelQrLogin`）：引导页直接显示二维码，
  * 端口（`src/main/qr-login.mjs`）在 sidecar 里建单 + 轮询，状态变化经 `auth:qr` 广播；
- * 用户手机确认后端口交回**同一个 shape 的回调 URL**，于是"确认之后"的部分与开窗路径
+ * 用户手机确认后端口交回 `callbackURL`，于是"确认之后"的部分与开窗路径
  * **共用同一条兑换链**（`completeWithCode`）——两条路不可能各自演化出不同的登录语义。
+ *
+ * R36 增补**二维码确认之后的最后一跳改走登录 webview**（用户真机诊断定案）：
+ * 端口交回的 `callbackURL` 是 **https 的登录收尾页**（查询里没有 `code`、200 的体里没有 `hms` 字样），
+ * **服务端 fetch 结构性地拿不到授权码**（R33 的跟随 / R34 的三策略 / R35 的诊断全部因此退役）。
+ * 唯一被实证走通的路子是**账号密码网页登录**那条："webview 里加载官方页 → 页面自己的 JS 执行 →
+ * 跳 `hms://` → 被导航拦截器接住"。所以 `finishQrLogin` 现在：已经是回调就照旧消费（既有链零改动），
+ * 是收尾页就**经宿主要求开一扇登录 webview**加载它（复用既有 `host:open-login` 那条路径），
+ * webview 的结论回到同一条兑换链上。**选型是两流合一**：这一段的流直接复用 R7 的 `runLoginFlow`
+ * （同一个 `startLoginFlow` 装配点），两条路共用一份收场/清理实现。
+ * 那一扇窗在 [`qrWindow`] 上登记着，于是 `login()` 会如实拒、`cancelLogin()` 也关得掉它。
  *
  * R18 增补**两条路互斥**：`login()` 开窗之前先 `stopQrSession()`（停轮询 + 作废待兑换的尝试），
  * 迟到的二维码确认由 `onConfirmed` 的身份比对丢掉；`busy` 只描述开窗那条路（二维码等待期间
@@ -39,6 +49,7 @@ import {
   LOGIN_FLOW_STATUS,
   LOGIN_TIMEOUT_MS,
   consumeCallback,
+  isCallback,
   runLoginFlow,
 } from "../protocols/login-callback.mjs";
 import { AUTH_QR, AUTH_STATUS } from "../shared/channels.ts";
@@ -155,6 +166,9 @@ export interface QrEvent {
  *
  * 生产实现是 `src/main/qr-login.mjs` 的 `createHuaweiQrPort`（探针确认的端点）；
  * 测试注入假端口，于是"确认/失败/过期"这些档位都能被钉住，不需要真机扫码。
+ *
+ * R36：`onConfirmed` 交回的是 `codeRemoteLogin` 的 **`callbackURL` 原文**——真机形状是 https 的
+ * 登录收尾页（那一跳由登录 webview 完成），也可能是 `hms://` 回调（[`finishQrLogin`] 两条分支）。
  */
 export interface QrLoginPort {
   start: (params: {
@@ -279,6 +293,16 @@ export function createAuthManager(deps: AuthManagerDeps) {
    * 渲染层 reload 之后来问的，它必须与广播说同一句话，所以两者同源。
    */
   let busy = false;
+  /**
+   * **二维码那条路开出来的那扇登录 webview**（R36）：跑着的时候它占在 `qrWindow` 上。
+   *
+   * 为什么要有这一格：R36 起二维码确认之后的最后一跳由宿主开一扇登录 webview 完成
+   * （`finishQrLogin`），那扇窗与"网页登录"那条路开的是**同一扇宿主窗**——所以：
+   * - `login()` 在它跑着的时候必须拒（宿主那侧会回 `login_in_progress`，这里先拦一道）；
+   * - `cancelLogin()` 必须能关掉它（否则那句"没有进行中的登录"就是假话）。
+   * 收场（成功/失败/取消/超时）由 `finally` 清空。
+   */
+  let qrWindow: ReturnType<typeof runLoginFlow> | null = null;
 
   /** 宿主交付物：结论，或"开窗本身就失败了"（后者的类别比任何结论都具体，别被改写成笼统的 failed）。 */
   type Deliverable =
@@ -390,12 +414,26 @@ export function createAuthManager(deps: AuthManagerDeps) {
     }
   }
 
-  /** 登录正体（`inFlight` 只由 `login()` 管）。 */
-  async function performLogin(): Promise<CoreResult<{ session: unknown; epoch: number }>> {
-    const attempt = createAttempt({ authorizeEndpoint: endpoints.authorize });
-
-    // 流程对象在 openLogin 里被同步调用，而结论只能从 promise 回调里到达 —— 所以
-    // `flowRef` 一定先就位。这里仍然留一个缓冲：它是廉价的保险，省掉一整类"靠时序侥幸成立"。
+  /**
+   * 起一条"开窗 → 等结论"的登录流（R7 的 [`runLoginFlow`]），并把宿主交付物接到它身上。
+   *
+   * **R36：两条路共用这一处**——网页登录那条路（[`performLogin`]）与二维码确认之后的最后一跳
+   * （[`finishQrLogin`]）都是"宿主开一扇 webview、等它给出结论"。抽取的理由不是"少写几行"，
+   * 而是**两处不可能各自演化**：开窗失败/回调/取消/关窗/超时/首载失败六种交付物的结算、
+   * 以及"结束必清理"的语义只有一份实现（`applyDeliverable` + `failureOf`）。
+   *
+   * `flowRef` 缓冲那一小段是 R4 就有的保险：流程对象在 `openLogin` 里被**同步**调用，
+   * 而结论只能从 promise 回调里到达——缓冲省掉一整类"靠时序侥幸成立"。
+   *
+   * @param {{url: string, expectedState: string, createdAt?: number}} params
+   *        `createdAt` = 这次**尝试**的建立时刻（R36：二维码那条路的 attempt 建立在前、窗开在后，
+   *        所以过期必须锚在 attempt 上，而不是锚在"窗开了多久"——见 `runLoginFlow` 的说明）
+   */
+  function startLoginFlow(params: {
+    url: string;
+    expectedState: string;
+    createdAt?: number;
+  }): ReturnType<typeof runLoginFlow> {
     let flowRef: ReturnType<typeof runLoginFlow> | null = null;
     let buffered: Deliverable | null = null;
     const deliver = (deliverable: Deliverable) => {
@@ -407,8 +445,9 @@ export function createAuthManager(deps: AuthManagerDeps) {
     };
 
     const flow = runLoginFlow({
-      authorizeUrl: attempt.authorizeUrl,
-      expectedState: attempt.state,
+      authorizeUrl: params.url,
+      expectedState: params.expectedState,
+      createdAt: params.createdAt,
       timeoutMs: LOGIN_TIMEOUT_MS,
       host: {
         openLogin: (url: string) => {
@@ -442,6 +481,17 @@ export function createAuthManager(deps: AuthManagerDeps) {
       applyDeliverable(flow, buffered);
       buffered = null;
     }
+    return flow;
+  }
+
+  /** 登录正体（`inFlight` 只由 `login()` 管）。 */
+  async function performLogin(): Promise<CoreResult<{ session: unknown; epoch: number }>> {
+    const attempt = createAttempt({ authorizeEndpoint: endpoints.authorize });
+    const flow = startLoginFlow({
+      url: attempt.authorizeUrl,
+      expectedState: attempt.state,
+      createdAt: attempt.createdAt,
+    });
 
     const settled = (await flow.settled) as Record<string, unknown>;
     if (settled.status !== LOGIN_FLOW_STATUS.callback) {
@@ -563,13 +613,33 @@ export function createAuthManager(deps: AuthManagerDeps) {
   }
 
   /**
-   * 二维码确认之后收尾：端口交回的**是同形的回调 URL**（`hms://redirect_uri?code=…&state=…`），
-   * 所以判真伪、比 state、兑换都走与开窗路径完全一样的那一条链。
+   * 二维码确认之后的**最后一跳**（R36 重写：从"服务端解析 callbackURL"改成"交给登录 webview"）。
    *
-   * 三条失败出口（尝试丢了 / state 不符 / `completeWithCode` 里任何一步）都经 `failQrWith`：
-   * 二维码这条路**每一步失败都得让界面知道"这条路走完了"**，用户才有"重试"可按。
+   * 真机诊断定案（R35 日志）：端口交回的那个 `callbackURL` 是 **https 的登录收尾页**，而它的
+   * 查询里**没有 `code`**（只有 ticket/siteID/flowID 一类的票据参数）、200 那份 14KB HTML 里
+   * **没有 `hms` 字样**（跳转目标是页面自己的 JS 现拼的）⇒ **服务端 fetch 结构性地拿不到 code**。
+   * 同一个应用里的对照组给出了唯一被实证的走法：**账号密码网页登录**能走通，靠的正是
+   * "webview 里加载官方页 → 页面自己的 JS 执行 → 跳 `hms://` → 被导航拦截器接住"。
    *
-   * 注意 `completeWithCode` 是开窗路径共用的，它**不**播 `auth:qr`（那条路上没有二维码）——
+   * 所以这里两条分支：
+   *
+   * 1. **本来就是回调**（`hms://redirect_uri?code&state`）→ 不必开窗，`consumeCallback` 之后照旧
+   *    走兑换链（既有链零改动；宿主那侧也只收 https 的登录页，喂 hms:// 给它是白跑一趟）；
+   * 2. **https 的登录收尾页**（真机形状）→ **经宿主要求开登录 webview 加载它**（复用既有
+   *    `host:open-login` 那条路径）：页面 JS 跳 `hms://`，导航拦截器把原样 URL 交回，
+   *    那条结论回到**同一条兑换链**（`consumeCallback → exchangeCode → loginex → 会话落地`）。
+   *
+   * **选型：两流合一**——第 2 条**直接复用 R7 的 [`runLoginFlow`]**（同一个 [`startLoginFlow`]
+   * 装配点），而不是在这一层另写一份"等 webview 结论"的循环：开窗/取消/关窗/超时/首载失败的
+   * 收场与清理只有一份实现，两条路不可能各自演化。QR 的 attempt 通过 `expectedState` 与
+   * `createdAt` 传进同一条流（**同一个 OAuth attempt**：R34 已核实建单链的 state 就是
+   * `attempt.state`），所以 `consumeCallback` 的校验天然成立、过期也仍然只说"这次尝试的寿命到了"。
+   *
+   * 收场与既有语义逐条一致：非 callback 的四收场走 `failureOf`（已取消 / 关窗 / 超时 / 首载失败），
+   * 一律经 `failQrWith` —— 二维码这条路**每一步失败都得让界面知道"这条路走完了"**，用户才有
+   * "重试"可按。
+   *
+   * 注意 `completeWithCode` 是两条路共用的，它**不**播 `auth:qr`（那条路上没有二维码）——
    * 所以"补一条二维码失败广播"的责任落在本函数里。
    *
    * R18：`attempt` 由调用方传进来（而不是读当前的 `qrAttempt`）——**迟到的确认**（用户改走
@@ -579,17 +649,51 @@ export function createAuthManager(deps: AuthManagerDeps) {
     callbackUrl: string,
     attempt: ReturnType<typeof createAttempt>,
   ): Promise<CoreResult<{ session: unknown; epoch: number }>> {
-    const consumed = consumeCallback(callbackUrl, {
+    // ① 已经是回调：既有链零改动（不开窗——宿主那只收 https 的登录页）
+    if (isCallback(callbackUrl)) {
+      const consumed = consumeCallback(callbackUrl, {
+        expectedState: attempt.state,
+        createdAt: attempt.createdAt,
+        timeoutMs: LOGIN_TIMEOUT_MS,
+      });
+      if (!consumed.ok) {
+        return failQrWith(err(consumed.error.message, consumed.error.kind ?? CORE_ERROR_KINDS.internal));
+      }
+      const completed = await completeWithCode(consumed.data.code, attempt);
+      return completed.ok ? completed : failQrWith(completed);
+    }
+
+    // ② https 的登录收尾页：开登录 webview 走最后一跳
+    if (qrWindow !== null) {
+      // 同一时刻只可能有一扇宿主登录窗（两条路互斥）：这里如实报，不去开第二扇
+      return failQrWith(err("已有一扇登录窗在跑（详情见日志）", AUTH_ERROR_KINDS.loginInProgress));
+    }
+    log("二维码已确认：开登录 webview 加载收尾页（最后一跳由页面 JS 跳 hms://，宿主拦截后交回）");
+    // 窗真的开了：`busy` 描述的就是"开窗那条路正在跑"（R18 的口径），此刻它确实在跑。
+    // 渲染层因此把状态行留在「已确认，正在完成登录…」（QR 这条路的既有文案），
+    // 而渲染层 reload 之后只凭 busy 也知道有一扇窗开着。
+    announce({ busy: true });
+    const flow = startLoginFlow({
+      url: callbackUrl,
       expectedState: attempt.state,
       createdAt: attempt.createdAt,
-      timeoutMs: LOGIN_TIMEOUT_MS,
     });
-    if (!consumed.ok) {
-      return failQrWith(err(consumed.error.message, consumed.error.kind ?? CORE_ERROR_KINDS.internal));
+    qrWindow = flow;
+    try {
+      const settled = (await flow.settled) as Record<string, unknown>;
+      if (settled.status !== LOGIN_FLOW_STATUS.callback) {
+        return failQrWith(failureOf(settled));
+      }
+      const code = typeof settled.code === "string" ? settled.code : "";
+      if (code === "") {
+        return failQrWith(err("回调里没有授权码（详情见日志）", CORE_ERROR_KINDS.internal));
+      }
+      const completed = await completeWithCode(code, attempt);
+      return completed.ok ? completed : failQrWith(completed);
+    } finally {
+      // 到这里 busy 已经由 completeWithCode 里的 announce/failWith 复位过了
+      qrWindow = null;
     }
-    const completed = await completeWithCode(consumed.data.code, attempt);
-    // 到这里 busy 已经由 completeWithCode 里的 failWith 复位过了，缺的只是 `auth:qr` 那一条
-    return completed.ok ? completed : failQrWith(completed);
   }
 
   /**
@@ -621,6 +725,13 @@ export function createAuthManager(deps: AuthManagerDeps) {
       if (inFlight !== null) {
         return Promise.resolve(
           err("已有一次登录正在进行（登录窗口会被拉到前台）", AUTH_ERROR_KINDS.loginInProgress),
+        );
+      }
+      // R36：二维码确认之后开出来的那扇登录 webview 也算"一次登录在进行"——
+      // 宿主同一时刻只有一扇登录窗，再开一扇只会撞上它的 `login_in_progress`，这里先如实拦一道。
+      if (qrWindow !== null) {
+        return Promise.resolve(
+          err("二维码确认后正在用登录窗口完成收尾（窗口会被拉到前台）", AUTH_ERROR_KINDS.loginInProgress),
         );
       }
       // R18：两条路互斥——先把二维码会话停掉（停轮询、作废待兑换的尝试）再开窗。
@@ -674,7 +785,11 @@ export function createAuthManager(deps: AuthManagerDeps) {
             return;
           }
           qrAttempt = null;
-          void finishQrLogin(result.callbackUrl, attempt);
+          // R36：这一次收尾可能开一扇登录 webview（`finishQrLogin`），所以把异常也收在这里——
+          // 一次没人接住的抛出会让界面永远停在「已确认，正在完成登录…」（失败广播就不会来了）。
+          void finishQrLogin(result.callbackUrl, attempt).catch((cause: unknown) =>
+            failQrWith(err(`二维码收尾异常：${messageOf(cause)}`, kindOf(cause) ?? CORE_ERROR_KINDS.internal)),
+          );
         },
       });
       if (!started.ok) {
@@ -700,9 +815,13 @@ export function createAuthManager(deps: AuthManagerDeps) {
      *
      * 没有进行中的登录时**不去打扰宿主**：什么都没取消不是错误（用户的意图"别等了"已经满足），
      * 重复点取消按钮不该看到一个报错，也不该在宿主不可用时弹一条假故障。
+     *
+     * R36：二维码确认之后开出来的那扇登录 webview（[`qrWindow`]）也算"进行中的登录"——
+     * 它是一扇真实的宿主登录窗，用户能看见、也该能取消。看不见它会让这条 API 说谎
+     * （"没有进行中的登录"而窗明明开着），也会让 sidecar 收尾时漏掉一扇没关的窗。
      */
     async cancelLogin(): Promise<CoreResult<{ cancelled: boolean }>> {
-      if (inFlight === null) return ok({ cancelled: false });
+      if (inFlight === null && (qrWindow === null || qrWindow.isSettled())) return ok({ cancelled: false });
       return host.cancelLogin();
     },
 

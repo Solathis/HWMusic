@@ -155,8 +155,12 @@ export function buildAuthorizeUrl({ authorizeEndpoint, clientId = OAUTH_CLIENT_I
  * 新建一次登录尝试：PKCE 对（verifier/challenge）+ state + 授权页 URL。
  * 消费它的是 login-callback.mjs 的 runLoginFlow（一次性、10 分钟过期）。
  *
- * @param {{authorizeEndpoint: string, random?: Function, now?: () => number}} [options]
- *        `authorizeEndpoint` 必须由调用方注入（已确认值见 docs/API_CONTRACT.md §1.2）
+ * @param {{authorizeEndpoint: string, random?: Function, now?: number}} [options]
+ *        `authorizeEndpoint` 必须由调用方注入（已确认值见 docs/API_CONTRACT.md §1.2）；
+ *        `now` 是**这次尝试的创建时刻**（纪元毫秒，**是值不是时钟函数**）——它原样存进
+ *        `createdAt`，消费它的是 `consumeCallback`/`runLoginFlow` 的过期判定
+ *        （R36 起二维码那条路也把 `attempt.createdAt` 传进 `runLoginFlow`：
+ *        attempt 建立在前、登录窗开在后，"过期"必须锚在尝试上）。
  */
 export function createAttempt({ authorizeEndpoint, random = randomBytes, now = Date.now() } = {}) {
   const endpoint = assertHttpsEndpoint(authorizeEndpoint, "authorizeEndpoint");

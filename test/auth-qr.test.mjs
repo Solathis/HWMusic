@@ -12,9 +12,11 @@ import { AUTH_QR, AUTH_STATUS } from "../src/shared/channels.ts";
 import { AUTH_ERROR_KINDS, HUAWEI_OAUTH_ENDPOINTS, createAuthManager } from "../src/main/auth-manager.ts";
 import {
   LOGIN_GATE_EVENT,
+  LOGIN_OPENING_TEXT,
   canRetryQr,
   canStartLogin,
   initialGateState,
+  loginGateStatusLine,
   reduceGateState,
   shouldAutoStartQr,
 } from "../src/renderer/features/auth/login-gate-logic.mjs";
@@ -589,4 +591,271 @@ test("R20 返回扫码登录：没有进行中的登录时如实回 cancelled:fa
   assert.equal(answer.ok, true);
   assert.equal(answer.data.cancelled, false, "什么都没取消也是如实的一句话，不是错误");
   assert.equal(hostCancels, 0, "没有进行中的登录就不去打扰宿主");
+});
+
+// ---------------------------------------------------------------------------
+// R36（用户真机诊断定案 2026-10-21）：二维码确认之后的最后一跳**交给登录 webview**
+//
+// 真机证据（R35 的诊断日志）：`loginCallback` 页的查询里**没有 `code`**（只有 ticket/siteID/flowID
+// 一类的票据参数），那份 200 的 14KB HTML 里**没有 `hms` 字样**（跳转目标是页面 JS 现拼的）。
+// ⇒ 服务端 fetch **结构性地拿不到 code**，R33 的"跟随 302"与 R34 的三策略全是在猜形状 → 整体退役。
+//
+// 定案依据是同一个应用里的**对照组**：账号密码网页登录实证走通，走的正是
+// "webview 里加载官方页 → 页面自己的 JS 执行 → 跳 `hms://` → 被导航拦截器接住"。
+// 所以这条链的最后一跳也交给**登录 webview**（复用既有 `host:open-login` 那条路径）：
+// 宿主加载 `codeRemoteLogin` 交回的 `callbackURL`，页面 JS 跑完跳 `hms://`，拦截器把原样 URL
+// 交回 → `consumeCallback → exchangeCode → loginex → 会话落地`（**同一条兑换链**）。
+//
+// **选型：两流合一**——这一段的等待/取消/超时/清理**直接复用 R7 的 `runLoginFlow`**
+// （auth-manager 里同一个 `startLoginFlow` 装配点），不在这一层另写一份"等 webview 结论"的循环：
+// 四收场（callback/cancelled/closed/timed_out）+ failed 的语义与清理因此只有一份实现，
+// 两条路不可能各自演化。QR 的 attempt 传进同一条流，**state 就是 attempt.state**（R34 已核实），
+// 所以 `consumeCallback` 的校验天然成立。
+// ---------------------------------------------------------------------------
+
+/** R36 的假宿主：开窗被记下来，结论由测试自己交付（模拟宿主那条覆盖整段登录的长轮询）。 */
+function qrWindowHost() {
+  const windows = [];
+  let settleWindow = null;
+  let cancels = 0;
+  return {
+    windows,
+    host: {
+      openLoginPage(params) {
+        windows.push(params);
+        return new Promise((resolve) => {
+          settleWindow = resolve;
+        });
+      },
+      /** 宿主关窗：Rust 把结论槽结算成 Cancelled（真机上浮动控件的「返回扫码登录」走的就是它）。 */
+      cancelLogin() {
+        cancels += 1;
+        if (settleWindow !== null) settleWindow({ status: "cancelled" });
+        return Promise.resolve({ ok: true, data: { cancelled: true } });
+      },
+      cleanup() {},
+    },
+    /** 交付一条宿主结论（`{status, url?}`），等价于登录 webview 收场。 */
+    conclude(conclusion) {
+      settleWindow(conclusion);
+    },
+    cancelCalls: () => cancels,
+  };
+}
+
+/** 让在飞的 promise 链落地（换码/开窗都是异步尾巴：微任务足够）。 */
+async function flush(rounds = 12) {
+  for (let i = 0; i < rounds; i += 1) await Promise.resolve();
+}
+
+/** 真机那个形状（R35 日志）：https 的 loginCallback 收尾页，查询里**没有 `code`**。 */
+const R36_CALLBACK_PAGE =
+  "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback" +
+  "?ticket=ST-1&siteID=1&flowID=FLOW-1&redirect_uri=hms%3A%2F%2Fredirect_uri&access_type=offline";
+
+test("R36 两流合一：确认交回 https 收尾页 → 宿主开登录 webview 加载它；webview 的 hms:// 结论走同一条兑换链", async () => {
+  const qrPort = fakeQrPort();
+  const window = qrWindowHost();
+  const exchanged = [];
+  const { auth, broadcasts } = managerOf({
+    qrPort,
+    host: window.host,
+    exchangeCode: async ({ code, codeVerifier }) => {
+      exchanged.push({ code, codeVerifier });
+      return { ok: true, data: ACCOUNT_TOKENS };
+    },
+  });
+
+  await auth.startQrLogin();
+  const state = stateOf(qrPort);
+  qrPort.emit({ status: "confirmed", payload: { resultCode: "0" } });
+  await flush();
+  assert.deepEqual(window.windows, [], "还没确认就不许开任何窗");
+
+  qrPort.confirm({ callbackUrl: R36_CALLBACK_PAGE });
+  await flush();
+
+  // ① 宿主被要求开一扇窗，加载的**就是** codeRemoteLogin 交回的那份地址（原样，端口不解析）
+  assert.equal(window.windows.length, 1, "确认之后开一扇登录 webview");
+  assert.equal(window.windows[0].url, R36_CALLBACK_PAGE);
+  assert.equal(
+    statusEvents(broadcasts).at(-1).busy,
+    true,
+    "窗在跑 → busy:true（渲染层 reload 之后只凭它也知道窗开着）",
+  );
+
+  // ② 登录 webview 里页面 JS 跳 hms:// → 拦截器把原样 URL 交回 → 同一条兑换链
+  window.conclude({ status: "callback", url: `hms://redirect_uri?code=CODE-WEB&state=${state}` });
+  await flush();
+
+  assert.deepEqual(exchanged.map((entry) => entry.code), ["CODE-WEB"], "webview 交回的 code 拿去换令牌");
+  assert.ok(exchanged[0].codeVerifier.length >= 43, "用的是本次二维码会话那对 PKCE（同一个 attempt）");
+  assert.equal(auth.status().loggedIn, true);
+  assert.deepEqual(statusEvents(broadcasts).at(-1), { loggedIn: true, busy: false });
+  assert.equal(
+    qrEvents(broadcasts).some((event) => event.status === "failed"),
+    false,
+    "成功这条路上没有失败广播",
+  );
+});
+
+test("R36 直通：callbackURL 本来就是 hms:// 回调 → 不开窗，直接消费（既有链零改动）", async () => {
+  const qrPort = fakeQrPort();
+  const window = qrWindowHost();
+  const { auth } = managerOf({ qrPort, host: window.host });
+  await auth.startQrLogin();
+
+  qrPort.confirm({ callbackUrl: `hms://redirect_uri?code=CODE-QR&state=${stateOf(qrPort)}` });
+  await flush();
+
+  assert.deepEqual(window.windows, [], "已经是回调就不必开窗（宿主那只收 https 的登录页）");
+  assert.equal(auth.status().loggedIn, true);
+});
+
+test("R36 取消：用户在 webview 上返回（宿主结算 Cancelled）→ 关窗收场 + 回二维码态（可重试）", async () => {
+  const qrPort = fakeQrPort();
+  const window = qrWindowHost();
+  const { auth, broadcasts } = managerOf({ qrPort, host: window.host });
+  await auth.startQrLogin();
+  qrPort.confirm({ callbackUrl: R36_CALLBACK_PAGE });
+  await flush();
+  assert.equal(window.windows.length, 1);
+
+  window.conclude({ status: "cancelled" });
+  await flush();
+
+  const status = statusEvents(broadcasts).at(-1);
+  assert.equal(status.busy, false, "收场之后界面不忙");
+  assert.match(status.message, /取消/, "收场要带一句给人看的话");
+  const qr = qrEvents(broadcasts).at(-1);
+  assert.equal(qr.status, "failed", "这一点也要落到二维码那条通道上：界面才有可点的东西");
+  assert.match(qr.message, /取消/);
+  assert.equal(auth.status().loggedIn, false);
+
+  // 渲染层（同一份逻辑模块、零改动）：这一档「重试」可点、常驻入口也可点 → 用户能继续走
+  let state = reduceGateState(initialGateState(), { type: LOGIN_GATE_EVENT.qrRequested });
+  for (const { channel, payload } of broadcasts) {
+    state = reduceGateState(state, {
+      type: channel === AUTH_STATUS ? LOGIN_GATE_EVENT.status : LOGIN_GATE_EVENT.qr,
+      ...payload,
+    });
+  }
+  assert.equal(canRetryQr(state), true);
+  assert.equal(canStartLogin(state), true);
+});
+
+test("R36 取消入口：二维码那条路开出来的窗也算「进行中的登录」（cancelLogin 如实叫停宿主）", async () => {
+  const qrPort = fakeQrPort();
+  const window = qrWindowHost();
+  const { auth, broadcasts } = managerOf({ qrPort, host: window.host });
+  await auth.startQrLogin();
+  qrPort.confirm({ callbackUrl: R36_CALLBACK_PAGE });
+  await flush();
+
+  const cancelled = await auth.cancelLogin();
+  assert.equal(cancelled.ok, true);
+  assert.equal(cancelled.data.cancelled, true, "窗还开着就不许回 cancelled:false");
+  assert.ok(window.cancelCalls() >= 1, "取消要落到宿主那一侧（关窗是它的事）");
+
+  await flush();
+  assert.equal(auth.status().loggedIn, false);
+  assert.equal(qrEvents(broadcasts).at(-1).status, "failed");
+});
+
+test("R36 失败：webview 交回的 state 不是本次 attempt → 一次兑换都不发，按关窗结算", async () => {
+  const qrPort = fakeQrPort();
+  const window = qrWindowHost();
+  let exchangeCalls = 0;
+  const { auth, broadcasts } = managerOf({
+    qrPort,
+    host: window.host,
+    exchangeCode: async () => {
+      exchangeCalls += 1;
+      return { ok: true, data: ACCOUNT_TOKENS };
+    },
+  });
+  await auth.startQrLogin();
+  qrPort.confirm({ callbackUrl: R36_CALLBACK_PAGE });
+  await flush();
+
+  window.conclude({ status: "callback", url: "hms://redirect_uri?code=CODE-WEB&state=NOT-MINE" });
+  await flush();
+
+  assert.equal(exchangeCalls, 0, "陌生的 state：兑换链一步都不许走");
+  assert.equal(auth.status().loggedIn, false);
+  const qr = qrEvents(broadcasts).at(-1);
+  assert.equal(qr.status, "failed");
+  assert.equal(statusEvents(broadcasts).at(-1).busy, false);
+});
+
+test("R36 收场：webview 首载失败 / 总超时 → 原类别原文案落到 auth:qr（不假成功、也不静默）", async () => {
+  const cases = [
+    {
+      conclusion: { status: "load_failed", message: "无法打开华为官方登录页面，请检查网络或代理后重试。" },
+      kind: AUTH_ERROR_KINDS.loginPageUnavailable,
+      pattern: /官方登录页面/,
+    },
+    {
+      conclusion: { status: "timed_out", message: "登录超时（10 分钟内未完成扫码），请重试。" },
+      kind: AUTH_ERROR_KINDS.timedOut,
+      pattern: /超时/,
+    },
+  ];
+  for (const one of cases) {
+    const qrPort = fakeQrPort();
+    const window = qrWindowHost();
+    const { auth, broadcasts } = managerOf({ qrPort, host: window.host });
+    await auth.startQrLogin();
+    qrPort.confirm({ callbackUrl: R36_CALLBACK_PAGE });
+    await flush();
+
+    window.conclude(one.conclusion);
+    await flush();
+
+    const qr = qrEvents(broadcasts).at(-1);
+    assert.equal(qr.status, "failed", `${one.conclusion.status}：界面上必须有可点的东西`);
+    assert.equal(qr.errorKind, one.kind);
+    assert.match(qr.message, one.pattern);
+    assert.equal(statusEvents(broadcasts).at(-1).busy, false);
+    assert.equal(auth.status().loggedIn, false);
+  }
+});
+
+test("R36 状态行（渲染层零改动）：确认之后那一行是「已确认，正在完成登录…」，收尾完成即「已登录。」", () => {
+  // 正常流程：渲染层没按过任何入口，path 仍是 qr —— 状态行跟着 qr.status 走（既有文案）
+  let state = reduceGateState(initialGateState(), { type: LOGIN_GATE_EVENT.qrRequested });
+  state = reduceGateState(state, { type: LOGIN_GATE_EVENT.status, loggedIn: false, busy: false });
+  state = reduceGateState(state, { type: LOGIN_GATE_EVENT.qr, status: "scanned" });
+  assert.equal(loginGateStatusLine(state), "已扫码，请在手机上确认。");
+
+  state = reduceGateState(state, { type: LOGIN_GATE_EVENT.qr, status: "confirmed" });
+  state = reduceGateState(state, { type: LOGIN_GATE_EVENT.status, loggedIn: false, busy: true });
+  assert.equal(
+    loginGateStatusLine(state),
+    "已确认，正在完成登录…",
+    "webview 开着期间那一行就是这句既有文案（渲染层一行未改）",
+  );
+
+  // 收尾完成 → 进主界面
+  state = reduceGateState(state, { type: LOGIN_GATE_EVENT.status, loggedIn: true, busy: false });
+  assert.equal(loginGateStatusLine(state), "已登录。");
+
+  /**
+   * 对照（**如实登记，不改渲染层**）：网页登录那条路（渲染层自己按了入口，`path === "official"`）
+   * 在 busy 期间显示的是 R27 的「正在打开华为官方登录页…」——`loginOpeningIndicator` 与
+   * `loginGateStatusLine` 里那句「已在网页中打开登录。」判据完全相同（`busy && path === "official"`），
+   * 前者先命中，所以后者在当前渲染层是**不可达**的一句。
+   *
+   * 二维码这条路更不会走到那里：渲染层没按过任何入口，`path` 一直是 `qr`。所以本轮"webview 打开后
+   * 照常显示"的落点是**上面那句「已确认，正在完成登录…」**（见 task-36 报告的门禁状态行一节）。
+   */
+  let official = reduceGateState(initialGateState(), { type: LOGIN_GATE_EVENT.status, loggedIn: false, busy: false });
+  official = reduceGateState(official, { type: LOGIN_GATE_EVENT.started });
+  official = reduceGateState(official, { type: LOGIN_GATE_EVENT.status, loggedIn: false, busy: true });
+  assert.equal(loginGateStatusLine(official), LOGIN_OPENING_TEXT, "busy 期间：R27 那句「正在打开…」");
+  assert.equal(
+    loginGateStatusLine(reduceGateState(official, { type: LOGIN_GATE_EVENT.status, loggedIn: false, busy: false })),
+    "官方登录页已收起（可以再打开一次）",
+    "收起之后那一档照旧",
+  );
 });
