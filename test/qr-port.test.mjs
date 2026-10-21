@@ -8,7 +8,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { HUAWEI_QR_ENDPOINTS, QR_PORT_ERROR_KINDS, createHuaweiQrPort } from "../src/main/qr-login.mjs";
+import {
+  HUAWEI_QR_ENDPOINTS,
+  QR_CALLBACK_DIAGNOSTIC_TAG,
+  QR_PORT_ERROR_KINDS,
+  collectCallbackFragments,
+  createHuaweiQrPort,
+  redactCallbackDiagnostic,
+} from "../src/main/qr-login.mjs";
 import { createAttempt } from "../src/protocols/auth.mjs";
 import {
   LOGIN_ERROR_KINDS,
@@ -1403,4 +1410,211 @@ test("R34 state 接线：确认链交回的回调，state 就是 attempt.state�
     "state 是这次尝试的凭据，日志里一个字都不许出现",
   );
   port.cancel();
+});
+
+// ---------------------------------------------------------------------------
+// R35（用户真机证据 2026-10-21）：三策略全败之后**不再猜形状**——先把真实形状留在日志里
+//
+// 真机链路：扫码确认 ✅ → `codeRemoteLogin` ✅ → `callbackURL` → ①参数直构 ✗
+// （查询里没有可判的 `code`+`redirect_uri` 组合）→ ②跟随得 **HTTP 200**（非 3xx）→
+// ③页面提取 ✗（体里没有 `OAUTH_REDIRECT_URI + "?"` 那段字面量）→ 报错。
+// **三个假设全部落空 = 我们在猜形状**，所以本轮只加**观测**：三策略的每一跳多记三行脱敏 JSON
+// （候选 → 响应 → 体），发出去的请求数、策略顺序、交回的回调、失败文案一处未动。
+//
+// 这一节钉两件事：
+//   1. **脱敏**（本轮的硬承诺）：哑值 `CODE-VALUE-DO-NOT-LOG` / `STATE-VALUE-DO-NOT-LOG`
+//      同时注入"查询值 / Location / 响应体"三处之后，**整份日志里断言缺席**；
+//   2. **形状记全了**：候选（origin+path、参数名清单、两个布尔）、响应（状态 + Location 在不在）、
+//      体（字节长度 + 三个包含布尔 + 所有 `hms…` 片段，`code=`/`state=` 的值只剩 `<len:N>`）。
+// 行为回归仍由上面 R33/R34 那些用例钉着（**一个字都没改**）；这一节再加一条"只观测"的对照。
+// ---------------------------------------------------------------------------
+
+/** 两个哑值：它们**绝不许**出现在日志里（出现了就是脱敏漏了）。 */
+const R35_DUMMY_CODE = "CODE-VALUE-DO-NOT-LOG";
+const R35_DUMMY_STATE = "STATE-VALUE-DO-NOT-LOG";
+
+/** 把日志里那几行诊断解析出来（顺带钉住"一行就是一个 JSON 对象"这个形状）。 */
+function diagnosticsOf(logs) {
+  return logs
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter((row) => row !== null && row.tag === QR_CALLBACK_DIAGNOSTIC_TAG);
+}
+
+test("R35 脱敏矩阵：查询值 / Location / 响应体三处都注入哑值 —— 日志里一个字都不出现", async () => {
+  // 起点：查询**值**里带两个哑值（`state` 是策略①认的那个名字、`note` 是别的名字当对照）。
+  // 查询里没有 `code` 参数 → 策略①不成立（落②）——真机那条链正是这个形状。
+  const relayUrl =
+    "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback" +
+    `?state=${R35_DUMMY_STATE}&redirect_uri=hms%3A%2F%2Fredirect_uri&note=${R35_DUMMY_CODE}`;
+  /** 第二跳才回 200，体里那串字面量也带着两个哑值（策略③要提取的就是它）。 */
+  const literal = `hms://redirect_uri?code=${R35_DUMMY_CODE}&state=${R35_DUMMY_STATE}`;
+  const { port, world, logs, confirmations, events } = await runR33({
+    callbackURL: relayUrl,
+    relay: (_url, hop) =>
+      hop === 1
+        ? { status: 302, location: "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?step=2" }
+        : { status: 200, body: `<html><script>location.href="${literal}"</script></html>` },
+  });
+
+  // 行为照旧：三策略哪条通走哪条（这里是策略③，提取原文交回——哑值只在**回调**里，不在日志里）
+  assert.equal(confirmations.length, 1, `三策略该收的场照旧收：${JSON.stringify(events.at(-1))}`);
+  assert.equal(confirmations[0].callbackUrl, literal, "提取的是原文（一个字不加不减）");
+  assert.equal(world.relayCalls().length, 2, "只观测：诊断不许让请求数变了");
+
+  // 三行一组、每跳一组（起点 0、第二跳 1）
+  const rows = diagnosticsOf(logs);
+  assert.deepEqual(
+    rows.map((row) => row.stage),
+    ["candidate", "response", "body", "candidate", "response", "body"],
+    `每一跳都要留下"候选 → 响应 → 体"三行：${JSON.stringify(rows)}`,
+  );
+  assert.deepEqual(rows.map((row) => row.hop), [0, 0, 0, 1, 1, 1], "hop = 第几次候选（起点 0）");
+
+  // **本轮的硬承诺**：两个哑值在整份日志里一个字都没有（值只在脱敏后的长度指纹里）
+  const joined = logs.join("\n");
+  assert.equal(joined.includes(R35_DUMMY_CODE), false, "code 的值绝不许进日志");
+  assert.equal(joined.includes(R35_DUMMY_STATE), false, "state 的值绝不许进日志");
+  // 反面控制：这份日志**确实**记了形状（否则上面两条"缺席"是因为什么都没记，等于没验）
+  assert.equal(joined.includes("hms://redirect_uri?code=<len:21>"), true, `片段要留下长度指纹：${joined}`);
+  port.cancel();
+});
+
+test("R35 策略①的判定输入：origin+path 与参数名清单（不含值）+ 两个布尔", async () => {
+  // R33_RELAY_URL 的查询里既有 code、又有我们那份 redirect_uri → 策略①当场收下（零请求）
+  const { port, logs, confirmations } = await runR33({ callbackURL: R33_RELAY_URL });
+
+  assert.equal(confirmations.length, 1);
+  const [row] = diagnosticsOf(logs);
+  assert.equal(row.stage, "candidate");
+  assert.equal(row.hop, 0);
+  assert.equal(row.scheme, "https");
+  assert.equal(
+    row.origin_path,
+    "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback",
+    "origin+path：**查询串不进这一项**（值都在查询串里）",
+  );
+  assert.deepEqual(row.query_names, ["state", "code", "redirect_uri", "access_type"], "只记参数**名**，按出现序");
+  assert.equal(row.query_names_total, 4);
+  assert.equal(row.query_names_truncated, false);
+  assert.equal(row.has_code, true);
+  assert.equal(row.code_nonempty, true);
+  assert.equal(row.redirect_uri_is_oauth, true, "记的是**布尔判断**：解码后是否等于我们那份回调");
+  assert.equal(row.redirect_uri, undefined, "绝不记 redirect_uri 的值本身");
+  port.cancel();
+});
+
+test("R35 策略①的判定输入：redirect_uri 不是我们的 → 布尔如实为 false（同样不记那个值）", async () => {
+  const foreign = "https://evil.example.com/cb";
+  const { port, logs, world } = await runR33({
+    callbackURL:
+      `https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?code=${R35_DUMMY_CODE}` +
+      `&redirect_uri=${encodeURIComponent(foreign)}`,
+    relay: () => ({ status: 200, body: "<html>请重新登录</html>" }),
+  });
+
+  assert.equal(world.relayCalls().length, 1, "策略①不成立才轮到策略②（照旧）");
+  const [row] = diagnosticsOf(logs);
+  assert.equal(row.redirect_uri_is_oauth, false);
+  assert.equal(row.has_code, true, "code 在参数里（只是不能直构：redirect_uri 不是我们的）");
+  assert.equal(logs.join("\n").includes(foreign), false, "别人的回调地址也是值，不进日志");
+  assert.equal(logs.join("\n").includes(R35_DUMMY_CODE), false);
+  port.cancel();
+});
+
+test("R35 响应形状：只记状态与 Location 在不在（+scheme），**不记 Location 的值**", async () => {
+  const { port, logs } = await runR33({
+    callbackURL: R34_PLAIN_RELAY_URL,
+    relay: () => ({ status: 302, location: R33_HMS_CALLBACK }),
+  });
+
+  const response = diagnosticsOf(logs).find((row) => row.stage === "response");
+  assert.deepEqual(
+    { hop: response.hop, status: response.status, has_location: response.has_location, location_scheme: response.location_scheme },
+    { hop: 0, status: 302, has_location: true, location_scheme: "hms" },
+    "Location 只留形状：在不在 + scheme",
+  );
+  assert.equal(
+    logs.join("\n").includes(R33_HMS_CALLBACK),
+    false,
+    "Location 的值（带着 code/state）一个字都不许进日志",
+  );
+  port.cancel();
+});
+
+test("R35 体形状：字节长度（不是字符数）+ 三个包含布尔 + 所有 hms 片段（值只剩长度指纹）", async () => {
+  const literal = `hms://redirect_uri?code=${R35_DUMMY_CODE}&state=${R35_DUMMY_STATE}`;
+  // 中文（一个字符三字节）与重复出现一次：前者钉"字节"口径，后者钉"去重但总数如实"
+  const body = `<html><!-- 请重新登录 --><script src="/oauth2/v3/loginCallback.js"></script>` +
+    `<script>location.href="${literal}"</script><script>location.href="${literal}"</script></html>`;
+  const { port, logs, confirmations } = await runR33({
+    callbackURL: R34_PLAIN_RELAY_URL,
+    relay: () => ({ status: 200, body }),
+  });
+
+  assert.equal(confirmations.length, 1, "体里那串字面量提得出来（策略③行为不变）");
+  const row = diagnosticsOf(logs).find((one) => one.stage === "body");
+  assert.equal(row.hop, 0);
+  assert.equal(row.status, 200);
+  assert.equal(row.body_bytes, Buffer.byteLength(body, "utf8"), "长度口径是 UTF-8 **字节**");
+  assert.equal(row.body_bytes > body.length, true, "中文一字三字节：字节数必须大于字符数（口径钉在这里）");
+  assert.equal(row.has_hms, true);
+  assert.equal(row.has_redirect_uri, true);
+  assert.equal(row.has_login_callback, true);
+  assert.deepEqual(
+    row.hms_fragments,
+    ["hms://redirect_uri?code=<len:21>&state=<len:22>"],
+    "片段原文照留，只有 code=/state= 的值换成 <len:N>（N = 那个值的字符数）",
+  );
+  assert.equal(row.hms_fragments_total, 2, "体里出现了两次（去重只去重复项，总数如实记）");
+  assert.equal(row.hms_fragments_truncated, false);
+  assert.equal(logs.join("\n").includes(R35_DUMMY_CODE), false);
+  port.cancel();
+});
+
+test("R35 只观测：策略①当场收下时一个请求都不发，也不许凭空记一行「响应形状」", async () => {
+  const { port, world, logs, confirmations } = await runR33({ callbackURL: R33_RELAY_URL });
+
+  assert.equal(confirmations.length, 1);
+  assert.equal(world.relayCalls().length, 0, "零请求那条路不许因为有诊断而多发一个请求");
+  assert.deepEqual(
+    diagnosticsOf(logs).map((row) => row.stage),
+    ["candidate"],
+    "没有请求就没有响应/体可记——诊断只记**发生过**的事，不编形状出来",
+  );
+  port.cancel();
+});
+
+test("R35 脱敏函数：code=/state= 的值换成 <len:N>，只宽不窄、且幂等", () => {
+  const once = redactCallbackDiagnostic("?code=ABCD&state=EF&wxCode=SECRET&Auth_State=Z&note=KEEP");
+  assert.equal(
+    once,
+    "?code=<len:4>&state=<len:2>&wxCode=<len:6>&Auth_State=<len:1>&note=KEEP",
+    "只宽不窄：名字以 code/state 结尾的、大小写不同的都一起脱；别的参数一个字符不动",
+  );
+  assert.equal(once.includes("SECRET"), false);
+  assert.equal(redactCallbackDiagnostic(once), once, "幂等：已经脱过的值不再套一层 <len:…>");
+});
+
+test("R35 片段收集：逐条脱敏、去重、条数上限如实标注（不静默丢）", () => {
+  const body = `hms://redirect_uri?code=${R35_DUMMY_CODE} <a href="hms://other/x?state=${R35_DUMMY_STATE}">`;
+  const { fragments, total, truncated } = collectCallbackFragments(body, 1);
+
+  assert.equal(total, 2, "命中总数如实记（含被上限挡掉的那些）");
+  assert.equal(truncated, true, "超过上限要标出来，不许静默丢");
+  assert.deepEqual(fragments, ["hms://redirect_uri?code=<len:21>"]);
+  assert.equal(fragments.join("").includes(R35_DUMMY_CODE), false);
+
+  // 上限内：两条都留，且都只剩长度指纹（`hms://other/x?state=…` 这种"别的形状"也照记——本轮的目的就是看见真实写法）
+  const full = collectCallbackFragments(body, 8);
+  assert.deepEqual(full.fragments, [
+    "hms://redirect_uri?code=<len:21>",
+    "hms://other/x?state=<len:22>",
+  ]);
+  assert.equal(full.truncated, false);
 });

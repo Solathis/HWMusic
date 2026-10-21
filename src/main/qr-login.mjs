@@ -118,6 +118,36 @@
  * （`auth-manager.ts` 的 `finishQrLogin` 传的正是 `expectedState: attempt.state`）。
  * 钉在 `test/qr-port.test.mjs` 的"R34 state 接线"一条：假世界照真机那样从我们发出去的那串参数里
  * 取 state 回带，最后交给**真的** `consumeCallback` 判（含"换个 state 就拒"的反面控制）。
+ *
+ * R35 增补（用户真机证据 2026-10-21：三策略全败之后，**不再猜形状**，先把真实形状留在日志里）：
+ * 真机链路是：扫码确认 ✅ → `codeRemoteLogin` ✅ → `callbackURL` → ①参数直构 ✗（查询里没有可判的
+ * `code`+`redirect_uri` 组合）→ ②跟随得 **HTTP 200**（非 3xx）→ ③页面提取 ✗（体里没有
+ * `OAUTH_REDIRECT_URI + "?"` 那段字面量）→ 结构化报错。**三个假设全部落空 = 我们在猜形状**。
+ *
+ * 所以这一轮**只加观测、不改行为**：`resolveCallbackUrl` 的每一跳照旧跑三条策略（顺序、请求数、
+ * 返回的 `via`、失败文案一处未动），只是把每一跳的**输入形状**多记一行 JSON 到既有 `log`
+ * （→ sidecar stderr）：
+ *
+ * - **候选**（策略①的判定输入）：`hop` / `scheme` / `origin_path`（scheme+host+path，**不含查询串**）/
+ *   `query_names`（**参数名清单，不含值**）/ `has_code` / `code_nonempty` /
+ *   `redirect_uri_is_oauth`（**布尔**：解码后是否等于 `OAUTH_REDIRECT_URI`——记的是那个判断，
+ *   不是值本身）；
+ * - **响应**（策略②的输入）：`status`、`has_location`（**布尔**：Location 头在不在）、
+ *   `location_scheme`（形状：绝对地址的 scheme；相对路径给空串）；
+ * - **体**（策略③的输入）：`body_bytes`（**UTF-8 字节数**，不是字符数）、
+ *   `has_hms` / `has_redirect_uri` / `has_login_callback`（三个**布尔**）、`hms_fragments`
+ *   （体里所有 `hms[^"'\s<>]{0,120}` 片段，逐条脱敏）/ `hms_fragments_total` /
+ *   `hms_fragments_truncated`。
+ *
+ * **脱敏是硬承诺**（[`redactCallbackDiagnostic`]）：片段里 `code=`/`state=` 之后的值一律换成
+ * `<len:N>`（只留长度指纹，N = 那个值的字符数）。这条规则**只宽不窄**——名字以 `code`/`state`
+ * 结尾的（`wxCode=`）一起脱敏、大小写不敏感、已经是 `<len:N>` 的不再套一层（幂等）——并且在
+ * **整行序列化之后再过一遍**：所以"值一个字符都不进日志"不靠"当时记得"，而是结构上的。
+ * 钉在 `test/qr-port.test.mjs` 的 R35 段：把哑值 `CODE-VALUE-DO-NOT-LOG` /
+ * `STATE-VALUE-DO-NOT-LOG` 同时注入查询值、Location、响应体三处，**整份日志里断言缺席**。
+ *
+ * 为什么值得：下一步（R36）要按**真实形状**精准修，而不是继续猜。用户复测一次，这几行就说清了
+ * "那一跳的 URL 长什么样、回的是不是 200、体里那串字面量到底怎么写"。
  */
 import { OAUTH_REDIRECT_URI } from "../protocols/auth.mjs";
 import { LOGIN_TIMEOUT_MS, isCallback } from "../protocols/login-callback.mjs";
@@ -334,6 +364,195 @@ function extractCallbackLiteral(body) {
   return isCallback(literal) ? literal : null;
 }
 
+// ---------------------------------------------------------------------------
+// R35 脱敏诊断（**只观测，不改任何策略行为**）
+//
+// 三策略全败之后，问题不再是"修哪条策略"，而是"真机上那一跳到底长什么样"——所以这里把每一跳的
+// **输入形状**记成一行 JSON（键值对，便于直接读、也便于 grep）。三条纪律：
+//
+// 1. **不动行为**：诊断只读已经拿在手里的值（候选 URL、响应状态、响应体），**不发任何新请求**，
+//    也不参与任何判定——三策略照旧跑、报错照旧报。
+// 2. **值不进日志**：`code`/`state` 是凭据（`redirect_uri` 的值也可能是别人的回调地址），所以
+//    只记**名字、存在性、布尔、长度**；片段里那两个参数的值一律换成 `<len:N>` 长度指纹。
+// 3. **只宽不窄**：脱敏规则往"宁可多脱"的方向写（大小写不敏感、名字以 code/state 结尾的也脱），
+//    并且在整行序列化之后**再过一遍**同一个规则——即便将来有人往里加了新字段，值也漏不出去。
+// ---------------------------------------------------------------------------
+
+/** 诊断行的标记：一行就是一个 JSON 对象，认它就知道这不是别的那种日志。 */
+export const QR_CALLBACK_DIAGNOSTIC_TAG = "qr-callback-diagnostic";
+
+/** 一行里最多留几条 `hms…` 片段（超出的只记条数：日志是给人读的，不是给人刷屏的）。 */
+export const QR_CALLBACK_DIAGNOSTIC_MAX_FRAGMENTS = 8;
+
+/** 一行里最多留几个查询参数名。 */
+const QR_CALLBACK_DIAGNOSTIC_MAX_QUERY_NAMES = 24;
+
+/**
+ * 凭据对（`<名字>=<值>`）的脱敏：值换成 `<len:N>`——**只留长度指纹**。
+ *
+ * - 名字：`code` / `state`，以及任何**以它们结尾**的名字（`wxCode=`、`auth_state=`：
+ *   "只宽不窄"，多脱一个值的代价远小于漏一个）；
+ * - `i`：大小写不敏感（`Code=` 同样脱）；
+ * - `(?!<len:)`：已经是长度指纹的不再套一层（**幂等**——整行那道收尾脱敏才敢重复跑）；
+ * - 值的边界：`&` / `#` / 引号 / 尖括号 / 空白 / 反斜杠（HTML/JS/查询串的包装边界都算）。
+ */
+const CREDENTIAL_PAIR = /([A-Za-z_][\w.-]*)?(code|state)=(?!<len:)([^&#"'\s<>\\]*)/gi;
+
+/**
+ * 把一段文本里所有凭据对的值换成 `<len:N>`（N = 值的字符数）。
+ *
+ * 幂等：对已经是 `<len:N>` 的值再跑一次，结果不变——所以它可以安全地同时用在片段上
+ * **和**整行 JSON 上（后者是"值漏不出去"的兜底，见 [`callbackDiagnostic`]）。
+ *
+ * @param {unknown} text
+ * @returns {string}
+ */
+export function redactCallbackDiagnostic(text) {
+  return String(text ?? "").replace(
+    CREDENTIAL_PAIR,
+    (_all, prefix, name, value) => `${prefix ?? ""}${name}=<len:${value.length}>`,
+  );
+}
+
+/**
+ * 体里所有 `hms…` 形状片段（R35 简报指定的正则 `hms[^"'\s<>]{0,120}`，**逐字照搬、不加锚**：
+ * 这一轮的目的是"看见真实写法"，任何收窄都是一次新的猜测）。
+ *
+ * 每条都过一遍 [`redactCallbackDiagnostic`]；**去重**（同一段 HTML 里同一串出现多次没有信息量），
+ * 超过 `limit` 的只记条数、并在 `truncated` 里如实标出来（不静默丢）。
+ *
+ * @param {unknown} body
+ * @param {number} [limit]
+ * @returns {{fragments: string[], total: number, truncated: boolean}} `total` = 命中总数（含重复）
+ */
+export function collectCallbackFragments(body, limit = QR_CALLBACK_DIAGNOSTIC_MAX_FRAGMENTS) {
+  const text = String(body ?? "");
+  const fragments = [];
+  const seen = new Set();
+  let total = 0;
+  let truncated = false;
+  for (const match of text.matchAll(/hms[^"'\s<>]{0,120}/g)) {
+    total += 1;
+    const redacted = redactCallbackDiagnostic(match[0]);
+    if (seen.has(redacted)) continue;
+    seen.add(redacted);
+    if (fragments.length < limit) fragments.push(redacted);
+    else truncated = true;
+  }
+  return { fragments, total, truncated };
+}
+
+/** 解析 URL；解析不出来给 `null`（形状不认，不猜）。 */
+function parseUrlOrNull(value) {
+  try {
+    return new URL(String(value));
+  } catch {
+    return null;
+  }
+}
+
+/** 查询参数名清单（**只有名字**：去重、按出现序、有上限；`total` = 参数对总数，`truncated` = 真有名字被上限挡掉）。 */
+function queryNamesOf(url) {
+  const names = [];
+  const seen = new Set();
+  let total = 0;
+  let truncated = false;
+  for (const pair of rawQueryOf(url).split("&")) {
+    if (pair === "") continue;
+    const index = pair.indexOf("=");
+    const name = index === -1 ? pair : pair.slice(0, index);
+    total += 1;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    if (names.length < QR_CALLBACK_DIAGNOSTIC_MAX_QUERY_NAMES) names.push(name);
+    else truncated = true;
+  }
+  return { names, total, truncated };
+}
+
+/**
+ * 策略①的**判定输入**形状（R35）：这条候选 URL 长什么样、参数名有哪些、两个判据的布尔值。
+ *
+ * `origin_path` 用 `scheme://host + path` 拼（不是 `URL.origin`：非特殊 scheme 的 origin 一律是
+ * `"null"`，那样就把候选的真实样子弄丢了）；**查询串不进这一项**——值都在查询串里。
+ *
+ * @param {string} url 候选地址（起点或某一跳的 Location）
+ * @param {number} hop 第几次候选（=第几次出向请求，起点 0）
+ */
+export function describeCallbackCandidate(url, hop) {
+  const text = String(url ?? "");
+  const parsed = parseUrlOrNull(text);
+  const { names, total, truncated } = queryNamesOf(text);
+  const code = rawQueryValue(text, "code");
+  return {
+    hop,
+    scheme: schemeOf(text),
+    origin_path: parsed === null ? "" : `${parsed.protocol}//${parsed.host}${parsed.pathname}`,
+    query_names: names,
+    query_names_total: total,
+    query_names_truncated: truncated,
+    has_code: code !== null,
+    /** 与 `has_code` 分开记：`code=`（空值）与"没有 code 参数"是两种形状，判据只认后者之外的那种 */
+    code_nonempty: code !== null && code !== "",
+    /** **布尔**：`redirect_uri` 解码后是否等于我们那份回调（记判断，不记值） */
+    redirect_uri_is_oauth: decodedQueryValue(text, "redirect_uri") === OAUTH_REDIRECT_URI,
+  };
+}
+
+/**
+ * 策略②的**响应**形状（R35）：HTTP 状态 + Location 头**在不在**（不记 Location 的值：里面带
+ * `code`）。`location_scheme` 只留形状——绝对地址的 scheme；相对路径给空串（配 `has_location` 读）。
+ *
+ * @param {{status?: unknown, location?: unknown}} data [`request`] 的返回数据
+ * @param {number} hop
+ */
+export function describeCallbackResponse(data, hop) {
+  const raw = data?.location;
+  const location = typeof raw === "string" ? raw.trim() : "";
+  return {
+    hop,
+    status: typeof data?.status === "number" ? data.status : null,
+    has_location: typeof raw === "string",
+    location_scheme: location === "" ? "" : schemeOf(location),
+  };
+}
+
+/**
+ * 策略③的**输入**形状（R35）：响应体的字节长度 + 三个"含不含"布尔 + 所有 `hms…` 片段（已脱敏）。
+ *
+ * 长度口径是**字节**（`Buffer.byteLength(…, "utf8")`）：体是 UTF-8 文本，中文一个字三字节——
+ * 用字符数记会把"页面大小"这件事记错，而这一轮要看的就是"那份 200 里到底装了多少东西"。
+ *
+ * @param {{status?: unknown, text?: unknown}} data [`request`] 的返回数据
+ * @param {number} hop
+ */
+export function describeCallbackBody(data, hop) {
+  const text = typeof data?.text === "string" ? data.text : String(data?.text ?? "");
+  const { fragments, total, truncated } = collectCallbackFragments(text);
+  return {
+    hop,
+    status: typeof data?.status === "number" ? data.status : null,
+    body_bytes: Buffer.byteLength(text, "utf8"),
+    has_hms: text.includes("hms"),
+    has_redirect_uri: text.includes("redirect_uri"),
+    has_login_callback: text.includes("loginCallback"),
+    hms_fragments: fragments,
+    hms_fragments_total: total,
+    hms_fragments_truncated: truncated,
+  };
+}
+
+/**
+ * 一行 JSON 形态的诊断（键值对，直接读、直接 grep）。
+ *
+ * 收尾那一道 [`redactCallbackDiagnostic`] 是关键：它对**整行序列化结果**再跑一遍脱敏规则，
+ * 于是"值一个字符都不进日志"不依赖"每个字段当时都记得脱敏"——将来往诊断里加字段也漏不出去。
+ * 规则幂等（见上），所以对已经脱过的片段不会套第二层。
+ */
+function callbackDiagnostic(stage, fields) {
+  return redactCallbackDiagnostic(JSON.stringify({ tag: QR_CALLBACK_DIAGNOSTIC_TAG, stage, ...fields }));
+}
+
 /** 极简 cookie jar：CAS 门户的 getPageInfo/换码要靠会话 cookie 关联（值不进日志）。 */
 function createCookieJar() {
   const jar = new Map();
@@ -470,6 +689,10 @@ export function createHuaweiQrPort(options = {}) {
    *
    * 文案不回显 URL（凭据边界：那个地址里带着 `code`）；只回状态码与"形状哪里不对"。
    *
+   * **R35**：三策略的每一跳都照旧跑，只是多记三行**脱敏诊断**（策略①的判定输入 → 响应形状 →
+   * 体形状，键表见文件头的「R35 增补」段）；诊断只读已经拿在手里的值，**一个请求都不多发**，
+   * 也不参与判定。
+   *
    * @param {string} callbackUrl `codeRemoteLogin` 交回的地址（调用方已保证非空字符串）
    * @returns {Promise<object>} `{callbackUrl, hops, via}`；`via` ∈ `direct|params|location|body`
    *          （只用于日志，不进广播）
@@ -480,6 +703,11 @@ export function createHuaweiQrPort(options = {}) {
 
     let current = start;
     for (let hop = 0; hop < QR_CALLBACK_MAX_REDIRECTS; hop += 1) {
+      /**
+       * R35 诊断①（只观测、不发请求）：这一跳候选 URL 的形状——origin+path、参数名清单、
+       * 策略①那两个判据的布尔值。**在这里就记**，所以连"形状压根不认（非 https）"那一跳也有记录。
+       */
+      log(callbackDiagnostic("candidate", describeCallbackCandidate(current, hop)));
       if (schemeOf(current) !== "https") {
         return err(
           "扫码已确认，但收到的回调地址既不是登录回调、也不是可以跟随的 https 中转页（不猜）",
@@ -496,6 +724,11 @@ export function createHuaweiQrPort(options = {}) {
       });
       if (!answer.ok) return answer;
       const { status } = answer.data;
+      // R35 诊断②/③（只观测）：这一跳的响应形状（状态 + Location 在不在）与体的形状（字节长度、
+      // 三个包含布尔、所有 hms 片段——已脱敏）。**2xx 之外也记**：真机上"回的不是 3xx"正是要看的
+      // 那一件事，而 3xx 那条空体（body_bytes=0、没有片段）同样是有信息量的形状。
+      log(callbackDiagnostic("response", describeCallbackResponse(answer.data, hop)));
+      log(callbackDiagnostic("body", describeCallbackBody(answer.data, hop)));
       if (status < 300 || status >= 400) {
         // 策略③：2xx 且这张页面自己带着跳转目标（真机那条链的收场形状）
         const literal = status >= 200 && status < 300 ? extractCallbackLiteral(answer.data.text) : null;
