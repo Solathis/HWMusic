@@ -50,6 +50,46 @@ export function themeOptionTestId(choice) {
   return `login-theme-${choice}`;
 }
 
+/** 主窗左下角那枚**循环切换**按钮的测试锚点（R41b：窄轨收起后它仍在）。 */
+export const THEME_TOGGLE_TESTID = "theme-toggle";
+
+/**
+ * 档位 → 给人看的文案（**认不出时按系统档**，与 `applyThemeChoice` 的落点逐字一致）。
+ *
+ * 与 `settings-form.mjs` 的 `closeBehaviorLabel` / `lyrics-window.mjs` 的 `modeLabel` 同款：
+ * 界面不直接拿字符串去索引 `THEME_LABELS`，而是经这个入口——那两处的教训是"控件里多写一次
+ * `LABELS[值]`，就等于多一处要自己保证值一定在表里"。
+ */
+export function themeLabel(choice) {
+  return THEME_LABELS[normalizeThemeChoice(choice) ?? THEME_DEFAULT];
+}
+
+/**
+ * 循环切换的下一档（R41b 左下角那枚图标按钮）：浅色 → 深色 → 跟随系统 → 浅色。
+ *
+ * 顺序**就是** `THEME_CHOICES` 的顺序（展示顺序 = 点击顺序），不另写一张表：
+ * 两处各写一份，早晚出现"控件里排 A、点一下跳到 B"。
+ *
+ * 认不出的档位按系统档起步（与 `applyThemeChoice` 的落点逐字一致）：界面上那时显示的就是
+ * 跟随系统，点一下就该走到浅色——从"上一个合法档位"接着走会跳过一个用户没选过的档。
+ */
+export function nextThemeChoice(choice) {
+  const current = normalizeThemeChoice(choice) ?? THEME_DEFAULT;
+  const index = THEME_CHOICES.indexOf(current);
+  return THEME_CHOICES[(index + 1) % THEME_CHOICES.length];
+}
+
+/**
+ * 循环按钮的无障碍名称：**当前是哪一档、点一下会到哪一档**都要说出来。
+ *
+ * 纯图标按钮没有可见文字，`aria-label` 就是它唯一的说法——只写"主题"等于让读屏用户
+ * 靠猜（点三下才知道转到哪）。文案与档位标签同源（`THEME_LABELS`），不另抄一份。
+ */
+export function themeToggleLabel(choice) {
+  const current = normalizeThemeChoice(choice) ?? THEME_DEFAULT;
+  return `当前${themeLabel(current)}，点击切换到${themeLabel(nextThemeChoice(current))}`;
+}
+
 /** 磁盘/广播上的字面量 → 档位；认不出一律 `null`（不猜、不 trim、不忽略大小写）。 */
 export function normalizeThemeChoice(raw) {
   return THEME_CHOICES.includes(raw) ? raw : null;

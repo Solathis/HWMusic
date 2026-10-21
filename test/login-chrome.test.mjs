@@ -299,6 +299,72 @@ test("复用：gate 的主题控件与浮动控件是同一个 React 组件", ()
 });
 
 // ---------------------------------------------------------------------------
+// R41b：三态只有一份接线（主窗左下角的循环按钮 + 设置页「外观」卡的 Select）
+// ---------------------------------------------------------------------------
+
+test("R41b 循环顺序与文案：浅色 → 深色 → 跟随系统，认不出的档位从系统档起步", async () => {
+  const { nextThemeChoice, themeLabel, themeToggleLabel, THEME_DEFAULT } = await import(
+    "../src/renderer/features/theme/theme.mjs"
+  );
+
+  assert.equal(nextThemeChoice("light"), "dark");
+  assert.equal(nextThemeChoice("dark"), "system");
+  assert.equal(nextThemeChoice("system"), "light", "三下转一圈");
+  // 顺序**就是** THEME_CHOICES 的顺序：不另写一张表（改一处不会与控件排布漂移）
+  assert.deepEqual(THEME_CHOICES.map(nextThemeChoice), ["dark", "system", "light"]);
+
+  for (const junk of [undefined, null, "", "Light", "auto", 42, {}]) {
+    assert.equal(
+      nextThemeChoice(junk),
+      "light",
+      `${JSON.stringify(junk)} 认不出时按系统档起步（界面上显示的正是系统档，点一下就该到浅色）`,
+    );
+    assert.equal(themeToggleLabel(junk), themeToggleLabel(THEME_DEFAULT), "认不出时的那句话与系统档一致");
+  }
+
+  assert.equal(themeToggleLabel("light"), "当前浅色，点击切换到深色");
+  assert.equal(themeToggleLabel("system"), "当前跟随系统，点击切换到浅色");
+  assert.match(themeToggleLabel("dark"), /^当前深色，点击切换到跟随系统$/, "当前态与下一步都要说出来");
+
+  assert.equal(themeLabel("light"), THEME_LABELS.light);
+  assert.equal(themeLabel("nonsense"), THEME_LABELS.system, "认不出的档位按系统档显示（与切类的落点一致）");
+});
+
+test("R41b 三态唯一接线：use-theme-choice 里读回/订阅/写回，三个控件共用", () => {
+  const wiring = stripComments(read("src/renderer/features/theme/use-theme-choice.ts"));
+
+  // 三件事都在这一处：订阅广播、读回档位、写回档位
+  assert.match(wiring, /onCoreEvent<ThemePayload>\(\s*THEME_CHANGED/, "订阅 theme:changed");
+  assert.match(wiring, /coreLoginChrome<\{ theme\?: string \}>\(\{ action: "theme" \}\)/, "读回当前档位（同一个动作，不带 theme 就是读）");
+  assert.match(wiring, /action: "theme", theme: next/, "写回档位也走这条命令");
+  assert.match(wiring, /applyTheme\(/, "落类只经 theme-sync → theme.mjs 的 applyThemeChoice");
+  /**
+   * **不许用 `settings:set` 写主题**（brief 里那句"走 settings:set 持久化"与代码不符）：
+   * `mergeSettings` 会把未知键原样透传（`data.theme` 确实写得进去），但那条路
+   * **只写盘**——Rust 内存里的 `ThemeState` 与 `theme:changed` 广播都不会跟着动，
+   * 界面会亮、重启就变回去（而且两份真相从那一刻起就不一致了）。
+   * 主题的唯一写入口是 `core_login_chrome` 的 theme 动作（落盘 + 内存 + 广播在同一处）。
+   */
+  assert.doesNotMatch(wiring, /SETTINGS_SET|settings:set/, "主题不走 settings:set（它不更新 Rust 内存、不广播）");
+
+  // 三个形态的控件都从这一份接线拿状态与写入口，谁也不自己 listen/invoke
+  for (const [relative, usage] of [
+    ["src/renderer/theme-control.tsx", /useThemeChoice/],
+    ["src/renderer/theme-toggle.tsx", /useThemeChoice/],
+    ["src/renderer/pages.tsx", /useThemeChoice/],
+  ]) {
+    const source = stripComments(read(relative));
+    assert.match(source, usage, `${relative} 要用那一份接线`);
+    assert.doesNotMatch(source, /coreLoginChrome/, `${relative} 不许自己调命令（写入口只在接线里）`);
+    assert.doesNotMatch(source, /THEME_CHANGED/, `${relative} 不许自己订阅广播（第二份状态就是这么长出来的）`);
+  }
+
+  // 设置页「外观」卡与左下角那枚图标按钮都在（同一份状态的两种形态）
+  assert.match(stripComments(read("src/renderer/pages.tsx")), /<Select value=\{themeChoice\}/, "设置页外观卡是三态 Select");
+  assert.match(stripComments(read("src/renderer/App.tsx")), /<ThemeToggle/, "左下角是循环图标按钮");
+});
+
+// ---------------------------------------------------------------------------
 // styles.css 的解析小工具（与 theme-tokens.test.mjs 同款口径，这里不跨文件 import）
 // ---------------------------------------------------------------------------
 

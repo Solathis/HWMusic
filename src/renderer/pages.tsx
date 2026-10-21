@@ -40,6 +40,7 @@ import {
   SelectValue,
 } from "./components/ui/select"
 import { Switch } from "./components/ui/switch"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs"
 import { CoverArt, EmptyState, GridSkeleton, ListSkeleton, LoadFailed, TrackTable } from "./components"
 import { AmllBackground } from "./AmllBackground.tsx"
 import { LOG_ENTRY_LIMIT, LogTerminal } from "./log-terminal.tsx"
@@ -78,6 +79,8 @@ import {
   validateProxyForm,
 } from "./features/settings/settings-form.mjs"
 import { VIEW, createView, viewParam } from "./features/library/views.mjs"
+import { THEME_CHOICES, themeLabel } from "./features/theme/theme.mjs"
+import { useThemeChoice } from "./features/theme/use-theme-choice.ts"
 import {
   LYRICS_COLOR_TOKENS,
   LYRICS_FONT_STEPS,
@@ -455,7 +458,31 @@ export interface SettingsPageProps {
 }
 
 /**
- * 设置页：代理表单、关窗行为、开机自启、外观、队列（只读）、登录状态与退出。
+ * 设置页的二级分类（R41b）：**单页 Tabs 切换，不新开视图、不加路由**。
+ *
+ * 分法只有一条依据——**"用户要决定的到底是哪一件事"**：
+ * - `通用`：日常使用里会被改的四件（关窗行为 / 开机自启 / 外观 / 播放队列只读摘要）；
+ * - `网络`：代理（连不上网时才来看的那一类，与上面四件没有共同前提）；
+ * - `歌词`：桌面歌词窗与歌词缓存/导入（同一件事的两半：在哪显示 / 从哪来）；
+ * - `日志`：运行日志。
+ *
+ * **为什么日志单独成一类**（简报让我定并写理由）：它根本不是"设置"——没有可选项，
+ * 是一块只读的诊断面板，而且很高（等宽正文 + 自己的滚动区 + 筛选框）。
+ * 挂在「通用」尾部的话，用户想找"开机自启"要先划过一整块日志终端；
+ * 反过来找日志的人也要先划过四张卡。给它一类，两类人都少滚一次。
+ *
+ * 这张表是 **trigger 与 content 的唯一真源**：两边各写一个字面量就会出现
+ * "点了标签、内容区是空的"（radix 只认 `value` 相等，认不出就等于没配）。
+ */
+export const SETTINGS_TABS = [
+  { id: "general", label: "通用" },
+  { id: "network", label: "网络" },
+  { id: "lyrics", label: "歌词" },
+  { id: "log", label: "日志" },
+]
+
+/**
+ * 设置页：二级分类下的代理表单、关窗行为、开机自启、外观、队列（只读）、桌面歌词、歌词缓存与日志。
  *
  * 三条纪律（沿 R8/R9 的做法）：
  * - 所有文案与判定都在 `features/settings/settings-form.mjs`（纯函数，跑得了测试）；
@@ -463,6 +490,10 @@ export interface SettingsPageProps {
  * - 凭据只写不读：密码字段永远是 `type="password"`、永远从空开始，回执里有密码但**不进表单**。
  * - 不冒充：没测过不给测试结论、读不到自启状态就说"未取到"、保存回执按 `restartRequired`
  *   如实说"要重启"，主机没通过清洗就说"仍是直连"。
+ *
+ * R41b：卡片按 `SETTINGS_TABS` 分到四个标签页里（**卡片内部一个字都没改**，只是搬了位置）。
+ * 失败/提示那两行留在标签页**之上**（页面级）：它们说的是"刚才那次保存的结果"，
+ * 跟着某一张卡藏到标签页里，用户切过去才看得见——那时他已经不知道这句话在说哪次操作了。
  */
 export function SettingsPage({
   queue = null,
@@ -482,6 +513,12 @@ export function SettingsPage({
   const [autostartReady, setAutostartReady] = useState(false)
   const [autostartBusy, setAutostartBusy] = useState(false)
   const [autostartFailure, setAutostartFailure] = useState<string | null>(null)
+  /**
+   * 主题档位（R41b 的「外观」卡）：与左下角那枚循环图标按钮、登录页那个控件**同一份接线**
+   * ——读回档位、订阅 `theme:changed`、写回档位都在 `useThemeChoice` 里，
+   * 页面自己不监听也不自己写（各写一份就会出现"两处显示不同档位"）。
+   */
+  const { choice: themeChoice, select: selectTheme } = useThemeChoice()
 
   // 读设置：挂载时一次（表单是本地状态，之后的编辑不再打请求）
   useEffect(() => {
@@ -629,305 +666,349 @@ export function SettingsPage({
         </p>
       ) : null}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>网络与代理</CardTitle>
-          <CardDescription>
-            代理只对本应用的请求生效。凭据写入本机配置文件，界面上不回显。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          <div className="flex items-center gap-2">
-            <Switch
-              id="proxy-enabled"
-              checked={form.enabled}
-              disabled={!loaded || busy}
-              onCheckedChange={(checked) => setForm((current) => ({ ...current, enabled: checked }))}
-            />
-            <Label htmlFor="proxy-enabled">使用代理</Label>
-          </div>
+      {/* R41b 二级分类：单页 Tabs，不新开视图（分法与「日志为什么单独一类」见 SETTINGS_TABS） */}
+      <Tabs defaultValue={SETTINGS_TABS[0].id} className="flex flex-col gap-4" data-testid="settings-tabs">
+        <TabsList aria-label="设置分类">
+          {SETTINGS_TABS.map((tab) => (
+            <TabsTrigger key={tab.id} value={tab.id}>
+              {tab.label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="proxy-host">主机</Label>
-              <Input
-                id="proxy-host"
-                value={form.host}
-                disabled={!loaded || busy}
-                placeholder="proxy.example.com"
-                onChange={(event) => setForm((current) => ({ ...current, host: event.target.value }))}
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="proxy-port">端口</Label>
-              <Input
-                id="proxy-port"
-                value={form.portText}
-                disabled={!loaded || busy}
-                inputMode="numeric"
-                placeholder="8080"
-                onChange={(event) => setForm((current) => ({ ...current, portText: event.target.value }))}
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="proxy-username">用户名</Label>
-              <Input
-                id="proxy-username"
-                value={form.username}
-                disabled={!loaded || busy}
-                autoComplete="off"
-                onChange={(event) => setForm((current) => ({ ...current, username: event.target.value }))}
-              />
-            </div>
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="proxy-password">密码</Label>
-              <Input
-                id="proxy-password"
-                type="password"
-                value={form.password}
-                disabled={!loaded || busy}
-                autoComplete="new-password"
-                onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
-              />
-              <span className="text-xs text-muted-foreground">{passwordHint(form)}</span>
-            </div>
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <Label htmlFor="proxy-bypass">例外列表</Label>
-            <Input
-              id="proxy-bypass"
-              value={form.bypassText}
-              disabled={!loaded || busy}
-              placeholder="localhost, 127.0.0.1"
-              onChange={(event) => setForm((current) => ({ ...current, bypassText: event.target.value }))}
-            />
-            <span className="text-xs text-muted-foreground">
-              逗号分隔：这些地址不走代理（例外只在应用内核侧生效）。
-            </span>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={() => void saveProxy()} disabled={!loaded || busy}>
-              {saving ? "正在保存…" : "保存"}
-            </Button>
-            <Button variant="secondary" onClick={() => void testConnection()} disabled={!loaded || busy}>
-              {testing ? "正在测试…" : "测试连接"}
-            </Button>
-            <Button variant="ghost" onClick={() => void restoreDefaultProxy()} disabled={!loaded || busy}>
-              恢复默认代理
-            </Button>
-          </div>
-
-          {testResult !== null ? (
-            <p className="text-sm text-muted-foreground" role="status">
-              {testResult}
-            </p>
-          ) : null}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>关窗行为</CardTitle>
-          <CardDescription>点关闭按钮时做什么。</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-2">
-          <Select
-            value={closeBehavior}
-            disabled={!loaded || saving}
-            onValueChange={(value) => void chooseCloseBehavior(value)}
-          >
-            <SelectTrigger aria-label="关窗行为" className="w-64">
-              {/* 直接把标签写进 SelectValue：radix 在没有展开过内容时拿不到选项文案
-                  （选项文本要等它挂载），触发器就会是空的——受控值 + 自绘标签才稳定 */}
-              <SelectValue>{closeBehaviorLabel(closeBehavior)}</SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              {CLOSE_BEHAVIORS.map((behavior) => (
-                <SelectItem key={behavior} value={behavior}>
-                  {closeBehaviorLabel(behavior)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-muted-foreground">
-            {/* 可用性来自宿主（R11）：`trayAvailable` 由外壳启动时查一次交下来 */}
-            {closeBehaviorNotice(closeBehavior, { trayAvailable })}
-          </p>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>开机自启</CardTitle>
-          <CardDescription>登录系统后自动启动本应用（写入系统自启项）。</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-2">
-          <div className="flex items-center gap-2">
-            <Switch
-              id="autostart-enabled"
-              checked={autostartEnabled === true}
-              disabled={!autostartReady || autostartEnabled === null || autostartBusy}
-              onCheckedChange={(checked) => void applyAutostart(checked)}
-            />
-            <Label htmlFor="autostart-enabled">随系统启动</Label>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            {autostartReady ? autostartStateText(autostartEnabled) : "正在读取当前状态…"}
-          </p>
-          {autostartFailure !== null ? (
-            <p className="text-xs text-destructive" role="alert">
-              {autostartFailure}
-            </p>
-          ) : null}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>外观</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">{APPEARANCE_NOTICE_TEXT}</p>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>桌面歌词</CardTitle>
-          <CardDescription>桌面上的独立歌词窗（无边框、置顶、可拖可锁）。</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <Switch
-              id="lyrics-visible"
-              checked={lyrics?.visible === true}
-              disabled={lyrics === null}
-              onCheckedChange={(checked) => lyrics?.setVisible(checked)}
-            />
-            <Label htmlFor="lyrics-visible">显示桌面歌词</Label>
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="lyrics-mode">窗口位置</Label>
+        {/* 通用：日常使用里会被改的四件 */}
+        <TabsContent value="general" className="flex flex-col gap-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>关窗行为</CardTitle>
+              <CardDescription>点关闭按钮时做什么。</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-2">
               <Select
-                value={lyrics?.config.mode ?? LYRICS_MODES[0]}
-                disabled={lyrics === null}
-                onValueChange={(value) => lyrics?.updateConfig({ mode: value })}
+                value={closeBehavior}
+                disabled={!loaded || saving}
+                onValueChange={(value) => void chooseCloseBehavior(value)}
               >
-                <SelectTrigger id="lyrics-mode" className="w-full">
-                  {/* 标签直接写进 SelectValue：radix 在没展开过内容时拿不到选项文案（R10 的同一个坑） */}
-                  <SelectValue>{modeLabel(lyrics?.config.mode)}</SelectValue>
+                <SelectTrigger aria-label="关窗行为" className="w-64">
+                  {/* 直接把标签写进 SelectValue：radix 在没有展开过内容时拿不到选项文案
+                      （选项文本要等它挂载），触发器就会是空的——受控值 + 自绘标签才稳定 */}
+                  <SelectValue>{closeBehaviorLabel(closeBehavior)}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
-                  {LYRICS_MODES.map((mode) => (
-                    <SelectItem key={mode} value={mode}>
-                      {modeLabel(mode)}
+                  {CLOSE_BEHAVIORS.map((behavior) => (
+                    <SelectItem key={behavior} value={behavior}>
+                      {closeBehaviorLabel(behavior)}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-            </div>
+              <p className="text-xs text-muted-foreground">
+                {/* 可用性来自宿主（R11）：`trayAvailable` 由外壳启动时查一次交下来 */}
+                {closeBehaviorNotice(closeBehavior, { trayAvailable })}
+              </p>
+            </CardContent>
+          </Card>
 
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="lyrics-size">字号</Label>
-              <Select
-                value={lyrics?.config.size ?? LYRICS_FONT_STEPS[0].id}
-                disabled={lyrics === null}
-                onValueChange={(value) => lyrics?.updateConfig({ size: value })}
-              >
-                <SelectTrigger id="lyrics-size" className="w-full">
-                  <SelectValue>{fontStepLabel(lyrics?.config.size)}</SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {LYRICS_FONT_STEPS.map((step) => (
-                    <SelectItem key={step.id} value={step.id}>
-                      {fontStepLabel(step.id)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="lyrics-color">颜色</Label>
-              <Select
-                value={lyrics?.config.color ?? LYRICS_COLOR_TOKENS[0].id}
-                disabled={lyrics === null}
-                onValueChange={(value) => lyrics?.updateConfig({ color: value })}
-              >
-                <SelectTrigger id="lyrics-color" className="w-full">
-                  <SelectValue>{colorTokenLabel(lyrics?.config.color)}</SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {LYRICS_COLOR_TOKENS.map((token) => (
-                    <SelectItem key={token.id} value={token.id}>
-                      {colorTokenLabel(token.id)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="flex flex-col justify-end gap-2">
+          <Card>
+            <CardHeader>
+              <CardTitle>开机自启</CardTitle>
+              <CardDescription>登录系统后自动启动本应用（写入系统自启项）。</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-2">
               <div className="flex items-center gap-2">
                 <Switch
-                  id="lyrics-locked"
-                  checked={lyrics?.config.locked === true}
-                  disabled={lyrics === null}
-                  onCheckedChange={(checked) => lyrics?.updateConfig({ locked: checked })}
+                  id="autostart-enabled"
+                  checked={autostartEnabled === true}
+                  disabled={!autostartReady || autostartEnabled === null || autostartBusy}
+                  onCheckedChange={(checked) => void applyAutostart(checked)}
                 />
-                <Label htmlFor="lyrics-locked">锁定（不可拖动）</Label>
+                <Label htmlFor="autostart-enabled">随系统启动</Label>
               </div>
+              <p className="text-xs text-muted-foreground">
+                {autostartReady ? autostartStateText(autostartEnabled) : "正在读取当前状态…"}
+              </p>
+              {autostartFailure !== null ? (
+                <p className="text-xs text-destructive" role="alert">
+                  {autostartFailure}
+                </p>
+              ) : null}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>外观</CardTitle>
+              <CardDescription>{APPEARANCE_NOTICE_TEXT}</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex flex-col gap-1">
+                <Label htmlFor="theme-choice">主题</Label>
+                {/*
+                  R41b：三态落在这里（与左下角那枚循环图标按钮、登录页的控件**同源同向**——
+                  读回档位、订阅 theme:changed、写回档位全在 useThemeChoice 那一份接线里，
+                  写入口是 Rust 侧唯一的 core_login_chrome 的 theme 动作）。
+                */}
+                <Select value={themeChoice} onValueChange={selectTheme}>
+                  <SelectTrigger id="theme-choice" aria-label="主题" className="w-64">
+                    {/* 标签直接写进 SelectValue：radix 在没展开过内容时拿不到选项文案（R10 的同一个坑） */}
+                    <SelectValue>{themeLabel(themeChoice)}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {THEME_CHOICES.map((choice) => (
+                      <SelectItem key={choice} value={choice}>
+                        {themeLabel(choice)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>播放队列</CardTitle>
+              <CardDescription>这里只显示当前状态，队列在播放队列面板里管理。</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm text-muted-foreground">{queueSummaryText(queueSummary(queue))}</p>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* 网络：连不上网时才会来看的那一类（与通用那四件没有共同前提） */}
+        <TabsContent value="network" className="flex flex-col gap-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>网络与代理</CardTitle>
+              <CardDescription>
+                代理只对本应用的请求生效。凭据写入本机配置文件，界面上不回显。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-4">
               <div className="flex items-center gap-2">
                 <Switch
-                  id="lyrics-click-through"
-                  checked={lyrics?.config.clickThrough === true}
-                  disabled={lyrics === null}
-                  onCheckedChange={(checked) => lyrics?.updateConfig({ clickThrough: checked })}
+                  id="proxy-enabled"
+                  checked={form.enabled}
+                  disabled={!loaded || busy}
+                  onCheckedChange={(checked) => setForm((current) => ({ ...current, enabled: checked }))}
                 />
-                <Label htmlFor="lyrics-click-through">鼠标穿透</Label>
+                <Label htmlFor="proxy-enabled">使用代理</Label>
               </div>
-            </div>
-          </div>
 
-          <p className="text-xs text-muted-foreground">
-            {/* 会话内这件事必须写在设置项旁边（已知限制，见 docs/API_CONTRACT.md §2.9） */}
-            {LYRICS_SESSION_NOTICE}
-          </p>
-        </CardContent>
-      </Card>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="flex flex-col gap-1">
+                  <Label htmlFor="proxy-host">主机</Label>
+                  <Input
+                    id="proxy-host"
+                    value={form.host}
+                    disabled={!loaded || busy}
+                    placeholder="proxy.example.com"
+                    onChange={(event) => setForm((current) => ({ ...current, host: event.target.value }))}
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <Label htmlFor="proxy-port">端口</Label>
+                  <Input
+                    id="proxy-port"
+                    value={form.portText}
+                    disabled={!loaded || busy}
+                    inputMode="numeric"
+                    placeholder="8080"
+                    onChange={(event) => setForm((current) => ({ ...current, portText: event.target.value }))}
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <Label htmlFor="proxy-username">用户名</Label>
+                  <Input
+                    id="proxy-username"
+                    value={form.username}
+                    disabled={!loaded || busy}
+                    autoComplete="off"
+                    onChange={(event) => setForm((current) => ({ ...current, username: event.target.value }))}
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <Label htmlFor="proxy-password">密码</Label>
+                  <Input
+                    id="proxy-password"
+                    type="password"
+                    value={form.password}
+                    disabled={!loaded || busy}
+                    autoComplete="new-password"
+                    onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
+                  />
+                  <span className="text-xs text-muted-foreground">{passwordHint(form)}</span>
+                </div>
+              </div>
 
-      {/* 歌词缓存 / 一键清除 / 导入本地歌词（R41）：与上面那张卡同一件事的两半（显示 vs 存放） */}
-      <LyricsCacheCard lyrics={lyrics} />
+              <div className="flex flex-col gap-1">
+                <Label htmlFor="proxy-bypass">例外列表</Label>
+                <Input
+                  id="proxy-bypass"
+                  value={form.bypassText}
+                  disabled={!loaded || busy}
+                  placeholder="localhost, 127.0.0.1"
+                  onChange={(event) => setForm((current) => ({ ...current, bypassText: event.target.value }))}
+                />
+                <span className="text-xs text-muted-foreground">
+                  逗号分隔：这些地址不走代理（例外只在应用内核侧生效）。
+                </span>
+              </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>播放队列</CardTitle>
-          <CardDescription>这里只显示当前状态，队列在播放队列面板里管理。</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">{queueSummaryText(queueSummary(queue))}</p>
-        </CardContent>
-      </Card>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button onClick={() => void saveProxy()} disabled={!loaded || busy}>
+                  {saving ? "正在保存…" : "保存"}
+                </Button>
+                <Button variant="secondary" onClick={() => void testConnection()} disabled={!loaded || busy}>
+                  {testing ? "正在测试…" : "测试连接"}
+                </Button>
+                <Button variant="ghost" onClick={() => void restoreDefaultProxy()} disabled={!loaded || busy}>
+                  恢复默认代理
+                </Button>
+              </div>
 
-      {/*
-        运行日志（R39 从侧栏那个 Sheet 搬到这里）。
-        展示与筛选全在 `LogTerminal` 里（编辑器样式：行号 gutter + 等宽正文 + ScrollArea，
-        上面一个文本筛选框与「N / 总数 条」计数）；这里只给卡片外壳与那句说明。
-        `app:notice` 的载荷只有 text，**没有级别**——所以筛选只按文本，不发明级别列。
-      */}
-      <Card>
-        <CardHeader>
-          <CardTitle>运行日志</CardTitle>
-          <CardDescription>{`来自应用内核的提示（最多保留最新 ${LOG_ENTRY_LIMIT} 条）。`}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <LogTerminal entries={notices} />
-        </CardContent>
-      </Card>
+              {testResult !== null ? (
+                <p className="text-sm text-muted-foreground" role="status">
+                  {testResult}
+                </p>
+              ) : null}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* 歌词：桌面歌词窗（在哪显示）与歌词缓存/导入（从哪来）是同一件事的两半 */}
+        <TabsContent value="lyrics" className="flex flex-col gap-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>桌面歌词</CardTitle>
+              <CardDescription>桌面上的独立歌词窗（无边框、置顶、可拖可锁）。</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-3">
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="lyrics-visible"
+                  checked={lyrics?.visible === true}
+                  disabled={lyrics === null}
+                  onCheckedChange={(checked) => lyrics?.setVisible(checked)}
+                />
+                <Label htmlFor="lyrics-visible">显示桌面歌词</Label>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="flex flex-col gap-1">
+                  <Label htmlFor="lyrics-mode">窗口位置</Label>
+                  <Select
+                    value={lyrics?.config.mode ?? LYRICS_MODES[0]}
+                    disabled={lyrics === null}
+                    onValueChange={(value) => lyrics?.updateConfig({ mode: value })}
+                  >
+                    <SelectTrigger id="lyrics-mode" className="w-full">
+                      {/* 标签直接写进 SelectValue：radix 在没展开过内容时拿不到选项文案（R10 的同一个坑） */}
+                      <SelectValue>{modeLabel(lyrics?.config.mode)}</SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {LYRICS_MODES.map((mode) => (
+                        <SelectItem key={mode} value={mode}>
+                          {modeLabel(mode)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <Label htmlFor="lyrics-size">字号</Label>
+                  <Select
+                    value={lyrics?.config.size ?? LYRICS_FONT_STEPS[0].id}
+                    disabled={lyrics === null}
+                    onValueChange={(value) => lyrics?.updateConfig({ size: value })}
+                  >
+                    <SelectTrigger id="lyrics-size" className="w-full">
+                      <SelectValue>{fontStepLabel(lyrics?.config.size)}</SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {LYRICS_FONT_STEPS.map((step) => (
+                        <SelectItem key={step.id} value={step.id}>
+                          {fontStepLabel(step.id)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <Label htmlFor="lyrics-color">颜色</Label>
+                  <Select
+                    value={lyrics?.config.color ?? LYRICS_COLOR_TOKENS[0].id}
+                    disabled={lyrics === null}
+                    onValueChange={(value) => lyrics?.updateConfig({ color: value })}
+                  >
+                    <SelectTrigger id="lyrics-color" className="w-full">
+                      <SelectValue>{colorTokenLabel(lyrics?.config.color)}</SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {LYRICS_COLOR_TOKENS.map((token) => (
+                        <SelectItem key={token.id} value={token.id}>
+                          {colorTokenLabel(token.id)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="flex flex-col justify-end gap-2">
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="lyrics-locked"
+                      checked={lyrics?.config.locked === true}
+                      disabled={lyrics === null}
+                      onCheckedChange={(checked) => lyrics?.updateConfig({ locked: checked })}
+                    />
+                    <Label htmlFor="lyrics-locked">锁定（不可拖动）</Label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      id="lyrics-click-through"
+                      checked={lyrics?.config.clickThrough === true}
+                      disabled={lyrics === null}
+                      onCheckedChange={(checked) => lyrics?.updateConfig({ clickThrough: checked })}
+                    />
+                    <Label htmlFor="lyrics-click-through">鼠标穿透</Label>
+                  </div>
+                </div>
+              </div>
+
+              <p className="text-xs text-muted-foreground">
+                {/* 会话内这件事必须写在设置项旁边（已知限制，见 docs/API_CONTRACT.md §2.9） */}
+                {LYRICS_SESSION_NOTICE}
+              </p>
+            </CardContent>
+          </Card>
+
+          {/* 歌词缓存 / 一键清除 / 导入本地歌词（R41）：与上面那张卡同一件事的两半（显示 vs 存放） */}
+          <LyricsCacheCard lyrics={lyrics} />
+        </TabsContent>
+
+        {/* 日志：只读的诊断面板（不是设置项——理由见 SETTINGS_TABS 的注释） */}
+        <TabsContent value="log" className="flex flex-col gap-4">
+          {/*
+            运行日志（R39 从侧栏那个 Sheet 搬到这里）。
+            展示与筛选全在 `LogTerminal` 里（编辑器样式：行号 gutter + 等宽正文 + ScrollArea，
+            上面一个文本筛选框与「N / 总数 条」计数）；这里只给卡片外壳与那句说明。
+            `app:notice` 的载荷只有 text，**没有级别**——所以筛选只按文本，不发明级别列。
+          */}
+          <Card>
+            <CardHeader>
+              <CardTitle>运行日志</CardTitle>
+              <CardDescription>{`来自应用内核的提示（最多保留最新 ${LOG_ENTRY_LIMIT} 条）。`}</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <LogTerminal entries={notices} />
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }

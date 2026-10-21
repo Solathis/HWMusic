@@ -12,7 +12,7 @@
  * （页面只有八个，路由库在这里只有依赖和"浏览器历史语义不适用"的麻烦）。
  * 唯一的例外是收藏页：它常驻挂载（切页不卸载），所以挂在 switch 之外、用 active 控制显隐。
  */
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import {
   CrownIcon,
   HistoryIcon,
@@ -57,9 +57,12 @@ import {
   SidebarMenuItem,
   SidebarProvider,
   SidebarTrigger,
+  useSidebar,
 } from "./components/ui/sidebar"
+import { TooltipProvider } from "./components/ui/tooltip"
 import { EmptyState, PlayerBar, QueuePanel } from "./components"
 import { PlaybackStage } from "./playback-stage.tsx"
+import { ThemeToggle } from "./theme-toggle.tsx"
 import { FavoritesPage } from "./favorites-page.tsx"
 import { useNoticeLog } from "./log-terminal.tsx"
 import {
@@ -112,9 +115,17 @@ export function App() {
 
   // app-shell：登录之后才存在的那一块（R7 的测试锚点，R8 保留）
   return (
-    <div className="h-full w-full" data-shell="app-shell">
-      <LibraryShell profile={gate.profile} />
-    </div>
+    /*
+      R41b：`TooltipProvider` 包在最外层——侧栏收起成图标轨之后，导航项只剩图标，
+      shadcn sidebar 的官方做法是 `SidebarMenuButton` 的 `tooltip` 参数（rack 里悬停给标签）。
+      radix 的 `Tooltip` 没有 Provider 会直接抛错（"must be used within TooltipProvider"），
+      而全项目此前一处 tooltip 都没用上，所以这一层是新加的、也是唯一的一层。
+    */
+    <TooltipProvider>
+      <div className="h-full w-full" data-shell="app-shell">
+        <LibraryShell profile={gate.profile} />
+      </div>
+    </TooltipProvider>
   )
 }
 
@@ -131,6 +142,84 @@ const NAV_ICONS = {
   [VIEW.playlists]: ListMusicIcon,
   [VIEW.history]: HistoryIcon,
   [VIEW.settings]: SettingsIcon,
+}
+
+/**
+ * 侧栏顶部的常驻搜索入口（R40 取代了原来那条「搜索」导航项；R41b 补上窄轨形态）。
+ *
+ * **它必须是一个在 `SidebarProvider` 之内的组件**：`useSidebar()` 只在这个上下文里拿得到
+ * 收起态，而外壳 `LibraryShell` 在 Provider **之外**（Provider 是它自己渲染的）——
+ * 在外壳里调 `useSidebar()` 会当场抛 "must be used within a SidebarProvider"（真机上撞过）。
+ *
+ * 两种形态（同一个入口，不是一个东西两处实现）：
+ * - 展开（或移动端）：`SidebarInput` + 提交按钮，回车提交（关键字交回外壳的 `onSubmit`）；
+ * - 窄轨（`collapsible="icon"`，48px）：输入框与按钮在那个宽度里没有可用形态，
+ *   官方做法就是收起时不渲染它——只留一枚图标按钮，点它先**展开侧栏**，再把光标交给输入框
+ *   （用户点的是"搜索"，落点就该是能打字的地方）。
+ *
+ * 关键字**不进这里**：它在 `onSubmit` 里被放进 `VIEW.search` 的视图参数（见 LibraryShell 的注释），
+ * 这一层只负责"输入框里显示什么"与"什么时候提交"。
+ */
+function SidebarSearch({
+  keyword,
+  onKeywordChange,
+  onSubmit,
+}: {
+  keyword: string
+  onKeywordChange: (value: string) => void
+  onSubmit: (value: string) => void
+}) {
+  const sidebar = useSidebar()
+  const railCollapsed = sidebar.state === "collapsed" && !sidebar.isMobile
+  const searchInputRef = useRef<HTMLInputElement | null>(null)
+  const focusSearchAfterExpand = useRef(false)
+
+  // 展开之后（输入框重新挂上）再把光标交给它。放在 effect 里而不是点击那一刻：
+  // 点击时输入框还没渲染出来（收起态下它不在 DOM 里）。
+  useEffect(() => {
+    if (railCollapsed || !focusSearchAfterExpand.current) return
+    focusSearchAfterExpand.current = false
+    searchInputRef.current?.focus()
+  }, [railCollapsed])
+
+  if (railCollapsed) {
+    return (
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        className="mx-auto"
+        aria-label="搜索"
+        data-testid="sidebar-search-rail"
+        onClick={() => {
+          focusSearchAfterExpand.current = true
+          sidebar.setOpen(true)
+        }}
+      >
+        <SearchIcon />
+      </Button>
+    )
+  }
+
+  return (
+    <form
+      className="flex items-center gap-1"
+      onSubmit={(event) => {
+        event.preventDefault()
+        onSubmit(keyword)
+      }}
+    >
+      <SidebarInput
+        ref={searchInputRef}
+        value={keyword}
+        onChange={(event) => onKeywordChange(event.target.value)}
+        placeholder="搜索歌曲、歌手或专辑"
+        aria-label="搜索关键字"
+      />
+      <Button type="submit" variant="ghost" size="icon-sm" aria-label="搜索" disabled={keyword.trim() === ""}>
+        <SearchIcon />
+      </Button>
+    </form>
+  )
 }
 
 export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
@@ -346,31 +435,21 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
 
   return (
     <SidebarProvider className="h-full min-h-0">
-      <Sidebar>
+      {/*
+        R41b：`collapsible="icon"`。
+        shadcn sidebar 的默认模式是 `offcanvas`——收起 = **整块滑出**（`left: -16rem`），
+        于是"收起侧栏"与"关掉侧栏"在界面上一模一样，导航就再也点不到了。
+        `icon` 是官方为常驻导航准备的那一档：收起后侧栏留着一条 48px 的图标轨
+        （`--sidebar-width-icon`），导航项变成图标 + 悬停 tooltip，展开即恢复。
+      */}
+      <Sidebar collapsible="icon">
         {/*
-          侧栏顶部的常驻搜索框（R40 取代了原来那条「搜索」导航项）。
-          用 shadcn sidebar 官方的 `SidebarInput`（它就是这个位置的原语）；
-          回车提交（`type="submit"`），结果渲染在右侧内容区——所以这里**只有入口，没有结果**。
-          没有做"边打字边搜"：那是每敲一个字母一次请求。
+          侧栏顶部的常驻搜索框（R40 取代了原来那条「搜索」导航项）：入口在这里，结果在内容区。
+          R41b 把它的两种形态（展开时的输入框 / 窄轨里的一枚图标按钮）收进 `SidebarSearch`
+          ——那一层在 `SidebarProvider` 里，才拿得到收起态。
         */}
         <SidebarHeader>
-          <form
-            className="flex items-center gap-1"
-            onSubmit={(event) => {
-              event.preventDefault()
-              submitSearch(keyword)
-            }}
-          >
-            <SidebarInput
-              value={keyword}
-              onChange={(event) => setKeyword(event.target.value)}
-              placeholder="搜索歌曲、歌手或专辑"
-              aria-label="搜索关键字"
-            />
-            <Button type="submit" variant="ghost" size="icon-sm" aria-label="搜索" disabled={keyword.trim() === ""}>
-              <SearchIcon />
-            </Button>
-          </form>
+          <SidebarSearch keyword={keyword} onKeywordChange={setKeyword} onSubmit={submitSearch} />
         </SidebarHeader>
         <SidebarContent>
           <SidebarGroup>
@@ -381,7 +460,13 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
                   const Icon = NAV_ICONS[entry.id] ?? ListMusicIcon
                   return (
                     <SidebarMenuItem key={entry.id}>
-                      <SidebarMenuButton isActive={view.id === entry.id} onClick={() => navigate(createView(entry.id))}>
+                      {/* `tooltip` 是 shadcn sidebar 官方给窄轨的形态：收起时（且非移动端）
+                          悬停显示标签，展开时不显示——标签本来就在按钮上 */}
+                      <SidebarMenuButton
+                        tooltip={entry.label}
+                        isActive={view.id === entry.id}
+                        onClick={() => navigate(createView(entry.id))}
+                      >
                         <Icon />
                         <span>{entry.label}</span>
                       </SidebarMenuButton>
@@ -394,27 +479,43 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
         </SidebarContent>
         <SidebarFooter>
           {/*
-            账号区（R38）：头像 + 名字 + VIP 徽标 + 退出登录。
+            账号区（R38）：头像 + 名字 + VIP 徽标 + 主题 + 退出登录。
             资料来自 `auth:status` 载荷的可选 `profile`（门禁那一层解析后交下来）——
             旧会话没有 profile 时这里显示兜底（头像占位 + "已登录"），**不造假数据**。
             退出走 `AlertDialog` 二次确认：误触的代价是重新扫码。
+
+            R41b：主题那枚纯图标按钮挂在「退出登录」**左边**（`ml-auto` 把两个按钮一起推到右端），
+            窄轨里账号区改成竖排（三个 24~28px 的图标在 32px 宽的轨道里横着放不下）——
+            名字与 VIP 徽标在窄轨里隐藏（官方 `SidebarGroupLabel` 同款做法：收起时 `hidden`）。
           */}
-          <div className="flex items-center gap-2 px-1 py-0.5" data-testid={ACCOUNT_AREA_TESTID}>
+          <div
+            className="flex flex-wrap items-center gap-2 px-1 py-0.5 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:gap-1 group-data-[collapsible=icon]:px-0"
+            data-testid={ACCOUNT_AREA_TESTID}
+          >
             <Avatar size="sm">
               {accountAvatar === null ? null : <AvatarImage src={accountAvatar} alt="" />}
               <AvatarFallback>
                 <UserIcon className="size-3.5" />
               </AvatarFallback>
             </Avatar>
-            <span className="truncate text-sm" data-testid={ACCOUNT_NAME_TESTID}>
+            <span
+              className="min-w-0 truncate text-sm group-data-[collapsible=icon]:hidden"
+              data-testid={ACCOUNT_NAME_TESTID}
+            >
               {accountName}
             </span>
             {accountVip ? (
-              <CrownIcon className="size-3.5 shrink-0 text-muted-foreground" aria-label={ACCOUNT_VIP_LABEL} data-testid={ACCOUNT_VIP_TESTID} />
+              <CrownIcon
+                className="size-3.5 shrink-0 text-muted-foreground group-data-[collapsible=icon]:hidden"
+                aria-label={ACCOUNT_VIP_LABEL}
+                data-testid={ACCOUNT_VIP_TESTID}
+              />
             ) : null}
+            {/* 主题三态循环（R41b）：与设置页「外观」卡的 Select 同源同向（同一份接线） */}
+            <ThemeToggle className="ml-auto group-data-[collapsible=icon]:ml-0" />
             <AlertDialog>
               <AlertDialogTrigger asChild>
-                <Button variant="ghost" size="icon-sm" className="ml-auto" aria-label={ACCOUNT_LOGOUT_TITLE}>
+                <Button variant="ghost" size="icon-sm" aria-label={ACCOUNT_LOGOUT_TITLE}>
                   <LogOutIcon />
                 </Button>
               </AlertDialogTrigger>
@@ -480,7 +581,7 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
           </div>
         </header>
 
-        {/* 收藏页常驻（切走只是 hidden），其余页面按视图重挂；歌词舞台盖在这一层之上 */}
+        {/* 收藏页常驻（切走只是 hidden），其余页面按视图重挂 */}
         <div className="relative min-h-0 flex-1 overflow-hidden">
           {isResidentView(view) ? null : <div className="h-full min-h-0 overflow-y-auto">{renderPage()}</div>}
           <FavoritesPage
@@ -489,16 +590,31 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
             onOpenAlbum={onOpenAlbum}
             onOpenArtist={onOpenArtist}
           />
-          <PlaybackStage
-            open={stageOpen}
-            runtime={runtime}
-            state={playback}
-            onClose={() => setStageOpen(false)}
-          />
         </div>
 
         {/* R40：封面/曲目信息也是"进入播放页（歌词舞台）"的入口，与头部那枚按钮同一个 state */}
         <PlayerBar runtime={runtime} state={playback} onOpenStage={() => setStageOpen(true)} />
+
+        {/*
+          歌词舞台（R41b 起**盖满整个 SidebarInset**）：
+          之前它挂在内容区那一层里，于是沉浸态下还露着头部的 48px 与播放器栏——
+          那不是"沉浸"，只是"内容区沉浸"。现在它是 `inset-0` 的最后一层，盖住 header、内容与
+          播放器栏，窗口整个交给歌词。
+
+          三件刻意的事：
+          - **底下的原渲染一个都不卸载**（覆盖层只是盖住）：页面状态、滚动位置、队列都不丢，
+            关掉舞台就回到原样；
+          - **播放控制必须有**：舞台自己那一层底部放的是**同一个 `PlayerBar` 组件**
+            （见 playback-stage.tsx），不是另写一份控件——沉浸态下不用退出就能暂停/切歌；
+          - 动画用官方 transition（tw-animate-css）+ `motion-safe:`：`prefers-reduced-motion`
+            的用户拿到的是瞬时切换，不是淡入。
+        */}
+        <PlaybackStage
+          open={stageOpen}
+          runtime={runtime}
+          state={playback}
+          onClose={() => setStageOpen(false)}
+        />
       </SidebarInset>
     </SidebarProvider>
   )

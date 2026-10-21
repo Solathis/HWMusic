@@ -161,12 +161,19 @@ export function GridSkeleton({ count = 8 }: { count?: number }) {
   )
 }
 
-/** 列表骨架（曲目表的加载态）。 */
+/**
+ * 列表骨架（曲目表的加载态）。
+ *
+ * R41b：行高从 `h-6`（24px）改成 `h-11`（44px）+ `gap-2`（8px）——**一行骨架 = 52px**，
+ * 与真实行高（`p-2` + `size-9` 封面 = 52~53px，真机量的 53px）对齐。
+ * 原来是 24 + 8 = 32px 一行：加载完的那一瞬间内容会往下长出一倍，用户看到的是"页面跳了一下"。
+ * 骨架屏的职责就是占住真实内容的位置，占错位置比不占更糟。
+ */
 export function ListSkeleton({ count = 8 }: { count?: number }) {
   return (
     <div className="flex flex-col gap-2 px-4 py-3" data-testid="list-skeleton">
       {Array.from({ length: count }, (_, index) => (
-        <Skeleton key={index} className="h-6 w-full" />
+        <Skeleton key={index} className="h-11 w-full" />
       ))}
     </div>
   )
@@ -229,98 +236,115 @@ export function TrackTable({
   const favorited = new Set(favoritedIds)
 
   return (
-    <Table className="table-fixed" data-testid="track-table">
-      <TableHeader>
-        <TableRow>
-          <TableHead className={`${TRACK_COLUMN_WIDTHS.index} text-center`}>#</TableHead>
-          <TableHead>标题</TableHead>
-          <TableHead className={TRACK_COLUMN_WIDTHS.artist}>艺人</TableHead>
-          <TableHead className={TRACK_COLUMN_WIDTHS.album}>专辑</TableHead>
-          <TableHead className={`${TRACK_COLUMN_WIDTHS.duration} text-right`}>时长</TableHead>
-          <TableHead className={TRACK_COLUMN_WIDTHS.favorite} />
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {songs.map((song, index) => {
-          const id = trackIdOf(song)
-          const albumId = trackAlbumIdOf(song)
-          const artistId = trackArtistIdOf(song)
-          const isFavorited = id !== null && favorited.has(id)
-          return (
-            <TableRow
-              key={`${id ?? "row"}-${index}`}
-              tabIndex={0}
-              aria-label={`${trackNameOf(song)}，双击播放`}
-              onDoubleClick={() => onActivate?.(song, index)}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter" && event.key !== " ") return
-                event.preventDefault()
-                onActivate?.(song, index)
-              }}
-              className="focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-            >
-              <TableCell className="text-center tabular-nums text-muted-foreground">{index + 1}</TableCell>
-              <TableCell className="font-medium">
-                {/* R38：小封面（`<img>` + 占位兜底见 CoverArt）——地址来自协议层的白名单投影 */}
-                <div className="flex min-w-0 items-center gap-2">
-                  <CoverArt coverUrl={trackCoverUrlOf(song)} className="size-9 rounded-md" iconClassName="size-4" />
-                  <span className="truncate">{trackNameOf(song)}</span>
-                </div>
-              </TableCell>
-              <TableCell>
-                <Button
-                  variant="link"
-                  size="sm"
-                  className="max-w-full truncate"
-                  disabled={onOpenArtist === undefined || artistId === null}
-                  onClick={() => {
-                    if (artistId === null) return
-                    onOpenArtist?.(artistId, song)
-                  }}
-                >
-                  {trackArtistsOf(song)}
-                </Button>
-              </TableCell>
-              <TableCell>
-                <Button
-                  variant="link"
-                  size="sm"
-                  className="max-w-full truncate"
-                  disabled={onOpenAlbum === undefined || albumId === null}
-                  onClick={() => {
-                    if (albumId === null) return
-                    onOpenAlbum?.(albumId, song)
-                  }}
-                >
-                  {trackAlbumOf(song)}
-                </Button>
-              </TableCell>
-              <TableCell className="text-right tabular-nums text-muted-foreground">
-                {formatDuration(trackDurationOf(song))}
-              </TableCell>
-              <TableCell>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-pressed={isFavorited}
-                  disabled={onToggleFavorite === undefined}
-                  aria-label={
-                    onToggleFavorite === undefined
-                      ? "收藏（写入接口待联调确认）"
-                      : isFavorited
-                        ? "取消收藏"
-                        : "收藏"
-                  }
-                  onClick={() => onToggleFavorite?.(song)}
-                >
-                  <HeartIcon className={isFavorited ? "fill-current" : undefined} />
-                </Button>
-              </TableCell>
-            </TableRow>
-          )
-        })}
-      </TableBody>
-    </Table>
+    /*
+      R41b 排版两处（都只为"与其余页面一致 / 表头看得见"）：
+      1. **页面级横向留白**：`px-4`。此前曲目表是**贴边**的（真机量的表格左边缘 = 内容区左边缘
+         256px），而歌单网格（`p-4`）、设置页（`m-4`）、空态（`px-4`）都在 16px 上——
+         同一栏内容在不同页面里左边缘差 16px，翻页时看得出来。留白加在这一层而不是行内，
+         是为了让行的 hover 底色仍然铺满整栏（Spotify 那种"行满宽、内容有边距"的形态）。
+      2. **表头 sticky**：shadcn 生成的 `Table` 外面套着一层 `overflow-x-auto` 的容器
+         （`data-slot="table-container"`）。一个轴上是 `auto` 时另一个轴的 `visible` 会被算成
+         `auto`——那层容器于是成了**滚动容器**，表头的 `sticky top-0` 只会相对它定位，
+         而它自己从不纵向滚动 = 表头照样滚走（真机量的 `position: static`）。
+         这里在调用点把那层容器的 `overflow` 放开（`[&>[data-slot=table-container]]:overflow-visible`），
+         表头就跟着页面那个滚动根走。R40 的 `table-fixed` 已经保证不再横向溢出
+         （真机量的 `scrollWidth == clientWidth`），所以放开它不会把内容顶出去。
+         不改生成原语：这是调用点的覆盖，`components/ui/table.tsx` 一个字都没动。
+    */
+    <div className="px-4 [&>[data-slot=table-container]]:overflow-visible">
+      <Table className="table-fixed" data-testid="track-table">
+        <TableHeader className="sticky top-0 z-10 bg-background">
+          <TableRow>
+            <TableHead className={`${TRACK_COLUMN_WIDTHS.index} text-center`}>#</TableHead>
+            <TableHead>标题</TableHead>
+            <TableHead className={TRACK_COLUMN_WIDTHS.artist}>艺人</TableHead>
+            <TableHead className={TRACK_COLUMN_WIDTHS.album}>专辑</TableHead>
+            <TableHead className={`${TRACK_COLUMN_WIDTHS.duration} text-right`}>时长</TableHead>
+            <TableHead className={TRACK_COLUMN_WIDTHS.favorite} />
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {songs.map((song, index) => {
+            const id = trackIdOf(song)
+            const albumId = trackAlbumIdOf(song)
+            const artistId = trackArtistIdOf(song)
+            const isFavorited = id !== null && favorited.has(id)
+            return (
+              <TableRow
+                key={`${id ?? "row"}-${index}`}
+                tabIndex={0}
+                aria-label={`${trackNameOf(song)}，双击播放`}
+                onDoubleClick={() => onActivate?.(song, index)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return
+                  event.preventDefault()
+                  onActivate?.(song, index)
+                }}
+                className="focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              >
+                <TableCell className="text-center tabular-nums text-muted-foreground">{index + 1}</TableCell>
+                <TableCell className="font-medium">
+                  {/* R38：小封面（`<img>` + 占位兜底见 CoverArt）——地址来自协议层的白名单投影 */}
+                  <div className="flex min-w-0 items-center gap-2">
+                    <CoverArt coverUrl={trackCoverUrlOf(song)} className="size-9 rounded-md" iconClassName="size-4" />
+                    <span className="truncate">{trackNameOf(song)}</span>
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <Button
+                    variant="link"
+                    size="sm"
+                    className="max-w-full truncate"
+                    disabled={onOpenArtist === undefined || artistId === null}
+                    onClick={() => {
+                      if (artistId === null) return
+                      onOpenArtist?.(artistId, song)
+                    }}
+                  >
+                    {trackArtistsOf(song)}
+                  </Button>
+                </TableCell>
+                <TableCell>
+                  <Button
+                    variant="link"
+                    size="sm"
+                    className="max-w-full truncate"
+                    disabled={onOpenAlbum === undefined || albumId === null}
+                    onClick={() => {
+                      if (albumId === null) return
+                      onOpenAlbum?.(albumId, song)
+                    }}
+                  >
+                    {trackAlbumOf(song)}
+                  </Button>
+                </TableCell>
+                <TableCell className="text-right tabular-nums text-muted-foreground">
+                  {formatDuration(trackDurationOf(song))}
+                </TableCell>
+                <TableCell>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-pressed={isFavorited}
+                    disabled={onToggleFavorite === undefined}
+                    aria-label={
+                      onToggleFavorite === undefined
+                        ? "收藏（写入接口待联调确认）"
+                        : isFavorited
+                          ? "取消收藏"
+                          : "收藏"
+                    }
+                    onClick={() => onToggleFavorite?.(song)}
+                  >
+                    <HeartIcon className={isFavorited ? "fill-current" : undefined} />
+                  </Button>
+                </TableCell>
+              </TableRow>
+            )
+          })}
+        </TableBody>
+      </Table>
+    </div>
   )
 }
 

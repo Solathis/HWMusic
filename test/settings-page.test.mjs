@@ -135,6 +135,96 @@ test("歌词缓存卡（R41）：挂在设置页里，且与「桌面歌词」�
   assert.match(source, /<LyricsCacheCard lyrics=\{lyrics\}\s*\/>/, "挂点：把外壳交下来的 lyrics 绑定传进去");
 });
 
+// ---------------------------------------------------------------------------
+// R41b：二级分类（单页 Tabs，不新开视图）
+// ---------------------------------------------------------------------------
+
+/** 取某个标签页那一段（从它的开头到下一个 `</TabsContent>`）。 */
+function paneSource(source, id) {
+  const start = source.indexOf(`<TabsContent value="${id}"`);
+  assert.ok(start > -1, `要能找到 ${id} 这个标签页`);
+  const end = source.indexOf("</TabsContent>", start);
+  assert.ok(end > start, `${id} 页没有收口`);
+  return source.slice(start, end);
+}
+
+test("R41b 二级分类：四个标签页，trigger 与 content 的值都来自 SETTINGS_TABS", () => {
+  const page = read("src/renderer/pages.tsx");
+  const source = settingsPageSource();
+
+  // trigger 与 content 各写一个字面量就会出现"点了标签、内容区是空的"（radix 只认 value 相等）
+  assert.match(page, /export const SETTINGS_TABS = \[/, "分类表要有名字（trigger 与 content 的唯一真源）");
+  assert.match(source, /SETTINGS_TABS\.map\(\(tab\) =>/, "标签按钮由那张表生成");
+  assert.match(source, /value=\{tab\.id\}/, "trigger 的值来自那张表");
+  assert.match(source, /defaultValue=\{SETTINGS_TABS\[0\]\.id\}/, "默认停在第一类（通用）");
+
+  const ids = [...page.matchAll(/\{ id: "([a-z-]+)", label: "([^"]+)" \}/g)].map((found) => [found[1], found[2]]);
+  assert.deepEqual(
+    ids,
+    [
+      ["general", "通用"],
+      ["network", "网络"],
+      ["lyrics", "歌词"],
+      ["log", "日志"],
+    ],
+    "四个分类与文案（文案要克制：两三个字，不带句号）",
+  );
+  assert.ok(ids.every(([, label]) => label.length >= 2 && label.length <= 3), "标签文案不许长过三个字");
+  for (const [id] of ids) paneSource(source, id); // 每个 id 都要有对应的 content
+});
+
+test("R41b 二级分类：卡片各归其类（只搬家，卡内一个字没改）", () => {
+  const source = settingsPageSource();
+  const panes = {
+    general: paneSource(source, "general"),
+    network: paneSource(source, "network"),
+    lyrics: paneSource(source, "lyrics"),
+    log: paneSource(source, "log"),
+  };
+
+  // 通用：关窗行为 / 开机自启 / 外观 / 播放队列
+  for (const title of ["关窗行为", "开机自启", "外观", "播放队列"]) {
+    assert.ok(panes.general.includes(`<CardTitle>${title}</CardTitle>`), `通用页要有「${title}」`);
+  }
+  // 网络：代理（连不上网时才会来看的那一类）
+  assert.ok(panes.network.includes("<CardTitle>网络与代理</CardTitle>"), "网络页是代理表单");
+  assert.ok(panes.network.includes("proxy-enabled"), "代理开关还在那一页里（搬家不改内部）");
+  // 歌词：桌面歌词窗 + 歌词缓存/导入（同一件事的两半）
+  assert.ok(panes.lyrics.includes("<CardTitle>桌面歌词</CardTitle>"), "歌词页有桌面歌词卡");
+  assert.ok(panes.lyrics.includes("<LyricsCacheCard lyrics={lyrics} />"), "歌词缓存卡与它同一页（R41 的挂点跟着搬）");
+  // 日志：只读的诊断面板（不是设置项），所以它单独一类
+  assert.ok(panes.log.includes("<CardTitle>运行日志</CardTitle>"), "日志单独成一类");
+  assert.ok(panes.log.includes("<LogTerminal"), "日志终端在那一页里");
+  assert.doesNotMatch(panes.general, /LogTerminal/, "通用页里不许还留着日志终端（挂两处等于两处要同步）");
+
+  // 每一张卡都只出现一次（"搬家"不是"复制"）
+  for (const title of ["关窗行为", "开机自启", "外观", "播放队列", "网络与代理", "桌面歌词", "运行日志"]) {
+    const seen = source.split(`<CardTitle>${title}</CardTitle>`).length - 1;
+    assert.equal(seen, 1, `「${title}」只该有一处定义`);
+  }
+});
+
+test("R41b 二级分类：失败/提示那两行留在标签页之上（页面级）", () => {
+  const source = settingsPageSource();
+  const tabsAt = source.indexOf('data-testid="settings-tabs"');
+  const failureAt = source.indexOf('role="alert"');
+  const noticeAt = source.indexOf('role="status"');
+  assert.ok(tabsAt > -1, "要能找到 Tabs 容器");
+  assert.ok(failureAt > -1 && failureAt < tabsAt, "失败那行在标签页之上（它是「刚才那次保存」的结果，藏进某一页就看不见了）");
+  assert.ok(noticeAt > -1 && noticeAt < tabsAt, "提示那行同理");
+});
+
+test("R41b 外观卡：三态 Select 与左下角那枚图标按钮同一份接线", () => {
+  const source = settingsPageSource();
+  const pane = paneSource(source, "general");
+  assert.match(pane, /<CardTitle>外观<\/CardTitle>/, "外观卡在通用页里");
+  assert.match(pane, /<Select value=\{themeChoice\}/, "三态是受控 Select");
+  assert.match(pane, /themeLabel\(themeChoice\)/, "标签直接写进 SelectValue（radix 没展开过内容时拿不到选项文案）");
+  assert.match(pane, /THEME_CHOICES\.map/, "三个档位来自 theme.mjs 的唯一真源");
+  assert.match(source, /const \{ choice: themeChoice, select: selectTheme \} = useThemeChoice\(\)/, "状态与写入口来自那一份接线");
+  assert.doesNotMatch(source, /APPEARANCE_NOTICE_TEXT[^}]*手动切换/, "外观说明不许再写「不提供手动切换」（R25 起就不是事实了）");
+});
+
 test("歌词缓存卡（R41）：文件选择用系统标准控件；清缓存要确认；本地导入默认不删", () => {
   const card = read("src/renderer/lyrics-cache-card.tsx");
   // 零 Rust / 零 capability：渲染层的标准文件输入

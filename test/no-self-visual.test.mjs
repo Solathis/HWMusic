@@ -44,6 +44,8 @@ const UI_FILES = [
   "src/renderer/login-gate.tsx",
   "src/renderer/login-chrome.tsx",
   "src/renderer/theme-control.tsx",
+  // R41b：左下角那枚主题循环按钮（图标 + tooltip 都是 shadcn/lucide，没有自绘）
+  "src/renderer/theme-toggle.tsx",
 ];
 
 /**
@@ -215,6 +217,44 @@ test("组件契约：TrackTable / PlayerBar / QueuePanel / GridSkeleton 都在 c
     "旧的固定 160px 列宽已删（它正是溢出的那一版）——注释里提它是说明文字，代码里不许再有",
   );
   assert.match(source, /max-w-full truncate/, "列内内容要真截断（ellipsis），不是只靠列宽");
+
+  /**
+   * R41b 排版两项（brief 第 4 项），都落在**调用点**而不是生成的 `components/ui/table.tsx`：
+   *
+   * ① **页面级横向留白**：曲目表此前是贴边的（真机量：表格左边缘 256 = 内容区左边缘），
+   *    而歌单网格（`p-4`）、设置页（`m-4`）、空态（`px-4`）都在 16px 上——同一栏内容翻页时左边缘跳。
+   * ② **表头 sticky**：生成的 `Table` 外面套着一层 `overflow-x-auto` 容器，一个轴 auto 会让另一个轴
+   *    的 visible 也算成 auto，于是那层容器成了滚动容器，`sticky top-0` 只相对它定位（它自己从不
+   *    纵向滚动）——真机量的 `position: static`，表头照样滚走。这里在调用点把那层容器的 overflow
+   *    放开，让表头跟着页面那个滚动根走。
+   */
+  assert.match(
+    stripComments(source),
+    /className="px-4 \[&>\[data-slot=table-container\]\]:overflow-visible"/,
+    "表格要跟其余页面一样吃 16px 留白，并在调用点放开生成容器的 overflow（表头 sticky 的前提）",
+  );
+  assert.match(
+    stripComments(source),
+    /<TableHeader className="sticky top-0 z-10 bg-background">/,
+    "表头 sticky + 令牌底色（滚下去之后列名还在，且不透明才不会透出下面的行）",
+  );
+  // 生成原语一个字都不许改：覆盖必须留在调用点（改了下一个 `shadcn add` 就把它冲掉）
+  assert.match(
+    read("src/renderer/components/ui/table.tsx"),
+    /className="relative w-full overflow-x-auto"/,
+    "components/ui/table.tsx 是生成物，不许手改",
+  );
+
+  /**
+   * 骨架屏占的是"真实内容的位置"：曲目表真实行高 = `p-2` + `size-9` 封面 = 52~53px（真机量 53px），
+   * 而 `h-6`（24px）+ `gap-2` 只有 32px 一行——加载完的那一瞬间内容往下长一倍。
+   * 现在 44 + 8 = 52px/行，与真实行高对齐。
+   */
+  assert.match(
+    stripComments(source),
+    /<Skeleton key=\{index\} className="h-11 w-full" \/>/,
+    "列表骨架的行高要与真实行高（52~53px）对齐",
+  );
 });
 
 test("播放器栏已接通：data-state 由状态机给、UI 层不持有音频也不碰 core（R9 翻转）", () => {
@@ -319,4 +359,61 @@ test("R40 搜索布局：入口只有侧栏那个常驻框，搜索页里没有�
   assert.match(detail, /<AmllBackground/, "头部底景用 AMLL 官方流体背景");
   assert.match(detail, /<TrackTable/, "正文仍是那一个曲目表（第 5 项修好之后）");
   assert.doesNotMatch(detail, /\bfetch\s*\(/, "封面仍然只能走 <img>/new Image（不 fetch）");
+});
+
+/**
+ * R41b 第 1 项：侧栏收起 = **图标轨**，不是整块滑出。
+ *
+ * 根因是 shadcn sidebar 的默认 `collapsible = "offcanvas"`（收起时整块移到 `left: -16rem`），
+ * 而 `<Sidebar>` 没传参数——"收起侧栏"于是与"关掉侧栏"在界面上完全一样，导航再也点不到。
+ * 判据不是"看起来还在"（那要靠真机量），而是**结构上就是官方那一档**：
+ * `collapsible="icon"` + 导航项的官方 `tooltip` + 窄轨里搜索的官方降级形态。
+ *
+ * 另外钉住 `TooltipProvider`：radix 的 `Tooltip` 没有 Provider 会**直接抛错**
+ * （"must be used within TooltipProvider"），而全项目此前一处 tooltip 都没用上——
+ * 少了这一层，整个主界面会白屏。
+ */
+test("R41b 侧栏：collapsible=icon + 导航 tooltip + 窄轨里搜索只剩一枚图标按钮", () => {
+  const app = stripComments(read("src/renderer/App.tsx"));
+
+  assert.match(app, /<Sidebar collapsible="icon">/, "收起要留图标轨（offcanvas 是整块滑出，导航就没了）");
+  assert.match(app, /<TooltipProvider>/, "导航 tooltip 需要 Provider（radix 没有它会直接抛错）");
+  assert.match(
+    app,
+    /<SidebarMenuButton\s+tooltip=\{entry\.label\}/,
+    "窄轨里导航项只剩图标：tooltip 用官方的那个参数（不是自己搭一个悬浮层）",
+  );
+
+  // 窄轨里的搜索：输入框与提交按钮在那个宽度里没有可用形态 → 官方做法是收起时不渲染它
+  assert.match(app, /const railCollapsed = sidebar\.state === "collapsed" && !sidebar\.isMobile/, "收起态判定要排除移动端（Sheet 形态没有窄轨）");
+  assert.match(app, /data-testid="sidebar-search-rail"/, "窄轨里必须留一枚搜索图标按钮（入口不能消失）");
+  assert.match(app, /sidebar\.setOpen\(true\)/, "点它先展开侧栏（然后光标才落得到输入框上）");
+  assert.match(app, /searchInputRef\.current\?\.focus\(\)/, "展开后把光标交给输入框（用户点的是「搜索」）");
+  // 账号区在窄轨里竖排、名字与 VIP 徽标隐藏（三个图标在 32px 宽的轨道里横着放不下）
+  assert.match(app, /group-data-\[collapsible=icon\]:flex-col/, "窄轨里账号区竖排");
+  assert.match(app, /group-data-\[collapsible=icon\]:hidden/, "窄轨里名字/徽标隐藏（官方 SidebarGroupLabel 同款做法）");
+});
+
+/**
+ * R41b 第 3 项：左下角的主题按钮**在退出登录左边**，且是纯图标。
+ *
+ * 位置这件事只能靠源码顺序钉（DOM 顺序就是视觉顺序）：`<ThemeToggle>` 必须出现在那个
+ * `AlertDialog`（退出登录）之前。图标本身是 lucide，颜色是令牌类（theme-tokens 扫）。
+ */
+test("R41b 左下角：主题图标按钮在退出登录左边（DOM 顺序 = 视觉顺序）", () => {
+  const app = stripComments(read("src/renderer/App.tsx"));
+  const footer = app.slice(app.indexOf("<SidebarFooter>"), app.indexOf("</SidebarFooter>"));
+  assert.ok(footer.length > 0, "要能在 App.tsx 里定位 SidebarFooter");
+
+  const themeAt = footer.indexOf("<ThemeToggle");
+  const logoutAt = footer.indexOf("ACCOUNT_LOGOUT_TITLE");
+  assert.ok(themeAt > -1, "账号区要有主题按钮");
+  assert.ok(logoutAt > -1, "账号区要有退出登录按钮");
+  assert.ok(themeAt < logoutAt, "主题按钮必须在退出登录**左边**");
+
+  const toggle = read("src/renderer/theme-toggle.tsx");
+  assert.match(toggle, /from\s+"lucide-react"/, "图标走 lucide（禁自绘）");
+  assert.match(toggle, /size="icon-sm"/, "纯图标按钮（shadcn Button 原语）");
+  assert.match(toggle, /aria-label=\{label\}/, "纯图标按钮必须有无障碍名称（说清当前档位与下一步）");
+  assert.match(toggle, /\.\/components\/ui\/tooltip/, "窄轨里那枚图标靠 tooltip 说人话");
 });

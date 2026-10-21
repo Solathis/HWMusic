@@ -448,19 +448,36 @@ test("凭据卫生：页面不直接摸回执里的代理对象，密码字段�
 });
 
 // ---------------------------------------------------------------------------
-// 10. 外观：跟随系统（裁决：不做手动切换，如实写在界面上）
+// 10. 外观：三态可选（R41b 改写——结论从"不做手动切换"变成"设置页里就能切"）
 // ---------------------------------------------------------------------------
 
-test("外观：如实说明「跟随系统」，且不画手动切换的饼", () => {
+/**
+ * R41b **改写了这一节**（原文钉的是 R10 的裁决"不做手动切换，如实写在界面上"）。
+ *
+ * 事实是：R25 起就有手动档（浅色/深色/跟随系统），入口在登录页与浮动控件上；
+ * 设置页那张卡一直停在 R10 的口径（"本版本不提供手动切换"——一句已经不是事实的话）。
+ * R41b 把三态放进这张卡（与左下角那枚循环图标按钮、登录页控件同一份接线），
+ * 文案随之改成"三选一 + 跟随系统时由系统决定"。
+ *
+ * 这条仍然钉的是同一件事：**界面上写的话必须与能力一致**——
+ * 现在有能力，就不能再说不提供；文案也不许画饼（`敬请期待` 之类）。
+ */
+test("外观（R41b）：说明与能力一致——三态可选，跟随系统时由系统决定亮暗", () => {
   assert.equal(typeof APPEARANCE_NOTICE_TEXT, "string");
-  assert.match(APPEARANCE_NOTICE_TEXT, /跟随系统|系统/, `要说清亮暗由谁决定：${APPEARANCE_NOTICE_TEXT}`);
-  assert.ok(
-    !/手动|自定义主题|深色模式开关/.test(APPEARANCE_NOTICE_TEXT) || /不提供|不做|没有/.test(APPEARANCE_NOTICE_TEXT),
-    `不许暗示有手动切换：${APPEARANCE_NOTICE_TEXT}`,
+  for (const word of ["浅色", "深色", "跟随系统"]) {
+    assert.ok(APPEARANCE_NOTICE_TEXT.includes(word), `三档都要说到（${word}）：${APPEARANCE_NOTICE_TEXT}`);
+  }
+  assert.match(APPEARANCE_NOTICE_TEXT, /系统/, `要说清跟随系统时亮暗由谁决定：${APPEARANCE_NOTICE_TEXT}`);
+  assert.doesNotMatch(
+    APPEARANCE_NOTICE_TEXT,
+    /不提供|不做|没有手动/,
+    `已经能做手动切换了，就不许再写"不提供"：${APPEARANCE_NOTICE_TEXT}`,
   );
   assert.ok(!/敬请期待|即将上线/.test(APPEARANCE_NOTICE_TEXT), `禁画饼：${APPEARANCE_NOTICE_TEXT}`);
 
   const page = read(PAGE_FILE);
   const settingsPage = page.slice(page.indexOf("export function SettingsPage("));
   assert.match(settingsPage, /APPEARANCE_NOTICE_TEXT/, "设置页要真的把这条如实说明显示出来");
+  // 说明之外还得真有那个控件（写着能切、界面上却没有，是同一类谎）
+  assert.match(settingsPage, /aria-label="主题"/, "外观卡要有主题三态控件");
 });
