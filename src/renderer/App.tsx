@@ -22,7 +22,6 @@ import {
   MicVocalIcon,
   SearchIcon,
   SettingsIcon,
-  ScrollTextIcon,
   UserIcon,
 } from "lucide-react"
 
@@ -60,7 +59,7 @@ import {
 import { EmptyState, PlayerBar, QueuePanel } from "./components"
 import { PlaybackStage } from "./playback-stage.tsx"
 import { FavoritesPage } from "./favorites-page.tsx"
-import { LogTerminal, useNoticeLog } from "./log-terminal.tsx"
+import { useNoticeLog } from "./log-terminal.tsx"
 import {
   AlbumPage,
   ArtistPage,
@@ -138,6 +137,13 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
   const [logoutFailure, setLogoutFailure] = useState<string | null>(null)
   // 托盘可用性：null = **还没取到**（不是"不可用"，也不是"可用"）
   const [trayAvailable, setTrayAvailable] = useState<boolean | null>(null)
+  /**
+   * 运行日志（R39 展示在设置页那张卡里）。
+   *
+   * 订阅**留在这里**而不是挪进设置页：`app:notice` 是广播，没人订阅的那一刻提示就没了，
+   * 而设置页只在用户切到设置时才挂载——那样"打开设置页之前的日志"会全丢。
+   * 与 `trayAvailable`/`lyrics` 同一条纪律：外壳收，页面只渲染。
+   */
   const notices = useNoticeLog()
   // 播放运行时是模块级单例（音频/媒体会话/广播都只能有一份），hook 只负责订阅状态
   const { runtime, state: playback } = usePlayer()
@@ -273,12 +279,14 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
       case VIEW.settings:
         // 设置页只读地显示队列状态（管理队列在播放队列面板里）：状态由外壳交下去，页面不自己取；
         // 托盘可用性同理（R11：查一次、交下去，页面不自己问宿主）；
-        // 桌面歌词的配置与开关同理（R12：宿主握着会话内那一份，外壳读回来交下去）
+        // 桌面歌词的配置与开关同理（R12：宿主握着会话内那一份，外壳读回来交下去）；
+        // 运行日志同理（R39：订阅在外壳——广播没人接就丢了，页面只渲染，见 useNoticeLog 的注释）
         return (
           <SettingsPage
             queue={playback}
             trayAvailable={trayAvailable ?? TRAY_AVAILABLE}
             lyrics={lyrics}
+            notices={notices}
           />
         )
       default:
@@ -355,23 +363,6 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
               {logoutFailure}
             </p>
           )}
-
-          {/* 运行日志：core 经 app:notice 上来的真实提示（代理生效、启动提示……） */}
-          <Sheet>
-            <SheetTrigger asChild>
-              <Button variant="ghost" size="sm" className="w-full justify-start">
-                <ScrollTextIcon />
-                <span>运行日志</span>
-              </Button>
-            </SheetTrigger>
-            <SheetContent side="bottom" className="max-h-[60vh]">
-              <SheetHeader>
-                <SheetTitle>运行日志</SheetTitle>
-                <SheetDescription>来自应用内核的提示（最多保留最新 100 条）。</SheetDescription>
-              </SheetHeader>
-              <LogTerminal entries={notices} />
-            </SheetContent>
-          </Sheet>
         </SidebarFooter>
       </Sidebar>
 

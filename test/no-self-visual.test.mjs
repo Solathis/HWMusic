@@ -25,7 +25,14 @@ import { fileURLToPath } from "node:url";
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const read = (relative) => readFileSync(`${repoRoot}${relative}`, "utf8");
 
-/** 组合 shadcn 原语的界面文件（简报 Files 一节 + R9 的舞台）。 */
+/**
+ * 组合 shadcn 原语的界面文件（简报 Files 一节 + R9 的舞台 + R39 补齐的三处）。
+ *
+ * R39 增补 `login-gate.tsx` / `login-chrome.tsx` / `theme-control.tsx`：它们是**早就存在**的
+ * 主界面（引导页、两个浮动控件），却一直没进这份名单——扫描范围漏一个文件，那个文件里的
+ * 自绘就永远扫不出来。补进来之后要交代的只有一处：门禁那块二维码 `<canvas>`
+ * （库的渲染目标，见下面的 `CANVAS_EXCEPTION_FILES`）。
+ */
 const UI_FILES = [
   "src/renderer/App.tsx",
   "src/renderer/pages.tsx",
@@ -34,6 +41,9 @@ const UI_FILES = [
   "src/renderer/playlist-grid.tsx",
   "src/renderer/log-terminal.tsx",
   "src/renderer/playback-stage.tsx",
+  "src/renderer/login-gate.tsx",
+  "src/renderer/login-chrome.tsx",
+  "src/renderer/theme-control.tsx",
 ];
 
 /**
@@ -51,6 +61,46 @@ const AMLL_HOSTS = [
 
 /** 全部"要么组合原语、要么把视觉交给官方组件"的界面文件。 */
 const ALL_UI_FILES = [...UI_FILES, ...AMLL_HOSTS];
+
+/**
+ * 手写 `<canvas>` 的唯一例外：登录门禁里那块二维码画布。
+ *
+ * 为什么它不算自绘：二维码没有 shadcn 原语，绘制必须由成熟库做——`qrcode`（MIT）的
+ * `toCanvas` 拿到元素后自己编码、纠错、画静区，渲染层只转发内容与参数
+ * （`features/auth/qr-canvas.mjs` 一处，像素由 `test/qr-render.test.mjs` 钉住）。
+ * 这跟 AMLL 宿主把画布交给官方渲染器是同一类事。
+ *
+ * 之所以把它**写出来**而不是让扫描放行 `<canvas>`：例外是一个决定，得有名字、有边界，
+ * 且下面有用例断言"全项目只有这一处"。
+ */
+const CANVAS_EXCEPTION_FILES = ["src/renderer/login-gate.tsx"];
+
+/**
+ * 自绘滚动容器的**例外集合**（R39 审计产物）：页面级滚动根，不是"面板"。
+ *
+ * 规则本身：该 `ScrollArea` 的地方（日志区、队列列表这类**面板**）不许拿 `overflow-y-auto`
+ * 自己搭一个。下面三处是"整个页面/整个内容区滚不滚"的布局根，与 `ScrollArea` 的语义不同：
+ *
+ * - `App.tsx`：`SidebarInset` 的内容区（页面切换的落点）。换成 `ScrollArea` 会把每个页面
+ *   塞进 radix 的 `display:table` 内容盒（`ScrollAreaContent`），页面里的百分比高度/`flex-1`
+ *   全部失去参照——六个页面的布局要一起重验，超出本轮范围；
+ * - `pages.tsx`（搜索页）：那一层 `overflow-y-auto` 在当前布局下**量不到自己的滚动**
+ *   （外层内容高度是 auto，`flex-1` 不生效），页面实际由上一个根滚动——它是重复的一层；
+ * - `favorites-page.tsx`：收藏页的滚动根**必须**是它自己——`IntersectionObserver` 的 `root`
+ *   与 `scrollTop` 位置记忆都要那个真实元素，而 radix 的 viewport 拿不到 ref
+ *   （`components/ui/scroll-area.tsx` 是生成原语，不手改）。
+ *
+ * 三处都记进 task-39-report.md 的「待裁决」，由 kimicode 裁决是"保留并写清理由"还是
+ * "改造页面级滚动根"。用例断言**计数逐文件相等**：新写一处自绘滚动容器会红；
+ * 把某处改成 `ScrollArea` 也会红（那时请连同这个集合一起改——它是一份决定记录，不是挡路的）。
+ */
+const SCROLL_ROOT_EXCEPTIONS = {
+  "src/renderer/App.tsx": 1,
+  "src/renderer/pages.tsx": 1,
+  "src/renderer/favorites-page.tsx": 1,
+};
+
+const HAND_ROLLED_SCROLLER = /overflow-(?:y-)?(?:auto|scroll)\b/g;
 
 function stripComments(source) {
   return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
@@ -73,13 +123,52 @@ test("组合原语：每个界面文件都从 components/ui 引入 shadcn 原语
   }
 });
 
-test("不自绘：无手写 svg/canvas/innerHTML（图形走 lucide-react 图标）", () => {
+test("不自绘：无手写 svg/innerHTML（图形走 lucide-react 图标）；canvas 只有一处例外", () => {
+  const canvases = [];
   for (const relative of ALL_UI_FILES) {
     const source = stripComments(read(relative));
     assert.doesNotMatch(source, /<svg[\s>]/, `${relative} 不得手写 <svg>（图标一律 lucide-react）`);
-    assert.doesNotMatch(source, /<canvas[\s>]|getContext\(|createElement\(["']canvas/, `${relative} 不得自绘画布`);
     assert.doesNotMatch(source, /dangerouslySetInnerHTML/, `${relative} 不得注入 HTML`);
     assert.doesNotMatch(source, /<(?:table|thead|tbody|tr|th|td|button|input|select)\b/, `${relative} 的表格/按钮/输入一律走 shadcn 原语`);
+    if (/<canvas[\s>]|getContext\(|createElement\(["']canvas/.test(source)) canvases.push(relative);
+  }
+
+  // 例外集合写死在这里（与 theme-tokens 那两处 AMLL 内联尺寸同款做法）：多一处就是规则被悄悄放宽
+  assert.deepEqual(
+    canvases.sort(),
+    [...CANVAS_EXCEPTION_FILES].sort(),
+    `手写 <canvas> 的例外只有登录门禁那一处（库的渲染目标）：${JSON.stringify(canvases)}`,
+  );
+
+  // 而且它不是"允许自己画"：门禁只把 canvas 交给 qr-canvas.mjs 的入口，
+  // 编码/纠错/绘制全在成熟库 qrcode 里（画法与像素由 test/qr-render.test.mjs 钉住）
+  const gate = stripComments(read("src/renderer/login-gate.tsx"));
+  assert.match(gate, /<canvas\b/, "例外真的存在（否则把它从例外集合里删掉，别留着空豁免）");
+  assert.doesNotMatch(gate, /getContext\(/, "宿主自己不碰画布上下文（不自己画）");
+  assert.match(gate, /paintQrCanvas\(/, "画布只经 features/auth/qr-canvas.mjs 的那一个入口");
+  assert.match(
+    stripComments(read("src/renderer/features/auth/qr-canvas.mjs")),
+    /QRCode\.toCanvas\(/,
+    "二维码的绘制属于 qrcode 库（渲染层不碰算法）",
+  );
+});
+
+test("自绘滚动容器：面板一律走 ScrollArea，页面级滚动根的例外集合写死", () => {
+  const measured = {};
+  for (const relative of ALL_UI_FILES) {
+    const code = stripComments(read(relative));
+    const hits = [...code.matchAll(HAND_ROLLED_SCROLLER)].length;
+    if (hits > 0) measured[relative] = hits;
+  }
+  assert.deepEqual(
+    measured,
+    SCROLL_ROOT_EXCEPTIONS,
+    `检测到的自绘滚动容器与例外集合不一致（新加一处要先问过它的语义，改掉一处要同步删例外）：${JSON.stringify(measured)}`,
+  );
+
+  // 面板级的滚动区必须真的用 ScrollArea（日志区、队列列表）——例外只管页面级滚动根，别混进来
+  for (const relative of ["src/renderer/log-terminal.tsx", "src/renderer/components.tsx"]) {
+    assert.match(read(relative), /from\s+"\.\/components\/ui\/scroll-area"/, `${relative} 的滚动区走 shadcn 的 ScrollArea`);
   }
 });
 

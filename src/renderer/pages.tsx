@@ -41,6 +41,8 @@ import {
 } from "./components/ui/select"
 import { Switch } from "./components/ui/switch"
 import { EmptyState, GridSkeleton, ListSkeleton, LoadFailed, TrackTable } from "./components"
+import { LOG_ENTRY_LIMIT, LogTerminal } from "./log-terminal.tsx"
+import type { LogEntry } from "./log-terminal.tsx"
 import { coreCall, getAutostart, isCoreError, setAutostart } from "./host-api"
 import { PlaylistGrid } from "./playlist-grid.tsx"
 import { libraryEmptyText, libraryFailureText } from "./features/library/library-state.mjs"
@@ -341,6 +343,14 @@ export interface SettingsPageProps {
    * 缺省 `null` = 外壳还没挂上（设置页不该因为少一个 prop 就崩）。
    */
   lyrics?: LyricsWindowBinding | null
+  /**
+   * 运行日志（R39）：由外壳的 `useNoticeLog()` 交下来。
+   *
+   * 订阅留在外壳是**必须的**，不是风格问题：`app:notice` 是广播，没人订阅那一刻的提示就丢了，
+   * 而设置页只在切到设置时才挂载——在这里订阅等于"打开设置页之前的日志全丢"。
+   * 缺省 `[]` = 外壳还没交下来（这时如实显示"暂无日志。"，不编内容）。
+   */
+  notices?: LogEntry[]
 }
 
 /**
@@ -353,7 +363,12 @@ export interface SettingsPageProps {
  * - 不冒充：没测过不给测试结论、读不到自启状态就说"未取到"、保存回执按 `restartRequired`
  *   如实说"要重启"，主机没通过清洗就说"仍是直连"。
  */
-export function SettingsPage({ queue = null, trayAvailable = TRAY_AVAILABLE, lyrics = null }: SettingsPageProps) {
+export function SettingsPage({
+  queue = null,
+  trayAvailable = TRAY_AVAILABLE,
+  lyrics = null,
+  notices = [],
+}: SettingsPageProps) {
   const [form, setForm] = useState(() => proxyFormFromSettings(null))
   const [closeBehavior, setCloseBehavior] = useState(() => closeBehaviorFromSettings(null))
   const [loaded, setLoaded] = useState(false)
@@ -791,6 +806,22 @@ export function SettingsPage({ queue = null, trayAvailable = TRAY_AVAILABLE, lyr
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground">{queueSummaryText(queueSummary(queue))}</p>
+        </CardContent>
+      </Card>
+
+      {/*
+        运行日志（R39 从侧栏那个 Sheet 搬到这里）。
+        展示与筛选全在 `LogTerminal` 里（编辑器样式：行号 gutter + 等宽正文 + ScrollArea，
+        上面一个文本筛选框与「N / 总数 条」计数）；这里只给卡片外壳与那句说明。
+        `app:notice` 的载荷只有 text，**没有级别**——所以筛选只按文本，不发明级别列。
+      */}
+      <Card>
+        <CardHeader>
+          <CardTitle>运行日志</CardTitle>
+          <CardDescription>{`来自应用内核的提示（最多保留最新 ${LOG_ENTRY_LIMIT} 条）。`}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <LogTerminal entries={notices} />
         </CardContent>
       </Card>
     </div>

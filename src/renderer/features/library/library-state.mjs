@@ -1,6 +1,10 @@
 /**
  * 库页面的失败/空态文案（R8）：一句话，克制，且**不冒充**。
  *
+ * 运行日志（`app:notice` 收上来的那些提示）的**纯列表逻辑**也在这里：`appendNotice`（R8）
+ * 与 R39 的 `filterNoticeEntries` / `noticeLogCountText`。R39 起日志的展示在设置页那张卡里，
+ * 但"怎么拼、怎么筛、计数怎么说"仍然只有这一个模块一处实现（UI 只 setState 与渲染）。
+ *
  * 最重要的一条区分（R4 K1 风险的 UI 面）：**"接口没配" ≠ "确实没有数据"**。
  * 端点未配置时必须说"未配置/待联调"，绝不能显示"还没有收藏歌曲"——
  * 那会让用户以为自己的收藏空了，而事实是我们连不上（旧仓的"假空态"就是这种坑）。
@@ -84,4 +88,36 @@ export function appendNotice(entries, text, limit = 100, id = 0) {
   const cap = Number.isInteger(limit) && limit > 0 ? limit : 100;
   const next = [...current, { id, text: trimmed }];
   return next.length > cap ? next.slice(next.length - cap) : next;
+}
+
+/** 一条日志的可筛文本（坏形状一律当空串：认不出不等于要抛出去）。 */
+function noticeTextOf(entry) {
+  return entry !== null && typeof entry === "object" && typeof entry.text === "string" ? entry.text : "";
+}
+
+/**
+ * 按**文本子串**筛选日志（R39）。
+ *
+ * `app:notice` 的载荷只有 `text`（没有级别字段），所以筛选只按文本做——**不发明级别**。
+ * 大小写不敏感：日志里混着 `Proxy`/`proxy` 这类英文词，区分大小写只会让人以为"筛不出来"。
+ * 空白查询等于不筛（返回原数组），与搜索页"空关键字不发请求"是同一条纪律：
+ * 不要把用户没提的要求当成一次筛掉全部。
+ */
+export function filterNoticeEntries(entries, query) {
+  const current = Array.isArray(entries) ? entries : [];
+  const needle = typeof query === "string" ? query.trim().toLowerCase() : "";
+  if (needle === "") return current;
+  return current.filter((entry) => noticeTextOf(entry).toLowerCase().includes(needle));
+}
+
+/**
+ * 「N / 总数 条」计数文案（设置页那张日志卡）。
+ *
+ * 两个数字都给：只报筛出来的条数，用户就没法知道"是库里只有这些，还是筛选把它们挡住了"。
+ * 坏入参当 0（不显示 `NaN / undefined`——那是把内部形状漏到界面上）。
+ */
+export function noticeLogCountText(shown, total) {
+  const safeShown = Number.isInteger(shown) && shown >= 0 ? shown : 0;
+  const safeTotal = Number.isInteger(total) && total >= 0 ? total : 0;
+  return `${safeShown} / ${safeTotal} 条`;
 }
