@@ -26,9 +26,10 @@
  * `isQrlogin:false` 且**不下发** `getqrContent`/`asyncURL`（实探记录），二维码配置只在
  * 移动登录页的 `localInfo` 里。这不是绕路，是华为自己页面之间的同一条链。
  *
- * **未实测的一档（如实登记）**：`codeRemoteLogin` 之后的 `callbackURL → code → 令牌兑换`需要
- * 一次**真实扫码 + 手机确认**（用户在场的授权动作），本任务交付到"轮询状态机就绪"为止；
- * 那一步的形状来自页面 bundle 的调用代码，且失败时是结构化错误（不猜、不静默）。
+ * **实测状态（R33 更新）**：`codeRemoteLogin` 这一段**已有真机证据**——用户扫码 + 手机确认之后，
+ * 轮询见到 `0`、换码接口跑通并交回了 `callbackURL`（形状 = https 中转页，见文件末尾的 R33 段）。
+ * 仍然只有真机能验的是**那份中转页 302 的真实往返**（R33 按 OAuth 302 语义实现），
+ * 以及其后的 `code → 令牌兑换`（`consumeCallback → exchangeCode`，需要真实授权码）。
  *
  * R20 增补（手动刷新 = 活动会话期间重启）：
  * - `start()` 天然就是"停旧会话 + 开新会话"（旧会话 `cancel()`，新会话新 qrToken/qrCode）；
@@ -71,8 +72,23 @@
  * 界面与 UA 一处未动：渲染层零改动、登录 webview 保持宿主默认 UA；这里的 `QR_HTTP_USER_AGENT`
  * 只是**请求头层面的协议保真**。"补上这些到底有没有用"要真手机 + 真账号才能验
  * （`docs/KNOWN_LIMITATIONS.md` B21）。
+ *
+ * R33 增补（用户真机证据 2026-10-21：扫码关联已通，卡在最后一步）：
+ * 真机上扫码 + 手机确认**已经走通**（R31 的保真生效：轮询见到 `0`、`codeRemoteLogin` 真的回了
+ * `callbackURL`），用户看到的失败是「不是登录回调 URL（只接受 hms://redirect_uri）」。
+ * 根因在**最后一跳**：那个 `callbackURL` 是 **https 的 loginCallback 中转页**
+ * （`oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?…redirect_uri=hms%3A%2F%2Fredirect_uri`），
+ * 浏览器里它 302 到 `hms://redirect_uri?code&state`；我们此前把它**原样**喂给只认 `hms://` 的
+ * `parseCallback`，于是扫码明明成功了却报"不是回调"。
+ *
+ * 修法落在确认链里（[`resolveCallbackUrl`]，`codeRemoteLogin` 之后、`onConfirmed` 之前）：
+ * `hms://` 开头直通（原样交回，既有链零改动）；`https://` → `redirect: "manual"` 自己读 Location
+ * （带同一口 QR 链 cookie 罐与同款头），最多跟 `QR_CALLBACK_MAX_REDIRECTS` 跳；
+ * 形状对不上（非 3xx / 没有 Location / 跳去的不是 `hms://redirect_uri` 回调 / 超过跳数）一律
+ * **结构化错误不猜**，文案不回显 URL（凭据边界）。`parseCallback` 成功之后的链一行未动。
  */
-import { LOGIN_TIMEOUT_MS } from "../protocols/login-callback.mjs";
+import { OAUTH_REDIRECT_URI } from "../protocols/auth.mjs";
+import { LOGIN_TIMEOUT_MS, isCallback } from "../protocols/login-callback.mjs";
 import { deviceFingerprintFields, encodeFingerprint } from "../protocols/device-fingerprint.mjs";
 import { QR_LOGIN_STATUS, QR_PAGE_ACCEPT, createQrSession } from "../protocols/qr-login.mjs";
 import { err, ok } from "../shared/result.ts";
@@ -141,7 +157,18 @@ export const QR_PORT_ERROR_KINDS = {
   qrConfigUnavailable: "qr_config_unavailable",
   /** 已确认但换码失败（含跨站/风险控制等业务码） */
   confirmFailed: "qr_confirm_failed",
+  /** R33：换码交回的 https 中转页没给出可用的 `hms://redirect_uri` 回调（形状对不上，不猜） */
+  callbackRedirectFailed: "qr_callback_redirect_failed",
 };
+
+/**
+ * R33：跟随"回调中转页"的**跳数上限**。
+ *
+ * 真机那条链是一跳（https 中转页 302 → `hms://redirect_uri?…`），但 OAuth 的实现允许再中转一层
+ * （例如带区域的 loginCallback 再跳到别处）。允许跟随、但**有上界**：超过就结构化报错，不无限跟
+ * （跟随的目标来自服务端响应，没有上界的跟随等于把"打不通"变成一个循环）。
+ */
+export const QR_CALLBACK_MAX_REDIRECTS = 5;
 
 const REQUEST_TIMEOUT_MS = 20_000;
 
@@ -153,6 +180,24 @@ function messageOf(cause) {
   if (cause instanceof Error && cause.message.trim() !== "") return cause.message;
   if (typeof cause === "string" && cause.trim() !== "") return cause;
   return "未知错误（详情见日志）";
+}
+
+/** URL 的 scheme（小写，不含冒号）；解析不出来就是空串——形状不认，不猜。 */
+function schemeOf(value) {
+  try {
+    return new URL(String(value)).protocol.replace(/:$/, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/** 相对 Location 解析成绝对地址（中转页偶尔给相对路径）；解析不出来就是空串。 */
+function absoluteUrl(value, base) {
+  try {
+    return new URL(String(value), base).href;
+  } catch {
+    return "";
+  }
 }
 
 /** 极简 cookie jar：CAS 门户的 getPageInfo/换码要靠会话 cookie 关联（值不进日志）。 */
@@ -263,6 +308,74 @@ export function createHuaweiQrPort(options = {}) {
     } catch {
       return err("端点响应不是 JSON", QR_PORT_ERROR_KINDS.invalidResponse);
     }
+  }
+
+  /**
+   * R33：把换码交回的 **callbackURL** 收敛成 `hms://redirect_uri?code&state`。
+   *
+   * 真机证据（2026-10-21）：`codeRemoteLogin` 交回的是 **https 的 loginCallback 中转页**
+   * （`oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?…redirect_uri=hms%3A%2F%2Fredirect_uri`），
+   * 浏览器里它 302 到 `hms://redirect_uri?code&state`。此前我们把它原样喂给只认 `hms://` 的
+   * `parseCallback` → 最后一步报"不是登录回调 URL"，而扫码其实已经成功。
+   *
+   * 三条规矩：
+   * 1. `hms://` 开头 → **直通**（原样交回；下游 `parseCallback` 仍是唯一的判真伪之处，既有链零改动）；
+   * 2. `https://` → **跟随**：`redirect: "manual"` 自己读 `Location`（复用 [`request`]，于是自动带上
+   *    同一口 cookie 罐与同款头）。**必须 manual**：让 fetch 自动跟随会把 302 换成一次"自定义 scheme
+   *    的导航"（跟不了），`Location` 反而读不到——真机这一跳要的就是那颗 `Location`；
+   * 3. 形状对不上（非 3xx / 没有 `Location` / 跳去的不是 `hms://redirect_uri` 回调 /
+   *    超过 `QR_CALLBACK_MAX_REDIRECTS` 跳）→ **结构化错误，不猜**。
+   *
+   * 文案不回显 URL（凭据边界：那个地址里带着 `code`）；只回状态码与"形状哪里不对"。
+   *
+   * @param {string} callbackUrl `codeRemoteLogin` 交回的地址（调用方已保证非空字符串）
+   */
+  async function resolveCallbackUrl(callbackUrl) {
+    const start = callbackUrl.trim();
+    if (schemeOf(start) === "hms") return ok({ callbackUrl: start, hops: 0 });
+
+    let current = start;
+    for (let hop = 0; hop < QR_CALLBACK_MAX_REDIRECTS; hop += 1) {
+      if (schemeOf(current) !== "https") {
+        return err(
+          "扫码已确认，但收到的回调地址既不是登录回调、也不是可以跟随的 https 中转页（不猜）",
+          QR_PORT_ERROR_KINDS.callbackRedirectFailed,
+        );
+      }
+      // Referer 与换码那一步同款：浏览器里它就是从那张贴着二维码的页面跳过去的
+      const answer = await request(current, {
+        headers: { referer: `${endpoints.casOrigin}${endpoints.mobileLoginPath}` },
+      });
+      if (!answer.ok) return answer;
+      const { status } = answer.data;
+      if (status < 300 || status >= 400) {
+        return err(
+          `扫码已确认，但中转页没有跳转到登录回调（HTTP ${status}）：本次登录无法收尾`,
+          QR_PORT_ERROR_KINDS.callbackRedirectFailed,
+        );
+      }
+      const location = typeof answer.data.location === "string" ? answer.data.location.trim() : "";
+      if (location === "") {
+        return err(
+          `扫码已确认，但中转页没有给出跳转目标（HTTP ${status}）`,
+          QR_PORT_ERROR_KINDS.callbackRedirectFailed,
+        );
+      }
+      // 已经是回调就**原样**交出去（不让 URL 解析去动那串 code/state 的编码）
+      if (isCallback(location)) return ok({ callbackUrl: location, hops: hop + 1 });
+      const next = absoluteUrl(location, current);
+      if (schemeOf(next) !== "https") {
+        return err(
+          `扫码已确认，但中转页跳去的不是登录回调（只接受 ${OAUTH_REDIRECT_URI}）`,
+          QR_PORT_ERROR_KINDS.callbackRedirectFailed,
+        );
+      }
+      current = next;
+    }
+    return err(
+      `扫码已确认，但中转页连跳 ${QR_CALLBACK_MAX_REDIRECTS} 次仍未交回登录回调（不猜）`,
+      QR_PORT_ERROR_KINDS.callbackRedirectFailed,
+    );
   }
 
   /**
@@ -539,7 +652,14 @@ export function createHuaweiQrPort(options = {}) {
         QR_PORT_ERROR_KINDS.confirmFailed,
       );
     }
-    return ok({ callbackUrl });
+
+    // R33：最后一跳——真机上这个字段是 https 的 loginCallback 中转页，不是 hms:// 回调
+    const resolved = await resolveCallbackUrl(callbackUrl);
+    if (!resolved.ok) return resolved;
+    if (resolved.data.hops > 0) {
+      log(`二维码换码：callbackURL 是 https 中转页 → 跟随 ${resolved.data.hops} 跳后拿到 hms:// 回调`);
+    }
+    return ok({ callbackUrl: resolved.data.callbackUrl });
   }
 
   return {

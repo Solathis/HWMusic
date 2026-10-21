@@ -493,14 +493,16 @@ gitignore；`--no-browser` 只跑公开接口那两段）。**只碰公开页面
 POST https://id1.cloud.huawei.com/CAS/IDM_W/ajaxHandler/codeRemoteLogin?reflushCode=…&cVersion=UP_CAS_6.26.3.100
 表单 {pageToken, pageTokenKey, loginUrl, reqClientType, service, loginChannel, lang, appID,
       userID, siteID, accountType, code, qrCode, userAccount, opType}
-→ {callbackURL}      // = loginCallback URL（带 code，与扫码开窗那条链落到同一个地方）
+→ {callbackURL}      // = **https 的 loginCallback 中转页**（浏览器里它 302 到 hms://redirect_uri?code&state）
+                     //   R33：这一跳由确认链自己跟随，见本节 R33 段（真机证据）
 ```
 
 这条链的**每一步都读自页面自己的代码**（`/CAS/static_rss/green/rss_20260904/CAS/vue3/vuebuild/js/login/portal/`
 的 `qrCodeLogin-legacy.js` 与 `index-entry-legacy.js`；`getqrContent`/`asyncURL` 只作为**服务端配置值**出现，
 bundle 里没有任何硬编码的二维码端点字符串——这也是"必须走 getPageInfo 拿配置"的原因）。
-**未实测的边界**：`codeRemoteLogin` 需要一次真实的"扫码 + 手机确认"，那是用户在场的授权动作
-（本任务交付到"轮询状态机就绪"）。失败时是结构化错误（`qr_confirm_failed` + 服务端 `errorCode`），不猜。
+**实测状态（R33 更新）**：这一步**已有真机证据**——用户扫码 + 手机确认后轮询见到 `0`，本接口跑通并交回了
+`callbackURL`（形状见上：https 中转页）。仍未实测的是**那份中转页 302 的真实往返**（R33 按 OAuth 302 语义实现，
+要用户复测）。换码接口自己失败时是结构化错误（`qr_confirm_failed` + 服务端 `errorCode`），不猜。
 
 **本项目落地位置**：`src/protocols/qr-login.mjs`（状态机，端点注入）、`src/main/qr-login.mjs`
 （探针确认的端点常量 `HUAWEI_QR_ENDPOINTS` + CAS 换码链）、`auth:qr-start` 请求频道、
@@ -725,10 +727,49 @@ R29 是被动读代码推断，R31 换了方法：**用 headless Chromium 真开
    建单 8 字段 + cookie 名单 `CAS_THEME_NAME,JSESSIONID,VERSION_NO,CASTGC,CASTGCLOW,hwid_cas_sid`、
    轮询 cookie 名单再带上 `qRCode,qrCodeCreateTime,expiredTime,cversion`；建单/轮询 UA 与
    `QR_HTTP_USER_AGENT` 逐字节相同。**仍然测不到的是"关联"本身**（要真手机 + 真账号）
-   → `docs/KNOWN_LIMITATIONS.md` **B21**。
+   → `docs/KNOWN_LIMITATIONS.md` **B21**（**R33 的真机证据补上了这一条：关联通了**，见本节 R33 段）。
 8. 钉在：`test/device-fingerprint.test.mjs`（10 条：序列化/校验/往返/**与页面逐字节一致**/字段表）、
    `test/qr-login.test.mjs` 的 R31 3 条（建单 URL 去查询串、建单请求形状、轮询请求形状）、
    `test/qr-port.test.mjs` 的 R31 4 条（上下文链 + cookie 罐；降级；空 sid 不猜；CAS 链只走一遍）。
+
+**R33（用户真机证据 2026-10-21：扫码关联已通，卡在最后一跳）——`callbackURL` 是 https 中转页，要跟着它拿 `hms://`**。
+
+真机事实链：用户扫码 + 手机确认之后，轮询见到了 `0`（已确认）、`codeRemoteLogin` 跑通并回了
+`callbackURL`（R31 的保真生效了），但界面报「不是登录回调 URL（只接受 hms://redirect_uri）」。
+根因：**那个 `callbackURL` 不是 `hms://` 回调，而是 https 的 loginCallback 中转页**：
+
+```
+codeRemoteLogin → {callbackURL: "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback
+                                  ?state=…&code=…&redirect_uri=hms%3A%2F%2Fredirect_uri&…"}
+浏览器里这一跳：302 → Location: hms://redirect_uri?code=…&state=…
+```
+
+我们此前把那份 https URL **原样**喂给只认 `hms://redirect_uri` 的 `parseCallback`
+（`src/protocols/login-callback.mjs`）→ 扫码明明成功了，却在最后一步报"不是回调"。
+（R16 的 §③ 表里写的是"`callbackURL` = loginCallback URL"，**方向是对的、形状写粗了**：
+它是 https 的中转页，不是回调本身。）
+
+修法落在确认链里（`src/main/qr-login.mjs` 的 `resolveCallbackUrl`，`codeRemoteLogin` 之后、
+`onConfirmed` 之前），三条规矩：
+
+1. **`hms://` 开头 → 直通**：原样交回，下游 `parseCallback` 仍是判真伪的唯一之处（既有链零改动）；
+2. **`https://` → 跟随**：`fetch(…, {redirect: "manual"})` 自己读 `Location`（复用 QR 链那条
+   [`request`]，于是自动带同一口 cookie 罐、页面 UA，并补上与换码那一步同款的 `Referer`）。
+   **必须 manual**：让 fetch 自动跟随会把 302 变成一次"自定义 scheme 的导航"（引擎跟不了），
+   `Location` 反而读不到——这一跳要的就是那颗 `Location`。跟随最多 `QR_CALLBACK_MAX_REDIRECTS = 5`
+   跳（允许区域中转再套一层，但**有上界**：跟随目标来自服务端响应，无上界的跟随等于把"打不通"
+   变成一个循环），`Location` 允许相对路径（按当前地址解析）；
+3. **形状对不上就结构化报错，不猜**（新增类别 `QR_PORT_ERROR_KINDS.callbackRedirectFailed`
+   = `qr_callback_redirect_failed`）：非 3xx / 3xx 但**没有 `Location`** / 跳去的不是
+   `hms://redirect_uri` 回调（例如 `hms://evil.example.com/…` 这种钓鱼形状，用 `isCallback` 判）/
+   超过跳数 / 连 https 中转页都不是的 callbackURL。跟随那一跳**网络失败**走既有的 `network_error`。
+   **文案不回显 URL**（那个地址里带着 `code`）：只说状态码与"形状哪里不对"。
+   `parseCallback` 成功之后的链（`consumeCallback → exchangeCode → loginex → 会话落地`）**一行未动**。
+
+钉在 `test/qr-port.test.mjs` 的 R33 8 条：直通（一个多余请求都不发）/ 一跳 302（含
+`redirect: "manual"`、cookie 罐、UA、Referer 逐项）/ 两跳 / 5 跳边界与超限 /
+200 无 `Location` / `Location` 是别的 hms 域 / 跟随那一跳网络失败 / 形状不认不外发请求。
+**仍未实测**：那条 302 的真实往返（是本轮唯一没走过真机的形状）→ `docs/KNOWN_LIMITATIONS.md` A6。
 
 ## 2. 音乐业务接口
 
