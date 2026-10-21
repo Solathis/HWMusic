@@ -28,8 +28,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use serde_json::{json, Value};
 use tauri::{
-    AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder,
+    webview::PageLoadEvent, AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime,
+    WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 
 use crate::bridge::{CoreError, LYRICS_DOCUMENT, LYRICS_PROGRESS, LYRICS_STATE, APP_NOTICE};
@@ -293,13 +293,19 @@ pub fn status_payload(config: &LyricsConfig, visible: bool) -> Value {
     json!({ "config": config.payload(), "visible": visible })
 }
 
-/// 歌词窗的**会话内**配置（唯一真源；持久化不做，见模块头）。
+/// 歌词窗的**会话内**状态：配置 + 最后一份发出去的歌词文档（唯一真源；持久化不做，见模块头）。
 ///
 /// 登记成托管状态（`lib.rs` 的 setup）：主窗的设置页读它、四条命令改它。
 /// 直接用 `Mutex` 而不是 `RwLock`：读也只是一次 clone，省一种锁的心智负担。
+///
+/// 为什么还要留一份**最后文档**（R41a）：歌词窗每显示一次都会重新加载页面（[`apply_toggle`]），
+/// 而"主窗推文档"与"新页面订阅事件"是两条不同步的异步链——主窗推得再快也在新页 `listen()`
+/// 之前。缓存 + 加载完成时重发（[`replay_document`]）把这条链的**顺序**钉在唯一知道
+/// "页面什么时候就绪"的那一侧（webview 的加载回调），而不是靠"希望它已经订阅了"。
 #[derive(Default)]
 pub struct LyricsWindowState {
     config: Mutex<LyricsConfig>,
+    document: Mutex<Option<Value>>,
 }
 
 impl LyricsWindowState {
@@ -309,6 +315,15 @@ impl LyricsWindowState {
 
     fn store(&self, config: LyricsConfig) {
         *lock(&self.config) = config;
+    }
+
+    /// 最后一份**真的发出去过**的歌词文档（`None` = 这次会话还没有歌词可重发）。
+    pub fn document(&self) -> Option<Value> {
+        lock(&self.document).clone()
+    }
+
+    fn store_document(&self, document: Value) {
+        *lock(&self.document) = Some(document);
     }
 }
 
@@ -335,6 +350,59 @@ fn store_config<R: Runtime>(app: &AppHandle<R>, config: LyricsConfig) {
 }
 
 // ---------------------------------------------------------------------------
+// 歌词文档（最后一份的缓存 + 页面加载完成时的重发）
+// ---------------------------------------------------------------------------
+
+/// 歌词文档归一（**纯函数**）：`{lines, status}`；不是对象就回 `None`（调用方按 `invalid_payload` 报错）。
+///
+/// 判据与 R12 起的那一版逐条相同（`lines` 不是数组就当空、`status` 认不出就 `unavailable`）——
+/// 这里只是把它从命令体里提出来，好让"缓存住的到底是哪一份"可以被单测钉住。
+pub fn normalize_document(document: &Value) -> Option<Value> {
+    let object = document.as_object()?;
+    let lines = object
+        .get("lines")
+        .filter(|value| value.is_array())
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let status = object
+        .get("status")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unavailable");
+    Some(json!({ "lines": lines, "status": status }))
+}
+
+/// 记下这一份（**发出去的那一刻才记**：缓存里躺着的必须是"用户本来能看到的那一份"）。
+fn remember_document<R: Runtime>(app: &AppHandle<R>, document: Value) {
+    match app.try_state::<LyricsWindowState>() {
+        Some(state) => state.store_document(document),
+        None => log::warn!("歌词窗状态未登记：这一份歌词文档没能留到页面重新加载之后"),
+    }
+}
+
+/// 页面加载完成时把最后一份文档重发一次（**没有就什么都不发**）。
+///
+/// 这条是 R41a 对"重开歌词窗显示占位直到换歌"的对症修：`reload()` 之后主窗那次重推落在
+/// 新页订阅**之前**（Rust 即转即弃），所以重发必须由**知道页面何时就绪**的那一侧做
+/// ——`on_page_load(Finished)`（见 [`build_lyrics_window`]）。
+///
+/// 走的是同一条广播（[`LYRICS_DOCUMENT`]）与同一种信封（[`emit_core_event`]）：歌词窗那边
+/// 只有一条消费路径，不因为"这次是重发"而多认一种形状。
+pub fn replay_document<R: Runtime>(app: &AppHandle<R>) {
+    let Some(state) = app.try_state::<LyricsWindowState>() else {
+        return;
+    };
+    let Some(document) = state.document() else {
+        // 这一次会话还没有任何歌词文档（比如刚启动、还没播过歌）：没什么可重发的
+        return;
+    };
+    // 只记"发了一件事"，**不记文档内容**：歌词文本进了日志就等于把用户的歌单抄进日志文件
+    //（与取词那条路同一条纪律）。
+    log::info!("歌词窗页面加载完成：重发最后一份歌词文档");
+    emit_core_event(app, LYRICS_DOCUMENT, document);
+}
+
+// ---------------------------------------------------------------------------
 // 窗口
 // ---------------------------------------------------------------------------
 
@@ -346,9 +414,27 @@ pub fn lyrics_data_dir(data_root: &Path) -> PathBuf {
     data_root.join("webview2").join("lyrics")
 }
 
-/// 建窗加载的地址：`lyrics.html?<配置>`（配置经查询串同步到位，见 [`LyricsConfig::query`]）。
-pub fn lyrics_window_url(config: &LyricsConfig) -> String {
-    format!("lyrics.html?{}", config.query())
+/// 歌词窗的标题（R41）：这是窗口在 **Alt+Tab / 任务视图**里的名字。
+///
+/// 为什么必须有：tao 的默认标题是 `"Tauri App"`（`WebviewWindowBuilder` 不给 `.title()` 时），
+/// 而 `skip_taskbar(true)` 在 Windows 上只做 `ITaskbarList::DeleteTab`（tao 0.37.1 的
+/// `set_skip_taskbar`）——它把任务栏那个条目删掉，**没有**碰 `WS_EX_TOOLWINDOW`，
+/// 所以窗口仍会出现在 Alt+Tab 里（实测 exStyle `0x40118`：有 `WS_EX_APPWINDOW`、没有 TOOLWINDOW）。
+/// 一个没有标题的透明条在 Alt+Tab 里显示成"Tauri App"，用户没有任何线索知道那是什么。
+pub const LYRICS_WINDOW_TITLE: &str = "桌面歌词";
+
+/// 建窗加载的地址：`lyrics.html?<配置>&theme=<档位>`（配置经查询串同步到位，见 [`LyricsConfig::query`]）。
+///
+/// **主题也走查询串**（R41），理由与配置同款、且多一条：歌词窗**调不动**读主题的那条命令
+/// （`core_login_chrome` 的来源守卫只放行主窗与两个浮动控件，见 `commands::require_login_chrome_source`），
+/// 所以它自己在启动时问不出"现在是哪一档"。查询串是同步到位的，之后的变化由 `theme:changed`
+/// 广播补上（订阅广播不需要任何权限）。
+///
+/// 不带这个参数会怎样（R12 起就一直是那样）：歌词窗永远停在 `:root` 的**浅色**令牌上
+/// （`lyrics-main.tsx` 里没有 `installThemeSync`），于是深色主题下歌词用近黑的字浮在深色桌面上
+/// ——"有歌词但看不见"。
+pub fn lyrics_window_url(config: &LyricsConfig, theme: crate::theme::ThemeChoice) -> String {
+    format!("lyrics.html?{}&theme={}", config.query(), theme.setting())
 }
 
 /// 歌词窗此刻是不是**开着**（存在且可见）。
@@ -417,8 +503,9 @@ fn build_lyrics_window<R: Runtime>(
     let mut builder = WebviewWindowBuilder::new(
         app,
         LYRICS_WINDOW_LABEL,
-        WebviewUrl::App(lyrics_window_url(config).into()),
+        WebviewUrl::App(lyrics_window_url(config, crate::theme::current_theme(app)).into()),
     )
+    .title(LYRICS_WINDOW_TITLE)
     .decorations(false)
     .transparent(true)
     .shadow(false)
@@ -434,6 +521,21 @@ fn build_lyrics_window<R: Runtime>(
     }
 
     builder
+        // 页面（重新）加载完成 → 把最后一份歌词文档重发一次（R41a）。
+        //
+        // 为什么挂在这里：`apply_toggle` 每次显示已有窗口都会 `reload()`，而主窗的重推
+        // 与新页面的 `listen()` 是两条不同步的异步链——重推总是落在订阅之前（即转即弃），
+        // 用户会看到占位文案直到换歌。加载完成是**唯一**能确定"新页面已经在跑"的时刻。
+        //
+        // 只认 `Finished`：`Started` 时页面里的 JS 还没执行，重发等于发进空气。
+        // 按 label 过滤：这个回调跟着这个窗的 webview 走，判一次 label 是兜底
+        // （"这条广播只发给歌词窗"这件事由它自证，而不是靠"只有一个窗"这种当下的巧合）。
+        .on_page_load(|webview, payload| {
+            if payload.event() != PageLoadEvent::Finished || webview.label() != LYRICS_WINDOW_LABEL {
+                return;
+            }
+            replay_document(webview.app_handle());
+        })
         .build()
         .map_err(|source| CoreError::new("internal", format!("歌词窗建不起来：{source}")))
 }
@@ -471,7 +573,37 @@ fn apply_config<R: Runtime>(
     Ok(())
 }
 
-/// 开关落地：开 = 建（没有就建）/摆好/显示；关 = **隐藏**（不销毁，webview 与进度都留着）。
+/// 开关落地：开 = 建（没有就建）/摆好/**重新加载**/显示；关 = **隐藏**（不销毁，webview 与进度都留着）。
+///
+/// ## 为什么"已经有了的窗"在 show 之前要 reload（R41）
+///
+/// 这条是**实测出来的缺陷**（R41 真机诊断，见任务报告）：
+/// 歌词窗的页面只在**建窗那一刻**加载一次，此后没有任何重新加载的路径——`toggle` 只 hide/show、
+/// `configure` 只改尺寸/位置/点透、模块里没有 destroy。于是**任何一次没加载完的页面都会被永久保留**：
+///
+/// - 实测现场：dev server（`http://localhost:1420`）在 16:27:50 挂掉，歌词窗恰好在那一刻建出来
+///   ——HTML/CSS 到了、JS 模块没到，React 从未挂载。窗口是**全透明**的，所以屏幕上什么都看不到
+///   （连页内那句占位文案都没有），而用户再怎么开关这个勾选都不会有任何变化，**只有重启应用能救**。
+///   取证：品红背板实验里那块 960×120 全是品红（非品红像素 0）——页面确实一个像素都没画。
+/// - 生产（`tauri://localhost` 的内嵌资源）虽然极少失败，但"加载失败即永久空白且无路可退"这条性质
+///   与触发原因无关：换台慢盘、杀毒软件拦一下、webview 渲染进程崩一次，都会落到同一个状态。
+///
+/// 所以规则改成：**每一次显示都让页面重新加载一次**（新建的窗除外——它本来就在加载）。
+///
+/// ## 重新加载之后，歌词从哪来（R41a 修的那一次）
+///
+/// 页面一重载就回到初始态（没有行、状态是"尚未配置"），所以必须有人把**当前这首**的文档补上。
+/// R41 把这件事交给主窗"窗口可见时重推一次"（`use-lyrics-window.ts`），但那一次**必然太早**：
+/// `reload()` 是异步的，主窗拿到"已显示"的回执时新页面还在加载——文档落在新页 `listen()` 之前，
+/// 此后没有任何补发路径，用户看到的是占位文案，**直到换歌**（换歌会重新走一遍数据链）。
+///
+/// 现在改成：`core_lyrics_document` 留一份最后发出去的文档（[`remember_document`]），
+/// **页面加载完成时由 webview 自己那条回调重发**（[`replay_document`]，见 [`build_lyrics_window`]）。
+/// 帧的顺序由"知道页面何时就绪"的那一侧定，而不是靠"希望主窗推得够晚"。
+/// 主窗那次重推因此删掉了（它在任何时序下都不落在可用的那一刻，留着只会让人以为它在起作用）。
+///
+/// 与 R12 的"隐藏不销毁"并不冲突：webview 仍然活着（省掉建窗那几百毫秒与一份新数据目录），
+/// 变的只是"页面在打开时是新鲜的"。
 fn apply_toggle<R: Runtime>(
     app: &AppHandle<R>,
     config: &LyricsConfig,
@@ -489,7 +621,14 @@ fn apply_toggle<R: Runtime>(
     let window = match app.get_webview_window(LYRICS_WINDOW_LABEL) {
         // 已经有了（多半是上次隐藏下来的）：**不重摆几何**——用户可能刚把它拖到别处，
         // 每次开关都把它拽回计算位置等于"拖了白拖"。模式/点透变化由 configure 那条路负责。
-        Some(window) => window,
+        Some(window) => {
+            // 重新加载（见函数头）：失败只留一行 warn——"页面没能刷新"不该让"打开歌词"这件事失败，
+            // 用户至少还有上一次那份页面（比"什么都看不到"好）。
+            if let Err(error) = window.reload() {
+                log::warn!("歌词窗页面没能重新加载（继续显示现有页面）：{error}");
+            }
+            window
+        }
         None => {
             let window = build_lyrics_window(app, config)?;
             if let Err(error) = apply_config(app, &window, config) {
@@ -589,6 +728,10 @@ pub async fn core_lyrics_configure(
 }
 
 /// 把歌词文档转发给歌词窗（歌词窗没有业务频道权限，数据只能由主窗转发）。
+///
+/// 顺手**留一份**（[`remember_document`]）：歌词窗每显示一次都会重新加载页面，那一份要由
+/// [`replay_document`] 在加载完成时重发。留的是归一之后的形状——缓存里躺着的与发出去的
+/// 必须是同一份，否则"重发"会是一种谁都没见过的形状。
 #[tauri::command]
 pub async fn core_lyrics_document(
     app: AppHandle,
@@ -597,24 +740,15 @@ pub async fn core_lyrics_document(
 ) -> Result<Value, CoreError> {
     require_main_webview(webview.label())?;
 
-    let Some(object) = document.as_object() else {
+    let Some(payload) = normalize_document(&document) else {
         return Err(CoreError::new(
             "invalid_payload",
             "歌词文档必须是对象（{lines, status}）",
         ));
     };
-    let lines = object
-        .get("lines")
-        .filter(|value| value.is_array())
-        .cloned()
-        .unwrap_or_else(|| json!([]));
-    let status = object
-        .get("status")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("unavailable");
 
-    emit_core_event(&app, LYRICS_DOCUMENT, json!({ "lines": lines, "status": status }));
+    remember_document(&app, payload.clone());
+    emit_core_event(&app, LYRICS_DOCUMENT, payload);
     Ok(Value::Null)
 }
 
@@ -868,7 +1002,7 @@ mod tests {
     }
 
     #[test]
-    fn window_url_carries_the_effective_config_and_the_renderer_reads_the_same_keys() {
+    fn window_url_carries_the_effective_config_the_theme_and_the_renderer_reads_the_same_keys() {
         let config = LyricsConfig {
             mode: LyricsMode::Taskbar,
             size: "xxl".to_string(),
@@ -876,13 +1010,185 @@ mod tests {
             locked: true,
             click_through: false,
         };
-        let url = lyrics_window_url(&config);
+        let url = lyrics_window_url(&config, crate::theme::ThemeChoice::Dark);
         assert!(url.starts_with("lyrics.html?"), "加载的是 R1 建好的那个入口：{url}");
         assert!(url.contains("mode=taskbar"), "{url}");
         assert!(url.contains("size=md"), "查询串里带的是**生效**档位（任务栏 ≤20px）：{url}");
         assert!(url.contains("color=contrast"), "{url}");
         assert!(url.contains("locked=1"), "布尔写成 0/1（渲染层只认这两个值）：{url}");
         assert!(url.contains("clickThrough=0"), "{url}");
+        // R41：主题也走查询串（歌词窗调不动读主题的那条命令，只能由建窗那一刻同步给它）
+        assert!(url.contains("&theme=dark"), "深色档位要真的带上：{url}");
+        assert!(
+            lyrics_window_url(&config, crate::theme::ThemeChoice::System).contains("&theme=system"),
+            "跟随系统那一档同样是三个字面量之一（渲染层按 system = 不加类处理）"
+        );
+        assert_ne!(
+            lyrics_window_url(&config, crate::theme::ThemeChoice::Light),
+            lyrics_window_url(&config, crate::theme::ThemeChoice::Dark),
+            "不同档位必须给出不同的地址（否则歌词窗永远停在浅色令牌上）"
+        );
+    }
+
+    /// R41：显示已有窗口之前必须**重新加载**页面（从"页面没加载完 ⇒ 永久空白"里恢复的唯一出路）。
+    ///
+    /// 这条只能扫源码：真要验得建一个真窗并让它的加载失败，而本任务不能重启应用。
+    /// 扫描同时把"新建那条分支不许 reload"钉住——新建的窗本来就在加载，reload 会把它打断。
+    #[test]
+    fn showing_an_existing_lyrics_window_reloads_the_page_but_a_fresh_one_is_left_alone() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs"))
+            .expect("要能读到自己的源码");
+        let production = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let start = production.find("fn apply_toggle").expect("apply_toggle 必须在");
+        let body = &production[start..];
+        let existing = body.find("Some(window) => {").expect("必须有「已经有了」那条分支");
+        let building = body.find("None => {").expect("必须有「新建」那条分支");
+        let reload = body.find("window.reload()").expect("显示已有窗口前必须重新加载页面");
+        assert!(
+            existing < reload && reload < building,
+            "reload 必须在「已经有了」那条分支里（不是新建那条）"
+        );
+        assert!(
+            body[reload..].contains("log::warn!"),
+            "重新加载失败只留一行 warn：刷新不了不该让「打开歌词」这件事失败"
+        );
+    }
+
+    /// R41a：歌词文档的归一（缓存里躺着的与发出去的必须是同一份形状）。
+    #[test]
+    fn the_document_is_normalized_before_it_is_kept_and_broadcast() {
+        assert_eq!(
+            normalize_document(&json!({ "lines": [1, 2], "status": "ready" })),
+            Some(json!({ "lines": [1, 2], "status": "ready" }))
+        );
+        // `lines` 不是数组 → 空数组；`status` 认不出（缺/空/非字符串）→ unavailable
+        assert_eq!(
+            normalize_document(&json!({ "lines": "nope", "status": "" })),
+            Some(json!({ "lines": [], "status": "unavailable" }))
+        );
+        assert_eq!(
+            normalize_document(&json!({ "status": 7 })),
+            Some(json!({ "lines": [], "status": "unavailable" }))
+        );
+        assert_eq!(normalize_document(&json!({})), Some(json!({ "lines": [], "status": "unavailable" })));
+        // 不是对象 = 用不了（命令按 invalid_payload 回错，缓存里不留东西）
+        assert_eq!(normalize_document(&json!("nope")), None);
+        assert_eq!(normalize_document(&json!([1, 2])), None);
+        assert_eq!(normalize_document(&Value::Null), None);
+    }
+
+    /// R41a：最后一份文档真的留在状态里（`None` = 这次会话还没有歌词可重发）。
+    #[test]
+    fn the_state_keeps_the_last_document_for_the_replay() {
+        let state = LyricsWindowState::default();
+        assert_eq!(state.document(), None, "刚启动时没有可重发的文档");
+
+        state.store_document(normalize_document(&json!({ "lines": [1], "status": "ready" })).unwrap());
+        assert_eq!(
+            state.document(),
+            Some(json!({ "lines": [1], "status": "ready" })),
+            "缓存的是归一之后那一份"
+        );
+
+        // 每推一份就换一份（缓存的是"最后一份"，不是"第一份"）
+        state.store_document(normalize_document(&json!({ "lines": [], "status": "unavailable" })).unwrap());
+        assert_eq!(state.document(), Some(json!({ "lines": [], "status": "unavailable" })));
+
+        // 文档与配置各占一把锁：改配置不会把文档弄丢（两件事互不干扰）
+        state.store(LyricsConfig {
+            mode: LyricsMode::Taskbar,
+            ..LyricsConfig::default()
+        });
+        assert_eq!(state.config().mode, LyricsMode::Taskbar);
+        assert_eq!(state.document(), Some(json!({ "lines": [], "status": "unavailable" })));
+    }
+
+    /// R41a：**页面加载完成**时重发最后一份文档（按 label 过滤），且只认 `Finished`。
+    ///
+    /// 这条只能扫源码（本任务不能重启应用、也起不了真窗），扫的是"重发挂在哪个回调上、
+    /// 什么时候发"——正是 R41 缺的那一环。
+    #[test]
+    fn a_finished_page_load_replays_the_last_document_to_the_lyrics_window() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs"))
+            .expect("要能读到自己的源码");
+        let production = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+
+        let start = production.find("fn build_lyrics_window").expect("建窗函数必须在");
+        let body = &production[start..];
+        let hook = body.find(".on_page_load(").expect("建窗时必须挂页面加载回调（重发的唯一时机）");
+        let built = body.find(".build()").expect("建窗要真的 build");
+        assert!(hook < built, "回调要挂在 build 之前（挂在之后就没有那一刻了）");
+
+        let callback = &body[hook..built];
+        assert!(
+            callback.contains("PageLoadEvent::Finished"),
+            "只认加载完成：Started 时页面里的 JS 还没跑，重发等于发进空气"
+        );
+        assert!(
+            !callback.contains("PageLoadEvent::Started"),
+            "Started 不是重发的时机"
+        );
+        assert!(
+            callback.contains("webview.label() != LYRICS_WINDOW_LABEL"),
+            "按 label 过滤：这条广播只发给歌词窗那一个 webview"
+        );
+        assert!(
+            callback.contains("replay_document("),
+            "回调里要真的重发（不是只记一行日志）"
+        );
+
+        // 重发走的是同一条广播与同一个信封构造点（歌词窗只有一条消费路径）
+        let replay = production.find("pub fn replay_document").expect("重发函数必须在");
+        let replay_body = &production[replay..];
+        assert!(
+            replay_body.contains("emit_core_event(app, LYRICS_DOCUMENT, document)"),
+            "重发用的是同一条歌词广播"
+        );
+        assert!(
+            !replay_body.contains("app.emit("),
+            "不许绕开唯一构造点自己 emit"
+        );
+        // 日志里不许出现文档内容（歌词文本进日志 = 把用户的歌单抄进日志文件）
+        let log_line = replay_body.find("log::info!").expect("重发要留一行日志（不然真机上无从取证）");
+        let log_end = replay_body[log_line..].find(");").expect("日志语句要收尾");
+        assert!(
+            !replay_body[log_line..log_line + log_end].contains("document"),
+            "日志里不许带上文档本身"
+        );
+    }
+
+    /// R41a：缓存发生在**发出去之前**（缓存住的必须是用户本来能看到的那一份）。
+    #[test]
+    fn the_document_command_keeps_the_document_it_broadcasts() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs"))
+            .expect("要能读到自己的源码");
+        let production = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let start = production.find("pub async fn core_lyrics_document(").expect("这条命令必须在");
+        let body = &production[start..];
+        let normalized = body.find("normalize_document(").expect("先归一（缓存的与发出的必须是同一份形状）");
+        let kept = body.find("remember_document(").expect("要留一份给页面重新加载之后");
+        let emitted = body.find("emit_core_event(").expect("照旧立刻发出去（当次显示不等重发）");
+        assert!(
+            normalized < kept && kept < emitted,
+            "顺序是：归一 → 留一份 → 发出去（留的是发出去的那一份）"
+        );
+        assert!(
+            body[..kept].contains("return Err("),
+            "归一失败要如实报错（不许把半个文档发出去，也不许缓存它）"
+        );
+    }
+
+    /// R41：窗口标题是给 Alt+Tab 看的（`skip_taskbar` 只删任务栏条目，不碰 WS_EX_TOOLWINDOW）。
+    #[test]
+    fn the_window_carries_a_human_title_for_alt_tab() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs"))
+            .expect("要能读到自己的源码");
+        let production = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        assert!(production.contains(".title(LYRICS_WINDOW_TITLE)"), "建窗时必须给标题");
+        assert!(
+            production.contains("pub const LYRICS_WINDOW_TITLE: &str = \"桌面歌词\";"),
+            "标题是给用户看的（不是 \"Tauri App\" 那种默认值）"
+        );
     }
 
     #[test]

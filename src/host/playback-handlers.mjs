@@ -49,6 +49,36 @@ export function createPlaybackHandlers({ api } = {}) {
     return textOf(payload.trackId) ?? textOf(payload.id);
   }
 
+  /**
+   * 第三方歌词回退要用的曲目元信息（R41）：`title` / `artist` / `durationSeconds`。
+   *
+   * 为什么由**渲染层**给而不是 core 自己去查：这三个值就在渲染层手里那份曲目投影里
+   * （`features/library/track-fields.mjs` 已经归一好），而 core 为了拿它们得再问一次曲目接口
+   * ——多一次请求、多一份可能过期的缓存，还可能问到别的曲目上。
+   *
+   * 三条边界：
+   * - **全部可选**：一个都不给，`getLyrics` 就只是少掉第三方那一跳（没有标题的回退等于盲搜）；
+   * - **认不出就不给**（不是字符串 / 不是正数 → 省略该字段），绝不编一个默认值——
+   *   一个编出来的时长会把严格匹配器带偏（它可是"宁可不显示"的那一侧）；
+   * - **只用于匹配**：这三个值不进日志、不落盘（落盘的是匹配到的那个候选的标题/艺人）。
+   */
+  function metadataOf(request) {
+    const payload = payloadOf(request);
+    const meta = {};
+    const title = textOf(payload.title);
+    if (title !== null) meta.title = title;
+    const artist = textOf(payload.artist);
+    if (artist !== null) meta.artist = artist;
+    for (const key of ["durationSeconds", "duration"]) {
+      const value = Number(payload[key]);
+      if (Number.isFinite(value) && value > 0) {
+        meta.durationSeconds = value;
+        break;
+      }
+    }
+    return meta;
+  }
+
   return {
     [PLAYBACK_RESOLVE_URL]: (request) => {
       const trackId = trackIdOf(request);
@@ -62,7 +92,7 @@ export function createPlaybackHandlers({ api } = {}) {
       if (trackId === null) {
         return err("歌词需要非空 trackId（曲目标识）", CORE_ERROR_KINDS.invalidPayload);
       }
-      return api.getLyrics({ trackId });
+      return api.getLyrics({ trackId, ...metadataOf(request) });
     },
   };
 }

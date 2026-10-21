@@ -111,6 +111,38 @@ export const PLAYBACK_RESOLVE_URL = "playback:resolve-url" as const;
  */
 export const PLAYBACK_LYRICS = "playback:lyrics" as const;
 
+/**
+ * 本地歌词导入（R41 增补）：载荷 `{trackId, text, fileName}` → 存进数据根下的
+ * `lyrics-local/`，应答 `data` = **生效的歌词文档**（`{text, format, source:"local", fileName?, warnings}`）。
+ *
+ * 为什么发过来的是**解码后的文本**而不是文件路径：文件是渲染层用系统标准控件
+ * （`<input type="file">`）选的，编码识别（BOM → UTF-8 → GBK）也在那一侧做完——那边拿到的
+ * 本来就是 `ArrayBuffer`。让 sidecar 去读一个路径，等于要再开一条"宿主给路径、sidecar 读盘"
+ * 的信任边界（那是一整类目录穿越问题的入口），而这里只要文本。
+ *
+ * **本地导入永远压过在线结果**（`getLyrics` 的第 ① 跳），所以这条频道同时也是"换掉当前这首歌
+ * 的歌词"的动作——导入完那一份文档就是这一首的歌词，直到用户再导入或删掉。
+ */
+export const LYRICS_IMPORT = "lyrics:import" as const;
+
+/**
+ * 歌词缓存占用（R41 增补）：载荷 `null`，应答 `data` = `{available, bytes, entries, localBytes, localEntries}`
+ * （在线缓存与本地导入两个目录各一份数字）。
+ *
+ * 为什么是独立频道而不是塞进 `settings:get`：这两件事的生命周期不同——设置是**用户配置**
+ * （会随 `settings:set` 走校验与广播），缓存是**磁盘现状**（要现算，且会自己变）。
+ * 把它塞进设置文档，等于让一份会漂的数字混进用户的配置里。
+ */
+export const LYRICS_CACHE_INFO = "lyrics:cache-info" as const;
+
+/**
+ * 清歌词缓存（R41 增补）：载荷 `{local?: boolean}`，应答 `data` = 清完之后的**新占用**（同 `lyrics:cache-info`）。
+ *
+ * `local: true` 才连本地导入目录一起删。默认**只清在线缓存**：`lyrics-local/` 里是用户自己导入的
+ * 文件，删它是一次不可撤销的动作，界面上要多问一句（设置页那张卡就是这么做的）。
+ */
+export const LYRICS_CACHE_CLEAR = "lyrics:cache-clear" as const;
+
 export const REQUEST_CHANNELS = [
   AUTH_LOGIN,
   AUTH_LOGOUT,
@@ -129,6 +161,9 @@ export const REQUEST_CHANNELS = [
   LIBRARY_HISTORY,
   PLAYBACK_RESOLVE_URL,
   PLAYBACK_LYRICS,
+  LYRICS_IMPORT,
+  LYRICS_CACHE_INFO,
+  LYRICS_CACHE_CLEAR,
 ] as const;
 
 export type RequestChannel = (typeof REQUEST_CHANNELS)[number];

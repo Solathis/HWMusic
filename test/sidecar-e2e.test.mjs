@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, existsSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,7 +39,8 @@ function makeDataDir() {
 }
 
 function startSidecar() {
-  const child = spawn(process.execPath, [sidecarEntry, "--data-dir", makeDataDir()], {
+  const dataDir = makeDataDir();
+  const child = spawn(process.execPath, [sidecarEntry, "--data-dir", dataDir], {
     cwd: repoRoot,
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -107,6 +108,7 @@ function startSidecar() {
   return {
     child,
     bridge,
+    dataDir,
     problems,
     frames,
     hostRequests,
@@ -278,6 +280,57 @@ test("端到端：未知频道不被桥放行（Node dispatch 层白名单生效
   const result = await sidecar.bridge.call("auth:not-a-channel", {});
   assert.equal(result.ok, false);
   assert.equal(result.error.kind, "unknown_channel");
+  assert.deepEqual(sidecar.problems, []);
+});
+
+test("端到端：lyrics:* 三条频道真的注册了（R41：导入 → 占用 → 清缓存，走真进程与真数据目录）", async (t) => {
+  const sidecar = startSidecar();
+  t.after(() => sidecar.cleanup());
+
+  const lrc = "[00:01.00]第一行\n[00:05.00]第二行\n";
+
+  // 占用：一开始两处都是 0 条（数据目录是新的）
+  const empty = await sidecar.bridge.call("lyrics:cache-info", null);
+  assert.equal(empty.ok, true, `lyrics:cache-info 必须真的挂了处理器：${JSON.stringify(empty)}`);
+  assert.deepEqual(empty.data, { available: true, bytes: 0, entries: 0, localBytes: 0, localEntries: 0 });
+
+  // 坏载荷在边界被拒
+  const missing = await sidecar.bridge.call("lyrics:import", { text: lrc });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.error.kind, "invalid_payload");
+
+  const notLyrics = await sidecar.bridge.call("lyrics:import", { trackId: "1001", text: "没有时间戳的一行" });
+  assert.equal(notLyrics.ok, false);
+  assert.equal(notLyrics.error.kind, "invalid_response", "这段文本不是歌词：如实回，并留下原因");
+  assert.match(notLyrics.error.message, /不是可用的歌词/);
+
+  // 正常导入：落进数据根下的 lyrics-local/
+  const imported = await sidecar.bridge.call("lyrics:import", { trackId: "1001", text: lrc, fileName: "我的.lrc" });
+  assert.equal(imported.ok, true, `导入必须成功：${JSON.stringify(imported)}`);
+  assert.equal(imported.data.source, "local");
+  assert.equal(imported.data.fileName, "我的.lrc");
+
+  const after = await sidecar.bridge.call("lyrics:cache-info", null);
+  assert.equal(after.data.localEntries, 1, "本地导入目录里多了一条");
+  assert.ok(after.data.localBytes > 0);
+  const files = readdirSync(join(sidecar.dataDir, "lyrics-local"));
+  assert.equal(files.length, 1, `落盘的文件名是 sha256 键：${files.join(", ")}`);
+
+  // 导入之后取词：本地那一条压过一切（端点全关也照样有歌词）
+  const lyrics = await sidecar.bridge.call("playback:lyrics", { trackId: "1001" });
+  assert.equal(lyrics.ok, true, `本地导入必须压过在线那条路：${JSON.stringify(lyrics)}`);
+  assert.equal(lyrics.data.source, "local");
+  assert.match(lyrics.data.text, /第一行/);
+
+  // 清缓存：默认只清在线缓存 → 本地导入留着
+  const kept = await sidecar.bridge.call("lyrics:cache-clear", {});
+  assert.equal(kept.ok, true);
+  assert.equal(kept.data.localEntries, 1, "默认不删用户导入的文件");
+
+  const cleared = await sidecar.bridge.call("lyrics:cache-clear", { local: true });
+  assert.equal(cleared.data.localEntries, 0, "local:true 才连本地导入一起删");
+  assert.equal(existsSync(join(sidecar.dataDir, "lyrics-local")), false);
+
   assert.deepEqual(sidecar.problems, []);
 });
 

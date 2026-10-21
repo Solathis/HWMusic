@@ -188,7 +188,8 @@ test("兑换：成功路径用注入端点与表单正文，映射字段并算�
   });
 });
 
-test("兑换：缺少端点/授权码/verifier → 结构化错误，且不发起请求", async () => {  const { calls, fetchImpl } = captureFetch(() => jsonResponse({ access_token: "nope" }));
+test("兑换：缺少端点/授权码/verifier → 结构化错误，且不发起请求", async () => {
+  const { calls, fetchImpl } = captureFetch(() => jsonResponse({ access_token: "nope" }));
   const base = { endpoint: TOKEN_ENDPOINT, code: "C", codeVerifier: "V", fetchImpl };
 
   for (const [label, patch, kind] of [

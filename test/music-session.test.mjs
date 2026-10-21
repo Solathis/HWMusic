@@ -264,10 +264,11 @@ test("R40 诊断：loginex 两个容器的一层键名日志（只记键名，�
   await exchange({ accessToken: AT, endpoint: HUAWEI_MUSIC_LOGINEX_ENDPOINT });
 
   const nested = logged.filter((line) => line.includes("容器一层键名"));
-  assert.equal(nested.length, 3, `两个容器各一条 + 一层子对象一条：${JSON.stringify(logged)}`);
+  assert.equal(nested.length, 4, `两个容器各一条 + 一层子对象/数组元素各一条：${JSON.stringify(logged)}`);
   assert.match(nested[0], /queryAllSubInfoResp: level, userInfo/, "容器自己的键名（排序）");
   assert.match(nested[1], /queryAllSubInfoResp\.userInfo: userName/, "一层子对象的键名也报（资料最可能在这里）");
   assert.match(nested[2], /queryAppConfigDetailResp: configList/);
+  assert.match(nested[3], /queryAppConfigDetailResp\.configList\[0\]: vipType/, "数组元素的键名也报（R41 补的盲区）");
   const joined = logged.join("\n");
   assert.ok(!joined.includes("听歌的人"), "资料值不进日志");
   assert.ok(!joined.includes(MUSIC_TOKEN), "令牌不进日志");
@@ -275,6 +276,17 @@ test("R40 诊断：loginex 两个容器的一层键名日志（只记键名，�
   assert.deepEqual(MUSIC_PROFILE_NESTED_CONTAINER_KEYS, ["queryAllSubInfoResp", "queryAppConfigDetailResp"], "容器名来自真机键名日志");
   assert.deepEqual(nestedContainerKeyNamesOf({ b: 1 }), [], "响应对不上就什么都不报（不抛）");
   assert.deepEqual(nestedContainerKeyNamesOf({ queryAllSubInfoResp: { z: 1, a: 2 } }), ["queryAllSubInfoResp: a, z"], "键名排序");
+  // R41：数组元素里的键名此前永远不进日志（"读得到却看不见"）——现在取首个对象元素记一行
+  assert.deepEqual(
+    nestedContainerKeyNamesOf({ queryAllSubInfoResp: { items: ["纯标量", { b: 1, a: 2 }] } }),
+    ["queryAllSubInfoResp: items", "queryAllSubInfoResp.items[0]: a, b"],
+    "数组只看首个**对象**元素（跳过标量），键名排序",
+  );
+  assert.deepEqual(
+    nestedContainerKeyNamesOf({ queryAllSubInfoResp: { items: [] } }),
+    ["queryAllSubInfoResp: items"],
+    "空数组 / 纯标量数组不进元素那一行（不编一个不存在的元素）",
+  );
 });
 
 test("R40 profile：往 queryAllSubInfoResp / queryAppConfigDetailResp 里读一层（防御式接线）", () => {

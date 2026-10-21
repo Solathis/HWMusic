@@ -44,6 +44,7 @@ import { CoverArt, EmptyState, GridSkeleton, ListSkeleton, LoadFailed, TrackTabl
 import { AmllBackground } from "./AmllBackground.tsx"
 import { LOG_ENTRY_LIMIT, LogTerminal } from "./log-terminal.tsx"
 import type { LogEntry } from "./log-terminal.tsx"
+import { LyricsCacheCard } from "./lyrics-cache-card.tsx"
 import { coreCall, getAutostart, isCoreError, setAutostart } from "./host-api"
 import { PlaylistGrid } from "./playlist-grid.tsx"
 import { libraryEmptyText, libraryFailureText } from "./features/library/library-state.mjs"
@@ -898,6 +899,9 @@ export function SettingsPage({
           </p>
         </CardContent>
       </Card>
+
+      {/* 歌词缓存 / 一键清除 / 导入本地歌词（R41）：与上面那张卡同一件事的两半（显示 vs 存放） */}
+      <LyricsCacheCard lyrics={lyrics} />
 
       <Card>
         <CardHeader>

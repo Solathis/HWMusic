@@ -48,6 +48,11 @@
  *   Rust 侧（`theme::set_theme`，由浮动控件的专用命令 `core_login_chrome` 触发），
  *   消费方是三个 webview（主窗 + 两个浮动控件）。少了它，用户点了主题只在自己那个控件上生效，
  *   别的 webview 停在旧配色——而日志里什么都看不出来（广播被当白名单外帧丢掉）。
+ *
+ * R41 的一处增补（同一流程）：
+ * - 请求频道加 `lyrics:*` 三条（**歌词体系**：本地导入 / 缓存占用 / 清缓存）。它们的载荷与
+ *   应答形状见 `src/shared/request-channels.ts`；这里只钉"两侧一致"。三条的后果各不相同
+ *   （导入悄悄失败 / 那张卡读不到数字 / "清除"按了没反应），但都落在"用户按了没反应"这一类上。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -58,6 +63,9 @@ import {
   AUTH_GET_STATUS,
   AUTH_QR_START,
   HOST_REQUEST_CHANNELS,
+  LYRICS_CACHE_CLEAR,
+  LYRICS_CACHE_INFO,
+  LYRICS_IMPORT,
   PLAYBACK_LYRICS,
   PLAYBACK_RESOLVE_URL,
   REQUEST_CHANNELS,
@@ -138,6 +146,15 @@ const PLAYBACK_CHANNELS = ["playback:lyrics", "playback:resolve-url"];
 const SETTINGS_CHANNELS = ["settings:get", "settings:set", "settings:test-proxy"];
 
 /**
+ * R41 增补的歌词请求频道（硬钉：三条各自对应一个用户动作，多一条 = 白名单悄悄放宽）。
+ *
+ * 与 `playback:lyrics` 的分工：那一条是**取词**（华为四档 + 第三方回退 + 磁盘缓存），
+ * 这三条是**管理歌词的存放**（导入 / 看占用 / 清缓存）。分成两条路的理由很实在：
+ * 取词是高频、只读、可以被缓存；这三条是低频、会写盘/删盘、要立刻看到结果。
+ */
+const LYRICS_CHANNELS = ["lyrics:cache-clear", "lyrics:cache-info", "lyrics:import"];
+
+/**
  * 广播频道硬钉内容（两侧一起写错也能过互比，所以内容必须钉死）。
  *
  * 按字典序写：下游断言走 `sorted(...)`（R11 加了 `lyrics:toggle` 与 `app:open-settings` 之后
@@ -156,10 +173,10 @@ const BROADCAST_CHANNEL_NAMES = [
   "theme:changed",
 ];
 
-test("一致性：请求频道白名单（Node 共享常量 ↔ Rust commands.rs 全部 auth:/settings:/library:/playback: 字面量）", () => {
+test("一致性：请求频道白名单（Node 共享常量 ↔ Rust commands.rs 全部 auth:/settings:/library:/playback:/lyrics: 字面量）", () => {
   const rust = rustChannelLiterals(
     rustProduction(rustSource("commands.rs")),
-    "(?:auth|settings|library|playback):",
+    "(?:auth|settings|library|playback|lyrics):",
   );
   assert.deepEqual(sorted(rust), sorted(REQUEST_CHANNELS));
   assert.deepEqual(sorted(REQUEST_CHANNELS), [
@@ -175,12 +192,38 @@ test("一致性：请求频道白名单（Node 共享常量 ↔ Rust commands.rs
     "library:playlist-detail",
     "library:playlists",
     "library:search",
+    "lyrics:cache-clear",
+    "lyrics:cache-info",
+    "lyrics:import",
     "playback:lyrics",
     "playback:resolve-url",
     "settings:get",
     "settings:set",
     "settings:test-proxy",
   ]);
+});
+
+test("一致性：lyrics:* 频道两侧逐条相等（R41 歌词体系：导入 / 占用 / 清缓存）", () => {
+  const rust = rustChannelLiterals(rustProduction(rustSource("commands.rs")), "lyrics:");
+  assert.deepEqual(sorted(rust), LYRICS_CHANNELS);
+  assert.deepEqual(
+    sorted(REQUEST_CHANNELS.filter((channel) => channel.startsWith("lyrics:"))),
+    LYRICS_CHANNELS,
+  );
+  // 逐字相等：频道名是契约（渲染层只认常量，Rust 侧是镜像副本）
+  assert.equal(LYRICS_IMPORT, "lyrics:import");
+  assert.equal(LYRICS_CACHE_INFO, "lyrics:cache-info");
+  assert.equal(LYRICS_CACHE_CLEAR, "lyrics:cache-clear");
+  for (const channel of LYRICS_CHANNELS) {
+    assert.ok(
+      REQUEST_CHANNELS.includes(channel),
+      `${channel} 必须在请求白名单里：不在的话 dispatcher.register 直接抛（处理器根本挂不上）`,
+    );
+    assert.ok(
+      rustChannelLiterals(rustProduction(rustSource("commands.rs")), "lyrics:").includes(channel),
+      `Rust 侧命令白名单同样必须含 ${channel}（否则 core_call 在准入处就回 unknown_channel）`,
+    );
+  }
 });
 
 test("一致性：settings:* 频道两侧逐条相等（R10 增补 settings:test-proxy）", () => {

@@ -19,6 +19,7 @@
  * Rust 侧握着同一张档位表/词表（`src-tauri/src/lyrics_window.rs`），由
  * `test/lyrics-window.test.mjs` 逐条钉住两侧相等。
  */
+import { normalizeThemeChoice } from "../theme/theme.mjs";
 
 /** 两种模式：桌面悬浮条（可拖）与任务栏显示带（贴 work_area 下沿）。 */
 export const LYRICS_MODES = ["desktop", "taskbar"];
@@ -191,6 +192,24 @@ export function lyricsConfigFromSearch(search) {
   return normalizeLyricsConfig(patch);
 }
 
+/** 主题档位从查询串来的参数名（Rust `lyrics_window_url` 写的就是它）。 */
+export const LYRICS_THEME_PARAM = "theme";
+
+/**
+ * 歌词窗的主题初值（R41）：从查询串取 `theme=`，**只认那三个字面量**，其余回 `null`。
+ *
+ * 为什么歌词窗的主题要走查询串：它**调不动**读主题的那条命令（`core_login_chrome` 的来源
+ * 守卫只放行主窗与两个浮动控件），所以问不出"现在是哪一档"。查询串是建窗时同步到位的。
+ *
+ * 认不出（缺参数 / 大写 / 别的词 / 空串）一律回 `null`：调用方 `applyThemeChoice` 把 null
+ * 当**系统档**处理——这是"不猜"的那一侧，与主窗"读不到就什么都不改"的纪律一致。
+ * 合法性判定复用 `theme.mjs` 的 `normalizeThemeChoice`（档位词表只有那一个真源）。
+ */
+export function themeFromSearch(search) {
+  const params = new URLSearchParams(typeof search === "string" ? search : "");
+  return normalizeThemeChoice(params.get(LYRICS_THEME_PARAM));
+}
+
 /**
  * 该不该把这一帧进度推给歌词窗（纯函数）。
  *
@@ -230,6 +249,39 @@ export function lyricsDocumentOf(lines, status) {
   return {
     lines: Array.isArray(lines) ? lines : [],
     status: typeof status === "string" && status !== "" ? status : LYRICS_STATUS.unavailable,
+  };
+}
+
+/**
+ * 导入回执 → 落地计划（R41a 纯函数）：**成功的语义与失败的语义不是同一件事**。
+ *
+ * - 成功（`ok: true`）：这一首的歌词**现在**就是这一份——调用方把 `lines` 交给播放运行时
+ *   （主窗面板）并转发给歌词窗，两处显示同一份行数组；
+ * - 失败（`ok: false`）：只有一句给用户看的人话，**不带 `lines`/`status`**。失败的事实是
+ *   "这首歌的歌词没有变"，所以界面必须停在原来那一份上——R41 曾在这里推一份空文档
+ *   （"让界面回到事实"），那是把事实看反了：面板会从"有词"跳成"这首歌没有歌词"，
+ *   而用户只是选错了文件（R41a 审查的 3/8）。
+ *
+ * 判据只有一条：桥在失败时一定给 `message`（它是给用户看的人话），成功时 `message` 为 null。
+ * 再加一条**凭据**：成功必须真的带来行（桥在这条路上必给 ≥1 行——"没有带时间戳的歌词行"
+ * 在桥里就被判失败了）。认不出的回执因此按失败处理：宁可不换，也不把面板清成"这首歌没有歌词"。
+ */
+export function importPlanOf(result) {
+  const source = result !== null && typeof result === "object" ? result : {};
+  const failure = typeof source.message === "string" && source.message.trim() !== "" ? source.message.trim() : null;
+  if (failure !== null) return { ok: false, message: failure };
+
+  const lines = Array.isArray(source.lines) ? source.lines : [];
+  if (lines.length === 0) {
+    return { ok: false, message: "导入没有生效（没有拿到可用的歌词行）：界面停在原来那一份上。" };
+  }
+  const lineCount = Number.isInteger(source.lineCount) && source.lineCount >= 0 ? source.lineCount : lines.length;
+  const fileName = typeof source.fileName === "string" && source.fileName !== "" ? source.fileName : "文件";
+  return {
+    ok: true,
+    lines,
+    status: typeof source.status === "string" && source.status !== "" ? source.status : LYRICS_STATUS.failed,
+    message: `已替换这首歌的歌词（${lineCount} 行，来自「${fileName}」）。`,
   };
 }
 

@@ -144,6 +144,13 @@ export const MUSIC_ERROR_KINDS = {
   apiError: "api_error",
   /** 播放地址不在 CDN 白名单内（渲染层反正也加载不了，早点如实报错） */
   unsafeMediaUrl: "unsafe_media_url",
+  /**
+   * 歌词缓存不可用（R41）：宿主没给数据目录，本地导入/清缓存都无从落盘。
+   *
+   * 为什么不并进 `invalid_response`：那是"这首歌没有歌词"，而这一条是**环境问题**
+   * （数据目录没传对），两件事的下一步完全不同——前者用户换个来源，后者要看宿主怎么起的。
+   */
+  cacheUnavailable: "cache_unavailable",
 };
 
 /** 能佐证"这是试听片段"的标志位候选（与 auditionTime 齐备才算试听）。 */
@@ -678,11 +685,18 @@ function favoritesHasMore(received, limit) {
  *          pageSize?: number, maxPages?: number, flagKeys?: string[],
  *          isSafeUrl?: (url: string) => boolean, timeoutMs?: number,
  *          discoveryLimit?: number, discoveryPageCap?: number,
- *          lyricIndexLimit?: number, log?: Function}} options
+ *          lyricIndexLimit?: number, lyricMemoryLimit?: number, log?: Function,
+ *          lyricsCache?: object|null, lyricsFallback?: Function|null}} options
  *
  * `session` 是 `{token, snsUserID}`（音乐会话；`snsUserID` 是收藏/歌单发现必需的
  * `targetSnsUserID` 来源）。可以传对象，也可以传函数（会话在运行时才会变——
  * 顶层装配时它多半还是 null）。
+ *
+ * R41 的两个**可选**端口（不给就是 R40 的行为）：
+ * - `lyricsCache`：`src/main/lyrics-cache.mjs` 的产物（`readLocal`/`readCached`/`writeCached`/
+ *   `writeLocal`/`info`/`clear`）——协议层自己不碰 fs，盘上的一切都经它；
+ * - `lyricsFallback`：`src/main/lyrics-fallback.mjs` 的产物（`(query) => doc|null`）——
+ *   华为四档全落空且曲目有标题时的那一次机会。
  */
 export function createMusicApi(options = {}) {
   const endpoints = options.endpoints ?? {};
@@ -739,6 +753,261 @@ export function createMusicApi(options = {}) {
     const value = lyricAddressIndex.get(trackId);
     if (typeof value !== "string") return null;
     return isSafeUrl(value) ? value : null;
+  }
+
+  /**
+   * 第 4 档的**会话内负缓存**（R41）：`trackId → 已经试过的 albumId`。
+   *
+   * 为什么必须有（R40 审查遗留）：第 4 档是一次**额外**的专辑请求，而它的失败并不比成功少见
+   * （端点失败、或那张专辑里根本没有这一首 —— `album_without_this_track`）。失败之后调用方
+   * 再取一次同一首（换行、重开歌词面板、歌词窗重连都会），整条链会从第 ② 档重放一遍，
+   * 再打一次注定同样的专辑请求：**同一首、同一张专辑、在同一个进程里被问第二次**，
+   * 而那一次的答案只可能和上一次一样。
+   *
+   * 三条边界（与 `lyricAddressIndex` 同一条纪律）：
+   * 1. **只在进程内存**：不落盘、不进设置、不跨进程（sidecar 重启即空）；
+   * 2. **只记"试过"**，不记"结论"：命中的意思是"这一对 (曲目, 专辑) 本进程已经问过了"；
+   * 3. **有上限、先进先出**：与地址索引同一个上限，浏览几千首也不会无界增长。
+   *
+   * 为什么键是 (trackId, albumId) 这一对而不是只有 trackId：同一个曲目换了专辑 id（例如
+   * 播放响应与列表条目给出了两个不同的 id）时，那是一次**没试过**的请求，不该被旧结论挡住。
+   */
+  const lyricAlbumAttempts = new Map();
+
+  function albumAttempted(trackId, albumId) {
+    const tried = lyricAlbumAttempts.get(trackId);
+    return tried !== undefined && tried.has(albumId);
+  }
+
+  function rememberAlbumAttempt(trackId, albumId) {
+    if (!isNonEmptyString(trackId) || !isNonEmptyString(albumId)) return;
+    let tried = lyricAlbumAttempts.get(trackId);
+    if (tried === undefined) {
+      tried = new Set();
+      lyricAlbumAttempts.set(trackId, tried);
+    }
+    tried.add(albumId);
+    while (lyricAlbumAttempts.size > lyricAddressIndexLimit) {
+      const oldest = lyricAlbumAttempts.keys().next().value;
+      lyricAlbumAttempts.delete(oldest);
+    }
+  }
+
+  // —— 歌词的三处缓存端口（R41） ---------------------------------------------------------------
+  //
+  // 协议层**自己不碰 fs**（同一条纪律：这里只认注入进来的端口）。三个端口都是可选的：
+  // 测试与"没有数据目录"的场景下不给，`getLyrics` 就照旧只有华为那四档——行为与 R40 完全一致。
+
+  /**
+   * 磁盘缓存端口（`src/main/lyrics-cache.mjs` 的 `createLyricsCache()` 产物，sidecar 装配时注入）。
+   *
+   * 只需三个方法：`readLocal` / `readCached` / `writeCached`。**写入一律 best-effort**
+   * （缓存是"下次更快"，不是"这次能不能看"）：端口自己吞掉失败，这里也不再包一层 try。
+   */
+  const lyricsCache = options.lyricsCache ?? null;
+
+  /** 第三方回退端口（`src/main/lyrics-fallback.mjs` 的 `createThirdPartyLyrics()` 产物）。 */
+  const lyricsFallback = typeof options.lyricsFallback === "function" ? options.lyricsFallback : null;
+
+  /**
+   * **进程内内存缓存**：`trackId → 歌词文档`（R41）。
+   *
+   * 为什么在磁盘缓存之外还要一层内存：同一首歌在一次会话里会被取很多次（切歌回来、开歌词窗、
+   * 主窗面板与歌词窗各推一次），磁盘读虽然快，但每次都读盘 + 每次都过一遍形状校验是白付的
+   * ——而这一层的内存代价只有几首歌词的文本。
+   *
+   * 与 `lyricAddressIndex` 同一条纪律：**只在进程内存、有上限、先进先出**（重启即空）。
+   */
+  const lyricMemoryCache = new Map();
+  const lyricMemoryLimit = positiveInt(options.lyricMemoryLimit, 200);
+
+  function rememberLyrics(trackId, doc) {
+    if (!isNonEmptyString(trackId) || !isObject(doc) || !isNonEmptyString(doc.text)) return;
+    if (lyricMemoryCache.has(trackId)) lyricMemoryCache.delete(trackId);
+    lyricMemoryCache.set(trackId, doc);
+    while (lyricMemoryCache.size > lyricMemoryLimit) {
+      const oldest = lyricMemoryCache.keys().next().value;
+      lyricMemoryCache.delete(oldest);
+    }
+  }
+
+  /**
+   * 读本地导入（端口不在/坏形状一律回 null：这一跳只是"可能更好"，失败不该有副作用）。
+   *
+   * 交回来的文档**带上文件名与导入时间**（它们住在磁盘记录的顶层，不在文档里）：
+   * 界面上要说得出"这一份是你哪天导入的哪个文件"，而这两个值只有读盘那一刻才知道。
+   */
+  async function readLocalLyrics(trackId) {
+    if (lyricsCache === null || typeof lyricsCache.readLocal !== "function") return null;
+    try {
+      const found = await lyricsCache.readLocal(trackId);
+      if (!isObject(found) || !isObject(found.doc) || !isNonEmptyString(found.doc.text)) return null;
+      const doc = { ...found.doc, source: "local" };
+      if (isNonEmptyString(found.fileName)) doc.fileName = found.fileName;
+      if (typeof found.importedAt === "number" && Number.isFinite(found.importedAt) && found.importedAt > 0) {
+        doc.importedAt = found.importedAt;
+      }
+      return doc;
+    } catch (cause) {
+      // 本地文件读不出来（权限/坏文件）不是"这首歌没有歌词"：留一行 warn 级的日志，继续往下走
+      log(`本地导入歌词读取失败（按没有导入处理）：${messageOf(cause)}`);
+      return null;
+    }
+  }
+
+  /** 读 90 天磁盘缓存（同上：失败当"没命中"，继续走在线那条路）。 */
+  async function readCachedLyrics(trackId) {
+    if (lyricsCache === null || typeof lyricsCache.readCached !== "function") return null;
+    try {
+      const doc = await lyricsCache.readCached(trackId);
+      return isObject(doc) && isNonEmptyString(doc.text) ? doc : null;
+    } catch (cause) {
+      log(`歌词磁盘缓存读取失败（按没有缓存处理）：${messageOf(cause)}`);
+      return null;
+    }
+  }
+
+  /** 命中在线结果之后：先记内存（这一帧之后的重复取词立刻命中），再尽力写盘。 */
+  async function rememberAndPersist(trackId, doc) {
+    rememberLyrics(trackId, doc);
+    if (lyricsCache === null || typeof lyricsCache.writeCached !== "function") return;
+    try {
+      await lyricsCache.writeCached(trackId, doc);
+    } catch (cause) {
+      log(`歌词缓存写入失败（不影响这次显示）：${messageOf(cause)}`);
+    }
+  }
+
+  /**
+   * 第三方回退那一跳。
+   *
+   * **触发条件**（与简报逐条相同）：只有曲目**有标题**才试——第三方库全靠关键字搜索，
+   * 没标题等于盲搜，那种"命中"不可能可信。艺人/时长有就参与严格匹配
+   * （`src/main/lyrics-provider.mjs` 的匹配器：时长差 > 8 秒或艺人硬错配一律不认）。
+   *
+   * ## 连标题都没有艺人、也没有可用时长时**不发请求**（R41a）
+   *
+   * 这一跳的代价是**两个服务各一次网络往返 + 各 8 秒超时**（最坏 16 秒），而匹配器早就把
+   * 结果定死了：艺人是硬错配判据之一（查询里有艺人时，候选必须至少有一个艺人宽松匹配），
+   * 时长只有在"两边都 > 30 秒"时才构成佐证（`scoreCandidate`）——两者都没有时，
+   * 最高分就是"标题精确"那 `1.3`，**必然低于** `MIN_SCORE = 1.5`。既然答案注定是"没有"，
+   * 就不该让播放链白等那 16 秒（第三方回退是"顺带试一下"，不该有这种量级的代价）。
+   *
+   * 注意短路条件只在这一种组合上：**只有标题**也能过（标题精确 `1.3` + 艺人宽松 `0.6` = `1.9`），
+   * 所以不是"必须三个值齐全"。时长 ≤ 30 秒的样本不构成佐证，与"没有时长"同档处理。
+   *
+   * 端口没注入（测试/未装配）就回 null：整条链的行为与 R40 一模一样。
+   */
+  async function thirdPartyLyricsFor(trackId, request = {}) {
+    if (lyricsFallback === null) return null;
+    const title = isNonEmptyString(request.title) ? request.title.trim() : "";
+    if (title === "") return null;
+    const artist = isNonEmptyString(request.artist) ? request.artist.trim() : "";
+    const duration = numberOrNull(request.durationSeconds ?? request.duration);
+    if (artist === "" && !(duration !== null && duration > 30)) {
+      log("第三方歌词回退跳过：这一首既没有艺人、时长也不构成佐证（匹配器的最高分必然不过门槛）");
+      return null;
+    }
+    try {
+      const doc = await lyricsFallback({ title, artist, durationSeconds: duration });
+      if (!isObject(doc) || !isNonEmptyString(doc.text)) return null;
+      // 来源只认端口给的那两个（端口自己不报来源的，按"第三方"记，绝不冒充 huawei）
+      const source = isNonEmptyString(doc.source) ? doc.source : "third_party";
+      return {
+        text: doc.text,
+        format: isNonEmptyString(doc.format) ? doc.format : "lrc",
+        source,
+        ...(isNonEmptyString(doc.matchedTitle) ? { matchedTitle: doc.matchedTitle } : {}),
+        ...(isNonEmptyString(doc.matchedArtist) ? { matchedArtist: doc.matchedArtist } : {}),
+      };
+    } catch (cause) {
+      // 一个歌词服务挂了绝不能打断播放（也不缓存这次失败）
+      log(`第三方歌词回退失败（按没有回退处理）：${messageOf(cause)}`);
+      return null;
+    }
+  }
+
+  /**
+   * **导入本地歌词**（R41 的 `lyrics:import` 频道用它）。
+   *
+   * 三件事，按顺序：
+   * 1. 交给磁盘端口写进 `lyrics-local/`（端口自己校验"这段文本算不算歌词"，坏的就抛结构化错误）；
+   * 2. 顺手更新内存缓存（导入要**立刻**生效，而内存里可能正躺着这一首的在线结果）；
+   * 3. 把生效的文档交回调用方（`source: "local"` + 文件名/导入时间）。
+   *
+   * **不清磁盘缓存里那一份在线结果**：本地永远排在它前面（`getLyrics` 的第 ① 跳），
+   * 留着它反而有用——用户哪天删掉本地导入，"原来的在线歌词"就还在。
+   */
+  async function importLyrics(request = {}) {
+    const trackId = request.trackId ?? request.id;
+    if (!isNonEmptyString(trackId)) return err("导入本地歌词需要 trackId", MUSIC_ERROR_KINDS.missingParam);
+    const id = trackId.trim();
+    if (typeof request.text !== "string" || request.text.trim() === "") {
+      return err("导入本地歌词需要歌词文本（文件是空的，或选中的文件读不出文本）", MUSIC_ERROR_KINDS.invalidResponse);
+    }
+    if (lyricsCache === null || typeof lyricsCache.writeLocal !== "function") {
+      return err(
+        "本地歌词无法保存：没有可用的数据目录（宿主未传 --data-dir），这一次导入不会留下来",
+        MUSIC_ERROR_KINDS.cacheUnavailable,
+      );
+    }
+    const fileName = isNonEmptyString(request.fileName) ? request.fileName.trim().slice(0, 120) : "";
+    let written;
+    try {
+      written = await lyricsCache.writeLocal(id, { text: request.text, fileName });
+    } catch (cause) {
+      // 端口在自己的错误里带了 kind（invalid_payload / unavailable）；认不出就按 invalid_response 报
+      const kind = isNonEmptyString(cause?.kind) ? cause.kind : MUSIC_ERROR_KINDS.invalidResponse;
+      const mapped = kind === "unavailable" ? MUSIC_ERROR_KINDS.cacheUnavailable : MUSIC_ERROR_KINDS.invalidResponse;
+      return err(`本地歌词没能保存：${messageOf(cause)}`, mapped);
+    }
+    const doc = isObject(written?.doc) ? written.doc : null;
+    if (doc === null) return err("本地歌词没能保存（磁盘模块没有交回文档）", MUSIC_ERROR_KINDS.invalidResponse);
+    const imported = { ...doc, source: "local", ...(fileName === "" ? {} : { fileName }) };
+    rememberLyrics(id, imported);
+    return ok({ ...imported, warnings: [] });
+  }
+
+  /** 两处磁盘占用（设置页那张卡显示的就是它；端口不在时如实回"不可用"）。 */
+  async function lyricsCacheInfo() {
+    if (lyricsCache === null || typeof lyricsCache.info !== "function") {
+      return ok({ available: false, bytes: 0, entries: 0, localBytes: 0, localEntries: 0 });
+    }
+    try {
+      return ok(await lyricsCache.info());
+    } catch (cause) {
+      return err(`读取歌词缓存占用失败：${messageOf(cause)}`, MUSIC_ERROR_KINDS.invalidResponse);
+    }
+  }
+
+  /**
+   * 清歌词缓存（`lyrics:cache-clear`）。
+   *
+   * `options.local === true` 才连本地导入一起删（**用户导入的是他的文件**，默认不碰）。
+   * 清完**顺手清内存缓存**：不清的话"清除缓存"之后这一首仍然命中内存里那份旧文本，
+   * 用户会以为清除没生效（这正是"两处缓存必须一起动"的地方）。
+   */
+  async function clearLyricsCache(options = {}) {
+    const local = options.local === true;
+    if (lyricsCache === null || typeof lyricsCache.clear !== "function") {
+      return err("歌词缓存不可用：没有可用的数据目录（宿主未传 --data-dir）", MUSIC_ERROR_KINDS.cacheUnavailable);
+    }
+    let stats;
+    try {
+      stats = await lyricsCache.clear({ local });
+    } catch (cause) {
+      return err(`清除歌词缓存失败：${messageOf(cause)}`, MUSIC_ERROR_KINDS.invalidResponse);
+    }
+    if (local) {
+      lyricMemoryCache.clear();
+    } else {
+      // 只清在线缓存时要留下本地导入那几首的内存副本：它们是"用户的文件"，与缓存无关
+      for (const [key, doc] of [...lyricMemoryCache]) {
+        if (doc?.source === "local") continue;
+        lyricMemoryCache.delete(key);
+      }
+    }
+    return ok(stats);
   }
 
   /** 曲目归一化的共同选项：白名单校验 + 顺手把歌词地址记进索引（唯一一处拼它）。 */
@@ -1224,13 +1493,78 @@ export function createMusicApi(options = {}) {
    *    仍然如实回 `invalid_response`（不猜 id、不编地址）。
    *
    * 四条都没有才回 `invalid_response`，且**不把整段响应体当歌词**塞给渲染层。
-   * 拿到的文本**不进日志、不落盘**：它只经这一帧交给渲染层。
+   *
+   * ## R41：这一条现在是**六跳**的编排（上面四条仍是"华为那一侧"的实现）
+   *
+   * | 跳 | 来源 | 命中后 |
+   * |---|---|---|
+   * | ① | **本地导入**（磁盘 `lyrics-local/`，见 `options.lyricsCache` 端口） | 立即返回（`source: "local"`）——**永远压过任何在线结果** |
+   * | ② | **进程内内存缓存**（`lyricMemoryCache`，本进程取过的文本） | 立即返回（`cached: "memory"`） |
+   * | ③ | **90 天磁盘缓存**（`lyrics-cache/`） | 立即返回（`cached: "disk"`），并顺手进内存 |
+   * | ④ | 华为四档（本函数下半部分） | 写内存 + 写磁盘（`source: "huawei"`） |
+   * | ⑤ | **第三方回退**（Kugou / lrclib，`options.lyricsFallback`） | 写内存 + 写磁盘（`source: "kugou"｜"lrclib"`） |
+   * | ⑥ | 都没有 → 回**第 ④ 跳那一次的真实失败** | 界面按那个 kind 说人话（不是笼统的"没有歌词"） |
+   *
+   * 三条边界：
+   * - **本地导入排在最前**：用户亲手导入的词必须立刻生效，且不能被缓存里的在线结果盖住
+   *   （所以导入不"改写"缓存，而是**压过**它）；
+   * - **失败不缓存**：只有真的拿到了歌词才写盘（见 `src/main/lyrics-cache.mjs` 纪律 4）；
+   * - **第 ⑥ 跳回的是华为那次的失败**而不是"第三方也失败了"：第三方是**额外的机会**，
+   *   它的失败不该把"为什么华为没给词"这个更有用的结论盖掉。
+   *
+   * 拿到的文本**不进日志**（`log` 只记键名）：它只经这一帧交给渲染层，落盘的副本在磁盘缓存模块里。
    */
   async function getLyrics(request = {}) {
     const trackId = request.trackId ?? request.id;
     if (!isNonEmptyString(trackId)) return err("歌词接口需要 trackId", MUSIC_ERROR_KINDS.missingParam);
     const id = trackId.trim();
 
+    // ① 本地导入（磁盘目录 lyrics-local/；端口没注入时这一跳不存在）
+    const local = await readLocalLyrics(id);
+    if (local !== null) {
+      rememberLyrics(id, local);
+      return ok({ ...local, warnings: [] });
+    }
+
+    // ② 内存缓存（本进程取过的那一份）
+    const remembered = lyricMemoryCache.get(id);
+    if (remembered !== undefined) {
+      return ok({ ...remembered, warnings: [], cached: "memory" });
+    }
+
+    // ③ 90 天磁盘缓存
+    const cached = await readCachedLyrics(id);
+    if (cached !== null) {
+      rememberLyrics(id, cached);
+      return ok({ ...cached, warnings: [], cached: "disk" });
+    }
+
+    // ④ 华为四档
+    const huawei = await huaweiLyricsOnce(id, request);
+    if (huawei.ok) {
+      const doc = { text: huawei.data.text, format: huawei.data.format ?? "lrc", source: "huawei" };
+      await rememberAndPersist(id, doc);
+      return ok({ ...doc, warnings: huawei.data.warnings ?? [] });
+    }
+
+    // ⑤ 第三方回退（只在华为侧全落空、且曲目有标题时才有意义——没有标题的回退等于盲搜）
+    const third = await thirdPartyLyricsFor(id, request);
+    if (third !== null) {
+      await rememberAndPersist(id, third);
+      return ok({ ...third, warnings: [] });
+    }
+
+    // ⑥ 如实转达华为那次的失败（`endpoint_unknown` / `session_required` / `invalid_response`…）
+    return huawei;
+  }
+
+  /**
+   * 华为侧四档（R38 三档 + R40 第 4 档）的**实现**：从内存/磁盘缓存的角度看，它只是第 ④ 跳。
+   *
+   * 返回 `ok({text, format, warnings})` 或 `err(...)`——**不带 source**：那是编排层的事
+   * （这一层只知道"从华为拿到了文本"）。
+   */
+  async function huaweiLyricsOnce(id, request = {}) {
     if (isNonEmptyString(endpoints.lyrics)) {
       const direct = await call("lyrics", { params: { contentID: id, contentType: "1" } });
       if (!direct.ok) return direct;
@@ -1268,8 +1602,11 @@ export function createMusicApi(options = {}) {
     //    拉一次详情——`getAlbum` 走的是同一套归一化（`trackOptions`），条目自带的 `lyricAddress`
     //    会顺手进索引，于是"从没在任何列表里加载过的曲目"（典型：重启后直接播恢复出来的队列）
     //    也还有一次机会。取不到专辑 id 就照旧如实回下面那个 `invalid_response`（不猜、不编地址）。
+    //
+    //    R41：这一档带**会话内负缓存**（见 `lyricAlbumAttempts`）——同一对 (曲目, 专辑) 本进程
+    //    已经问过一次（无论成败）就不再问第二次：重复取词不该把一次注定同样的专辑请求重放一遍。
     const albumId = albumIdOf(result.data);
-    if (albumId !== null) {
+    if (albumId !== null && !albumAttempted(id, albumId)) {
       // 只记键名（不记值，**连专辑 id 的值也不记**）：这条路的成败取决于"播放响应里到底有没有
       // albumID"，而那个形状一直没有实证——下一台真机跑一次就能从这一行看出来（协议层不自造事实）。
       log(
@@ -1277,6 +1614,7 @@ export function createMusicApi(options = {}) {
           `（只记键名，不记值）｜播放响应顶层键名：${objectKeysOf(result.data).join(", ")}` +
           `｜songInfo 键名：${objectKeysOf(result.data.songInfo).join(", ")}`,
       );
+      rememberAlbumAttempt(id, albumId);
       const album = await getAlbum(albumId, {});
       if (!album.ok) {
         warnings.push(album.error.kind ?? "album_failed");
@@ -1343,6 +1681,10 @@ export function createMusicApi(options = {}) {
     getHistory,
     getPlayback,
     getLyrics,
+    /** R41：本地导入 / 缓存占用 / 清缓存（三条 `lyrics:*` 频道用它们）。 */
+    importLyrics,
+    lyricsCacheInfo,
+    clearLyricsCache,
   };
 }
 

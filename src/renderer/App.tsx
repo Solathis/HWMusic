@@ -243,7 +243,8 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
     [runtime],
   )
 
-  const onOpenAlbum = useCallback(    (albumId: string, song: unknown) => {
+  const onOpenAlbum = useCallback(
+    (albumId: string, song: unknown) => {
       navigate(createView(VIEW.album, { albumId, name: trackAlbumOf(song) }))
     },
     [navigate],

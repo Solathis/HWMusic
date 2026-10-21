@@ -190,8 +190,13 @@ function profileContainersOf(payload) {
  * 只报键名、**不报值**：这两个容器里可能就有账号资料（名字/头像/会员档位），
  * 值是用户的个人信息，键名才是"下一步该读哪个字段"的证据。
  *
+ * R41 补一处盲区：**数组元素里的键名**。`profileContainersOf` 早就把"一层数组里的对象元素"
+ * 当候选容器读（账号资料很可能挂在 `xxxList[0]` 这种形状下），而这份键名日志此前只走对象分支
+ * ——于是"读得到却看不见"：日志里永远只有那个数组名，看不出元素里到底有哪些键。
+ * 现在对数组取**首个对象元素**记一行（`容器.键[0]: ...`），与读取侧的一层口径对齐。
+ *
  * @param {unknown} payload loginex 响应
- * @returns {string[]} 每个容器/子容器一行（`容器名: a, b, c`）
+ * @returns {string[]} 每个容器/子容器一行（`容器名: a, b, c` / `容器名.键[0]: a, b, c`）
  */
 export function nestedContainerKeyNamesOf(payload) {
   if (!isObject(payload)) return [];
@@ -202,10 +207,13 @@ export function nestedContainerKeyNamesOf(payload) {
     lines.push(`${key}: ${Object.keys(container).sort().join(", ")}`);
     let shown = 0;
     for (const [childKey, value] of Object.entries(container)) {
-      if (!isObject(value)) continue;
+      // 数组：只看首个对象元素（与读取侧"一层数组里的对象元素"同一口径；空数组/纯标量数组跳过）
+      const element = Array.isArray(value) ? value.find((item) => isObject(item)) : value;
+      if (!isObject(element)) continue;
       if (shown >= MUSIC_PROFILE_NESTED_LOG_LIMIT) break;
       shown += 1;
-      lines.push(`${key}.${childKey}: ${Object.keys(value).sort().join(", ")}`);
+      const label = Array.isArray(value) ? `${key}.${childKey}[0]` : `${key}.${childKey}`;
+      lines.push(`${label}: ${Object.keys(element).sort().join(", ")}`);
     }
   }
   return lines;
@@ -332,7 +340,7 @@ export function mergeProfiles(primary, fallback) {
  * 只补空缺、只多一个 `profile` 键：其余字段（音乐 token、userId、expireTime）原样带过。
  * 认不出任何东西时返回**原来的对象**（不制造"多了一个空 profile"的假变化）。
  *
- * **不落盘原始 token**：`claims` 本身不进记录，只有从里面提取出的名字/头像/wip 三个键进
+ * **不落盘原始 token**：`claims` 本身不进记录，只有从里面提取出的名字/头像/vip 三个键进
  * ——会话记录会随 DPAPI 信封落盘，凭据与 claims 原文都不该在那里。
  *
  * @param {unknown} record `parseMusicSessionResponse` 的产物

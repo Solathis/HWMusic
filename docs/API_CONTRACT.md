@@ -1070,7 +1070,7 @@ nonce=…, created=…[, token=…]`，见 §1.5.1 ②）；`snsUserID`（收藏
 | 音质**不虚标** | `confirmedPlaybackQuality(playQuality, type)`：`"3"+flac → lossless`、`"1"+mp3 → standard`，对不上就是 `unknown` |
 | 播放地址必须落在 CDN 白名单 | 非白名单域 → `unsafe_media_url`（文案只带域名）。白名单与参考**逐字相同**：`dbankcdn.cn` / `tingmall.com` / `kuke.com` |
 
-#### 2.3.2 歌词（R32 从播放响应推导；R38 真机取证后改为三档；**R40 增补第四档**）
+#### 2.3.2 歌词（R32 从播放响应推导；R38 真机取证后改为三档；**R40 增补第四档**；**R41 升级为六跳编排**）
 
 参考实现里**没有独立歌词端点**。R38 用真实会话取证（CDP 只读，只记字段名与域名）：
 
@@ -1081,13 +1081,28 @@ GET 200，3.3 KiB / 0.9 KiB / 22 B（三条分别是 3332 / 900 / 22 字节）�
 （歌词窗与歌词舞台停在`歌词暂时取不到`）。
 
 所以 `getLyrics` 现在是四档，按"最可能有、最便宜"排序：
-
 | 档 | 来源 | 说明 |
 |---|---|---|
 | 1 | 设置里显式注入的 `musicEndpoints.lyrics` | 形状按候选键宽容读取；那条路的响应形状**没有实测证据**，只在显式注入时使用 |
 | 2 | **已加载过的曲目条目自带的 `lyricAddress`** | 官方 H5 走的就是列表里这条地址。协议层在 `normalizeTrack` 时把它记进**进程内索引**（`trackId → 地址`，上限 400 条先进先出，**不落盘、不跨进程**）；取歌词时再**过一次 CDN 白名单**。命中就省掉一次播放请求 |
 | 3 | 播放响应 | `lyricAddress`（含内嵌的 `songInfo`，按**同一份候选表**读）→ 下载；没有地址就看内嵌歌词（`contentExInfo.lyrics`，最多剥两层 JSON 字符串） |
-| 4 | **按专辑补条目索引**（R40） | 第 2、3 档都落空时：用**播放响应自己给出的**专辑 id（`albumID`，与 `normalizeTrack` 同一份候选表；含内嵌 `songInfo`）经**既有的**专辑端点拉一次详情——那条响应的条目自带 `lyricAddress`，归一化时顺手进索引，于是"本次运行从没在任何列表里加载过"的曲目（典型：重启后直接播恢复出来的队列）还有一次机会。**代价**：多一次专辑请求（只在前面几档全落空时发生）。**边界**：播放响应没给专辑 id 就没有这一档（不猜 id、不编地址），仍然如实回下一段的 `invalid_response` |
+| 4 | **按专辑补条目索引**（R40） | 第 2、3 档都落空时：用**播放响应自己给出的**专辑 id（`albumID`，与 `normalizeTrack` 同一份候选表；含内嵌 `songInfo`）经**既有的**专辑端点拉一次详情——那条响应的条目自带 `lyricAddress`，归一化时顺手进索引，于是"本次运行从没在任何列表里加载过"的曲目（典型：重启后直接播恢复出来的队列）还有一次机会。**代价**：多一次专辑请求（只在前面几档全落空时发生）。**边界（三条，都别当成 bug）**：① 播放响应没给专辑 id 就没有这一档（不猜 id、不编地址），仍然如实回下一段的 `invalid_response`；② **只拉专辑的第一页**（`getAlbum` 的默认 `pageSize` = 50，与所有 `library:*` 分页同一个默认值）——一张 200 首的专辑里排在第 51 位之后的曲目，第 4 档**看不见**（翻页补全不做：为了一首歌把整张专辑翻完是另一种代价，见 `docs/KNOWN_LIMITATIONS.md` B23）；③ **同一对 (曲目, 专辑) 每进程只问一次**（R41 会话内负缓存：失败也是结论，重复取词不再重放那一次注定同样的专辑请求） |
+
+**R41 起这一条是六跳编排**（上面四档仍然是"华为那一侧"的实现，第 4 档之后不再直接回错误）：
+
+| 跳 | 来源 | 命中后 |
+|---|---|---|
+| ① | **本地导入**（磁盘 `lyrics-local/`，见 §2.12） | 立即返回（`source: "local"`，带 `fileName`/`importedAt`）——**永远压过任何在线结果** |
+| ② | **进程内内存缓存**（上限 200 首，先进先出） | 立即返回（`cached: "memory"`） |
+| ③ | **90 天磁盘缓存**（`lyrics-cache/`） | 立即返回（`cached: "disk"`），顺手进内存 |
+| ④ | 上面那四档（华为） | 写内存 + 写磁盘（`source: "huawei"`） |
+| ⑤ | **第三方回退**（Kugou → lrclib，见 §2.12） | 写内存 + 写磁盘（`source: "kugou"｜"lrclib"`，带 `matchedTitle`/`matchedArtist`） |
+| ⑥ | 都没有 → 回**第 ④ 跳那一次的真实失败** | 界面按那个 `kind` 说人话（`endpoint_unknown` / `session_required` / `invalid_response`） |
+
+三条边界：**失败不缓存**（只有真拿到歌词才落盘，"这次没有"必须能被下一次尝试推翻）；
+**第 ⑤ 跳只在曲目有标题时发生**（第三方库靠关键字搜索，没标题等于盲搜），且匹配严格
+（标题 + 艺人 + 时长，半天差 > 8 秒或艺人硬错配一律不显示——错词比没有词更糟）；
+**第 ⑥ 跳回的是华为那次的失败**而不是"第三方也失败了"（第三方是额外的机会，不该盖掉更有用的结论）。
 
 四档都没有 → `invalid_response`（**不把整段响应体当歌词**塞给渲染层——那只会让歌词窗显示一坨 JSON）。
 下载一律：CDN 白名单内、有界读取（上限 512 KiB）、**不跟随跳转**。
@@ -1314,7 +1329,7 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 4. **勾选态与歌词窗存在性的同步**：**R12 已收口**（见 §2.9）：勾选态仍由托盘自己镜像并翻转，
    R12 只补失败路径（窗命令失败 → `app:notice` + 勾选翻回实际状态），不建双向同步链。
 
-### 2.9 桌面歌词窗与任务栏降级（R12 落地）
+### 2.9 桌面歌词窗与任务栏降级（R12 落地；**R41 修了"永久空白"与主题**）
 
 桌面歌词窗本体在 Rust（`src-tauri/src/lyrics_window.rs`）：label `lyrics`、无边框、透明、无阴影、
 置顶、不进任务栏、不可缩放、不抢焦点、**先建出来是隐藏的**（摆好几何再 `show`，防闪默认样式）、
@@ -1323,11 +1338,19 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 `webview_proxy::resolve_for_webview(data_root, "lyrics")` + `proxy_url`（R6 的审计缺口：
 不接则封面图与音频流绕过设置直连）。
 
+**R41 的三处修正（真机诊断驱动，见 `.superpowers/.../task-41a-report.md`）**：
+
+| 项 | 修正前 | 修正后 | 为什么 |
+|---|---|---|---|
+| **页面加载是"一锤子买卖"** | 页面只在建窗那一刻加载一次：`toggle` 只 hide/show、`configure` 只改几何、模块里没有 destroy——**任何一次没加载完的页面会被永久保留**。实测现场：dev server 在 16:27:50 挂掉，歌词窗恰好在那一刻建出来（JS 模块没到、React 从未挂载），窗口全透明 ⇒ 屏幕上什么都看不到，开关多少次都一样，**只有重启应用能救**（品红背板实验：那块 960×120 里非品红像素 **0**） | 显示**已有**窗口之前先 `reload()`（新建那条分支不动，它本来就在加载）；**重新加载之后那一份歌词由宿主重发**——`core_lyrics_document` 留一份最后发出去的文档，页面加载完成（`on_page_load(Finished)`）时 `replay_document` 重发（**R41a**：R41 曾让主窗在"窗刚可见"时重推，那一次必然落在新页 `listen()` 之前，已删），所以打开就能看到这一首的词 | "加载失败 = 永久空白且无路可退"这条性质与触发原因无关：慢盘、杀软拦一下、渲染进程崩一次都会落到同一状态 |
+| **歌词窗不跟随主题** | `lyrics-main.tsx` 里没有 `installThemeSync`（也用不了：那条路要经 `core_login_chrome` 读档位，而该命令的来源守卫只放行主窗与两个浮动控件）。于是歌词窗永远停在 `:root` 的**浅色**令牌上——深色主题下用近黑的字浮在深色桌面上，"有歌词但看不见" | 主题作为**查询串参数**随建窗同步到位（`lyrics_window_url(config, theme)`，`theme` 取自 `theme::current_theme(app)`），到窗之后跟随 `theme:changed` 广播（订阅不需要任何权限、不新增命令） | 与"配置走查询串"同一条纪律（订阅是异步的，建窗那一刻可能还没 listen）；颜色令牌（`foreground`/`muted`/`primary`/`contrast`）本来就是主题令牌，不跟随主题时那张表没有意义 |
+| **Alt+Tab 里叫 "Tauri App"** | 建窗没给 `.title()`，tao 的默认标题就是 `"Tauri App"`；`skip_taskbar(true)` 在 Windows 上只做 `ITaskbarList::DeleteTab`（tao 0.37.1 `set_skip_taskbar`）——删了任务栏条目，**没碰** `WS_EX_TOOLWINDOW`（实测 exStyle `0x40118`） | `.title(LYRICS_WINDOW_TITLE)` = `"桌面歌词"` | 一个无边框透明条在 Alt+Tab 里显示成 "Tauri App"，用户没有任何线索知道那是什么 |
+
 **请求频道增补一条**（唯一真源 `src/shared/request-channels.ts`，Rust 镜像 `commands.rs`）：
 
 | 频道 | 载荷 | 应答 `data` | 说明 |
 |---|---|---|---|
-| `playback:lyrics` | `{trackId}` | `{text, format, warnings}` | 歌词**文本**来源（原始 LRC 文本，不是解析结果）。为什么返回文本：逐行滚动必须来自 AMLL 官方组件，而"文本 → 行"是官方 `parseLrc` 的职责（`features/lyrics/amll-adapter.ts` 在它之上补 `[offset:]` 与翻译行）。端点仍是**注入**的（`data.musicEndpoints.lyrics`，与其余业务端点同一张表）：未配置时协议层回结构化 `endpoint_unknown`，界面说"歌词来源尚未配置"——不冒充"这首歌没有歌词"。响应形状尚未联调确认，`parseLyricsPayload` 按候选键宽容读取（`lyric`/`lyrics`/`lrc`/`lyricText`/`content`/`text`，只往里看一层），读到的键名进 `warnings` 备查。文本**不进日志、不落盘、不缓存** |
+| `playback:lyrics` | `{trackId, title?, artist?, durationSeconds?}` | `{text, format, source, cached?, warnings}` | 歌词**文本**来源（原始 LRC 文本，不是解析结果）。为什么返回文本：逐行滚动必须来自 AMLL 官方组件，而"文本 → 行"是官方 `parseLrc` 的职责（`features/lyrics/amll-adapter.ts` 在它之上补 `[offset:]` 与翻译行）。端点仍是**注入**的（`data.musicEndpoints.lyrics`，与其余业务端点同一张表）：注入过就打它（候选键宽容读取，读到的键名进 `warnings`），没注入就走 §2.3.2 那条链。**R41**：三个可选元信息只用于第三方回退的严格匹配（缺 `title` 就没有那一跳）；`source` ∈ `local`/`huawei`/`kugou`/`lrclib`，`cached` 只在命中内存/磁盘缓存时出现。文本**不进日志**（落盘的副本见 §2.10） |
 
 **广播频道增补三条**（唯一真源 `src/shared/channels.ts`，Rust 镜像 `bridge.rs`，parity 钉住）：
 
@@ -1487,7 +1510,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 > 按**代码事实**补齐（真源：`src/shared/request-channels.ts` 的两份清单，Rust 侧为镜像副本）。
 > 本节只登记，不改任何实现。
 
-**请求频道（渲染层 → core，唯一业务通道 `core_call`）** —— 共 17 条，真源 `REQUEST_CHANNELS`：
+**请求频道（渲染层 → core，唯一业务通道 `core_call`）** —— 共 20 条，真源 `REQUEST_CHANNELS`：
 
 | 频道 | 载荷 | 应答 `data` | 失败类别 | 落地 |
 |---|---|---|---|---|
@@ -1501,7 +1524,10 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `settings:test-proxy` | 见 §2.7 | 见 §2.7 | 见 §2.7 | R10（接 R6 的测试器） |
 | `library:*`（7 条） | 见 §2.5 | 见 §2.5 | 见 §2.5 | R8 |
 | `playback:resolve-url` | 见 §2.6 | 见 §2.6 | 见 §2.6 | R9 |
-| `playback:lyrics` | 见 §2.9 | 见 §2.9 | 见 §2.9 | R12 |
+| `playback:lyrics` | 见 §2.9 | 见 §2.9 | 见 §2.9 | R12（R41 增可选元信息与 `source`） |
+| `lyrics:import` | `{trackId, text, fileName?}` | 生效的歌词文档（`source:"local"`，带 `fileName`） | `invalid_payload`（缺 trackId / text 不是字符串 / 文本 > 512 KB）；文本不含时间戳歌词行 → `invalid_response`；没有数据目录 → `cache_unavailable` | R41（§2.12） |
+| `lyrics:cache-info` | 无（`null`） | `{available, bytes, entries, localBytes, localEntries}` | 读不出占用 → `invalid_response`；没有缓存端口（无数据目录）→ **不是错误**，`available:false` | R41（§2.12） |
+| `lyrics:cache-clear` | `{local?: boolean}` | 清完之后的**新**占用（同 `lyrics:cache-info`） | 没有数据目录 → `cache_unavailable`；其余 → `invalid_response` | R41（§2.12） |
 
 三条关于 `auth:login` 的要紧事实：
 
@@ -1540,6 +1566,49 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 （`src-tauri/src/commands.rs` 的 `require_request_channel` / `route_host_request`）是**刻意的镜像副本**，
 由 `test/channel-parity.test.mjs` 扫源码钉住集合相等。入口对 `REQUEST_CHANNELS` 逐个补齐兜底：
 尚未实现的频道回结构化 `unimplemented`（**不静默、不挂起**）。
+
+### 2.12 歌词的缓存、本地导入与第三方回退（R41 落地）
+
+三条新频道见 §2.11；这一节写它们背后的**磁盘布局、纪律与出口**。代码真源：
+`src/main/lyrics-cache.mjs`（fs，sidecar 持有）、`src/main/lyrics-store.mjs`（纯助手）、
+`src/main/lyrics-provider.mjs`（匹配器）、`src/main/lyrics-fallback.mjs`（网络）。
+
+**两个目录**（都挂在宿主给的**数据根**下，即 `--data-dir`；没有数据根时缓存如实报 `available:false`，
+**不假装"0 条 0 字节"**）：
+
+| 目录 | 内容 | 谁写 | 优先级 |
+|---|---|---|---|
+| `<数据根>/lyrics-cache/` | 在线取到的歌词（华为那条链 + 第三方回退） | `getLyrics` 命中即写 | 低于本地导入 |
+| `<数据根>/lyrics-local/` | 用户**自己导入**的 `.lrc`/`.txt` | `lyrics:import` | **永远压过任何在线结果**（§2.3.2 第 ① 跳） |
+
+**六条磁盘纪律**：TTL **90 天**（过期当没命中，不删文件）；**原子写**（同目录 temp + rename）；
+单文件上限 **512 KiB**（超了不写，不截断）；**空歌词不落盘**（"至少一行带 LRC 时间戳"是判据——
+`hasTimedLyricLine`，与官方 `parseLrc` 在本项目里的既有结论等价，见该函数说明）；
+`lyrics-cache/` 上限 **3000 条**按 mtime 裁最旧；**写缓存失败不打扰用户**（只留一行日志），
+**本地导入失败要抛**（用户按了导入就 expect 它记住）。
+
+**本地导入的链路**：渲染层 `<input type="file" accept=".lrc,.txt">`（系统标准控件，**零 Rust、
+零 capability**）→ 渲染层解码（BOM 探测 UTF-16LE/BE/UTF-8 → UTF-8 严格 → **GBK 退化**，
+`TextDecoder('gbk')` 由 Chromium 的完整 ICU 提供）→ **官方 `parseLrc` 判"有没有歌词行"**
+（没有就拒，并说清"纯文本歌词暂时显示不了"）→ 只把**文本**交给 core（不发路径：少一条
+"sidecar 去读一个别人给的路径"的信任边界）→ 落 `lyrics-local/` → 立刻生效（导入的那一份推给
+主窗面板与歌词窗）。512 KB 上限与空文件在渲染层就被拦下（不把大字符串递给磁盘模块再指望它报错）。
+
+**第三方回退（Kugou → lrclib）**：`https://songsearch.kugou.com` / `krcs.kugou.com` /
+`lyrics.kugou.com` / `https://lrclib.net`。三个事实写清楚，免得下次有人以为漏了配置：
+
+1. **不需要任何白名单**——sidecar 侧的出口**没有域名白名单**（`src/main/proxy.mjs` 只管代理与例外）；
+   CSP 的 `connect-src` 只约束**渲染层**，而这两个请求都发生在 sidecar 进程里，歌词文本经 IPC 回来
+   （与 `playback:lyrics` 同路）。媒体白名单（`safe-media-url.mjs`）管的是 `<audio>`/`<img>`，与此无关。
+2. **走全局 fetch ⇒ 设置里的代理照常生效**（`applyStartupProxy` 装的就是全局 dispatcher）。
+3. **UA 克制**：`HuaweiMusicDesktop/0.0.1 (unofficial study client)` —— 只自报"这是什么客户端"，
+   **不带任何本项目凭据**（无令牌、无账号标识、无会话头；酷狗那三个请求另带 `referer: https://www.kugou.com/`）。
+   超时 8 秒（顺带试一下的东西，不该拖成华为接口那样的 25 秒）、单响应 512 KiB、不跟随跳转、
+   **失败静默回 `null` 且不缓存**（缓存一份"这次没有"等于把这个来源永久关掉）。
+
+**匹配器的硬规则**（`lyrics-provider.mjs`，整片单测覆盖）：艺人硬错配一律拒绝；标题不精确时
+**必须有**时长佐证（`|Δ| ≤ 8 秒`，两边都要 > 30 秒才参与）；分数门槛 `MIN_SCORE = 1.5`。
+理由一句话：**显示错歌的词比没有词更糟**。
 
 ## 3. 本地常量（唯一真源位置）
 

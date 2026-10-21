@@ -34,6 +34,7 @@ import {
   CORE_LYRICS_TOGGLE,
 } from "../src/shared/commands.ts";
 import { PLAYBACK_LYRICS, REQUEST_CHANNELS } from "../src/shared/request-channels.ts";
+import { THEME_CHANGED } from "../src/shared/channels.ts";
 import {
   DEFAULT_LYRICS_CONFIG,
   LYRICS_COLOR_TOKENS,
@@ -49,6 +50,7 @@ import {
   effectiveSizeId,
   estimateTimeMs,
   fontStepLabel,
+  importPlanOf,
   lyricsConfigFromSearch,
   lyricsStatusFromFailure,
   modeLabel,
@@ -56,6 +58,7 @@ import {
   progressOf,
   reanchorProgress,
   shouldPushProgress,
+  themeFromSearch,
 } from "../src/renderer/features/lyrics/lyrics-window.mjs";
 import { createLyricsBridge } from "../src/renderer/features/lyrics/lyrics-bridge.mjs";
 import { createPlayer } from "../src/renderer/features/playback/player.mjs";
@@ -541,6 +544,86 @@ test("歌词窗入口：lyrics-main.tsx 挂载 LyricsWindow（双入口那一份
   ]) {
     assert.ok(entry.includes(line), `入口必须保持 CSS 引入顺序契约：${line}`);
   }
+});
+
+test("歌词窗主题（R41）：初值走查询串、变化走广播，且**不新增命令**", () => {
+  const entry = read("src/renderer/lyrics-main.tsx");
+  // 初值：建窗时 Rust 拼进 URL（歌词窗调不动读主题的那条命令，只能这么同步给它）
+  assert.match(entry, /themeFromSearch\(window\.location\.search\)/, "主题初值从查询串读");
+  assert.match(entry, /applyThemeChoice\(document\.documentElement/, "切类只经 theme.mjs 的那一个入口");
+  // 变化：订阅 `theme:changed` 广播（订阅不需要权限）
+  assert.match(entry, new RegExp(THEME_CHANGED), "跟随 theme:changed 广播");
+  assert.match(entry, /onCoreEvent</, "订阅走 host-api 的封装");
+  // 不许为了主题把命令权限放宽（那条命令还能取消登录）
+  // 注：只扫**调用形状**——注释里出现 `installThemeSync()` 是在解释"为什么不那么做"，不算调用。
+  assert.doesNotMatch(entry, /coreLoginChrome\s*[(<]|coreCall\(/, "歌词窗不许调命令（主题也不例外）");
+
+  // 纯函数那一半：认不出/缺参数一律回 null（调用方按"系统档"处理，不猜）
+  assert.equal(themeFromSearch("?theme=dark"), "dark");
+  assert.equal(themeFromSearch("?mode=desktop&theme=light"), "light");
+  assert.equal(themeFromSearch("?theme="), null, "空值不算");
+  assert.equal(themeFromSearch(""), null);
+  assert.equal(themeFromSearch("?theme=DARK"), null, "大小写不同不算（与 theme.mjs 的严格口径一致）");
+  assert.equal(themeFromSearch(null), null, "坏入参不抛");
+});
+
+test("桌窗文档重发（R41a）：改由 Rust 在页面加载完成时重发，渲染层不再重推", () => {
+  const hook = read("src/renderer/use-lyrics-window.ts");
+  // R41 曾在渲染层补推一次（visible false→true）；那一次**必然太早**（reload 是异步的，
+  // 主窗拿到回执时新页还在加载），所以删掉——真正的时机只有"页面加载完成"。
+  assert.doesNotMatch(
+    hook,
+    /const opened = visible && !wasVisible\.current/,
+    "渲染层不再在窗口打开时重推（那一推落在新页订阅之前）",
+  );
+  assert.doesNotMatch(hook, /wasVisible/, "基准 ref 也一并删掉（留着会让人以为还有第二次机会）");
+  // 重发的三个要件在 Rust 侧（同样的规矩由同时刻可见的那一侧执行）
+  const rust = read("src-tauri/src/lyrics_window.rs");
+  assert.match(rust, /window\.reload\(\)/, "显示已有窗口前仍要重新加载页面（不然重发没有意义）");
+  assert.match(rust, /\.on_page_load\(/, "重发挂在页面加载回调上（唯一知道新页就绪的时刻）");
+  assert.match(rust, /PageLoadEvent::Finished/, "只认加载完成：Started 时页面里的 JS 还没跑");
+  assert.match(rust, /webview\.label\(\) != LYRICS_WINDOW_LABEL/, "按 label 过滤（这条广播只发给歌词窗）");
+  assert.match(rust, /fn replay_document/, "重发是一个单独的函数（页面加载回调与命令各用各的一半）");
+  // 缓存发生在发出去那一刻：core_lyrics_document 里"留一份"要在"发出去"之前
+  const command = rust.slice(rust.indexOf("pub async fn core_lyrics_document("));
+  const kept = command.indexOf("remember_document(");
+  const emitted = command.indexOf("emit_core_event(");
+  assert.ok(kept > 0 && emitted > kept, "先留一份再发出去（缓存住的必须是用户本来能看到的那一份）");
+  assert.match(command.slice(0, kept), /return Err\(/, "归一失败如实报错，不缓存半个文档");
+  // 日志里不许出现文档内容（歌词文本进日志 = 把用户的歌单抄进日志文件）
+  const replay = rust.slice(rust.indexOf("pub fn replay_document"));
+  const logStart = replay.indexOf('log::info!("');
+  const logEnd = replay.indexOf('")', logStart);
+  assert.ok(logStart > 0 && logEnd > logStart, "重发要留一行日志（不然真机上无从取证）");
+  assert.doesNotMatch(replay.slice(logStart, logEnd), /document|\{/, "重发的日志不带文档本身（也不带格式化占位符）");
+});
+
+test("导入落地（R41a）：成功才动歌词；失败什么工具都不碰（失败的事实是歌词没变）", () => {
+  // 成功：行 + 状态 + 一句带文件名与行数的回执（文案与 R41 逐字一致）
+  const done = importPlanOf({ status: "ready", lines: [{ startTime: 0 }], source: "local", message: null, fileName: "我的.lrc", lineCount: 2 });
+  assert.equal(done.ok, true);
+  assert.deepEqual(done.lines, [{ startTime: 0 }]);
+  assert.equal(done.status, "ready");
+  assert.equal(done.message, "已替换这首歌的歌词（2 行，来自「我的.lrc」）。");
+
+  // 失败：**不带 lines/status**（调用方因此不可能"顺手"推一份空文档出去）
+  const failed = importPlanOf({ status: "failed", lines: [], source: null, message: "这个文件里没有带时间戳的歌词行。" });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.message, "这个文件里没有带时间戳的歌词行。");
+  assert.equal("lines" in failed, false, "失败的计划里没有行（界面停在原来那一份上）");
+  assert.equal("status" in failed, false, "失败的计划里也没有状态（不把面板打成『没有歌词』）");
+
+  // 认不出的回执（没有 message，也没有行）：按失败处理（宁可不换，也不假装换成功了）
+  for (const bad of [null, undefined, "nope", {}, { lines: [] }, { message: "   " }]) {
+    const plan = importPlanOf(bad);
+    assert.equal(plan.ok, false, `认不出的回执按失败：${JSON.stringify(bad)}`);
+    assert.ok(plan.message.length > 0, "失败也要有一句人话");
+    assert.equal("lines" in plan, false, "失败的计划不带行（调用方不可能顺手清空面板）");
+  }
+
+  // 缺文件名/行数时如实兜底（不编一个像样的名字）
+  const thin = importPlanOf({ status: "ready", lines: [{}, {}], message: null });
+  assert.equal(thin.message, "已替换这首歌的歌词（2 行，来自「文件」）。", "行数按行数组算，文件名兜底成「文件」");
 });
 
 test("主窗面板共用：同一份行经 setLyrics 进播放状态（五档词表，认不出的按行数推断）", () => {

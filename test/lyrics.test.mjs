@@ -12,6 +12,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { parseLyrics, parseLyricsOrEmpty } from "../src/protocols/lyrics.mjs";
+// R41a：判据住在 sidecar（`src/main/lyrics-store.mjs`），这里用**真实解析器**与它对照
+import { hasTimedLyricLine, sanitizeLyricsDoc } from "../src/main/lyrics-store.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -110,6 +112,101 @@ test("parseLyrics：同一输入两次解析互不影响（不共享可变缓存
 test("parseLyricsOrEmpty：任何异常都降级为空数组（播放器不因歌词挂掉）", () => {
   assert.deepEqual(parseLyricsOrEmpty(null), []);
   assert.deepEqual(parseLyricsOrEmpty(SAMPLE_LRC).length, 3);
+});
+
+test("等价（R41a）：hasTimedLyricLine 与真实 parseLrc 在边界矩阵上给出同一个答案", () => {
+  // 为什么这条必须"用真实解析器对照"：判据住在 sidecar（进不了 AMLL 解析器，见
+  // `src/main/lyrics-store.mjs` 的说明），而它的正当性只有一句话——"与 parseLrc 等价"。
+  // 这句话靠读正则读不出来：R41a 就是这么发现原判据在两处说错了话的
+  //（`[00:01.0000]词`：官方认、判据不认；`[00:01.00]`：判据认、官方给 0 行）。
+  const agree = [
+    // 时间戳形状
+    "[00:01.00]词",
+    "[00:01]词",
+    "[0:1]词",
+    "[0:0.0]词",
+    "[100:01:500]词",
+    "[999:99.999]词",
+    "[00:01:50]词",
+    "[00:01:0]词",
+    "[00:01.0000]词",
+    "[000:01.00]词",
+    // 行首空白 / 行内空白
+    "  [00:01.00]词",
+    "\t[00:01.00]词",
+    "[00:01.00] 词",
+    "[00:01.00] 词 ",
+    // 元数据行与歌词行混在一起
+    "[ti:标题]\n[ar:艺人]\n[00:01.00]词",
+    "[offset:500]\n[00:01.00]词",
+    // 一行多个时间戳 / 逐字（增强型）
+    "[00:01.00][00:05.00]词",
+    "[00:01.00] [00:05.00]词",
+    "[00:01.00]<00:01.00>逐字",
+    "[00:01.00]词[b]",
+    // 后面几行有没有词不影响（"至少一行"）
+    "[00:01.00]词\n[00:05.00]",
+    "[00:01.00]词\n不是时间戳",
+    "[00:01.00]词\r\n[00:05.00]词",
+    // 两侧都说"不是歌词"
+    "",
+    "   \n\t ",
+    "[ti:标题]\n[ar:艺人]\n纯文本",
+    "没有时间戳的一行",
+    "[00:01.00]",
+    "[00:01]",
+    "[00:01.00]   ",
+    "[00:01.00]\t",
+    "[00:01.00]\u3000",
+    "[00:01.00]　",
+    "[00:01.00][00:05.00]",
+    "[00:01][00:02]",
+    "[1234:01.00]词",
+    "[00:999]词",
+    "[ 00:01.00]词",
+    "[00:01.00 ]词",
+    "[00:01,00]词",
+    "[00:01.]词",
+    "词 [00:01.00]词",
+  ];
+  for (const text of agree) {
+    const timed = hasTimedLyricLine(text);
+    const lines = parseLyrics(text).lineCount;
+    assert.equal(
+      timed,
+      lines > 0,
+      `两侧必须同答：${JSON.stringify(text)}（判据=${timed}，parseLrc=${lines} 行）`,
+    );
+  }
+
+  // 已知的**刻意不等价**（三处，都有理由；钉住它们是为了不让正则悄悄漂移）：
+  const knownDivergences = [
+    // 时间戳后面跟一个"不是时间戳的方括号"：官方把它当一行（词就是那个方括号里的东西），
+    // 判据说"没有词"。方向是**宁可不落盘**（把这种行当歌词缓存下来，用户看到的仍是方括号，
+    // 而那份缓存 90 天挡着真正的歌词）。
+    { text: "[00:01.00][Chorus]", amll: 1, timed: false },
+    { text: "[00:01.00][]", amll: 1, timed: false },
+    // 行首 BOM：官方解析器自己会剥（`parseLyrics` 的既有用例钉着），判据不剥——
+    // 但它**到不了**判据：唯一的调用点在 `sanitizeLyricsDoc` 里，那里第一步就是剥 BOM
+    //（下面一条断言钉住"那条路会剥"，所以这一处分歧在真实链路上不可达）。
+    { text: "\uFEFF[00:01.00]词", amll: 1, timed: false },
+  ];
+  for (const { text, amll, timed } of knownDivergences) {
+    assert.equal(
+      parseLyrics(text).lineCount,
+      amll,
+      `官方解析器在这一条上的答案变了：${JSON.stringify(text)}——等价矩阵要重新对齐`,
+    );
+    assert.equal(
+      hasTimedLyricLine(text),
+      timed,
+      `判据在这一条上的答案变了：${JSON.stringify(text)}——要么与官方对齐，要么显式改这张表`,
+    );
+  }
+  // 上面那条"不可达"的说法本身也要钉住：真实链路上 BOM 先被剥掉
+  const withBom = sanitizeLyricsDoc({ text: "\uFEFF[00:01.00]词" });
+  assert.notEqual(withBom, null, "行首 BOM 不影响『算不算歌词』（盘上/文件里都可能有）");
+  assert.equal(withBom.text, "[00:01.00]词", "剥掉的是 BOM，正文一个字符都不动");
 });
 
 test("禁止自绘：本模块必须复用 AMLL 官方 parseLrc，不得自带时间戳正则解析", () => {

@@ -813,7 +813,56 @@ test("歌词（R40）：日志口默认不存在时也不崩（协议层自己�
   assert.equal(lyrics.ok, false, "没有 log 注入位时照旧走完这条链");
 });
 
-test("歌词（R38）：白名单外的条目地址不进索引（不会被下载）", async () => {  const { calls, fetchImpl } = scriptedFetch((url) => {
+test("歌词（R41）：第 4 档的失败进会话内负缓存——同一首重复取词不再重放那次专辑请求", async () => {
+  const { calls, fetchImpl } = scriptedFetch((url) => {
+    if (url.includes("/api/playback")) {
+      return jsonResponse(okBody({ fileURL: "https://cdn.dbankcdn.cn/a.mp3", songInfo: { contentID: "s9", albumID: "A9" } }));
+    }
+    if (url.includes("/api/album")) {
+      // 这张专辑里没有这一首：第 4 档的"失败"，但它是**结论**（下次问也一样）
+      return jsonResponse(okBody({ albumInfoEx: { songSimpleInfos: [wireSong("other", { albumID: "A9" })] } }));
+    }
+    throw new Error(`不该请求：${url}`);
+  });
+  const api = apiOf({ fetchImpl });
+
+  const first = await api.getLyrics({ trackId: "s9" });
+  assert.equal(first.ok, false);
+  const second = await api.getLyrics({ trackId: "s9" });
+  assert.equal(second.ok, false, "第二次照旧如实失败（负缓存不是把失败改写成成功）");
+
+  const albumCalls = calls.filter((call) => call.url.includes("/api/album"));
+  assert.equal(albumCalls.length, 1, `同一对 (曲目, 专辑) 每进程只问一次：${albumCalls.length} 次`);
+  assert.equal(
+    calls.filter((call) => call.url.includes("/api/playback")).length,
+    2,
+    "前几档照旧每次都走（负缓存只管第 4 档那一次额外请求）",
+  );
+});
+
+test("歌词（R41）：负缓存的键是 (曲目, 专辑) 这一对——换了专辑 id 就是一次没试过的请求", async () => {
+  let albumCode = "A1";
+  const { calls, fetchImpl } = scriptedFetch((url) => {
+    if (url.includes("/api/playback")) {
+      return jsonResponse(okBody({ fileURL: "https://cdn.dbankcdn.cn/a.mp3", songInfo: { contentID: "s9", albumID: albumCode } }));
+    }
+    if (url.includes("/api/album")) return jsonResponse(okBody({ albumInfoEx: { songSimpleInfos: [] } }));
+    throw new Error(`不该请求：${url}`);
+  });
+  const api = apiOf({ fetchImpl });
+
+  await api.getLyrics({ trackId: "s9" });
+  albumCode = "A2";
+  await api.getLyrics({ trackId: "s9" });
+  assert.equal(
+    calls.filter((call) => call.url.includes("/api/album")).length,
+    2,
+    "换了专辑 id 就该再问一次（旧结论挡不住另一张专辑）",
+  );
+});
+
+test("歌词（R38）：白名单外的条目地址不进索引（不会被下载）", async () => {
+  const { calls, fetchImpl } = scriptedFetch((url) => {
     if (url.includes("/api/playlist/detail")) {
       return jsonResponse(
         okBody({
@@ -959,4 +1008,343 @@ test("music.mjs 只登记路径形状，不含任何域名与凭据字面量", a
   const source = readFileSync(fileURLToPath(new URL("../src/protocols/music.mjs", import.meta.url)), "utf8");
   assert.doesNotMatch(source, /https?:\/\//, "端点只能来自注入（绝对 URL 的默认值住在 src/main/music-service.mjs）");
   assert.doesNotMatch(source, /dbankcdn|tingmall|kuke/i, "CDN 白名单只许出现在 safe-media-url.mjs");
+});
+
+// —— R41：歌词的六跳编排（本地 → 内存 → 磁盘 → 华为四档 → 第三方 → invalid_response） ---------
+
+const CACHED_TEXT = "[00:01.00]磁盘缓存里的词\n";
+const LOCAL_TEXT = "[00:01.00]我自己导入的词";
+const THIRD_TEXT = "[00:01.00]第三方来的词\n";
+
+/** 一个记账用的内存缓存端口（形状与 src/main/lyrics-cache.mjs 的产物一致）。 */
+function stubCache({ local = null, cached = null } = {}) {
+  const writes = [];
+  const clears = [];
+  return {
+    writes,
+    clears,
+    readLocal: async (trackId) => (local === null ? null : { doc: { text: LOCAL_TEXT, format: "lrc", source: "local" }, fileName: "我的.lrc", importedAt: 7, ...(local[trackId] ?? {}) }),
+    readCached: async () => (cached === null ? null : { text: CACHED_TEXT, format: "lrc", source: "huawei" }),
+    writeCached: async (trackId, doc) => {
+      writes.push({ trackId, doc });
+      return { written: true };
+    },
+    writeLocal: async () => ({ written: true, doc: { text: LOCAL_TEXT, format: "lrc", source: "local" } }),
+    info: async () => ({ available: true, bytes: 10, entries: 1, localBytes: 20, localEntries: 2 }),
+    clear: async (options) => {
+      clears.push(options);
+      return { available: true, bytes: 0, entries: 0, localBytes: options.local === true ? 0 : 20, localEntries: options.local === true ? 0 : 2 };
+    },
+  };
+}
+
+/** 华为侧取不到歌词的 fetch：播放响应既没有地址也没有内嵌歌词（也没有专辑 id） */
+const missFetch = () =>
+  scriptedFetch((url) => {
+    if (url.includes("/api/playback")) return jsonResponse(okBody({ fileURL: "https://cdn.dbankcdn.cn/a.mp3" }));
+    throw new Error(`不该请求：${url}`);
+  });
+
+test("歌词（R41）：本地导入压过一切——命中本地就一次网络请求都不发", async () => {
+  const { calls, fetchImpl } = missFetch();
+  const cache = stubCache({ local: { s9: {} } });
+  const api = apiOf({ fetchImpl, api: { lyricsCache: cache, lyricsFallback: async () => ({ text: THIRD_TEXT, source: "kugou" }) } });
+
+  const lyrics = await api.getLyrics({ trackId: "s9", title: "歌" });
+  assert.equal(lyrics.ok, true);
+  assert.equal(lyrics.data.text, "[00:01.00]我自己导入的词");
+  assert.equal(lyrics.data.source, "local");
+  assert.equal(lyrics.data.fileName, "我的.lrc", "本地导入带上文件名（用户要认得出是哪一份）");
+  assert.deepEqual(calls, [], "本地命中就该短路——在线那几跳一次都不走");
+});
+
+test("歌词（R41）：内存缓存在磁盘之前命中（同一个进程里取第二次不打磁盘）", async () => {
+  const { fetchImpl } = missFetch();
+  let reads = 0;
+  const cache = {
+    readLocal: async () => null,
+    readCached: async () => {
+      reads += 1;
+      return { text: CACHED_TEXT, format: "lrc", source: "huawei" };
+    },
+    writeCached: async () => ({ written: true }),
+  };
+  const api = apiOf({ fetchImpl, api: { lyricsCache: cache } });
+
+  const first = await api.getLyrics({ trackId: "s9" });
+  assert.equal(first.data.cached, "disk", "第一次是磁盘命中");
+  const second = await api.getLyrics({ trackId: "s9" });
+  assert.equal(second.data.text, CACHED_TEXT);
+  assert.equal(second.data.cached, "memory", "第二次起走内存（磁盘读只发生一次）");
+  assert.equal(reads, 1, `磁盘只被读了一次：${reads}`);
+});
+
+test("歌词（R41）：磁盘缓存在华为那条链之前命中——命中就不打业务接口", async () => {
+  const { calls, fetchImpl } = missFetch();
+  const api = apiOf({ fetchImpl, api: { lyricsCache: stubCache({ cached: true }) } });
+
+  const lyrics = await api.getLyrics({ trackId: "s9" });
+  assert.equal(lyrics.data.text, CACHED_TEXT);
+  assert.equal(lyrics.data.cached, "disk");
+  assert.equal(lyrics.data.source, "huawei", "来源仍是它当初被取回来的那个来源");
+  assert.deepEqual(calls, [], "缓存命中不该再发请求");
+});
+
+test("歌词（R41）：华为四档命中 → 写内存 + 写磁盘，并注明 source:huawei", async () => {
+  const { fetchImpl } = scriptedFetch((url) => {
+    if (url.includes("/api/playback")) {
+      return jsonResponse(okBody({ fileURL: "https://cdn.dbankcdn.cn/a.mp3", songInfo: { contentID: "s9", lyricAddress: "https://cdn.dbankcdn.cn/s9.lrc" } }));
+    }
+    if (url.endsWith("/s9.lrc")) return new Response("[00:01.00]华为给的词", { status: 200 });
+    throw new Error(`不该请求：${url}`);
+  });
+  const cache = stubCache();
+  const api = apiOf({ fetchImpl, api: { lyricsCache: cache } });
+
+  const lyrics = await api.getLyrics({ trackId: "s9" });
+  assert.equal(lyrics.ok, true);
+  assert.equal(lyrics.data.source, "huawei");
+  assert.match(lyrics.data.text, /华为给的词/);
+  assert.equal(cache.writes.length, 1, "命中之后写了一次磁盘");
+  assert.equal(cache.writes[0].trackId, "s9");
+  assert.equal(cache.writes[0].doc.source, "huawei");
+});
+
+test("歌词（R41）：华为全落空 + 有标题 → 第三方回退命中，记 source 并写缓存", async () => {
+  const { fetchImpl } = missFetch();
+  const cache = stubCache();
+  const queries = [];
+  const api = apiOf({
+    fetchImpl,
+    api: {
+      lyricsCache: cache,
+      lyricsFallback: async (query) => {
+        queries.push(query);
+        return { text: THIRD_TEXT, source: "lrclib", matchedTitle: "歌", matchedArtist: "艺人" };
+      },
+    },
+  });
+
+  const lyrics = await api.getLyrics({ trackId: "s9", title: "歌", artist: "艺人", durationSeconds: 200 });
+  assert.equal(lyrics.ok, true);
+  assert.equal(lyrics.data.source, "lrclib");
+  assert.equal(lyrics.data.matchedTitle, "歌");
+  assert.deepEqual(queries, [{ title: "歌", artist: "艺人", durationSeconds: 200 }], "元信息原样交给匹配器");
+  assert.equal(cache.writes[0].doc.source, "lrclib", "第三方命中也落盘（下次不必再搜）");
+});
+
+test("歌词（R41）：没有标题就不试第三方（盲搜不算机会），如实回华为那次的失败", async () => {
+  const { fetchImpl } = missFetch();
+  let asked = 0;
+  const api = apiOf({
+    fetchImpl,
+    api: {
+      lyricsFallback: async () => {
+        asked += 1;
+        return { text: THIRD_TEXT, source: "kugou" };
+      },
+    },
+  });
+
+  const lyrics = await api.getLyrics({ trackId: "s9" });
+  assert.equal(lyrics.ok, false);
+  assert.equal(lyrics.error.kind, MUSIC_ERROR_KINDS.invalidResponse, "回的是华为那次的失败（不是笼统的『没有歌词』）");
+  assert.equal(asked, 0, "没有标题时第三方端口一次都不该被调");
+});
+
+test("歌词（R41a）：既没有艺人、也没有可用时长就**不发请求**（匹配器的最高分必然不过门槛）", async () => {
+  const { fetchImpl } = missFetch();
+  const logs = [];
+  let asked = 0;
+  const api = apiOf({
+    fetchImpl,
+    api: {
+      log: (line) => logs.push(line),
+      lyricsFallback: async () => {
+        asked += 1;
+        return { text: THIRD_TEXT, source: "kugou" };
+      },
+    },
+  });
+
+  // 只有标题：艺人没有、时长也没有 → 最高分是"标题精确"那 1.3 < MIN_SCORE 1.5。
+  // 结果是注定的，代价却是两个服务各一次往返 + 各 8 秒超时（最坏 16 秒），所以干脆不问。
+  const bare = await api.getLyrics({ trackId: "s9", title: "歌" });
+  assert.equal(bare.ok, false);
+  assert.equal(bare.error.kind, MUSIC_ERROR_KINDS.invalidResponse, "照旧回华为那次的失败（不是笼统的『没有歌词』）");
+  assert.equal(asked, 0, "一次都不该问");
+  assert.ok(
+    logs.some((line) => line.includes("第三方歌词回退跳过")),
+    `跳过要留一行痕（不然"这次为什么没试第三方"没人说得清）：${JSON.stringify(logs)}`,
+  );
+
+  // 时长 ≤ 30 秒不构成佐证（`scoreCandidate` 只认"两边都 > 30 秒"的样本）→ 与"没有时长"同档
+  await api.getLyrics({ trackId: "s9", title: "歌", durationSeconds: 25 });
+  assert.equal(asked, 0, "太短的时长不算佐证，同样不问");
+
+  // 但"只有艺人"（标题精确 1.3 + 艺人宽松 0.6 = 1.9）与"只有可用时长"（1.3 + 0.6）都能过门槛：
+  // 短路条件只在这一种组合上，不是"三个值必须齐全"
+  const withArtist = await api.getLyrics({ trackId: "s9", title: "歌", artist: "艺人" });
+  assert.equal(withArtist.ok, true);
+  assert.equal(asked, 1, "有艺人就照旧试（换成别的曲目 id：内存缓存会短路同一首的第二次）");
+  const withDuration = await api.getLyrics({ trackId: "s9b", title: "歌", durationSeconds: 200 });
+  assert.equal(withDuration.ok, true);
+  assert.equal(asked, 2, "有可用时长也照旧试");
+});
+
+test("歌词（R41）：第三方也没命中 → 回华为那次的失败；失败不写缓存", async () => {
+  const { fetchImpl } = missFetch();
+  const cache = stubCache();
+  const api = apiOf({
+    fetchImpl,
+    api: { lyricsCache: cache, lyricsFallback: async () => null },
+  });
+
+  const lyrics = await api.getLyrics({ trackId: "s9", title: "歌" });
+  assert.equal(lyrics.ok, false);
+  assert.equal(lyrics.error.kind, MUSIC_ERROR_KINDS.invalidResponse);
+  assert.deepEqual(cache.writes, [], "没有歌词就绝不落盘（『没歌词』必须能被下一次尝试推翻）");
+});
+
+test("歌词（R41）：第三方端口抛错不影响这条链（静默回华为那次的失败）", async () => {
+  const { fetchImpl } = missFetch();
+  const logs = [];
+  const api = apiOf({
+    fetchImpl,
+    api: {
+      log: (line) => logs.push(line),
+      lyricsFallback: async () => {
+        throw new Error("第三方库挂了");
+      },
+    },
+  });
+  // 带上艺人：这一条钉的是"端口抛错"（R41a 之后，只有标题+无可用时长的曲目根本不会问端口）
+  const lyrics = await api.getLyrics({ trackId: "s9", title: "歌", artist: "艺人" });
+  assert.equal(lyrics.ok, false);
+  assert.equal(lyrics.error.kind, MUSIC_ERROR_KINDS.invalidResponse);
+  assert.ok(logs.some((line) => line.includes("第三方歌词回退失败")), JSON.stringify(logs));
+});
+
+test("歌词（R41）：缓存端口抛错 / 坏形状 → 当作没命中，照旧走在线那条路（缓存不该挡路）", async () => {
+  const { fetchImpl, calls } = scriptedFetch((url) => {
+    if (url.includes("/api/playback")) {
+      return jsonResponse(okBody({ fileURL: "https://cdn.dbankcdn.cn/a.mp3", songInfo: { contentID: "s9", lyricAddress: "https://cdn.dbankcdn.cn/s9.lrc" } }));
+    }
+    if (url.endsWith("/s9.lrc")) return new Response("[00:01.00]华为给的词", { status: 200 });
+    throw new Error(`不该请求：${url}`);
+  });
+  const broken = {
+    readLocal: async () => {
+      throw new Error("本地目录读不动");
+    },
+    readCached: async () => ({ text: "" }),
+    writeCached: async () => {
+      throw new Error("磁盘写不动");
+    },
+  };
+  const logs = [];
+  const api = apiOf({ fetchImpl, api: { lyricsCache: broken, log: (line) => logs.push(line) } });
+
+  const lyrics = await api.getLyrics({ trackId: "s9" });
+  assert.equal(lyrics.ok, true, "缓存坏了不该让取词失败");
+  assert.match(lyrics.data.text, /华为给的词/);
+  assert.ok(calls.some((call) => call.url.includes("/api/playback")));
+  assert.equal(logs.length, 2, `两条都要留痕（本地读失败 + 写盘失败）：${JSON.stringify(logs)}`);
+});
+
+test("歌词（R41）：内存缓存有上限（FIFO）——超限时最旧一条被淘汰", async () => {
+  const { fetchImpl } = scriptedFetch((url) => {
+    if (url.includes("/api/playback")) {
+      const id = new URL(url).searchParams.get("contentCode");
+      return jsonResponse(okBody({ fileURL: "https://cdn.dbankcdn.cn/a.mp3", songInfo: { contentID: id, lyricAddress: `https://cdn.dbankcdn.cn/${id}.lrc` } }));
+    }
+    return new Response(`[00:01.00]词 ${new URL(url).pathname}`, { status: 200 });
+  });
+  let reads = 0;
+  const cache = {
+    readLocal: async () => null,
+    readCached: async () => {
+      reads += 1;
+      return null;
+    },
+    writeCached: async () => ({ written: true }),
+  };
+  const api = apiOf({ fetchImpl, api: { lyricsCache: cache, lyricMemoryLimit: 2 } });
+
+  await api.getLyrics({ trackId: "s1" });
+  await api.getLyrics({ trackId: "s2" });
+  await api.getLyrics({ trackId: "s3" });
+  await api.getLyrics({ trackId: "s1" }); // s1 已被淘汰 → 这一次要重新走在线那条路
+  assert.equal((await api.getLyrics({ trackId: "s3" })).data?.cached, "memory", "最新的那条在内存里");
+  assert.equal((await api.getLyrics({ trackId: "s1" })).data?.cached, "memory", "s1 被重新取过，又在内存里了");
+  assert.equal(reads, 4, `内存上限 2 → 六次取词里只有四次穿透到磁盘：${reads}`);
+});
+
+test("歌词（R41）：importLyrics 写本地 + 立刻进内存 + 没有缓存端口时如实报 cache_unavailable", async () => {
+  const cache = stubCache();
+  const api = apiOf({ api: { lyricsCache: cache } });
+  const imported = await api.importLyrics({ trackId: "s9", text: "[00:01.00]导入的词", fileName: "我的.lrc" });
+  assert.equal(imported.ok, true);
+  assert.equal(imported.data.source, "local");
+  assert.equal(imported.data.fileName, "我的.lrc");
+
+  // 导入之后再取词：命中本地那一条（端口给的是固定文本，这里只验链路真的短路过）
+  const again = await api.getLyrics({ trackId: "s9" });
+  assert.equal(again.data.source, "local");
+
+  // 参数校验
+  assert.equal((await api.importLyrics({ text: "x" })).error.kind, MUSIC_ERROR_KINDS.missingParam);
+  assert.equal((await api.importLyrics({ trackId: "s9", text: "   " })).error.kind, MUSIC_ERROR_KINDS.invalidResponse);
+
+  // 端口写失败（坏文本）：kind 映射成 invalid_response，并且把原因带上
+  const rejecting = apiOf({
+    api: {
+      lyricsCache: {
+        writeLocal: async () => {
+          const error = new Error("这段文本不是可用的歌词");
+          error.kind = "invalid_payload";
+          throw error;
+        },
+      },
+    },
+  });
+  const bad = await rejecting.importLyrics({ trackId: "s9", text: "无时间戳" });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.error.kind, MUSIC_ERROR_KINDS.invalidResponse);
+  assert.match(bad.error.message, /不是可用的歌词/);
+
+  // 根本没有缓存端口（没有数据目录）：如实报"存不下来"，不假装成功
+  const noCache = apiOf({});
+  const unavailable = await noCache.importLyrics({ trackId: "s9", text: "[00:01.00]词" });
+  assert.equal(unavailable.ok, false);
+  assert.equal(unavailable.error.kind, MUSIC_ERROR_KINDS.cacheUnavailable);
+});
+
+test("歌词（R41）：lyricsCacheInfo / clearLyricsCache——清了在线缓存会顺手清内存，但留下本地那几首", async () => {
+  const cache = stubCache();
+  const { fetchImpl } = scriptedFetch((url) => {
+    if (url.includes("/api/playback")) {
+      return jsonResponse(okBody({ fileURL: "https://cdn.dbankcdn.cn/a.mp3", songInfo: { contentID: "s9", lyricAddress: "https://cdn.dbankcdn.cn/s9.lrc" } }));
+    }
+    return new Response("[00:01.00]华为给的词", { status: 200 });
+  });
+  const api = apiOf({ fetchImpl, api: { lyricsCache: cache } });
+
+  assert.deepEqual(await api.lyricsCacheInfo(), { ok: true, data: { available: true, bytes: 10, entries: 1, localBytes: 20, localEntries: 2 } });
+
+  // 先取一次词把内存填上，再清（默认只清在线缓存）
+  await api.getLyrics({ trackId: "s9" });
+  const cleared = await api.clearLyricsCache({});
+  assert.equal(cleared.ok, true);
+  assert.deepEqual(cache.clears, [{ local: false }]);
+  assert.equal((await api.getLyrics({ trackId: "s9" })).data?.cached, undefined, "内存里那一份也清了（否则用户以为清除没生效）");
+
+  const withLocal = await api.clearLyricsCache({ local: true });
+  assert.equal(withLocal.ok, true);
+  assert.deepEqual(cache.clears[1], { local: true });
+
+  // 没有端口时：两个方法都如实报不可用，不假装成功
+  const none = apiOf({});
+  assert.deepEqual((await none.lyricsCacheInfo()).data, { available: false, bytes: 0, entries: 0, localBytes: 0, localEntries: 0 });
+  assert.equal((await none.clearLyricsCache({})).error.kind, MUSIC_ERROR_KINDS.cacheUnavailable);
 });

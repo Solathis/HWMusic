@@ -124,3 +124,31 @@ test("保存中禁用：写盘期间按钮不可重复点（一次点击 = 一�
   assert.match(source, /disabled=\{/, "保存/测试/自启开关都要有禁用态");
   assert.match(source, /saving|busy|pending/, "要有进行中的状态（否则用户只能靠再点一次判断）");
 });
+
+// ---------------------------------------------------------------------------
+// R41：歌词缓存卡（挂点，不是二级分类——那是第二波）
+// ---------------------------------------------------------------------------
+
+test("歌词缓存卡（R41）：挂在设置页里，且与「桌面歌词」卡同一个 lyrics 绑定", () => {
+  const source = settingsPageSource();
+  assert.match(read("src/renderer/pages.tsx"), /from\s+"\.\/lyrics-cache-card\.tsx"/, "卡片是独立组件（设置页不继续膨胀）");
+  assert.match(source, /<LyricsCacheCard lyrics=\{lyrics\}\s*\/>/, "挂点：把外壳交下来的 lyrics 绑定传进去");
+});
+
+test("歌词缓存卡（R41）：文件选择用系统标准控件；清缓存要确认；本地导入默认不删", () => {
+  const card = read("src/renderer/lyrics-cache-card.tsx");
+  // 零 Rust / 零 capability：渲染层的标准文件输入
+  assert.match(card, /type="file"/, "文件选择用系统标准控件");
+  assert.match(card, /accept=\{LYRICS_IMPORT_ACCEPT\}/, "accept 来自常量（.lrc,.txt，与文案同一处真源）");
+  assert.doesNotMatch(card, /invoke\(|coreCall\(/, "卡片自己不调 IPC：走 getLyricsBridge（频道常量只在共享真源里）");
+  // 删用户的文件要确认，而且默认不删
+  assert.match(card, /<AlertDialog/, "清除要有确认框（尤其勾上「连本地导入一起清」时）");
+  assert.match(card, /useState\(false\)/, "「连本地导入一起清」默认关（删用户的文件不是默认行为）");
+  assert.match(card, /withLocal[\s\S]{0,120}会删掉在线缓存与你自己导入的歌词文件/, "确认框要说清这一次到底删什么");
+  // 没有当前曲目就不给导入，并说清原因
+  assert.match(card, /canImport/, "导入入口要有可用性判定（没有正在播放的曲目时禁用）");
+  assert.match(card, /先播一首，再导入歌词/, "禁用不是终点：要告诉用户下一步");
+  // 占用读不到就说读不到（不显示 0 条那种假数字；三种状态由纯函数分开）
+  assert.match(card, /lyricsCacheSizeText\(info, \{ failed: infoFailed \}\)/, "占用文案来自纯函数（不可用/读不到那两档由它兜住）");
+  assert.match(card, /setInfoFailed\(true\)/, "调用失败要落'读不到'那一档（不许说成'没有数据目录'）");
+});

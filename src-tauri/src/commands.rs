@@ -41,6 +41,14 @@ use crate::MAIN_WINDOW_LABEL;
 /// 广播一次（`NoticeQueue` 冲刷**只发生一次**），渲染层 reload/崩溃重启之后那一条已经错过了 ——
 /// 门禁会永远停在 `checking`（"正在检查登录状态…"）。少了这条频道，`core_call` 会在**这里**
 /// 就被拒（`unknown_channel`），而渲染层看到的仍然只是"一直在检查"。
+///
+/// R41 增补 `lyrics:*` 三条：**歌词体系**的三件事（本地导入 / 缓存占用 / 清缓存）。
+/// 少了它们的后果各不相同，但都表现为"按钮点了没反应或界面说错话"：
+/// - `lyrics:import` 缺失 → 用户导入 `.lrc` 之后那首歌仍然放的是在线歌词（导入悄悄失败）；
+/// - `lyrics:cache-info` 缺失 → 设置页那张卡永远显示"读不到占用"；
+/// - `lyrics:cache-clear` 缺失 → "清除缓存"按下去什么都没发生，而用户以为清了。
+/// 三条都在**这里**被准入，与 `library:*` / `playback:*` 同一条规矩（唯一真源在
+/// `src/shared/request-channels.ts`，本数组是它的镜像副本，由 channel-parity 测试钉住）。
 pub const REQUEST_CHANNELS: &[&str] = &[
     "auth:login",
     "auth:logout",
@@ -59,6 +67,9 @@ pub const REQUEST_CHANNELS: &[&str] = &[
     "library:history",
     "playback:resolve-url",
     "playback:lyrics",
+    "lyrics:import",
+    "lyrics:cache-info",
+    "lyrics:cache-clear",
 ];
 
 /// core → 宿主 的宿主要求频道（与 src/shared/request-channels.ts 的 HOST_REQUEST_CHANNELS 同源）。

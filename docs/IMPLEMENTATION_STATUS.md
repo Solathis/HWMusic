@@ -109,6 +109,17 @@
 | R40-5 | **曲目表横向溢出** | **verified（真机 CDP，三档窗宽）** | 根因（真机实测）：`table-layout: auto` 下 `w-40` 只是建议——艺人/专辑被 nowrap 内容撑到 318 / 479 px，表格长到 **1361 px** 而内容区 **1024 px**，整表横向溢出（`.tmp/r40-table-baseline.json`）。改法：`table-fixed` + 列宽配比常量（艺人 18% / 专辑 22%，标题吃余量）+ 列内真 `truncate`。复测：**1280 / 1024 / 820** 三档窗宽下 `horizontalOverflowChain = []`、`documentOverflow = false`、容器 `scrollWidth == clientWidth`；窄窗下艺人列 `clientW=81 / scrollW=149 / text-overflow=ellipsis`（.tmp/r40-item56-*.json、r40-item5-clipping.json）。顺带修掉一处真机抓到的 React 重复 key（行 key 带上行号） |
 | R40-6 | **PlayerBar 控件居中**（三区布局） | **verified（真机 CDP，三档窗宽）** | 控件组 `absolute left-1/2 -translate-x-1/2`，三档窗宽下**中点偏差 0 px**（1280：栏中点 768 / 控件中点 768；1024：640/640；820：538/538，`.tmp/r40-item56-*.json`）。选绝对定位而不是 `flex-1 basis-0` 等分：两侧内容天然不等宽，等分只让剩余空间相等、中点仍会漂（理由写在组件注释里）；代价是极窄窗宽下可能与左区重叠，左区文字先截断、控件始终完整可点 |
 
+**R41 逐项分档**（2026-10-21；报告 `.superpowers/sdd/2026-10-18-full-rebuild-from-zero/task-41a-report.md`；
+本轮的 Rust / sidecar 改动**要重启应用**才生效，见报告 §需重启清单）
+
+| # | 项 | 状态 | 决定性证据（可复现） |
+|---|---|---|---|
+| R41-1 | **歌词磁盘缓存**（`lyrics-cache/` 90 天 TTL + `lyrics-local/` 本地导入）与三条 `lyrics:*` 频道 | **代码级 verified + 真进程 e2e verified**；真机生效**待重启** | `test/lyrics-cache.test.mjs` 12 条（真目录：TTL / 原子写 / prune / 清缓存默认不删本地导入 / 无数据目录如实报不可用）；`test/sidecar-e2e.test.mjs` 用**真 sidecar 进程 + 真数据目录**跑通「导入 → 占用 +1 → `playback:lyrics` 命中本地 → 清缓存」；真机上渲染层对**运行中的旧二进制**调 `lyrics:cache-info` 得到 `unknown_channel`（`.tmp/r41-live/r41-channel-probe.json`）——"改了但要重启"这条事实本身有证据 |
+| R41-2 | **本地导入 `.lrc`/`.txt`**（渲染层解码 BOM → UTF-8 严格 → GBK；导入即生效） | **代码级 verified + 真机 UI 链路 verified** | `test/lyrics-import.test.mjs`（解码退化链、四类拒绝文案、桥只发**文本**不发路径）；真机 CDP：`DOM.setFileInputFiles` 把一份真 `.lrc` 塞进隐藏的 `<input type=file>` → 卡片把 core 的结论如实显示（`.tmp/r41-live/r41-ui-import.json`） |
+| R41-3 | **第三方回退**（Kugou → lrclib；严格 title+artist+duration、8 秒超时、失败静默不缓存、UA 不带凭据） | **代码级 verified**（联网未在真机验） | `test/lyrics-provider.test.mjs` 8 条 + `test/lyrics-fallback.test.mjs` 8 条（注入 fetch：三步走通 / 严格匹配拒绝翻唱与"安静下来" / 五类失败静默 / 请求头只有 accept+UA+referer） |
+| R41-4 | **`getLyrics` 六跳编排**（本地 → 内存 → 磁盘 → 华为四档 → 第三方 → `invalid_response`）+ 第 4 档会话内负缓存 | **代码级 verified** | `test/music.test.mjs` 的 R41 组（本地压过一切、内存/磁盘命中不打网络、失败不缓存、缓存端口抛错不挡路、导入接口、负缓存按 (曲目, 专辑) 生效）；`docs/API_CONTRACT.md` §2.3.2 |
+| R41-5 | **桌面歌词窗**：显示前重新加载页面（从"加载失败 ⇒ 永久空白"里恢复）+ 主题跟随 + 窗口标题 | **根因取证 verified（真机 Win32/像素）；修法待重启复测** | 品红背板实验：那块 960×120 里**非品红像素 0**（页面一个像素都没画，`.tmp/r41-live/r41-lyrics-over-magenta.png`）；`1420` 无监听 + vite 日志止于 16:27:50（页面恰在建窗那一刻加载失败）；窗口 960×120 @ (480,792) = `desktop_position` 的正解、`WS_EX_TOPMOST` 在、exStyle `0x40118`（无 `WS_EX_TOOLWINDOW` ⇒ Alt+Tab 里显示 "Tauri App"），`.tmp/r41-windows.json` |
+| R41-6 | **设置页歌词挂点**（缓存占用 / 一键清除 / 导入入口） | **verified（真机 CDP）** | `.tmp/r41-verify.mjs` **15/15 PASS**：卡片挂载、`accept=.lrc,.txt`、两个按钮在、占用文案三档分得开（正在读取 / 数字 / 读不到）、开关能关能开、窗打开时主窗重推 `lyrics:document`（广播回声）、0 console error / 0 pageerror |
 
 ---
 

@@ -20,7 +20,7 @@ import {
   CORE_LYRICS_PROGRESS,
   CORE_LYRICS_TOGGLE,
 } from "../../../shared/commands.ts";
-import { PLAYBACK_LYRICS } from "../../../shared/request-channels.ts";
+import { LYRICS_CACHE_CLEAR, LYRICS_CACHE_INFO, LYRICS_IMPORT, PLAYBACK_LYRICS } from "../../../shared/request-channels.ts";
 import {
   coreLyricsConfigure,
   coreLyricsDocument,
@@ -30,6 +30,7 @@ import {
   onCoreEvent,
 } from "../../host-api.ts";
 import { parseAmllLyrics } from "./amll-adapter.ts";
+import { readLyricsFile } from "./lyrics-import.mjs";
 import {
   DEFAULT_LYRICS_CONFIG,
   LYRICS_STATUS,
@@ -64,6 +65,28 @@ export function lyricsStatusFromAnswer(answer) {
     config: normalizeLyricsConfig(source.config, DEFAULT_LYRICS_CONFIG),
     visible: source.visible === true,
   };
+}
+
+/**
+ * 曲目元信息 → `playback:lyrics` 的载荷字段（R41）。
+ *
+ * 三个值只用于**第三方回退的严格匹配**，所以认不出就**不带**（不是编一个默认值）：
+ * 一个编出来的时长会把匹配器带偏，而匹配器是"宁可不显示"的那一侧。
+ */
+function metadataPayload(query) {
+  const payload = {};
+  if (typeof query.title === "string" && query.title.trim() !== "") payload.title = query.title.trim();
+  if (typeof query.artist === "string" && query.artist.trim() !== "") payload.artist = query.artist.trim();
+  const duration = Number(query.durationSeconds);
+  if (Number.isFinite(duration) && duration > 0) payload.durationSeconds = duration;
+  return payload;
+}
+
+/** 失败 → 一句人话：core 的错误消息本来就是给用户看的（带原因与下一步），有就用它。 */
+function failureText(error) {
+  const message = error !== null && typeof error === "object" ? error.message : null;
+  if (typeof message === "string" && message.trim() !== "") return message;
+  return "导入失败（详情见运行日志）。";
 }
 
 /** 进度载荷归一（字段名只在这里拼一次）。 */
@@ -124,21 +147,85 @@ export function createLyricsBridge(deps = {}) {
    *
    * 失败分类如实分开：端点没配（`endpoint_unknown`）说"尚未配置"，别的失败说"暂时取不到"
    * ——把后者说成前者，用户会去设置里找一个本来就填好的端点。
+   *
+   * ## R41：入参可以带曲目元信息（`title` / `artist` / `durationSeconds`）
+   *
+   * 三个值只有**一个用途**：华为那条链全落空时，sidecar 拿它们去第三方公开歌词库做
+   * **严格匹配**（标题 + 艺人 + 时长，见 `src/main/lyrics-provider.mjs`）。缺了它们，
+   * 那一跳就不发生（没有标题的回退等于盲搜）——所以这里只传渲染层确实有的值，绝不补默认值。
+   *
+   * 兼容旧的字符串入参（`loadLyrics("s1")`）：那是 R40 的形状，测试与调用点都还在用。
    */
-  async function loadLyrics(trackId) {
+  async function loadLyrics(target) {
+    const query = target !== null && typeof target === "object" ? target : { trackId: target };
+    const id = typeof query.trackId === "string" ? query.trackId.trim() : "";
+    if (id === "") return { status: LYRICS_STATUS.unavailable, lines: [], source: null };
+
+    const payload = { trackId: id, ...metadataPayload(query) };
+    let answer;
+    try {
+      answer = await callCore(PLAYBACK_LYRICS, payload);
+    } catch (error) {
+      return { status: lyricsStatusFromFailure(error), lines: [], source: null };
+    }
+    const record = answer !== null && typeof answer === "object" ? answer : {};
+    const text = typeof record.text === "string" ? record.text : "";
+    const parsed = parseLyrics(text);
+    const lines = Array.isArray(parsed?.lines) ? parsed.lines : [];
+    return {
+      status: lines.length > 0 ? LYRICS_STATUS.ready : LYRICS_STATUS.empty,
+      lines,
+      // 来源只作说明（界面与日志用）：认不出就是 null，不编一个"未知来源"出来
+      source: typeof record.source === "string" && record.source !== "" ? record.source : null,
+    };
+  }
+
+  /**
+   * 导入本地歌词文件（R41）：解码与"能不能解析出歌词行"都在这里判（见 `lyrics-import.mjs`），
+   * 通过了才把**文本**交给 core 落盘。
+   *
+   * 返回值与 `loadLyrics` 同形（`{status, lines, source, message}`）：导入成功 = 这一首的歌词
+   * **立刻**就是这一份，调用方不必再取一次词（少一次 IPC，也少一段"刚导入完又显示旧的"的窗口）。
+   */
+  async function importLyrics({ trackId, file } = {}) {
     const id = typeof trackId === "string" ? trackId.trim() : "";
-    if (id === "") return { status: LYRICS_STATUS.unavailable, lines: [] };
+    if (id === "") {
+      return { status: LYRICS_STATUS.unavailable, lines: [], source: null, message: "没有正在播放的曲目：先播一首，再导入歌词。" };
+    }
+    const read = await readLyricsFile(file, { parseLines: (text) => parseLyrics(text)?.lines?.length ?? 0 });
+    if (read.ok !== true) {
+      return { status: LYRICS_STATUS.failed, lines: [], source: null, message: read.error.message };
+    }
 
     let answer;
     try {
-      answer = await callCore(PLAYBACK_LYRICS, { trackId: id });
+      answer = await callCore(LYRICS_IMPORT, { trackId: id, text: read.data.text, fileName: read.data.fileName });
     } catch (error) {
-      return { status: lyricsStatusFromFailure(error), lines: [] };
+      return { status: lyricsStatusFromFailure(error), lines: [], source: null, message: failureText(error) };
     }
-    const text = answer !== null && typeof answer === "object" && typeof answer.text === "string" ? answer.text : "";
-    const parsed = parseLyrics(text);
+    // 落盘成功的回执就是"这一份现在生效"：用它确认（`source` 一定是 local），再本地解析一次
+    const accepted = answer !== null && typeof answer === "object" && answer.source === "local";
+    const parsed = parseLyrics(read.data.text);
     const lines = Array.isArray(parsed?.lines) ? parsed.lines : [];
-    return { status: lines.length > 0 ? LYRICS_STATUS.ready : LYRICS_STATUS.empty, lines };
+    return {
+      status: lines.length > 0 ? LYRICS_STATUS.ready : LYRICS_STATUS.empty,
+      lines,
+      source: "local",
+      message: null,
+      accepted,
+      fileName: read.data.fileName,
+      lineCount: read.data.lineCount,
+    };
+  }
+
+  /** 读两处磁盘占用（`lyrics:cache-info`）——设置页那张卡用它。 */
+  async function readCacheInfo() {
+    return callCore(LYRICS_CACHE_INFO, null);
+  }
+
+  /** 清缓存（`lyrics:cache-clear`）；`local: true` 才连本地导入一起删。 */
+  async function clearCache(options = {}) {
+    return callCore(LYRICS_CACHE_CLEAR, { local: options.local === true });
   }
 
   /** 把歌词文档转发给歌词窗（主窗面板与歌词窗共用同一份行数组）。 */
@@ -169,6 +256,9 @@ export function createLyricsBridge(deps = {}) {
     applyConfig,
     subscribeToggle,
     loadLyrics,
+    importLyrics,
+    readCacheInfo,
+    clearCache,
     pushDocument,
     pushProgress,
   };

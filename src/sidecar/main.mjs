@@ -16,6 +16,7 @@
 import { createBridge } from "../host/bridge.mjs";
 import { createDispatcher } from "../host/dispatcher.mjs";
 import { createLibraryHandlers } from "../host/library-handlers.mjs";
+import { createLyricsHandlers } from "../host/lyrics-handlers.mjs";
 import { createPlaybackHandlers } from "../host/playback-handlers.mjs";
 import { createProxyHandlers } from "../host/proxy-handlers.mjs";
 import { createRpc } from "../host/rpc.mjs";
@@ -23,6 +24,8 @@ import { createHostServices } from "../host/host-services.mjs";
 import { createAuthManager } from "../main/auth-manager.ts";
 import { dataDirFromArgv } from "../main/data-dir.mjs";
 import { createLoginHost } from "../main/huawei.ts";
+import { createLyricsCache } from "../main/lyrics-cache.mjs";
+import { createThirdPartyLyrics } from "../main/lyrics-fallback.mjs";
 import { createMusicService } from "../main/music-service.mjs";
 import { applyStartupProxy, testProxyConnection } from "../main/proxy.mjs";
 import { createMusicSessionVerifier } from "../main/session-verifier.mjs";
@@ -52,6 +55,7 @@ function implementedBy(channel) {
   if (channel.startsWith("settings:")) return "R6 设置与统一代理";
   if (channel.startsWith("library:")) return "R8 主界面";
   if (channel.startsWith("playback:")) return "R9 播放器";
+  if (channel.startsWith("lyrics:")) return "R41 歌词体系";
   return "后续任务";
 }
 
@@ -99,21 +103,40 @@ dispatcher.register(SETTINGS_SET, async (request) => {
   return answer;
 });
 
-// —— 库页面数据通道（R8；R32 换血：默认端点表 + 会话注入）——
+// —— 库页面数据通道（R8；R32 换血：默认端点表 + 会话注入；R41 接上歌词缓存与第三方回退）——
 //
 // 端点：默认值 = 参考实现的实测端点（`src/main/music-service.mjs` 的 `MUSIC_ENDPOINT_DEFAULTS`），
 // 设置文档 `data.musicEndpoints` 可逐键覆盖或显式关闭（`null`）。
 // 会话：**取值函数**而不是快照——这段装配发生在 `authManager` 之前，而会话要等登录/恢复之后才有。
 // 没有会话时协议层如实回 `session_required`（"先登录"），绝不拿匿名请求冒充"你的库是空的"。
+//
+// R41 的两个歌词端口（都在**数据根**下，数据根来自宿主的 `--data-dir`；没有数据根时缓存如实报
+// "不可用"，而不是假装"0 条 0 字节"）：
+// - `lyricsCache`：`lyrics-cache/`（在线结果，90 天 TTL）+ `lyrics-local/`（用户导入，永远最优先）；
+// - `lyricsFallback`：华为四档全落空且曲目有标题时的第三方回退（Kugou → lrclib）。
+//   它走**全局 fetch**，所以设置里的代理照常生效（见 `src/main/lyrics-fallback.mjs` 的文件头）。
 let musicSessionSource = null;
+const lyricsCache = createLyricsCache({ dir: dataDir, log });
+const lyricsFallback = createThirdPartyLyrics({ log });
 const musicService = createMusicService({
   settingsData: settings.data,
   session: () => (musicSessionSource === null ? null : musicSessionSource()),
   // R40：协议层的诊断口（**只记键名**）。目前只有一处输出：歌词回落到"按专辑补索引"时，
   // 记下播放响应的键名——"播放响应里有没有 albumID"这句话得靠真机日志，不靠猜。
   log,
+  lyricsCache,
+  lyricsFallback,
 });
 for (const [channel, handler] of Object.entries(createLibraryHandlers({ api: musicService.api }))) {
+  dispatcher.register(channel, handler);
+}
+
+// —— 歌词体系三条管理频道（R41）——
+//
+// 与 `playback:lyrics`（取词）分开：这三条是 `lyrics:import`（导入本地 .lrc/.txt）、
+// `lyrics:cache-info`（两处磁盘占用）、`lyrics:cache-clear`（清缓存，可选连本地导入）。
+// 三件事都经同一个 music api（协议层是唯一碰"缓存端口"的地方），处理器不自己拿 fs。
+for (const [channel, handler] of Object.entries(createLyricsHandlers({ api: musicService.api }))) {
   dispatcher.register(channel, handler);
 }
 

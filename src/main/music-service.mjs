@@ -128,6 +128,8 @@ function sessionOf(session) {
  * @param {number} [options.pageSize]     默认页大小（协议层另有默认）
  * @param {Function} [options.random]     注入随机源（Digest nonce；测试用）
  * @param {Function} [options.now]        注入时钟（Digest created；测试用）
+ * @param {object} [options.lyricsCache]  R41：歌词磁盘缓存端口（`src/main/lyrics-cache.mjs` 的产物）
+ * @param {Function} [options.lyricsFallback] R41：第三方歌词回退（`src/main/lyrics-fallback.mjs` 的产物）
  */
 export function createMusicService({
   settingsData,
@@ -138,6 +140,8 @@ export function createMusicService({
   random = randomBytes,
   now = () => new Date(),
   log,
+  lyricsCache,
+  lyricsFallback,
 } = {}) {
   const { endpoints, disabled } = resolveMusicEndpoints(settingsData);
 
@@ -169,6 +173,9 @@ export function createMusicService({
     ...(pageSize === undefined ? {} : { pageSize }),
     // R40：诊断口（只记键名）。协议层自己不写日志，默认不记——装配处不给就没有输出。
     ...(typeof log === "function" ? { log } : {}),
+    // R41：歌词的磁盘缓存与第三方回退（都是**可选**端口：不给就是 R40 的行为）
+    ...(lyricsCache === undefined || lyricsCache === null ? {} : { lyricsCache }),
+    ...(typeof lyricsFallback === "function" ? { lyricsFallback } : {}),
   });
   return { api, endpoints, disabled, configured: Object.keys(endpoints).length > 0 };
 }
