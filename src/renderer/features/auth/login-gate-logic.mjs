@@ -60,6 +60,14 @@
  * 诊断依据（可复现：`node scripts/probe-qr.mjs --until-expired`，摘要 `.probe/qr-expiry-diag.json`）：
  * 服务端**会**给出过期档位——TTL 181s，实测 t+177.4s 时 `103000200` → `103000201`，
  * 过期之后重新建单照常下发新码（R21 起这件事改为**用户点刷新**时才做）。
+ *
+ * R37（用户真机反馈之 2）在这里加了两条判定，**合起来才成立**：
+ * 1. **扫到之后遮蔽二维码**（[`qrMaskText`]）：`scanned`/`confirmed` 两档返回遮罩文案
+ *    （就是状态行那两句，同一份常量），界面在 canvas 上叠一层——用户报的现象正是"已经扫过了，
+ *    屏上那张码看起来还能扫"；pending 不遮（那是屏上唯一有用的东西）、expired 也不遮
+ *    （它走"撤下 canvas + 两行占位"那条终止档的路）；
+ * 2. **`scanned` 档容器不可点**（[`canRefreshQr`] 的判据收窄）：手机正对着那张码的时候换码
+ *    = 把这次扫码作废（用户只能重扫），所以点得动的档位只剩 pending / expired / failed。
  */
 
 /** 门禁的三个阶段。 */
@@ -176,6 +184,24 @@ export const QR_COUNTDOWN_TESTID = "login-qr-countdown";
 
 /** 倒计时的步长（秒级；改它等于改倒计时的分辨率，界面文案跟着变）。 */
 export const QR_COUNTDOWN_TICK_MS = 1_000;
+
+/**
+ * 扫到之后那两句（R37）：**状态行与二维码遮蔽层共用同一份**。
+ *
+ * 为什么必须是常量而不是各写一份字面量：R37 起这两句话会**同时出现在两处**——
+ * 状态行（`role="status"`，全页唯一的"现在到哪一步"）与二维码遮罩（那块地方已经用过了）。
+ * 各写一份的下场是迟早有一处改了、另一处没跟上，而两处说的是同一件事。
+ *
+ * 与 `expired` 那一档的区别（R26）：过期是**终止**档，遮罩是唯一提示载体、状态行整行隐掉；
+ * `scanned`/`confirmed` 还在流程中间（后面还有换码、落盘、广播），所以状态行**照旧说话**。
+ */
+export const QR_SCANNED_TEXT = "已扫码，请在手机上确认。";
+export const QR_CONFIRMED_TEXT = "已确认，正在完成登录…";
+
+/**
+ * 二维码遮蔽层的测试锚点（R37）：真窗守卫与标记测试按它点名那一层。
+ */
+export const QR_MASK_TESTID = "login-qr-mask";
 
 /** 网页那条路收场、广播里却没带文案时的兜底说明（"刚退回来"这个标记永远不为空）。 */
 export const OFFICIAL_ENDED_NOTE = "网页登录已结束（没有完成登录）。";
@@ -477,20 +503,46 @@ export function canRetryQr(state) {
  *
  * 点击的语义就是 `startQr`（= `auth:qr-start`，sidecar 会停掉旧会话、换一张新码），
  * 所以"点得动"的判据是"再发一次有意义"：
- * - `pending`/`scanned`：有码在屏上，换一张是用户明确想要的（旧的那张他不想扫了）；
+ * - `pending`：有码在屏上等着被扫，换一张是用户明确想要的（旧的那张他不想扫了）；
  * - `expired`：**R21 起这里是唯一的换码路径**（sidecar 不再自动换新）——过期态那张已经废了，
- *   点容器或点那个显著的「刷新二维码」按钮都是"再来一张"；
+ *   点容器（或那个显著的「刷新二维码」按钮，R25 已删）就是"再来一张"；
  * - `failed`：与「重试」同一件事（两个入口都留着，用户按哪个都行）；
  * - `preparing`：已经有一次请求在飞，再点一次只是**重复建单**（还会白白换掉马上要到的码）；
+ * - `scanned`（R37 改判）：**手机已经在扫这一张了**——此刻换码 = 把这次扫码作废
+ *   （用户手机上正对着的那张码突然失效，只能重扫）。容器同时被遮蔽层盖住（见 [`qrMaskText`]）；
  * - `confirmed`：正在换码，这时换一张新码只会把已经成功的那次作废；
  * - 网页那条路开着：那层被窗盖住（点不到），而且此刻不该建第二张码（两条路互斥，不变量 6）。
  */
 export function canRefreshQr(state) {
   if (state?.path === "official") return false;
   const status = state?.qr?.status;
-  if (status === QR_GATE_STATUS.pending || status === QR_GATE_STATUS.scanned) return true;
+  if (status === QR_GATE_STATUS.pending) return true;
   if (status === QR_GATE_STATUS.expired || status === QR_GATE_STATUS.failed) return true;
   return false;
+}
+
+/**
+ * 二维码上要不要盖遮蔽层（R37，用户真机反馈之 2）：要盖就返回盖上去的那句话，不盖返回 `null`。
+ *
+ * 用户报的现象：手机上已经扫了码（甚至点了确认），屏上那张码还是原样——**看起来还能扫**。
+ * 处置是"遮蔽 + 不可点"两条一起（后者见 [`canRefreshQr`]）：用户一眼看出"这块地方已经用过了"，
+ * 而手也不会再往那儿点。
+ *
+ * 只认 `scanned`/`confirmed` 两档：
+ * - `pending` 不遮——那张码是屏上唯一有用的东西（遮它等于自断出路）；
+ * - `expired` 不遮——它走的是另一条路（canvas 直接撤下 + 两行占位，R21/R25/R26 的终止档语义）；
+ * - `failed`/`preparing` 没有可扫的码，也就无所谓遮。
+ *
+ * 文案就是状态行那两句（同一份常量，见 [`QR_SCANNED_TEXT`]）：两处说同一件事。
+ *
+ * @param {object} state 门禁状态
+ * @returns {string|null} 遮蔽层上那句文案；`null` = 这一档不盖
+ */
+export function qrMaskText(state) {
+  const status = state?.qr?.status;
+  if (status === QR_GATE_STATUS.scanned) return QR_SCANNED_TEXT;
+  if (status === QR_GATE_STATUS.confirmed) return QR_CONFIRMED_TEXT;
+  return null;
 }
 
 /**
@@ -583,9 +635,9 @@ export function loginGateStatusLine(state) {
       // 提示文字已经在上一条把"怎么扫"说完了：这里只说"现在在等什么"
       return "等待扫码…";
     case QR_GATE_STATUS.scanned:
-      return "已扫码，请在手机上确认。";
+      return QR_SCANNED_TEXT;
     case QR_GATE_STATUS.confirmed:
-      return "已确认，正在完成登录…";
+      return QR_CONFIRMED_TEXT;
     case QR_GATE_STATUS.expired:
       // R26（用户真机反馈之 4）：终止档且提示已经在二维码遮罩上了——状态行整行隐掉，不复述
       return null;

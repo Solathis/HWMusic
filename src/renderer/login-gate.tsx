@@ -70,6 +70,12 @@
  *
  * 顶部那条 header（高度仍 = [`LOGIN_VIEW_TOP_INSET`]）现在只是门禁自己的标题区：
  * R25 起登录页**不再**从它下面开始（官方页铺满整窗），它不再是"给子窗让位"的几何契约。
+ *
+ * R37（用户真机反馈之 2）在这一页上补了一处：**已经扫过的那张二维码要被遮住**。
+ * 用户报的现象是"已经扫了码，屏上那张码看起来还能扫"（再扫一次会发生什么没人知道）——
+ * 所以 `scanned`/`confirmed` 两档在 canvas 上叠一层（半透明令牌背景 + 状态文案，判定与文案
+ * 都在逻辑模块里：[`qrMaskText`]），同时容器不可点。码本身仍然画在底下：手机那边正在确认的
+ * 就是它，动态二维码没有"半张"这一说。
  */
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Loader2Icon } from "lucide-react"
@@ -95,6 +101,7 @@ import {
   QR_EXPIRED_BOX_TEXT,
   QR_GATE_STATUS,
   QR_HINT_TEXT,
+  QR_MASK_TESTID,
   QR_REFRESH_LABEL,
   QR_REFRESH_TESTID,
   canRefreshQr,
@@ -104,6 +111,7 @@ import {
   loginOpeningIndicator,
   qrContentOf,
   qrCountdownText,
+  qrMaskText,
   reduceGateState,
   shouldAutoStartQr,
   webLoginEntry,
@@ -350,6 +358,8 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
   const entry = webLoginEntry(state)
   /** R27：官方页还在屏外加载那一刻（那一行的文案与转圈读**同一个判定**）。 */
   const opening = loginOpeningIndicator(state)
+  /** R37：扫到之后盖在二维码上的那句话（`null` = 这一档不盖；判定见逻辑模块）。 */
+  const maskText = qrMaskText(state)
 
   /**
    * 次要入口（**只有一处定义**）。
@@ -393,7 +403,10 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
             过期时给的是"已过期"占位而不是 Skeleton：Skeleton 读起来像"马上就来"，而这一档
             要等的正是用户点一下。canvas 撤下 → 屏上没有任何可扫的东西。
             R25（用户指令）：过期占位**只有两行**——「二维码已过期」/「点击刷新」；原来那个显著的
-            「刷新二维码」按钮删掉（容器自己就是那个控件，它一直可点）。 */}
+            「刷新二维码」按钮删掉（容器自己就是那个控件，它一直可点）。
+            R37（用户真机反馈）：**已经扫过的那张码会被遮住**——码还在画布上（它还有用，手机那边
+            正在确认），但上面叠一层，用户一眼看出"这块地方用过了"；那一刻容器也不可点
+            （`canRefreshQr` 在 scanned 档为假），否则手一抖就把这次扫码作废。 */}
         <Button
           variant="ghost"
           className="h-auto rounded-lg border-border bg-card p-3 hover:bg-card"
@@ -412,7 +425,18 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
               <Skeleton className="h-52 w-52 rounded-md" />
             )
           ) : (
-            <QrCanvas content={content} />
+            // R37：`relative` 是遮蔽层的定位上下文（它要正好盖住画布那一块，不多不少）
+            <span className="relative block">
+              <QrCanvas content={content} />
+              {maskText === null ? null : (
+                <span
+                  className="absolute inset-0 flex items-center justify-center rounded-md bg-background/85 px-4 text-center text-sm text-foreground backdrop-blur-sm"
+                  data-testid={QR_MASK_TESTID}
+                >
+                  {maskText}
+                </span>
+              )}
+            </span>
           )}
         </Button>
 

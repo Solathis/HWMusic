@@ -242,10 +242,17 @@ export async function exchangeMusicSessionPending(): Promise<CoreResult<unknown>
   return err(LOGINEX_PENDING_MESSAGE, AUTH_ERROR_KINDS.loginexPending);
 }
 
-/** 默认的会话验证：没有验证器就说没有，返回"没验成"而不是"无效"。 */
+/**
+ * 默认的会话验证：没有验证器就说没有，返回"没验成"而不是"无效"。
+ *
+ * **R37 起这不是生产路径**：sidecar 装配处注入了真验证器
+ * （`src/main/session-verifier.mjs`：收藏接口的最小页 + 业务码 `000000`）。
+ * 留着它是为了让"忘了注入验证器"这类**装配缺口仍然说实话**——而不是让一个没验过的会话
+ * 冒充"已登录已验"（那正是用户 R37 之前看到的那句「会话验证器尚未注入」）。
+ */
 async function verifySessionUnavailable(): Promise<CoreResult<unknown>> {
   return err(
-    "会话验证器尚未注入（收藏接口的端点待确认，见 docs/API_CONTRACT.md §2.1）：本次不判定会话有效",
+    "会话验证器尚未注入（装配处必须经 deps.verifySession 传入，见 src/main/session-verifier.mjs）：本次不判定会话有效",
     "endpoint_unknown",
   );
 }

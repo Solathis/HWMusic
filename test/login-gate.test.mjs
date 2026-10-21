@@ -61,14 +61,17 @@ import {
   LOGIN_GATE_PHASE,
   LOGIN_GATE_TITLE,
   LOGIN_OPENING_TEXT,
+  QR_CONFIRMED_TEXT,
   QR_COUNTDOWN_TESTID,
   QR_EXPIRED_BOX_HINT,
   QR_EXPIRED_BOX_TEXT,
   QR_EXPIRING_TEXT,
   QR_GATE_STATUS,
   QR_HINT_TEXT,
+  QR_MASK_TESTID,
   QR_REFRESH_LABEL,
   QR_REFRESH_TESTID,
+  QR_SCANNED_TEXT,
   WEB_LOGIN_BACK_TESTID,
   WEB_LOGIN_BACK_TEXT,
   WEB_LOGIN_ENTRY_TESTID,
@@ -81,6 +84,7 @@ import {
   loginOpeningIndicator,
   qrContentOf,
   qrCountdownText,
+  qrMaskText,
   reduceGateState,
   shouldAutoStartQr,
   shouldShowLoginGate,
@@ -758,11 +762,12 @@ test("R21 状态行：过期**不再**说一句话（R26），失败说的是为
   assert.equal(loginGateStatusLine(failed), "轮询失败");
 });
 
-test("R20 手动刷新：二维码容器可点（等待/已扫/过期/失败都点得动；准备中、已确认、网页那条路开着时不可点）", () => {
+test("R20/R37 手动刷新：二维码容器可点（等待/过期/失败点得动；准备中、已扫、已确认、网页那条路开着时不可点）", () => {
   assert.equal(canRefreshQr(pendingState()), true, "等待扫码：点它就是换一张新码");
   assert.equal(
     canRefreshQr(reduceGateState(pendingState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.scanned })),
-    true,
+    false,
+    "R37：已经扫到了——手机上正在确认那一张，此刻换一张新码只会把这次扫码作废（容器同时被遮蔽层盖住）",
   );
   assert.equal(
     canRefreshQr(reduceGateState(pendingState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.expired })),
@@ -1057,4 +1062,87 @@ test("R27 加载动画：门禁源码真的画出来（Loader2 转圈 + 那一�
   assert.match(gate, /LOGIN_OPENING_TEXT/, "文案只许有一处字面量（常量）");
   assert.match(gate, /role="status"/, "加载动画与状态行是同一个状态区：读屏听到的就是看到的");
 });
+
+// ---------------------------------------------------------------------------
+// 13. R37：扫码之后**遮蔽**二维码（用户真机反馈）
+// ---------------------------------------------------------------------------
+//
+// 用户报的现象：手机上已经扫了码（甚至已经点了确认），屏上那张码还是原样——**还能扫**。
+// 再扫一次会发生什么没人知道（至少是白白重开一次 round trip），而用户完全看不出"这码已经用过了"。
+//
+// 处置（两条一起才成立）：
+// 1. **遮蔽层**：`scanned`/`confirmed` 两档在 canvas 上叠一层（半透明令牌背景 + 文案），
+//    底下那张码还在画布上，但用户看到的是"这块地方已经用过了"；
+// 2. **容器不可点**：这两档 `canRefreshQr` 为假（R20 起容器是刷新控件）——扫到一半换一张新码
+//    只会把这次扫码作废。
+//
+// 文案**不是一个新真源**：遮罩上那句就是状态行那句（`QR_SCANNED_TEXT` / `QR_CONFIRMED_TEXT`
+// 同时被遮罩与状态行读），所以不可能出现"遮罩说 A、状态行说 B"。
+
+test("R37 遮蔽：只有已扫/已确认两档给遮蔽文案，其余档都没有（文案与状态行同源）", () => {
+  assert.equal(QR_SCANNED_TEXT, "已扫码，请在手机上确认。");
+  assert.equal(QR_CONFIRMED_TEXT, "已确认，正在完成登录…");
+  assert.equal(QR_MASK_TESTID, "login-qr-mask");
+
+  const scanned = reduceGateState(pendingState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.scanned });
+  const confirmed = reduceGateState(scanned, { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.confirmed });
+
+  assert.equal(qrMaskText(scanned), QR_SCANNED_TEXT);
+  assert.equal(qrMaskText(confirmed), QR_CONFIRMED_TEXT);
+  assert.equal(qrMaskText(pendingState()), null, "还在等扫：那张码是屏上唯一有用的东西，遮它等于自断出路");
+  assert.equal(
+    qrMaskText(reduceGateState(pendingState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.expired })),
+    null,
+    "过期档走的是另一条路（撤下 canvas + 两行占位），不叠遮蔽层",
+  );
+  assert.equal(
+    qrMaskText(reduceGateState(pendingState(), { type: LOGIN_GATE_EVENT.qrFailed, message: "建单失败" })),
+    null,
+    "失败档没有可扫的码，也就不需要遮",
+  );
+  assert.equal(qrMaskText(initialGateState()), null, "还没发起：什么都没有，更不该有遮罩");
+
+  // 同源：遮罩那句与状态行那句是同一个常量（不是各写一份字面量）
+  assert.equal(loginGateStatusLine(scanned), QR_SCANNED_TEXT);
+  assert.equal(loginGateStatusLine(confirmed), QR_CONFIRMED_TEXT);
+});
+
+test("R37 遮蔽：门禁源码真的把遮蔽层画在 canvas 之上（绝对定位 + 令牌背景，零自定义 CSS）", () => {
+  const jsx = gateJsx();
+
+  assert.match(jsx, /qrMaskText\(state\)/, "有没有遮罩交给纯函数判定（不在 JSX 里手写条件）");
+  assert.match(jsx, /data-testid=\{QR_MASK_TESTID\}/, "遮罩要有测试锚点（真窗守卫与标记测试都按它点名）");
+  assert.match(jsx, /absolute inset-0/, "遮罩叠在 canvas 之上（绝对定位铺满那块地方）");
+  assert.match(jsx, /bg-background\/\d+/, "半透明背景必须是设计令牌（写死颜色就跟着主题漂移）");
+  assert.match(jsx, /\brelative\b/, "宿主要有定位上下文，遮罩才叠得住");
+  assert.match(jsx, /\{maskText\}/, "文案来自纯函数（唯一真源），不在 JSX 里另抄一句");
+
+  // 不许出现裸色值 / 非令牌调色板（test/theme-tokens.test.mjs 的扫描口径，这里就近再钉一条）
+  const maskBlock = jsx.slice(jsx.indexOf("QR_MASK_TESTID") - 400, jsx.indexOf("QR_MASK_TESTID") + 400);
+  assert.doesNotMatch(maskBlock, /#[0-9a-fA-F]{3,8}\b|\brgba?\(|\boklch\(/, `遮罩不得硬编码颜色：${maskBlock}`);
+});
+
+test("R37 文档：遮蔽这一项按 B22 登记（真机观感 untested），且编号计数与表里的行数对得上", () => {
+  const doc = read("docs/KNOWN_LIMITATIONS.md");
+
+  // 这一处改动**只有** SSR 标记 + 纯函数 + 源码扫描三种证据，"真窗上看起来怎么样"没有证据
+  // （本环境起不了真窗）——按那份文档自己的口径（任何没实测的都要写进去、一条不漏）必须登记。
+  const row = doc.split("\n").find((line) => line.startsWith("| B22 |"));
+  assert.ok(row, "B22 是 R37 新增的那一条（真窗观感 untested）：没有它就是漏登");
+  assert.match(row, /遮[蔽罩]/, "这一行说的就是「扫到之后把二维码遮住」");
+  assert.match(row, /untested/, "缺的正是真窗上那一眼");
+  assert.match(row, /login-gate-markup|login-gate\.test/, "要说清机制侧由哪些测试钉住");
+
+  // 那份文档自称「从本轮起**以行数为准**」：最后一次计数更正里那个数必须等于实际行长
+  // （R37 加了这一行，所以旧数字会当场红——这正是它想防的漂移）
+  const rows = doc.match(/^\| [A-G][0-9A-Za-z-]* \|/gm) ?? [];
+  const totals = [...doc.matchAll(/全文 \*\*(\d+) 条\*\*/g)];
+  assert.ok(totals.length > 0, "计数行读不出来（格式变了就同步改这条）");
+  assert.equal(
+    Number(totals.at(-1)[1]),
+    rows.length,
+    "计数行与表里的实际行数对不上：加/删条目时要连着更新计数行",
+  );
+});
+
 

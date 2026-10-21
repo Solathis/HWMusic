@@ -25,6 +25,7 @@ import { dataDirFromArgv } from "../main/data-dir.mjs";
 import { createLoginHost } from "../main/huawei.ts";
 import { createMusicService } from "../main/music-service.mjs";
 import { applyStartupProxy, testProxyConnection } from "../main/proxy.mjs";
+import { createMusicSessionVerifier } from "../main/session-verifier.mjs";
 import { createSessionStore } from "../main/session-store.mjs";
 import {
   dataDirSource,
@@ -158,19 +159,36 @@ const sessionStore =
         log,
       });
 
+// —— 会话验证器（R37）：补上「会话验证器尚未注入」那个缺口 ——
+//
+// 它是 `createAuthManager` 的 `verifySession` 插座：登录刚换到音乐会话之后、以及启动恢复读回会话之后，
+// 都要有一次「这个会话现在还有效吗」的判定。实现见 `src/main/session-verifier.mjs`
+// （调收藏接口的**最小页**：HTTP 200 + `result.resultCode === "000000"` 才算有效；
+// 服务端明确拒绝 → 踢回登录；网络错/端点关 → 保守地「没验成」）。
+//
+// 两处装配细节，都是顺序逼出来的：
+// 1. **会话来源按调用时取**：`musicSessionSource` 的赋值在 `createAuthManager` **之后**
+//    （见下面那行），所以这里传的是取值函数而不是快照——验证器每次调用时才读它；
+// 2. **验证器自己一份 music api**：`createApi` 用「本次要验的那个会话」建 api。因为两个调用点
+//    （`restore` / 登录收尾）传进来的都是**还没落进内存**的会话（恢复时它刚从信封读出来、
+//    登录时它刚由 loginex 换到），那一刻 `currentSession().session` 里还是旧会话或 null。
+//    端点表与 Digest 头仍然只有 `createMusicService` 一处实现，这里只是再装配一次。
+const verifySession = createMusicSessionVerifier({
+  createApi: (sessionSource) =>
+    createMusicService({ settingsData: settings.data, session: sessionSource }).api,
+  sessionSource: () => (musicSessionSource === null ? null : musicSessionSource()),
+});
+
 const authManager = createAuthManager({
   host: createLoginHost({ hostServices, log }),
   sessionStore,
+  verifySession,
   broadcast: (channel, payload) => rpc.broadcast(channel, payload),
   notify: (text) => {
     log(`提示：${text}`);
     rpc.broadcast(APP_NOTICE, { text });
   },
   log,
-  // 如实登记的缺口：会话验证要打收藏接口。R32 起端点有了，但**仍不注入验证器**——
-  // 现在能把"会话失效"和"网络抖动/端点被关掉"分开的证据还不够（业务码与失效的对应关系
-  // 没有实测），而判错的代价是把用户踢回登录页。所以维持保守口径：restore 报
-  // `verify_unavailable`（会话仍在、但没验过），界面照常进主界面，业务请求自己会报真实原因。
 });
 
 // 音乐业务的会话来源（`currentSession()` 是内存里的活会话；登录/登出/恢复都会更新它）。

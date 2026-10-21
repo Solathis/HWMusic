@@ -41,13 +41,16 @@ import {
   LOGIN_GATE_EVENT,
   LOGIN_GATE_TITLE,
   LOGIN_OPENING_TEXT,
+  QR_CONFIRMED_TEXT,
   QR_COUNTDOWN_TESTID,
   QR_EXPIRED_BOX_HINT,
   QR_EXPIRED_BOX_TEXT,
   QR_GATE_STATUS,
   QR_HINT_TEXT,
+  QR_MASK_TESTID,
   QR_REFRESH_LABEL,
   QR_REFRESH_TESTID,
+  QR_SCANNED_TEXT,
   WEB_LOGIN_BACK_TESTID,
   WEB_LOGIN_BACK_TEXT,
   WEB_LOGIN_ENTRY_TESTID,
@@ -225,6 +228,25 @@ function headerTag(html) {
   return match[0];
 }
 
+/**
+ * 遮蔽层（R37）：开标签 + 可见文案。
+ *
+ * 标签名不写死（遮罩是 `<span>` 还是别的都行，契约是"绝对定位铺满 + 令牌背景 + 那句文案"）。
+ */
+function maskParts(html) {
+  const at = html.indexOf(`data-testid="${QR_MASK_TESTID}"`);
+  assert.ok(at > -1, `这一档没有遮蔽层：${visibleText(html).replaceAll("\u0001", "|")}`);
+  const start = html.lastIndexOf("<", at);
+  const open = html.indexOf(">", at);
+  assert.ok(start > -1 && open > start, `遮蔽层的开标签读不出来：${html.slice(Math.max(0, at - 120), at + 120)}`);
+  const tag = html.slice(start, open + 1);
+  const name = /^<([a-zA-Z]+)/.exec(tag)?.[1];
+  assert.ok(name, `遮蔽层的标签名认不出来：${tag}`);
+  const close = html.indexOf(`</${name}>`, open);
+  assert.ok(close > -1, `遮蔽层的闭合标签找不到：${tag}`);
+  return { tag, text: visibleText(html.slice(open + 1, close)).replaceAll("\u0001", "").trim() };
+}
+
 // ---- 状态夹具（用真状态机造，不手搓对象） --------------------------------
 
 function loggedOut() {
@@ -250,6 +272,16 @@ function pendingState(content = "https://id1.cloud.huawei.com/qrcode/login.jsp?q
 
 function expiredState() {
   return reduceGateState(pendingState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.expired });
+}
+
+/** R37：手机上已经扫到了（等确认）。 */
+function scannedState() {
+  return reduceGateState(pendingState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.scanned });
+}
+
+/** R37：手机上点了确认（正在换码收尾）。 */
+function confirmedState() {
+  return reduceGateState(scannedState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.confirmed });
 }
 
 function failedState() {
@@ -474,6 +506,62 @@ test("标记：可操作元素集合 = 主题三档 + 刷新容器 + 常驻入�
     failed.map((button) => button.testid || button.text),
     [...themeIds, QR_REFRESH_TESTID, "重试", WEB_LOGIN_ENTRY_TESTID],
     `失败态多一个「重试」：${JSON.stringify(failed)}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// R37（用户真机反馈之 2）：扫码之后**遮蔽**二维码——屏上那张码已经用过了，不许再让人扫
+// ---------------------------------------------------------------------------
+//
+// 两条一起才算修好：canvas 上叠一层（半透明令牌 + 那句状态文案）、容器同时不可点。
+// 文案从唯一真源来（`QR_SCANNED_TEXT` / `QR_CONFIRMED_TEXT`，与状态行同一份常量），
+// 所以"遮罩说 A、状态行说 B"这种漂移不可能发生。
+
+test("标记：已扫/已确认档——canvas 上叠着遮蔽层（令牌背景 + 状态文案），容器不可点", async () => {
+  const { renderGate } = await gateRenderer();
+
+  const cases = [
+    ["已扫码", scannedState(), QR_SCANNED_TEXT],
+    ["已确认", confirmedState(), QR_CONFIRMED_TEXT],
+  ];
+  for (const [label, state, text] of cases) {
+    const html = renderGate(state);
+    const block = qrHostBlock(html);
+
+    assert.match(block, /<canvas/, `${label}：码还画在底下（遮罩说「这张用过了」，不是「这里没码」）`);
+    assert.ok(
+      block.indexOf("<canvas") < block.indexOf(QR_MASK_TESTID),
+      `${label}：遮蔽层必须排在 canvas **之后**（叠在它上面，不是被它盖住）`,
+    );
+    assert.equal(occurrences(block, text), 1, `${label}：遮罩上就是那句文案（唯一真源）：${visibleText(block)}`);
+
+    const mask = maskParts(html);
+    assert.match(mask.tag, /\babsolute\b/, `${label}：遮蔽层要绝对定位：${mask.tag}`);
+    assert.match(mask.tag, /\binset-0\b/, `${label}：要铺满那块地方：${mask.tag}`);
+    assert.match(mask.tag, /bg-background\/\d+/, `${label}：半透明背景用设计令牌：${mask.tag}`);
+    assert.doesNotMatch(
+      mask.tag,
+      /#[0-9a-fA-F]{3,8}\b|\brgba?\(|\boklch\(|border-(?:white|black)\b|bg-(?:white|black)\b/,
+      `${label}：不得硬编码颜色：${mask.tag}`,
+    );
+    assert.doesNotMatch(html, /<style[\s>]/, "零自定义 CSS");
+
+    // 容器不可点：扫到一半换一张新码只会把这次扫码作废
+    const refresh = buttonSummaries(html).find((button) => button.testid === QR_REFRESH_TESTID);
+    assert.ok(refresh, `${label}：容器还在（尺寸不跳）`);
+    assert.equal(refresh.disabled, true, `${label}：容器这一刻点不动（无刷新控件可达）`);
+  }
+
+  // 等扫码那一档不许有遮罩：那张码是屏上唯一有用的东西
+  assert.doesNotMatch(
+    renderGate(pendingState()),
+    new RegExp(`data-testid="${QR_MASK_TESTID}"`),
+    "等待扫码：码要能扫，遮它等于自断出路",
+  );
+  assert.equal(
+    buttonSummaries(renderGate(pendingState())).find((button) => button.testid === QR_REFRESH_TESTID)?.disabled,
+    false,
+    "等待扫码：容器照旧可点（换一张新码是用户的正当选择）",
   );
 });
 

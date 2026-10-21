@@ -27,6 +27,9 @@
 > 计数更正（R31）：新增 **B21**（R31 全保真对齐之后仍要真机验的那一跳）。按实际行数重数一遍：
 > `^\| [A-G][0-9A-Za-z-]* \|` 命中 **74 行**（A 6 / B 23 / C 12 / D 8 / E 15 / F 7 / G 3）——
 > 其中 B20 是 R32 那一轮加的、B21 是这一轮加的，两次都以上面的命令重数过。
+> 计数更正（R37）：新增 **B22**（R37 两项的真机观感：扫码后遮蔽二维码 + 会话验证器落地）。按实际行数重数一遍：
+> `^\| [A-G][0-9A-Za-z-]* \|` 命中 **75 行**（A 6 / B 24 / C 12 / D 8 / E 15 / F 7 / G 3）——
+> 即全文 **75 条**。
 > **R28 按用户指令撤掉了官方页的主题机制与移动 UA**（推翻 R26/R27 那两项裁决），所以
 > B18 的 ①② 与 B18-R27 的 ①②③⑤⑥ **整条作废**（评论写在各自那一行末尾），B18-R27 ④ 也被
 > 静默窗改了口径——留在这里的是"当年验过什么"，不是"现在该验什么"。
@@ -46,10 +49,15 @@
 
 连带影响（R32 更新后仍成立的那几条）：
 
-- 会话验证器**刻意没注入**：R32 起收藏端点有了，但"业务码 → 会话失效"的对应关系**没有实测**，
-  判错的代价是把用户踢回登录页。所以维持保守口径——启动恢复报 `verify_unavailable`
+- 会话验证器 **R37 起已注入**（实现 `src/main/session-verifier.mjs`；sidecar 装配时经
+  `createAuthManager({verifySession})` 传入，装配钉在 `test/session-verifier.test.mjs`）：
+  判据是**收藏接口的最小页**（`favorites`，`start=0&limit=1`——参考实现的登录链本身就用它验收会话）——
+  HTTP 200 且 `result.resultCode === "000000"` 才算有效；**服务端明确拒绝**（业务码非 000000 / HTTP 4xx·5xx）
+  → `session_invalid`（踢回登录，文案带「请重新登录」）。**仍未实测**的正是"失效会话在真机上回什么业务码"
+  （要用户在场的授权登录，与 A3 同一跳），所以除"服务端明确拒绝"外一律**保守**——报 `verify_unavailable`
   （会话仍在、没验过），界面照常进主界面，业务请求自己会报真实原因；
-  `SESSION_INVALID_KINDS` 仍是按现有证据拟定的**待确认清单**。
+  `SESSION_INVALID_KINDS` 仍是按现有证据拟定的**待确认清单**（收窄点只有 `session-verifier.mjs` 的
+  `REJECTION_KINDS` 一处，真机发现某个码其实是"参数不对"就改那一行）。
 - `sessionHeaders`（会话凭据注入）**R32 已接线**：`Authorization: Digest username=app-music-baseline,
   nonce=…, created=…[, token=…]`（形状同参考，逐字差分钉住）。
 - 收藏的**写入**接口（`favorite/create`、`favorite/delete`）**仍不在接线范围**，
@@ -101,6 +109,8 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
 | B19 | **R29 诊断：「扫码始终不关联」的落点在手机侧，不在我们这条链**。真机现场：用户扫码后，桌面端一个会话连轮询 90 轮、四个会话全都只有 `resultCode=103000200` + `errorDesc="Please to login."`，**连 `103000202`（已扫待确认）都没出现过**（`.tmp/dev-visible.log` 行 35–243）。桌面侧逐项实测健康：建单参数与**今天**移动登录页下发的 `getqrContent` 模板**逐参数相同**（`scripts/probe-qr-phone.mjs` 现场比对：appID/appBrand/confirmFlag/version/reqClientType/loginChannel 六个值全等，路径也等）；轮询请求的形状（`asyncURL&t=<随机>` + 表单只有 `qrToken`）与官方页 bundle 的调用一致（`cas-qrCodeLogin.js` 的 `asyncRequest`）。手机侧那条路（`/qrcode/login.jsp` → 302 → `/CAS/mobile/confirmQRLogin.html`）的页面代码里**只有一个出向请求**——用户按「登录」时的 `confirmQRLogin({qRCode})`（`.confirmQRLogin(` 1 处、`.qrRemoteLogin(` 0 处、`scanQRCode` 0 处），**"打开这个链接"本身不上报扫码**：探针用手机 UA 打开 content URL（无账号会话）前后各轮询两次，档位仍是 `103000200`／`"Please to login."`。于是"压根没扫"与"扫了但手机侧那台设备没登录华为账号"在服务端是**同一档**，我们无法从状态码区分。**未验证的正是关键一跳**：一台**已登录华为账号**的手机扫屏幕上这张码，是否会依次给出 `103000202` → `0`（本环境不允许登录账号，故测不到） | untested | 证据：`scripts/probe-qr-phone.mjs` + `.probe/r29-phone.json`（打开前后轮询、接口名计数、`hwidConfig`→loader→entry 的真实资源链）、`.tmp/dev-visible.log`（真机四会话现场）、`docs/API_CONTRACT.md` §1.8 的 R29 段（**更正**：这里原来写的是 §1.7，而 R29/R31 都登记在 §1.8）。**R31 更新**：这条诊断登记的三处保真度缺口已按探针实测补齐——建单 URL 去查询串、`deviceID`/`deviceType`（服务端 `sid`）、cookie 罐——关键一跳仍要真机，续集见 **B21**。**机制侧**（不是"没测"）：R29 的观测加强——建单时一行 content 非敏感摘要 + 每轮 `errorDesc`/时刻/节奏——由 `test/qr-login.test.mjs` 的 5 条 R29 用例钉住；建单/轮询的参数保真度由同一份探针现场比对 | 下一次扫码时先确认**手机侧那个入口自己已经登录了华为账号**（二维码下方那句提示给的就是这条路：系统「设置」>「华为账号」>「扫一扫」，或控制中心的扫一扫），然后看日志里有没有出现 `resultCode=103000202`。若仍是 `103000200` 且 `errorDesc="Please to login."`，把新日志（**建单那一行**与**轮询行**都要，R29 起才有）交回：那一行里带着这张码的 `loginChannel/reqClientType/qrSiteID/familySharing/appBrand`，足以判定是"手机侧没登录"还是"参数错位" |
 | B20 | **R32 协议层换血后的真机验证（用户指令 2026-10-21 的核心诉求：歌曲能放、歌单能显示）**：① 点「在网页中打开登录」后，**新的授权域**（`oauth-login.platform.hicloud.com`）下官方页是否正常渲染、账号密码登录能走完并跳回 `hms://`（"新授权域下官方页会不会真的跳 `hms://`"**只有真机能验**：白名单按参考实测清单铺好了，但那是参考实现的证据，不是我们在新域上的实测）；② 兑换链（`oauth-login.cloud.huawei.com` 换 AT → `loginex` 换音乐会话）是否真的成功——**这是 R32 唯一没有任何替代验证的一跳**；③ **「我的歌单」是否真的显示出真实歌单**（协议层会翻页扫完再挑；若显示"还没有歌单"而实际有，要抓 `library:playlists` 的请求/响应核对分页与 `contentType` 分流）；④ **收藏页是否显示真实歌曲**（总数只在完全加载后才出现，这是刻意的）；⑤ **点一首歌是否真的出声**（顶层 `fileURL` 是否可用、`<audio>` 经 CSP/代理是否放得出来）；⑥ 桌面歌词窗是否显示歌词（R32 起歌词从播放响应推导：`lyricAddress` 下载或内嵌）；⑦ 重启后是否仍是登录态 | untested | 本环境**不代登、不起 GUI**（用户在场的授权动作），所以 ①–⑦ 全是"必须真机 + 真账号"的一档。机制侧已钉住的：端点/方法/参数/容器/归一化与参考源码**逐字差分**（`test/reference-parity.test.mjs`）、请求形状（`test/music.test.mjs` 30 条）、频道与失败类别（`test/dispatcher.test.mjs` / `test/playback-channel.test.mjs` / `test/sidecar-e2e.test.mjs`）、Digest 头形状（`test/music-session.test.mjs` + 差分）。**这些证明的是"形状对"，不是"往返通"** | 用户按顺序走一遍：网页登录（账号密码）→ 看收藏/歌单是否出真实数据 → 点一首歌听到声 → 看歌词窗 → 重启看是否免登录。任一档卡住时把 **sidecar stderr** 里那一行交回（日志带端点键名与失败类别，**不含凭据**）：`endpoint_*` 说明是配置问题，`session_required` 说明会话没落地 |
 | B21 | **R31 全保真对齐之后，"扫码能不能关联"仍只有真机能验**（B19 的续集）——**R33 真机已给出答案：关联通了（本轮只这一条更新，其余结论不变）**。R31 按探针实测把三处缺口补齐了：建单 URL **去查询串**、建单表单**带上 `deviceID`（服务端下发的 `sid`）+ `deviceType=7`**、建单/轮询**带 cookie 罐**（含建单响应自己种下的 `qRCode`/`expiredTime`/`qrCodeCreateTime`）与页面 UA/Referer。**关键那一跳已由用户真机验过**（2026-10-21，R33 的证据链）：一台**已登录华为账号**的手机扫屏幕上这张码之后，轮询**见到了 `0`（已确认）**、`codeRemoteLogin` 跑通并交回了 `callbackURL` ——即"服务端给出确认档位"这件事**不再只有推测**。（R33 修的是它之后那一跳，见 A6。）另外两件同源的"只有真机能验"：① **补上 `deviceID`/cookie 到底有没有用**——本环境实测到的只是"服务端收下了"（建单 200、字段与页面逐字段相同、手机 UA 打开 content URL 的落点与档位与不带时**完全一样**）；**R33 起可以说"这套保真能跑出 `0`"，但仍不能归因**（没有做过 A/B：去掉 `deviceID` 再扫一次会不会也通）；② **指纹里那几个哈希是同形状的固定值**（`canvas`/`webgl`/`fonts`，sidecar 没有浏览器引擎算不出来），服务端按形状收（探针实测：换一个 40 位 hex 照样发 `sid`），但"服务端会不会哪天改成校验来源"无从预判 | **关联 = 真机已验证（R33）**；① ② 仍 untested | 证据：`scripts/probe-qr-fidelity.mjs` + `.probe/r31-fidelity.json`（headless Chromium 真开官方二维码页：建单无查询串、八字段、`dev` → `sid`、轮询带建单响应的 cookie；保真度比对当场跑产品代码）、`test/fixtures/r31-page-fingerprint.json`（页面指纹原件 → 单测钉住编码器逐字节一致）、`.tmp/r31-live-port.mjs` 的实探输出（**产品代码自己**走一遍：`deviceID=服务端 sid（84 位 hex）`、建单带 6+8 字段与 cookie、轮询带 `qRCode`/`expiredTime`）。机制侧全部由测试钉住：`test/device-fingerprint.test.mjs` 10 条、`test/qr-login.test.mjs` 的 R31 3 条、`test/qr-port.test.mjs` 的 R31 4 条（含降级与"不猜"两条）+ R33 8 条（最后一跳的跟随） | 已由用户真机闭合（R33）；只剩 ① 的归因可做可不做：想归因就**去掉 `deviceID`** 再扫一次对比（代价是一次扫码，收益是一条"A/B 证据"） |
+
+| B22 | **R37 两项的真机观感**（用户真机反馈两项的收口）：① 手机扫码（甚至点了确认）之后，屏上那张二维码是否真的**被遮住**——半透明令牌背景 + 「已扫码，请在手机上确认。」/「已确认，正在完成登录…」，看起来是不是"这块地方已经用过了"，而码本体（底下的 canvas）是否仍画着；② 这一档**点二维码容器真的没反应**（扫到一半换一张新码会把这次扫码作废），而"等待扫码"那一档照旧点得动、也没有遮罩；③ 「会话验证器尚未注入」那句报错是否**真的不再出现**、登录链是否走完（扫码确认 → 换码 → `loginex` → 收藏最小页验会话 → 落盘 → 进主界面）；④ 会话失效档是否真的**踢回登录**（文案带「请重新登录」），网络错那一档是否**保守留在主界面**（按"已登录未验证"继续） | untested | ① ② 的机制侧全由测试钉住（`test/login-gate-markup.test.mjs` 的真 SSR 标记：遮蔽层排在 canvas **之后**、容器 `disabled`；`test/login-gate.test.mjs` 的纯函数档位 + 门禁源码钉子；`test/session-verifier.test.mjs` 的档位矩阵 + sidecar 装配钉 + 端到端登录链），但"真窗上看起来怎么样、点下去什么反应"要人看（本环境起不了真窗，见本节开头）。③ ④ 更要**真实账号**：验证器打的是收藏接口，只有"HTTP 200 + `result.resultCode === "000000"` = 有效"这一条有解包证据，**失效会话在真机上回什么业务码没有证据**（同 A3）——所以除"服务端明确拒绝"外一律按"没验成"保守处理 | 用户真机复测：扫码 → 看那张码是否被遮住、顺手点一下容器（应当没反应）→ 手机确认 → 看是否一路进主界面（**不再出现「会话验证器尚未注入」**）→ 重启一次看是否免登录（这一跳就是"验证器真的被调了"的正向证据）→ 若被踢回登录，看文案里是否带着业务码与「请重新登录」，**把那一行交回**（它决定 `REJECTION_KINDS` 要不要收窄）；sidecar 那一行不含凭据 |
 
 **B16 的回退路径（登记在案，不在本轮实施）**：宿主换回独立子窗是**局部改动**（`login.rs` 的
 `build_on_main_thread` 换回建窗 API + 几何换回屏幕坐标 + `Cargo.toml` 撤掉 `unstable`），
