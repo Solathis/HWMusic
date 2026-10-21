@@ -26,3 +26,4 @@ research/
 
 # 代理工作区（计划、任务简报、报告）
 .superpowers/
+target/

@@ -833,6 +833,58 @@ state 接线（含反面控制）。R33 那条"跟随那一跳网络失败"的�
 仍走结构化失败；`&amp;` 这一类**本轮不处理**，按"原文不加不减"的口径登记在此）→
 `docs/KNOWN_LIMITATIONS.md` A6。
 
+**R35（用户真机证据 2026-10-21：三策略全败 → 不再猜形状，先把真实形状留在日志里）——只加脱敏诊断，不改行为。**
+
+真机链路（用户交回的证据链）：扫码确认 ✅ → `codeRemoteLogin` ✅ → `callbackURL` → ①参数直构 ✗
+（查询里没有可判的 `code`+`redirect_uri` 组合）→ ②跟随得 **HTTP 200**（非 3xx）→ ③页面提取 ✗
+（体里没有 `OAUTH_REDIRECT_URI + "?"` 那段字面量）→ 报错。**三个假设全部落空 = 我们在猜形状**，
+所以这一轮**一条策略都不动**：`src/main/qr-login.mjs` 的 `resolveCallbackUrl` 三策略照旧跑
+（顺序、请求数、`via`、失败文案一处未改），只是每一跳多记三行**脱敏诊断**到既有 `log`
+（→ sidecar **stderr**；**不进 UI、不发新请求、不参与判定**）：
+
+| 行（`stage`） | 它服务哪条策略 | 键（**值一律不进日志**） |
+|---|---|---|
+| `candidate` | ①的**判定输入** | `hop`（第几次候选=第几次请求，起点 0）/ `scheme` / `origin_path`（`scheme://host + path`，**查询串不进这一项**）/ `query_names`（**参数名清单，不含值**）+ `query_names_total` + `query_names_truncated` / `has_code` / `code_nonempty` / `redirect_uri_is_oauth`（**布尔**：解码后是否等于 `OAUTH_REDIRECT_URI` —— 记判断，不记值） |
+| `response` | ②的输入 | `status` / `has_location`（**布尔**：头在不在）/ `location_scheme`（绝对地址的 scheme；相对路径给空串） |
+| `body` | ③的输入 | `body_bytes`（**UTF-8 字节数**，不是字符数）/ `has_hms` / `has_redirect_uri` / `has_login_callback` / `hms_fragments`（体里所有 `hms[^"'\s<>]{0,120}` 片段，逐条脱敏；去重、上限 8 条）/ `hms_fragments_total` / `hms_fragments_truncated` |
+
+一行就是一个 JSON 对象（`{"tag":"qr-callback-diagnostic","stage":…}`，键值对，直接读也直接 grep）。
+**脱敏**（本轮的硬承诺）：片段里 `code=` / `state=` 之后的值一律换成 `<len:N>`（**只留长度指纹**，
+N = 那个值的字符数）；规则**只宽不窄**——名字以 `code`/`state` 结尾的（`wxCode=`）一起脱、
+大小写不敏感、已经是 `<len:N>` 的不再套一层（幂等）——并且在**整行序列化之后再过一遍**，
+所以"值一个字符都不进日志"是**结构上**的保证，不靠"当时记得脱"。
+
+钉在 `test/qr-port.test.mjs` 的 R35 8 条：哑值 `CODE-VALUE-DO-NOT-LOG` / `STATE-VALUE-DO-NOT-LOG`
+同时注入**查询值 / Location / 响应体**三处之后**整份日志断言缺席**（外加反面控制"形状确实记了"，
+否则"缺席"可能只是"什么都没记"）；候选/响应/体三行的字段逐项钉（origin+path 不含查询串、参数名
+清单按出现序、两个布尔、字节长度 > 字符数、三个包含布尔、片段长度指纹、去重与上限如实标注）；
+"只观测"一条钉住零请求那条路**不许**凭空记出一行"响应形状"；另有两条纯函数级用例钉脱敏的
+"只宽不窄 + 幂等"与片段收集的去重/上限。
+
+真机形状的两个样本（`.tmp/r35-shape-demo.mjs` 驱动**真的**端口跑出来的原样输出，不是手写的）：
+
+```
+{"stage":"candidate","hop":0,"scheme":"https","origin_path":"https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback",
+ "query_names":["state","redirect_uri"],"query_names_total":2,"has_code":false,"code_nonempty":false,"redirect_uri_is_oauth":true}
+{"stage":"response","hop":0,"status":200,"has_location":false,"location_scheme":""}
+{"stage":"body","hop":0,"status":200,"body_bytes":130,"has_hms":false,"has_redirect_uri":false,"has_login_callback":true,
+ "hms_fragments":[],"hms_fragments_total":0,"hms_fragments_truncated":false}
+```
+
+——这正是"三个假设全落空"的形状：**查询里没有 `code`**、**回的是 200 且没有 `Location`**、
+**体里压根没有 `hms`**。第二个样本（R34 登记过的未处理写法，`&` 写成 `&amp;`）的 `body` 行：
+
+```
+{"stage":"body","hop":0,"status":200,"body_bytes":116,"has_hms":true,"has_redirect_uri":true,
+ "hms_fragments":["hms://redirect_uri?code=<len:9>&amp;state=<len:10>"],"hms_fragments_total":1,...}
+```
+
+——`hms_fragments` 里那串 `&amp;state` 就是**真机一旦这么写**时我们要看的东西（值只剩长度指纹）。
+
+**仍未实测（R35 只是把可判性做足，不改变这一条）**：那句 HTTP 200 页面里到底写的是什么。
+R35 之后用户再扫一次码，日志里 `stage=body` 那行的 `hms_fragments`（或"一个片段都没有"这个事实）
+本身就是答案 → R36 按真实形状精准修。
+
 ## 2. 音乐业务接口
 
 ### 2.1 结论：**端点与请求/响应形状 = 公开参考实现的实测值（R32 换血）**
