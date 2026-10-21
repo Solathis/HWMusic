@@ -63,6 +63,40 @@
 **唯一那个 `1 ignored`**：R5 的 DPAPI 半程端到端用例——sidecar 的发起方在 R7，
 所以当前形态不是完整端到端。`cargo test -- --ignored` 手动跑得 `1 passed`。
 
+### 1.1 R38 / R39 增补（2026-10-21）
+
+> 上面那张主表停在 R15（`97a03d6`）。**R16–R37 的档位不在本文**：那些轮次的分级登记在
+> [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)（A 组闭合项 / B 组真机项）与
+> [API_CONTRACT.md](API_CONTRACT.md) §5 的变更记录里。这一节只按**同款格式**增补 R38 / R39 两轮，
+> **既有行一行未动**；§0 那张测试基线的数字也保持原样（它是终审修复波的值），当前基线见下表两行。
+
+| 任务 | 内容 | 提交 | 状态 | 决定性证据 |
+|---|---|---|---|---|
+| **R38** | 登录后的主界面五项修复（封面点亮 / 歌词数据链 / 账号区与退出迁移 / 品牌重复 / 账号资料） | `3ce04b4` | **混合档 —— 逐项见下**：**真机 verified 3 项 + in-progress 1 项 + pending 1 项**（含修复轮 2 Important + 2 Note 全修） | `npm test` **800 pass / 0 fail / 0 skipped**（799 → 800，修复轮只 +1 条新用例、**未改写任何既有断言**）；`tsc` 0 错；`build:web` ✓；acceptance 6/0/0；真机 CDP 现场 `.tmp/r38-verify-ui.json` / `r38-verify-ui2.json` / `r38-probe-lyrics.json` / `r38-probe-lrc-fetch.json`。未动 Rust / CSP / 白名单，未新开频道 |
+| **R39** | 运行日志设置页化（编辑器样式 + 文本筛选）+ shadcn / AMLL 合规清查与守卫加固 | `5d0b578` | **verified（真机 CDP 41/41）**；合规清查「无硬违例」；7 处组合边界 + 1 条口径**登记待裁决**（见下） | `npm test` **810 pass / 0 fail**（800 → 810，+10）；`tsc` 0 错；`build:web` ✓；CDP 裸协议驱动**真窗口** **41/41 PASS**、0 console error、0 pageerror（`.tmp/r39-live/r39-summary.json` + 三张截图）；未动 Rust / 主进程 / 频道 / `app:notice` 载荷 / `components/ui/` 生成原语，`styles.css` 一行未改 |
+
+**R38 逐项分档**（档位口径同本文开头那张表；「真机」= 在真实桌面会话里跑出来、眼睛看得见）
+
+| # | 项 | 状态 | 决定性证据（可复现） |
+|---|---|---|---|
+| R38-1 | **封面点亮**（歌单卡 / 曲目行 / 播放栏 / 队列行统一走 `components.tsx` 的 `CoverArt`——全仓唯一的 `<img>` 实现） | **verified（真机 CDP）** | 诊断先落地：`coverUrl` **全部落在既有白名单域内**（`contentcenter-drcn.dbankcdn.cn` / `image.tingmall.com` / `music-pics-drcn.dbankcdn.cn`）→ 纯渲染层接线，**不扩白名单、不碰 CSP、不碰契约域表**。现场：歌单页卡片 **2/2** 张有 `<img>`，歌单详情 **22/22** 行曲目有 `<img>`，`loading="lazy"` 2/2 与 22/22，**碎图 0、无占位行**（`.tmp/r38-verify-ui.json` 的 `playlistImages` / `trackTable` / `trackImages`）；客户端代码零 `fetch(`（`test/no-self-visual.test.mjs` 同扫这条）。**如实登记未接线项**：`AmllBackground` 的专辑图仍未接（AMLL 要 `HTMLImageElement`，接它得命令式建 `Image()` 并处理加载竞态，属另一件事），写在契约 §2.5 |
+| R38-2 | **歌词数据链修复**（`getLyrics` 改三档：显式注入端点 → 已加载条目地址的进程内索引 → 播放响应/内嵌 `songInfo`） | **in-progress（代码已落地、已提交；真机播放复验待用户验收）** | **根因是真机取证出来的**：`$.albumInfoEx.songSimpleInfos[i].lyricAddress` **3/3 条都有**（白名单域、无查询串、GET 200、3332 / 900 / 22 字节、LRC 时间戳行 80 / 46 / 1），而 `playback:resolve-url` 的产物里**没有任何歌词类字段**——旧实现只问播放响应，真机上永远取不到歌词（`.tmp/r38-probe-lyrics.json` / `r38-probe-lrc-fetch.json`）。修完由 `test/music.test.mjs` +4 钉住（三档顺序、白名单外不进索引、索引过期回落、`songInfo` 同表；另有一条「被淘汰的地址一次都没被请求过」的**能杀变异**的断言）。**为什么不算 verified**：协议层跑在 sidecar，改动**需重启才生效**，而本轮简报要求不重启——「打开歌单 → 双击一首 → 点歌词 → 出现歌词行」这一眼**尚未有人看过**（见 KNOWN_LIMITATIONS B23 ①(b)）。**已知边界不是 bug**：索引只含用户本次运行加载过的条目，重启后直接播恢复出来的队列仍可能没歌词，不靠发明端点/编地址绕过去 |
+| R38-3 | **账号区与退出迁移**（设置页整块「登录状态与退出」删净；退出收进账号区 `AlertDialog` 二次确认 + `host-api` 的 `coreLogout` 唯一实现） | **verified（真机 CDP，兜底形态）** | 账号区存在、文本 = `已登录`、`slots = [avatar, avatar-fallback, alert-dialog-trigger]`、**VIP 徽标不存在**（因为确实没有 VIP 事实）、退出按钮存在（`aria-label="退出登录"`）；点退出 → 确认框标题/说明/两个按钮**逐字比对通过** → 点「取消」→ `data-state="closed"`、`app-shell` 仍在、`login-qr` 不在（**仍是登录态，取消不丢会话**）；设置页卡片标题现在是 `[网络与代理, 关窗行为, 开机自启, 外观, 桌面歌词, 播放队列]`，「登录」卡与「退出登录」字样都已消失（`.tmp/r38-verify-ui.json` / `r38-verify-ui2.json`）。两条旧断言按新契约重写（`test/proxy-settings-form.test.mjs` 第 8 节、`test/settings-page.test.mjs`） |
+| R38-4 | **品牌重复删除**（`App.tsx` 的 `SidebarHeader` 整块删净，不留空壳） | **verified（真机 CDP）** | `document.querySelector('[data-slot="sidebar-header"]')` → `null`（修复前**同一断言**是 `true`，`.tmp/r38-verify-ui.json` 的 `skeleton.sidebarHeaderPresent: false`）；`APP_BRAND_LABEL` 仍有调用方（`main.tsx` 的 `document.title`）→ 导出保留，`test/login-gate-markup.test.mjs` 仍钉「品牌不进引导页」 |
+| R38-5 | **账号资料点亮**（名字 / 头像 / VIP 进 `auth:status` 的可选 `profile`） | **pending（等真机登录取证）** | `loginex` 响应的形状**从来没有实证**，所以只做了防御式候选键（名字 `userName`/`nickName`/`nickname`；头像 `headUrl`/`headImage`/`avatarUrl`/`avatar`/`head` 且必须过 CDN 白名单；VIP 只认明确布尔或有证据的 `memberShip` 含 `6`，`vipLevel`/`vipType` **刻意不认**）+ **只记键名**的 INFO 日志两行。当前会话是 R38 之前建的、**没有 `profile`** → 左下角如实显示兜底（R38-3 那一行已验）。**所以这一档的 verified 只能等下一次真实登录**：运行日志里那两行「顶层键名（只记键名，不记值）」才是字段名的真源，回填候选表后才谈"点亮"；`test/music-session.test.mjs` +6、`test/account-area.test.mjs` +4 只钉住**候选键与降级形状**，**不证明任何真实字段存在** |
+
+**R38 的两条如实登记**（都不进 verified）：
+- **修复轮第 1 处（封面失败闩锁跨曲目粘死）没有真机证据**：本仓测试是 `node --test test/*.test.mjs`，**没有 DOM/组件渲染基建**，`CoverArt` 那三行也没有可抽的纯逻辑，所以证据只到 `tsc` + `build:web` + 代码推理；而且那一刻 **1420 上没有 vite 在监听**，这一处（渲染层）当时**也没能 HMR 送进窗口**。要真机钉子得在运行实例上造一次封面失败（会动正在跑的播放状态），本轮没做。
+- **R38-1 的现场取证是在修复轮之前取的**：修复轮改的是"失败闩锁"这三行，**不是**封面接线本身，所以 2/2 与 22/22 那些数字仍然有效；但那一处的窗口内形态与证据之间隔了这次改动，如实写在这里。
+
+**R39 逐项分档**
+
+| # | 项 | 状态 | 决定性证据（可复现） |
+|---|---|---|---|
+| R39-1 | **运行日志从侧栏 Sheet 搬到设置页页尾**：编辑器样式（行号 gutter + 等宽正文 + 有界 `ScrollArea`）+ shadcn `Input` 文本筛选 + 「N / 总数 条」计数 + 两种空态；数据层 `useNoticeLog` 一行未改，**订阅仍留在外壳**（`app:notice` 是广播，订阅挪进只在切页时挂载的设置页 = 打开设置页之前的日志全丢） | **verified（真机 CDP 41/41）** | 侧栏已无入口（`sidebarText` 里没有「运行日志」、`[class*="scroll-text"]` 命中 **0** 个、导航仍是那五项）；设置页卡片清单多出页尾「运行日志」；空态 `0 / 0 条` + 「暂无日志。」；走**真实广播通道**注入 4 条 `app:notice` 后 `lines=4`、gutter `["1","2","3","4"]`、正文不加工；筛选 `SETTINGS` → `lines=1`、计数 `1 / 4 条`；无命中 → `0 / 4 条` + 「没有匹配的日志。」；有界高度 `maxHeight=480px`（60vh）；**64 条压力**下 `viewport client=480 / scroll=1040`、`scrollTop` 可到 560 且最后一条落在视口内；等宽小字真计算值 `12px` + gutter 色 = 令牌 `--muted-foreground`；离开设置页无残留、队列 Sheet 未被波及；**0 console error / 0 pageerror**（`.tmp/r39-live/r39-summary.json` + 三张截图）。代码级：`test/log-terminal.test.mjs` **新增 9 条**（筛选 / 计数 / 数据层未改 / 样式接线 / 不发明级别 / 入口迁移 / 设置页卡），数字 800 → **810**。**过程中实测抓到一个真缺陷并修掉**：只有 `max-height`、没有确定高度的父盒子解不出 radix viewport 的 `height:100%` → 日志**溢出**而不是滚动（与旧 Sheet 完全同形）；修法把有界高度直接落到 viewport 上，由测试钉住那条任意变体必须在 |
+| R39-2 | **守卫扩展（shadcn / AMLL 合规清查的机器证据）** | **verified（代码级）** | `test/no-self-visual.test.mjs`：① `UI_FILES` 补入 `login-gate.tsx` / `login-chrome.tsx` / `theme-control.tsx`——**这三个展示文件此前一直在扫描名单外**，里面的自绘/裸原语守卫结构性抓不到；② `<canvas>` 断言改成"例外集合**恰好** = `login-gate.tsx`"且**可验证地**钉住它只是库的渲染目标（宿主不碰 `getContext`、只经 `paintQrCanvas`、`qr-canvas.mjs` 里确实是 `QRCode.toCanvas`）；③ 新增「自绘滚动容器：面板一律走 ScrollArea，页面级滚动根的例外集合写死」（`SCROLL_ROOT_EXCEPTIONS` 逐文件计数 `deepEqual`）。三条判据的机械结论：**硬编码色 0 处**（`theme-tokens.test.mjs` 扫除 `components/ui/` 外全部手写文件）、**自定义 CSS 0 处新增**（`styles.css` 一行未改）、**裸元素替代 shadcn 原语 0 处**（全仓裸表单/表格/弹层元素只出现在 `components/ui/` 生成物与那块二维码画布） |
+| R39-3 | 审计交上来的 **7 处组合边界 + 1 条口径问题**：三处页面级自绘滚动根（`App.tsx` 内容区 / 搜索页内层 / `favorites-page`——后者要真实元素给 `IntersectionObserver`）、设置页顶部 `<p role="alert">` 与仓里已有的 `Alert` 两种形态并存、`QueuePanel` 两行空态、`PlaybackStage` 是覆盖层而不是 `Dialog`、二维码 `<canvas>` 形态；口径：行号 gutter = **显示位置 1..N**（跟筛选走），计数 = 「筛出来的 / 总数 条」 | **pending（登记待裁决；本轮刻意不动）** | 都不是硬违例，也都不是"拿不准就不做"——是按简报要求把边界交上去，逐条给了倾向与代价（报告 §4）。**一条未实测的推断**一并如实登记：旧 Sheet 用的是同一个 `max-h` 形状，所以 R38 那个日志面板很可能**也滚不动**；入口已删、无法就地实测，**这不是 R39 引入的问题**，修好的是同一个形状 |
+
 ---
 
 ## 2. 能力矩阵（**代码级 verified 与真机 verified 分开写**）
