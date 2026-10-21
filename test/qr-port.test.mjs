@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 
 import { HUAWEI_QR_ENDPOINTS, QR_PORT_ERROR_KINDS, createHuaweiQrPort } from "../src/main/qr-login.mjs";
 import { QR_LOGIN_STATUS } from "../src/protocols/qr-login.mjs";
+import { decodeFingerprint, fingerprintChecksum } from "../src/protocols/device-fingerprint.mjs";
 
 const AUTHORIZE_URL =
   "https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize?response_type=code&client_id=101444301" +
@@ -158,7 +159,7 @@ function build({
   return { port, world, events, confirmations, clock };
 }
 
-test("端口：建单只打无状态的二维码端点（不碰 CAS 链），pending 广播带二维码内容", async () => {
+test("端口：建单打的是无状态的二维码端点（URL 无查询串、六个参数从模板取），pending 广播带二维码内容", async () => {
   const { port, world, events, clock } = build();
   const started = await port.start({
     authorizeUrl: AUTHORIZE_URL,
@@ -171,16 +172,21 @@ test("端口：建单只打无状态的二维码端点（不碰 CAS 链），pen
   assert.equal(started.data.expiresInMs, 181_000);
   assert.deepEqual(events.map((event) => event.status), [QR_LOGIN_STATUS.pending]);
 
-  const create = world.calls[0];
-  assert.equal(create.url, HUAWEI_QR_ENDPOINTS.create, "建单端点就是探针登记的那一条（模板查询串原样带上）");
+  const create = world.calls.find((call) => call.url.includes("getqrInfo"));
+  /**
+   * R31 改了断言（行为也随之改了，理由在 `docs/API_CONTRACT.md` §1.8 的 R31 段）：
+   * **请求上不再挂模板查询串**——探针实测页面发的是 `getqrContent.split("?")[0]`。
+   * 端点常量本身仍然带查询串，因为它是六个参数的唯一真源（`buildQrCreateBody` 从它取）。
+   */
+  assert.equal(create.url, "https://id1.cloud.huawei.com/DimensionalCode/getqrInfo");
   const body = new URLSearchParams(create.body);
   assert.equal(body.get("appID"), "com.huawei.hwidweb");
   assert.equal(body.get("version"), "40200");
   assert.equal(body.get("confirmFlag"), "1");
   assert.equal(
-    world.calls.some((call) => call.url.includes("getLoginWay")),
+    world.calls.some((call) => call.url.includes("codeRemoteLogin")),
     false,
-    "显示二维码不该先走 CAS 链：链路的失败要留到用户已经扫码之后",
+    "还没有人确认，换码那一步一步都不许走",
   );
   port.cancel();
   assert.equal(clock.size(), 0);
@@ -531,4 +537,210 @@ test("端口（R22）：轮询诊断日志经端口落到注入的 log（stderr�
   assert.match(rounds[0], /resultCode=103000200/);
   assert.match(rounds.at(-1), /resultCode=0/);
   assert.equal(logs.join("\n").includes(CREATE_PAYLOAD.qrToken), false, "日志不带 qrToken（会话令牌只在进程内用）");
+});
+
+// ---------------------------------------------------------------------------
+// R31 全保真：建单/轮询的**上下文**补齐（探针实测的三处缺口）
+//
+// `scripts/probe-qr-fidelity.mjs` 用 headless Chromium 真开了官方二维码页（桌面门户
+// `/CAS/portal/loginAuth.html`），抓到页面自己发的三个请求：
+//
+// 1. **建单**：`POST /DimensionalCode/getqrInfo`（**无查询串**）、表单 = 模板六参数
+//    **+ deviceID + deviceType=7**、带 cookie（CAS 会话那串）、Referer 就是门户页；
+// 2. **轮询**：`POST /DimensionalCode/async?version=40200&t=<随机>`、表单只有 qrToken、
+//    带 cookie（**连建单响应自己设的 `qRCode`/`expiredTime`/`qrCodeCreateTime` 都带上了**）；
+// 3. **设备指纹**：`POST /CAS/IDM_W/ajaxHandler/dev`，正文 `{pageToken, pageTokenKey, …, fp}`，
+//    响应 `{isSuccess:1, sid:"<84 位 hex>"}`——**deviceID 就是这颗 sid**（页面写进
+//    `localStorage.hwid_cas_sid` 与同名 cookie）。
+//
+// 于是端口层多两件事：① 建单前先把"会话上下文"拿到（CAS 链 → 门户页 → getPageInfo → dev），
+// ② 让建单/轮询走**同一个 cookie 罐**（并带上页面 UA / Referer）。**失败一律降级**：
+// 链走不通就照旧建单显示二维码——界面不能因为"保真"而变脆（R31 的硬约束：界面不变）。
+// ---------------------------------------------------------------------------
+
+/** 探针实测：页面的 deviceID 是服务端下发的一颗 84 位 hex（这里用假世界编一颗同形状的）。 */
+const R31_SID = "a".repeat(84);
+
+/** R31 的假世界：门户链 + 指纹 + 建单/轮询（每一步都能断言到请求头）。 */
+function makeR31World({ deviceSid = R31_SID, portalFails = false, sidEmpty = false } = {}) {
+  const calls = [];
+  const cookieJar = [];
+  const makeCookies = () => (cookieJar.length === 0 ? {} : { cookie: cookieJar.join("; ") });
+  const fetchImpl = async (url, init = {}) => {
+    const target = String(url);
+    const headers = { ...(init.headers ?? {}) };
+    calls.push({ url: target, method: init.method ?? "GET", body: String(init.body ?? ""), headers });
+    const answer = (status, body, extraHeaders = {}) => {
+      for (const line of extraHeaders["set-cookie-list"] ?? []) cookieJar.push(line.split(";")[0]);
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        headers: {
+          get: (name) => extraHeaders[name.toLowerCase()] ?? null,
+          getSetCookie: () => extraHeaders["set-cookie-list"] ?? [],
+        },
+        async text() {
+          return typeof body === "string" ? body : JSON.stringify(body ?? {});
+        },
+      };
+    };
+
+    if (target.includes("/oauth2/ajax/getLoginWay")) {
+      if (portalFails) throw new Error("假装网络断了（R31 降级用例）");
+      return answer(200, { isSuccess: "true", loginInteractInfo: { cas: { casLoginRedirectUrl: CAS_REDIRECT } } });
+    }
+    if (target.startsWith("https://id1.cloud.huawei.com/CAS/remoteLogin")) {
+      return answer(302, "", { location: PORTAL_URL });
+    }
+    if (target.includes("/CAS/portal/loginAuth.html")) {
+      // 门户页：它自己会下发一份会话 cookie（页面就是这么拿到的）
+      return answer(200, "<html></html>", { "set-cookie-list": ["JSESSIONID=portal-session; Path=/"] });
+    }
+    if (target.includes("/CAS/mobile/standard/login.html")) return answer(200, "<html></html>");
+    if (target.includes("/login/getPageInfo")) return answer(200, PAGE_INFO);
+    if (target.includes("/ajaxHandler/dev")) {
+      return answer(200, { isSuccess: 1, sid: sidEmpty ? "" : deviceSid });
+    }
+    if (target.includes("/DimensionalCode/getqrInfo")) {
+      // 建单响应自己会设 cookie（探针实测：轮询把它们带回去了）
+      return answer(200, CREATE_PAYLOAD, { "set-cookie-list": ["qRCode=R1; Path=/", "expiredTime=1; Path=/"] });
+    }
+    if (target.includes("/DimensionalCode/async")) return answer(200, { resultCode: "103000200" });
+    if (target.includes("/codeRemoteLogin")) return answer(200, { isSuccess: "1", callbackURL: "hms://redirect_uri?code=CODE" });
+    throw new Error(`假 fetch 不认识这个地址：${target}`);
+  };
+  return { fetchImpl, calls };
+}
+
+function buildR31(options = {}, config = {}) {
+  const clock = timers();
+  const world = makeR31World(config);
+  const logs = [];
+  const events = [];
+  const port = createHuaweiQrPort({
+    fetchImpl: world.fetchImpl,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    now: () => 1_700_000_000_000,
+    random: () => 0.5,
+    log: (message) => logs.push(message),
+    timeoutMs: null,
+    ...options,
+  });
+  return { port, world, clock, logs, events };
+}
+
+test("R31 建单：先拿会话上下文（CAS 链 → 门户页 → getPageInfo → 指纹 dev），再按页面形状建单", async () => {
+  const { port, world, clock, events, logs } = buildR31();
+  await port.start({ authorizeUrl: AUTHORIZE_URL, onEvent: (event) => events.push(event), onConfirmed: () => undefined });
+
+  // 端点表里登记的就是探针抓到的那两条（改路径要连契约一起改）
+  assert.equal(HUAWEI_QR_ENDPOINTS.deviceFingerPath, "/CAS/IDM_W/ajaxHandler/dev");
+  assert.equal(HUAWEI_QR_ENDPOINTS.portalLoginPath, "/CAS/portal/loginAuth.html");
+
+  // ① 指纹那一步：URL/正文都是页面的形状
+  const dev = world.calls.find((call) => call.url.includes("/ajaxHandler/dev"));
+  assert.ok(dev, `建单之前要先用指纹换 deviceID：${JSON.stringify(world.calls.map((call) => call.url))}`);
+  assert.match(dev.url, /reflushCode=.*&cVersion=/);
+  const devBody = new URLSearchParams(dev.body);
+  assert.equal(devBody.get("pageToken"), PAGE_INFO.pageToken);
+  assert.equal(devBody.get("pageTokenKey"), PAGE_INFO.pageTokenKey);
+  const fp = decodeFingerprint(devBody.get("fp"));
+  assert.equal(fp.ok, true, "fp 必须是页面那种可解的形状");
+  assert.equal(fp.checksum, fingerprintChecksum(fp.body), "cs 就是去掉 cs 那半截的 sha1（服务端就认它）");
+
+  // ② 建单：URL 无查询串、表单与页面逐字段一致、deviceID 用的是服务端给的 sid
+  const create = world.calls.find((call) => call.url.includes("/DimensionalCode/getqrInfo"));
+  assert.equal(create.url, "https://id1.cloud.huawei.com/DimensionalCode/getqrInfo");
+  const body = new URLSearchParams(create.body);
+  assert.deepEqual([...body.keys()].sort(), [
+    "appBrand",
+    "appID",
+    "confirmFlag",
+    "deviceID",
+    "deviceType",
+    "loginChannel",
+    "reqClientType",
+    "version",
+  ]);
+  assert.equal(body.get("deviceID"), R31_SID, "deviceID 必须是服务端下发的那颗 sid（不是我们自己编的）");
+  assert.equal(body.get("deviceType"), "7");
+  assert.equal(body.get("appID"), "com.huawei.hwidweb");
+
+  // ③ 三个请求都带页面那套头：UA（协议保真，不是应用 webview 的 UA）+ Referer + cookie
+  for (const call of [dev, create]) {
+    assert.match(call.headers["user-agent"] ?? "", /Chrome\/131\.0\.0\.0/, "UA 复刻页面（桌面 Chrome）");
+    assert.match(call.headers.referer ?? "", /\/CAS\/portal\/loginAuth\.html/, "Referer 就是那张画着二维码的页");
+  }
+  assert.match(create.headers.cookie ?? "", /JSESSIONID=portal-session/, "建单带着 CAS 会话的 cookie（探针实测页面带着）");
+  assert.equal(create.headers.accept, "application/json, text/plain, */*");
+
+  // ④ 轮询：同一个罐，而且**建单响应自己设的 cookie** 也要回来
+  await clock.tick();
+  const poll = world.calls.find((call) => call.url.includes("DimensionalCode/async"));
+  assert.match(poll.url, /^https:\/\/id1\.cloud\.huawei\.com\/DimensionalCode\/async\?version=40200&t=/);
+  assert.deepEqual([...new URLSearchParams(poll.body).keys()], ["qrToken"]);
+  assert.match(poll.headers.cookie ?? "", /JSESSIONID=portal-session/);
+  assert.match(poll.headers.cookie ?? "", /qRCode=R1/, "建单响应设的 qRCode cookie 要跟着回来（页面就是这样）");
+  assert.match(poll.headers.cookie ?? "", /expiredTime=1/);
+
+  assert.deepEqual(events.map((event) => event.status), [QR_LOGIN_STATUS.pending]);
+  assert.equal(
+    logs.some((line) => line.includes("二维码") && line.includes("R31")),
+    true,
+    `上下文那一步要留一行可判的日志：${JSON.stringify(logs)}`,
+  );
+  assert.equal(logs.join("\n").includes(R31_SID), false, "deviceID 是设备标识，但没必要进日志（只记形状/来源）");
+  port.cancel();
+  assert.equal(clock.size(), 0);
+});
+
+test("R31 降级：CAS/门户链走不通时照样建单显示二维码（不带 deviceID、不带 cookie，界面不受影响）", async () => {
+  const { port, world, clock, events, logs } = buildR31({}, { portalFails: true });
+  const started = await port.start({
+    authorizeUrl: AUTHORIZE_URL,
+    onEvent: (event) => events.push(event),
+    onConfirmed: () => undefined,
+  });
+
+  assert.equal(started.ok, true, "链走不通也必须把二维码显示出来（保真不能变成新的故障点）");
+  const create = world.calls.find((call) => call.url.includes("/DimensionalCode/getqrInfo"));
+  assert.ok(create, "照旧建单");
+  const body = new URLSearchParams(create.body);
+  assert.equal(body.get("deviceID"), null, "拿不到服务端那颗 sid 就不许自己编一个");
+  assert.equal(body.get("deviceType"), null);
+  assert.equal(create.headers.cookie, undefined, "没有会话上下文就一个 cookie 都不带");
+  assert.equal(create.headers["user-agent"] !== undefined, true, "但 UA 是协议保真，与上下文成败无关");
+  assert.deepEqual(events.map((event) => event.status), [QR_LOGIN_STATUS.pending]);
+  assert.equal(logs.some((line) => line.includes("降级")), true, `降级要留一行说明：${JSON.stringify(logs)}`);
+  port.cancel();
+  assert.equal(clock.size(), 0);
+});
+
+test("R31 不猜：dev 回了空 sid（服务端不认这份指纹）→ 建单不带 deviceID，二维码照常显示", async () => {
+  const { port, world, events, logs } = buildR31({}, { sidEmpty: true });
+  await port.start({ authorizeUrl: AUTHORIZE_URL, onEvent: (event) => events.push(event), onConfirmed: () => undefined });
+
+  const create = world.calls.find((call) => call.url.includes("/DimensionalCode/getqrInfo"));
+  const body = new URLSearchParams(create.body);
+  assert.equal(body.get("deviceID"), null);
+  assert.equal(body.get("deviceType"), null);
+  assert.deepEqual(events.map((event) => event.status), [QR_LOGIN_STATUS.pending]);
+  assert.equal(logs.some((line) => line.includes("降级")), true);
+  port.cancel();
+});
+
+test("R31 上下文只拿一次：start 不会为了建单打两遍 CAS 链（换码那一步仍然留给确认之后）", async () => {
+  const { port, world, clock } = buildR31();
+  await port.start({ authorizeUrl: AUTHORIZE_URL, onEvent: () => undefined, onConfirmed: () => undefined });
+  await clock.tick();
+
+  const loginWayCalls = world.calls.filter((call) => call.url.includes("getLoginWay")).length;
+  assert.equal(loginWayCalls, 1, `建单这条链只走一遍：${loginWayCalls}`);
+  assert.equal(
+    world.calls.some((call) => call.url.includes("/codeRemoteLogin")),
+    false,
+    "没有人确认过，换码链一步都不许走",
+  );
+  port.cancel();
 });

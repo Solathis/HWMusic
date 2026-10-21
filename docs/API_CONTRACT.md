@@ -625,17 +625,21 @@ bundle 里没有任何硬编码的二维码端点字符串——这也是"必须
    **简报假设的"reqClientType/loginChannel 错位"不成立**：页面 `localInfo` 里另有一套
    `reqClientType="90"` / `loginChannel="90000300"`（那是 OAuth 客户端的上下文），而**二维码建单用的是
    `getqrContent` 里的 700/7000700**——我们跟页面走的是同一条；若当初取了 `localInfo` 那套才是错位。
-2. **三处保真度偏差，本轮如实登记、不改行为**（没有任何证据表明它们影响"扫码关联"，改了就是赌）：
+2. **三处保真度偏差，本轮如实登记、不改行为**（没有任何证据表明它们影响"扫码关联"，改了就是赌）
+   ——**R31 更新：这三条已按探针实测补齐，见下面 R31 段**：
    - **查询串**：页面把 `?…` 丢掉（`split("?")[0]`），我们把模板查询串**留在 URL 上**（表单里同时也带了
      同样六个参数）。协议层是"参数从端点模板取"的唯一真源设计（`buildQrCreateBody`），改 URL 形状要连
      契约一起改，而收益不明；
    - **`deviceID`/`deviceType`**：页面在 `localStorage.hwid_cas_sid` 存在时补 `{deviceID, deviceType: 7}`
      （`getDevInfo`），而这张页面的 `localInfo.isUsedDeviceFingerSite = true`（**设备指纹在这个站点上是
-     开着的**）。sidecar 没有浏览器 localStorage 那一份 `hwid_cas_sid`，目前**一个都不带**；
+     开着的**）。sidecar 没有浏览器 localStorage 那一份 `hwid_cas_sid`，目前**一个都不带**
+     （R31 查清了那颗 `sid` 的来源：服务端下发的，见 R31 段第 2 条）；
    - **cookie**：页面两个调用都是 `withCredentials: true`（带的是它自己 CAS 会话的 cookie）。我们
      建单/轮询**完全不依赖 cookie**——R16 的 `recon-stateless.mjs` 与 R29 的探针都在"零 cookie"下拿到
      了正常建单响应与正常轮询档位（可复现），所以这不是"请求被拒"的问题；至于它会不会影响**扫码关联**，
-     本环境无法判定（见第 4 条）。
+     本环境无法判定（见第 4 条）。**R31 更正口径**："不依赖"说的是服务端**不拒绝**无 cookie 的请求，
+     不等于"页面不带 cookie"——探针实测页面的轮询还带着**建单响应自己种下的** `qRCode`/`expiredTime`/
+     `qrCodeCreateTime`，所以我们照样把罐带上（`docs/KNOWN_LIMITATIONS.md` B21）。
 3. **轮询请求保真度：形状相同，节奏略有差异**。页面 `asyncRequest`：`POST asyncURL + "&t=" + Math.random()`、
    表单只有 `qrToken`、`Content-Type: x-www-form-urlencoded`、超时 30 s、`withCredentials: true`；
    我们除 cookie 外逐项相同（`buildQrPollBody` 也只有 `qrToken`）。**节奏**：页面按"上一轮**发出**时刻 +
@@ -649,13 +653,20 @@ bundle 里没有任何硬编码的二维码端点字符串——这也是"必须
    本页组件从不调用）。也就是说**"把那个链接打开"本身并不上报扫码**：探针用手机 UA 打开 content URL
    （无账号会话）前后各轮询两次，档位始终 `103000200`／`"Please to login."`。
    于是"压根没扫"与"扫了但手机侧那台设备**没有登录华为账号**"在服务端是**同一档**；而
-   `errorDesc` 那句 "Please to login." 正是服务端在说后者。
+   `errorDesc` 那句 "Please to login." **读作服务端在说后者**——这是**推断，不是实测**（R31 更正措辞）：
+   我们只验过"无账号的手机打开 content URL 会得到这句话"，没有对照组，也没验过服务端会不会在别的
+   场合复用同一句话。
    **仍未验证的关键一跳**：一台已登录华为账号的手机扫这张码，是否会依次给出 `103000202` → `0`
    ——需要真实账号（本任务与探针都禁止登录），如实登记为 `docs/KNOWN_LIMITATIONS.md` **B19**
    并给出用户步骤（手机侧先登录，再看日志里是否出现 `103000202`）。
 5. **`errorDesc` 的处置**：页面 bundle 只认 `0`/`103000201`/`103000202`，其余（含 `103000200`）一律
-   "继续轮询"，所以**状态码本身分不出上面那两种情况**，而 `errorDesc` 可以。它是服务端固定文案
-   （不带会话信息），因此 R29 起**进日志**（压成一行、超长截断 `QR_ERROR_DESC_MAX = 80`）。
+   "继续轮询"，所以**状态码本身分不出上面那两种情况**。`errorDesc` 是服务端在 `103000200` 这档上
+   **给出的唯一一句话**（现场原话 `"Please to login."`），也是我们手上**唯一能拿来推断**
+   "是不是手机侧没登录"的线索——注意口径（R31 更正）：**它是线索，不是判据**。
+   本轮能证明的只有"这句话在'无账号的手机打开 content URL'时出现"，**不能**证明"这句话出现 ⇔ 手机侧
+   没登录"（没有对照组：既没验过"手机侧已登录但没关联"会说什么，也没验过服务端会不会在别的场合
+   复用这句话）。它不带会话信息，因此 R29 起**进日志**（压成一行、超长截断 `QR_ERROR_DESC_MAX = 80`），
+   真机上按"线索"读即可。
 6. **观测加强（本轮交付的可判性）**，两条，都在协议层（`src/protocols/qr-login.mjs`）：
    - **建单一行** `二维码建单：content=/qrcode/login.jsp?loginChannel=…&reqClientType=…&qrSiteID=…
      &appBrand=…&familySharing=…；有效期=181s`——只留**非敏感**参数（`describeQrContent` 丢掉
@@ -667,6 +678,57 @@ bundle 里没有任何硬编码的二维码端点字符串——这也是"必须
    `describeQrContent` 丢掉 `qRCode`、建单一行只此一条且不含凭据、轮询行的时刻与 `t+…s`、陌生码那行
    格式不分叉）；探针 `scripts/probe-qr-phone.mjs` + 摘要 `.probe/r29-phone.json`。
    **未改任何行为**：参数/链路/cookie 一处未动（依据见第 2 条），本轮交付的是**结论 + 可判性**。
+
+**R31（用户指令 2026-10-21：界面不变、不用移动端 UA、继续修自己生成的二维码）——建单/轮询全保真对齐**。
+R29 是被动读代码推断，R31 换了方法：**用 headless Chromium 真开官方页，把页面自己发的请求抓下来**
+（`scripts/probe-qr-fidelity.mjs` → `.probe/r31-fidelity.json`；`test:acceptance` 之外可单独
+`node scripts/probe-qr-fidelity.mjs` 复现）。抓下来之后，R29 登记的三处缺口一条条变成了事实。
+
+1. **先说一张被推翻的想当然：建单不在移动页上，在桌面门户页上**（这是本轮所有结论的前提）。
+   探针两个相位：手机 UA 下——无论是 CAS 入口落到的那张页（`/CAS/portal/loginAuth.html`）还是显式打开的
+   移动登录页（`/CAS/mobile/standard/login.html`）——**画布 0 个、二维码图 0 个、建单 0 条、轮询 0 条**
+   （那两张页渲染的是"短信验证码登录/密码登录"）；桌面 UA 下同一张门户页 **画布 1 个、二维码图 1 个**，
+   建单与轮询都是它发的。所以：① R16 起从移动页读 `getqrContent` 只是"借它的配置"，**二维码从来是桌面页的东西**；
+   ② 用户"不用移动端 UA"的指令与协议保真是**同一件事**（移动 UA 下那张页根本没有二维码）。
+   附带更正：探针里**桌面门户页的 `getPageInfo` 也下发 `getqrContent`/`asyncURL`/`qrcodeRequestInterval`**
+   （R16 记的是"不下发"）——R16 的判断按当时的请求参数成立与否已不可考，但今天的实测是下发，
+   所以我们沿用原设计（配置仍从移动页读、常量仍以那次实探为准），只是把门户页用在"上下文"上。
+2. **`deviceID` 的真源查清了：它是服务端下发的 `sid`，不是页面自己算的哈希**。页面顺序是
+   `POST /CAS/IDM_W/ajaxHandler/dev`（正文 `{pageToken, pageTokenKey, reqClientType, loginChannel,
+   clientID, lang, languageCode, state, fp}`）→ 响应 `{"isSuccess":1,"sid":"204937…（84 位 hex）"}`
+   → 写进 `localStorage.hwid_cas_sid` 与同名 cookie → 建单时作为 `deviceID=<sid>&deviceType=7` 发出去。
+   那份 `fp` 的编码（`k=v` 排序 + `&cs=<sha1>` + 滚动 XOR + base64）在
+   `src/protocols/device-fingerprint.mjs` 里**逐字节复刻**，并由探针抓到的那份原件钉住
+   （`test/fixtures/r31-page-fingerprint.json` + `test/device-fingerprint.test.mjs`）。
+   服务端的接受规则也是实测的：`cs` 必须是 `sha1(去掉 cs 的那半截)`（写错/不写/内容不合形状 → `sid:""`
+   = 拒绝），而**指纹里那几个哈希不校验来源**（换一个 40 位 hex 照样发 `sid`）。
+   → 因此我们发的那份指纹里：`ett`/`etz`/`nlg`/屏幕尺寸是**真值**（可注入），
+   `canvas`/`webgl`/`fonts` 是**同形状的固定值**（sidecar 没有浏览器引擎）——如实登记在模块头与 B21。
+3. **建单请求的完整形状**（页面 vs 我们，R31 起逐项相等）：URL `POST /DimensionalCode/getqrInfo`
+   **不带查询串**（`qrCreateRequestUrl` 只留 origin+path；端点常量仍带模板查询串，因为六个参数从它取）、
+   表单 `{appID, confirmFlag, version, reqClientType, loginChannel, appBrand, deviceID, deviceType}`
+   （前六个逐值相同，后两个形状相同）、头 `content-type: application/x-www-form-urlencoded` +
+   `accept: application/json, text/plain, */*`（`QR_PAGE_ACCEPT`）+ 页面 UA（`QR_HTTP_USER_AGENT`）
+   + `Referer` 指门户页 + **cookie**（CAS 会话那串，含 `dev` 响应种下的 `hwid_cas_sid`）。
+4. **轮询请求同理**：`POST /DimensionalCode/async?version=40200&t=<随机>`、表单只有 `qrToken`、
+   同一套头与 cookie——**并且带着建单响应自己种下的** `qRCode`/`expiredTime`/`qrCodeCreateTime`
+   （探针实测的 cookie 名单里就有它们；这正是"cookie 罐"这条缺口最硬的一条证据）。
+5. **降级是硬约束**：上下文那一步（CAS 链 → 门户页 → getPageInfo → dev）**失败不许挡界面**——
+   拿不到就照旧建单（不带 `deviceID`/cookie），日志留一行
+   `二维码建单上下文（R31 全保真）降级：<原因>；照旧建单（不带 deviceID/cookie）`；
+   拿到则留 `二维码建单上下文（R31 全保真）：门户页=/CAS/portal/loginAuth.html；cookie=N 项；
+   deviceID=服务端 sid（84 位 hex）`。`sid` 的值本身**不进日志**（只记长度）。
+   dev 回空 `sid` 时**不猜一个 deviceID**（自己编的骗不过服务端，只会让"不关联"更难查）。
+6. **界面与 UA 一处未动**：渲染层零改动、登录 webview 仍是宿主默认 UA、二维码的画布/倒计时/过期/刷新
+   全保留。协议里的 UA 是**请求头层面的协议保真**（桌面 Chrome），与"应用用什么 UA 打开官方登录页"是两件事。
+7. **实探（产品代码自己走一遍，`.tmp/r31-live-port.mjs`）**：`deviceID=服务端 sid（84 位 hex）`、
+   建单 8 字段 + cookie 名单 `CAS_THEME_NAME,JSESSIONID,VERSION_NO,CASTGC,CASTGCLOW,hwid_cas_sid`、
+   轮询 cookie 名单再带上 `qRCode,qrCodeCreateTime,expiredTime,cversion`；建单/轮询 UA 与
+   `QR_HTTP_USER_AGENT` 逐字节相同。**仍然测不到的是"关联"本身**（要真手机 + 真账号）
+   → `docs/KNOWN_LIMITATIONS.md` **B21**。
+8. 钉在：`test/device-fingerprint.test.mjs`（10 条：序列化/校验/往返/**与页面逐字节一致**/字段表）、
+   `test/qr-login.test.mjs` 的 R31 3 条（建单 URL 去查询串、建单请求形状、轮询请求形状）、
+   `test/qr-port.test.mjs` 的 R31 4 条（上下文链 + cookie 罐；降级；空 sid 不猜；CAS 链只走一遍）。
 
 ## 2. 音乐业务接口
 
@@ -1237,7 +1299,10 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `LYRICS_SESSION_NOTICE` | 会话内说明文案 | `src/renderer/features/lyrics/lyrics-window.mjs` | R12：设置项旁边如实写"只在本次运行内生效、不写入设置文件" |
 | `SHORTCUT_BINDINGS` | 5 动作 / 主组合 + 备选链 | `src-tauri/src/shortcuts.rs` | R13：全局快捷键的唯一真源（媒体三键无备选；两条提示型组合各有 2 条备选）。每个组合都必须能被 `global-hotkey` 解析、且不许两个动作抢同一个组合（内联单测钉住） |
 | `ShortcutState` | 生效组合快照 | `src-tauri/src/shortcuts.rs` | R13：`setup` 里登记成托管状态（设置页后续可读；本任务只记 + 提示，不做 UI） |
-| `HUAWEI_QR_ENDPOINTS` | 见 §1.8（建单/轮询/CAS 换码三条） | `src/main/qr-login.mjs` | R16：二维码登录的端点表（探针确认值；协议层 `src/protocols/qr-login.mjs` 仍只收注入，不写死 URL） |
+| `HUAWEI_QR_ENDPOINTS` | 见 §1.8（建单/轮询/CAS 换码三条 + **R31 的两条**：`deviceFingerPath`、`portalLoginPath`） | `src/main/qr-login.mjs` | R16 立、**R31 增补两条**：二维码登录的端点表（探针确认值；协议层 `src/protocols/qr-login.mjs` 仍只收注入，不写死 URL）。R31 增补的两条来自新探针：`/CAS/IDM_W/ajaxHandler/dev`（指纹换 `sid` = deviceID 的来源）与 `/CAS/portal/loginAuth.html`（画着二维码的那张页，也是建单/轮询的 Referer） |
+| `QR_HTTP_USER_AGENT` | `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36` | `src/main/qr-login.mjs` | R31：二维码这条链上**所有 HTTP 请求**的 UA（协议保真 = 像页面一样说话）。探针实测页面的 UA 与它**逐字节相同**（`probe-qr-fidelity` 每次都当场比）。**与"应用用什么 UA 打开官方登录页"无关**——后者按用户指令保持宿主默认 |
+| `QR_PAGE_ACCEPT` | `"application/json, text/plain, */*"` | `src/protocols/qr-login.mjs` | R31：建单/轮询的 `accept`（页面 axios 发的就是这一串；原来只写 `application/json`） |
+| `DEVICE_FINGERPRINT_FIELDS` / `DEVICE_FINGERPRINT_DEFAULT_SCREEN` | 19 个字段 / `{width:1920, height:1080}` | `src/protocols/device-fingerprint.mjs` | R31：设备指纹的字段表（探针实测页面那份的 19 个：`bsh,bsw,canvas,devs,ep,ett,etz,fonts,ips,nacn,nan,nce,nlg,npf,sah,saw,sh,sw,webgl`）与拿不到真窗口尺寸时的合约默认值。**服务端按形状收**（实测），所以 `canvas`/`webgl`/`fonts` 是同形状固定值 |
 | `AUTH_QR_START` / `AUTH_QR` | `"auth:qr-start"` / `"auth:qr"` | `src/shared/request-channels.ts` / `src/shared/channels.ts` | R16：二维码会话的请求频道与状态广播（Rust 镜像由 `test/channel-parity.test.mjs` 钉住） |
 | `AUTH_GET_STATUS` | `"auth:get-status"` | `src/shared/request-channels.ts` | R19：登录状态**重查**频道（渲染层挂载时主动问一次；应答与 `auth:status` 同形状，Rust 镜像由 `test/channel-parity.test.mjs` 钉住） |
 | `QR_HINT_TEXT` | `"手机「控制中心」>「扫一扫」或者系统「设置」>「华为账号」>「扫一扫」。"` | `src/renderer/features/auth/login-gate-logic.mjs` | R16 立、**R18 按用户指令改文案**：引导页那**一句**提示文字（界面与测试读同一份真源；状态行不再复述它） |
@@ -1581,3 +1646,17 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
   见 §2.1 第 3 条。
   测试：cargo **239 pass + 0 fail + 1 ignored**（白名单 3 条断言改写）、node **723 pass / 0 fail**
   （`test/music.test.mjs` 按新线上形状重写、新增差分用例）、tsc 0 错、acceptance 6/0/0。
+
+- 2026-10-21（Task R31）：**自建二维码全保真修复**（用户指令：界面不变、不用移动端 UA、继续修自己生成的
+  二维码）。方法换了：R29 是读代码推断，本轮**用 headless Chromium 真开官方二维码页**，把页面自己发的
+  建单/轮询/指纹请求抓下来（`scripts/probe-qr-fidelity.mjs` → `.probe/r31-fidelity.json`）。八条见 §1.8 的
+  R31 段，最要紧的三条：① **二维码是桌面门户页画的**（手机 UA 下那张页画布 0 个、建单 0 条——所以"不用
+  移动端 UA"与协议保真是同一件事）；② **`deviceID` = 服务端下发的 `sid`**（拿一份设备指纹打
+  `/CAS/IDM_W/ajaxHandler/dev` 换回来，编码格式逐字节复刻，见 `src/protocols/device-fingerprint.mjs`）；
+  ③ **cookie 罐**——页面的轮询带着建单响应自己种下的 `qRCode`/`expiredTime`，我们此前全丢。
+  落地：建单 URL 去查询串（`qrCreateRequestUrl`）、建单表单补 `deviceID`/`deviceType=7`、
+  建单/轮询走同一个 cookie 罐并带页面 UA/Referer/`accept`。**失败一律降级**（拿不到上下文照旧建单，
+  界面不受影响）；渲染层与 Rust 一行未动。**仍未验证**："补上这些到底有没有用"要真手机 + 真账号
+  → `docs/KNOWN_LIMITATIONS.md` **B21**。
+  测试：node **753 pass / 0 fail**（+17：指纹模块 10、协议层 3、端口层 4）、tsc 0 错、
+  acceptance 6/0/0、cargo **239 pass + 0 fail + 1 ignored**（源码一行未动，跑一遍确认没回归）。

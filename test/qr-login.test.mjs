@@ -47,6 +47,7 @@ import {
   createQrSession,
   describeQrContent,
   parseQrCreate,
+  qrCreateRequestUrl,
   sanitizeErrorDesc,
 } from "../src/protocols/qr-login.mjs";
 
@@ -1242,4 +1243,94 @@ test("R29 诊断：认不出的码那一行照样带时刻与 errorDesc（熔断
   assert.ok(round.includes("103009999"));
   assert.ok(round.includes("连续 1/5"), `陌生码的连续计数要在同一行：${round}`);
   assert.ok(round.includes('errorDesc="protocol changed"'));
+});
+
+// ---------------------------------------------------------------------------
+// R31 全保真：探针（headless Chromium 真开官方二维码页）实测到的请求形态逐项对齐
+//
+// 实测（`scripts/probe-qr-fidelity.mjs` → `.probe/r31-fidelity.json`）：
+// - 建单 **POST https://id1.cloud.huawei.com/DimensionalCode/getqrInfo**——**没有查询串**；
+//   表单 = 模板六参数 + `deviceID` + `deviceType=7`；
+// - 轮询 `POST …/DimensionalCode/async?version=40200&t=<随机>`，表单只有 `qrToken`；
+// - 两个请求都带 `accept: application/json, text/plain, */*` 与页面自己的 Referer；
+// - 两者都带 cookie（建单带 CAS 那些、轮询还带**建单响应自己设的** `qRCode`/`expiredTime`）。
+//
+// 本层只负责"我们发出去的那一串"对不对；cookie 罐、UA、设备标识从哪来，是端口层的事
+// （见 test/qr-port.test.mjs 的 R31 段）。
+// ---------------------------------------------------------------------------
+
+/** 那张画着二维码的页（探针实测：建单/轮询的 Referer 就是它）。 */
+const R31_REFERER = "https://id1.cloud.huawei.com/CAS/portal/loginAuth.html?x=1";
+
+/** R31 的假世界：把请求头也记下来（harness 只记 URL 与正文）。 */
+function r31SessionWorld({ pollResponses = [{ body: { resultCode: "103000200" } }] } = {}) {
+  const world = harness({ createResponses: [{ body: createPayload() }], pollResponses });
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url: String(url), body: String(init?.body ?? ""), headers: init?.headers ?? {} });
+    return world.fetchImpl(url, init);
+  };
+  const session = createQrSession({
+    createUrl: CREATE_URL,
+    pollUrl: POLL_URL,
+    intervalMs: world.intervalMs,
+    fetchImpl,
+    setTimer: world.setTimer,
+    clearTimer: world.clearTimer,
+    now: () => 1_700_000_000_000,
+    log: () => undefined,
+    createParams: { deviceID: "R31-DEVICE-ID", deviceType: "7" },
+    extraHeaders: { referer: R31_REFERER },
+  });
+  return { session, calls, tick: world.tick };
+}
+
+test("R31 建单 URL：查询串丢掉（页面是 getqrContent.split('?')[0]），模板仍是六个参数的唯一真源", () => {
+  assert.equal(qrCreateRequestUrl(CREATE_URL), "https://id1.cloud.huawei.com/DimensionalCode/getqrInfo");
+  assert.equal(CREATE_URL.includes("?"), true, "端点常量本身仍带模板查询串（六个参数从它取）");
+  const body = new URLSearchParams(buildQrCreateBody(CREATE_URL));
+  assert.equal(body.get("appID"), "com.huawei.hwidweb");
+  assert.equal(body.get("loginChannel"), "7000700");
+  // 认不出的串不许编一个 URL 出来
+  assert.equal(qrCreateRequestUrl("not-a-url"), "not-a-url");
+});
+
+test("R31 建单请求：URL 无查询串、accept 与页面同款、设备标识进正文、Referer 由调用方注入", async () => {
+  const world = r31SessionWorld({});
+  await world.session.start();
+  await world.tick();
+
+  const create = world.calls.find((call) => call.url.includes("getqrInfo"));
+  assert.equal(create.url, "https://id1.cloud.huawei.com/DimensionalCode/getqrInfo", "建单 URL 一个查询串都不带");
+  assert.equal(create.headers.accept, "application/json, text/plain, */*", "页面用的就是这一串");
+  assert.equal(create.headers["content-type"], "application/x-www-form-urlencoded");
+  assert.equal(create.headers.referer, "https://id1.cloud.huawei.com/CAS/portal/loginAuth.html?x=1", "Referer 就是那张画着二维码的页");
+  const body = new URLSearchParams(create.body);
+  assert.deepEqual([...body.keys()].sort(), [
+    "appBrand",
+    "appID",
+    "confirmFlag",
+    "deviceID",
+    "deviceType",
+    "loginChannel",
+    "reqClientType",
+    "version",
+  ]);
+  assert.equal(body.get("deviceType"), "7");
+});
+
+test("R31 轮询请求：URL 带 &t=、表单只有 qrToken、请求头与建单同一套（含 Referer）", async () => {
+  const world = r31SessionWorld({});
+  await world.session.start();
+  await world.tick();
+  await world.tick();
+
+  const polls = world.calls.filter((call) => call.url.includes("DimensionalCode/async"));
+  assert.ok(polls.length >= 2, `至少两轮：${JSON.stringify(world.calls.map((call) => call.url))}`);
+  for (const poll of polls) {
+    assert.match(poll.url, /^https:\/\/id1\.cloud\.huawei\.com\/DimensionalCode\/async\?version=40200&t=/);
+    assert.deepEqual([...new URLSearchParams(poll.body).keys()], ["qrToken"]);
+    assert.equal(poll.headers.accept, "application/json, text/plain, */*");
+    assert.equal(poll.headers.referer, "https://id1.cloud.huawei.com/CAS/portal/loginAuth.html?x=1");
+  }
 });

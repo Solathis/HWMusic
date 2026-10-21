@@ -5,9 +5,14 @@
  * 端点值全部来自 R16 的实探（`scripts/probe-qr.mjs` 的可复现证据，登记在 docs/API_CONTRACT.md §1.7）：
  *
  * ```
- * ① 建单/轮询（**无状态**：实探证明它们不依赖任何 cookie 会话，只认 qrToken）
- *    POST https://id1.cloud.huawei.com/DimensionalCode/getqrInfo?appID=…&version=40200
+ * ① 建单/轮询（**无状态**：实探证明它们不依赖任何 cookie 会话，只认 qrToken；
+ *    R31 起**照样带上** cookie/UA/Referer 与 `deviceID`——那是"像页面一样说话"，不是"服务端要求"）
+ *    POST https://id1.cloud.huawei.com/DimensionalCode/getqrInfo（**R31：不带查询串**）
  *    POST https://id1.cloud.huawei.com/DimensionalCode/async?version=40200&t=<随机>
+ * ①b 建单**之前**的上下文（R31 增补；失败降级，不挡界面）
+ *    GET  https://id1.cloud.huawei.com/CAS/portal/loginAuth.html?…（画着二维码的那张页，也是 Referer 的来源）
+ *    POST /CAS/IDM_W/ajaxHandler/login/getPageInfo → localInfo（含 getqrContent）+ pageToken/pageTokenKey
+ *    POST /CAS/IDM_W/ajaxHandler/dev → {sid}（拿一份设备指纹换；**deviceID = 这颗 sid**）
  * ② 确认之后的换码链（**需要页面会话**：pageToken 由 getPageInfo 下发）
  *    POST https://oauth-login1.cloud.huawei.com/oauth2/ajax/getLoginWay?reflushCode=…
  *         → loginInteractInfo.cas.casLoginRedirectUrl（对 client 101444301 一律是 TICKET/CAS 跳转）
@@ -45,17 +50,43 @@
  * `docs/API_CONTRACT.md` §1.8 的 R29 段（建单/轮询与官方页逐参数相同，三处偏差登记在案）。
  * 交付的是**可判性**：协议层现在多记两样东西（建单一行 content 非敏感摘要、轮询行带时刻/节奏/
  * `errorDesc`），本端口只是把 `log` 照旧传下去。下一轮真机扫码时，日志里那句
- * `errorDesc="Please to login."` 就是"手机侧那台设备没有登录华为账号"的原话。
+ * `errorDesc="Please to login."` 就是"手机侧那台设备没有登录华为账号"的原话
+ * （**R31 更正**：这是线索不是判据，见契约同段）。
+ *
+ * R31 增补（用户指令 2026-10-21：界面不变、不用移动端 UA、继续修自己生成的二维码）：
+ * R29 登记的三处保真度缺口**在这一轮补齐了**，依据不是推断而是探针实物
+ * （`scripts/probe-qr-fidelity.mjs`：headless Chromium 真开官方二维码页，抓下它自己发的请求）：
+ *
+ * - **建单 URL 去查询串**：协议层 `qrCreateRequestUrl` 只留 origin+path（页面行为）；
+ * - **补 `deviceID`/`deviceType`**：真源是 `POST /CAS/IDM_W/ajaxHandler/dev` 下发的 `sid`——
+ *   页面拿一份浏览器指纹（`fp`）换它。本端口在建单前把上下文走一遍
+ *   （[`resolveQrSessionContext`]：CAS 链 → 门户页 → `getPageInfo` → [`resolveDeviceIdentity`]），
+ *   指纹编码逐字节复刻在 `src/protocols/device-fingerprint.mjs`；
+ * - **cookie 罐**：建单/轮询走 [`protocolFetch`]（同一个罐 + 页面 UA），所以 CAS 会话那串 cookie、
+ *   `dev` 种下的 `hwid_cas_sid`、以及**建单响应自己种下的** `qRCode`/`expiredTime` 都会跟着回来
+ *   ——最后这一条是探针实测的页面行为，也是"罐"最硬的理由。
+ *
+ * **降级是硬约束**：上下文那一步的任何失败都只记一行日志，绝不挡界面（二维码必须能显示出来）——
+ * 拿不到就照旧建单（不带 deviceID/cookie），拿不到 sid 就**不猜**一个（自己编的骗不过服务端）。
+ * 界面与 UA 一处未动：渲染层零改动、登录 webview 保持宿主默认 UA；这里的 `QR_HTTP_USER_AGENT`
+ * 只是**请求头层面的协议保真**。"补上这些到底有没有用"要真手机 + 真账号才能验
+ * （`docs/KNOWN_LIMITATIONS.md` B21）。
  */
 import { LOGIN_TIMEOUT_MS } from "../protocols/login-callback.mjs";
-import { QR_LOGIN_STATUS, createQrSession } from "../protocols/qr-login.mjs";
+import { deviceFingerprintFields, encodeFingerprint } from "../protocols/device-fingerprint.mjs";
+import { QR_LOGIN_STATUS, QR_PAGE_ACCEPT, createQrSession } from "../protocols/qr-login.mjs";
 import { err, ok } from "../shared/result.ts";
 
 /**
- * 探针确认的端点与参数（**改这里必须同步 docs/API_CONTRACT.md §1.7 与 test/qr-port.test.mjs**）。
+ * 探针确认的端点与参数（**改这里必须同步 docs/API_CONTRACT.md §1.7/§1.8 与 test/qr-*.test.mjs**）。
  */
 export const HUAWEI_QR_ENDPOINTS = {
-  /** 建单端点：查询串就是服务端下发的模板（表单参数从它里面取，不另写一份） */
+  /**
+   * 建单端点：查询串就是服务端下发的模板（表单参数从它里面取，不另写一份）。
+   *
+   * R31：真正发出去的 URL **不带查询串**（页面是 `getqrContent.split("?")[0]`）——
+   * 转换由协议层的 `qrCreateRequestUrl` 做，这里保留模板是因为六个参数要从它取。
+   */
   create:
     "https://id1.cloud.huawei.com/DimensionalCode/getqrInfo?appID=com.huawei.hwidweb&loginChannel=7000700&reqClientType=700&confirmFlag=1&version=40200&appBrand=HUAWEI",
   /** 轮询端点（调用方再拼 `&t=<随机数>`） */
@@ -68,15 +99,38 @@ export const HUAWEI_QR_ENDPOINTS = {
   interfaceVersion: "v3",
   /** CAS 门户域（实探：授权页最终把浏览器送到这里） */
   casOrigin: "https://id1.cloud.huawei.com",
-  /** 二维码配置所在的移动登录页 */
+  /** 二维码配置所在的移动登录页（换码链用它拿 service/pageToken） */
   mobileLoginPath: "/CAS/mobile/standard/login.html",
+  /**
+   * **画着二维码的那张页**（R31 探针实测：屏幕上那张码是它画的，建单/轮询也是它发的）。
+   *
+   * 它同时是建单/轮询的 Referer，也是"会话上下文"（cookie + pageToken）的来源。
+   */
+  portalLoginPath: "/CAS/portal/loginAuth.html",
   /** 页面配置接口（下发 service / pageToken / getqrContent …） */
   pageInfoPath: "/CAS/IDM_W/ajaxHandler/login/getPageInfo",
   /** 页面版本（实探值；缺省也接受） */
   cVersion: "UP_CAS_6.26.3.100",
+  /**
+   * 设备指纹接口（R31）：拿一份指纹 `fp` 换 `{sid}` —— **deviceID 就是这颗 sid**。
+   *
+   * 页面把它写进 `localStorage.hwid_cas_sid`（与同名 cookie），建单时作为 `deviceID` 发出去。
+   * 编码格式见 `src/protocols/device-fingerprint.mjs`（探针实物逐字节复刻）。
+   */
+  deviceFingerPath: "/CAS/IDM_W/ajaxHandler/dev",
   /** 已确认 → 换授权码的接口 */
   confirmPath: "/CAS/IDM_W/ajaxHandler/codeRemoteLogin",
 };
+
+/**
+ * 二维码这条链上所有 HTTP 请求的 UA（R31 明确：这是**协议保真**，不是应用 webview 的 UA）。
+ *
+ * 为什么是桌面 UA：二维码只由**桌面门户页**渲染（探针实测：手机 UA 下那张页面根本没有二维码，
+ * 一个建单请求都不发）。所以"像页面一样说话"= 像桌面浏览器一样说话。
+ * 同时这是用户指令的一部分：登录 webview 也**不许**改成移动 UA（界面/页面观感不变）。
+ */
+export const QR_HTTP_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 /** 本模块的错误类别（渲染层按它决定"能不能重试"）。 */
 export const QR_PORT_ERROR_KINDS = {
@@ -147,8 +201,7 @@ export function createHuaweiQrPort(options = {}) {
 
   async function request(url, init = {}) {
     const headers = {
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      "user-agent": QR_HTTP_USER_AGENT,
       ...(jar.size() > 0 ? { cookie: jar.header() } : {}),
       ...(init.headers ?? {}),
     };
@@ -178,6 +231,27 @@ export function createHuaweiQrPort(options = {}) {
     });
   }
 
+  /**
+   * 给**协议层**用的 fetch（R31）：建单/轮询也要像页面一样带着 UA 与 cookie，并把响应种的 cookie 收回来。
+   *
+   * 为什么单独写一个而不是复用 [`request`]：协议层要的是**原始 Response**
+   * （它自己判 `ok`/`status`/`text()`），而 `request()` 返回的是本模块包装过的 `{ok, data}`。
+   * 两者的差别只在这里，UA/cookie/吸收这三件事是同一套。
+   *
+   * 探针实测这一条不是"锦上添花"：页面的轮询请求带着**建单响应自己种下的** cookie
+   * （`qRCode`/`expiredTime`/`qrCodeCreateTime`）——我们此前把它们全丢了。
+   */
+  async function protocolFetch(url, init = {}) {
+    const headers = {
+      "user-agent": QR_HTTP_USER_AGENT,
+      ...(jar.size() > 0 ? { cookie: jar.header() } : {}),
+      ...(init.headers ?? {}),
+    };
+    const response = await fetchImpl(url, { ...init, headers });
+    jar.absorb(response);
+    return response;
+  }
+
   async function requestJson(url, init) {
     const answer = await request(url, init);
     if (!answer.ok) return answer;
@@ -192,12 +266,15 @@ export function createHuaweiQrPort(options = {}) {
   }
 
   /**
-   * 走一遍 CAS 链，拿"确认之后换码"所需的页面配置。
+   * 走到 CAS 门户（R31 抽出来给两处用）：`getLoginWay` → CAS 302 → 门户地址。
    *
-   * 只在**已经确认**之后才调用：二维码的显示与轮询完全不依赖它（实探证明那两个端点是无状态的），
-   * 所以链路的任何失败都发生在"用户已经扫码"之后，代价最小。
+   * 两处用它的理由不同但路径相同：
+   * - **建单前**（[`resolveQrSessionContext`]）：要那张画着二维码的门户页的 cookie 与 pageToken；
+   * - **确认后**（[`resolveCasContext`]）：要换授权码所需的 service/pageToken。
+   *
+   * @param {string} authorizeUrl 授权页地址（决定 CAS 跳转里那一串参数）
    */
-  async function resolveCasContext(authorizeUrl) {
+  async function walkToCasPortal(authorizeUrl) {
     const authorize = new URL(String(authorizeUrl));
     const query = authorize.search.slice(1);
 
@@ -217,7 +294,7 @@ export function createHuaweiQrPort(options = {}) {
     const casUrl = loginWay.data?.loginInteractInfo?.cas?.casLoginRedirectUrl;
     if (typeof casUrl !== "string" || casUrl === "") {
       return err(
-        "登录方式接口没有给出 CAS 跳转地址（响应形状变了？见 docs/API_CONTRACT.md §1.7）",
+        "登录方式接口没有给出 CAS 跳转地址（响应形状变了？见 docs/API_CONTRACT.md §1.8）",
         QR_PORT_ERROR_KINDS.invalidResponse,
       );
     }
@@ -231,8 +308,147 @@ export function createHuaweiQrPort(options = {}) {
         QR_PORT_ERROR_KINDS.qrConfigUnavailable,
       );
     }
+    return ok({ casUrl, portalUrl });
+  }
 
-    // 同一串参数换到移动登录页：二维码配置（getqrContent/asyncURL）只在那一张页面上
+  /**
+   * 建单**之前**的会话上下文（R31）：cookie 罐 + 门户页地址 + pageToken + 服务端下发的 deviceID。
+   *
+   * 为什么值得在建单前多走几步：探针（`scripts/probe-qr-fidelity.mjs`）把官方二维码页在两个
+   * 请求上做的事抓了个全——它的建单**带 cookie、带 `deviceID`/`deviceType=7`、Referer 是门户页**，
+   * 轮询还会把**建单响应种下的** cookie 带回来。我们此前这三样一个都没有。
+   *
+   * **不抛异常、不挡界面**：任何一步失败都返回 `{ok:false, reason}`，调用方降级成"照旧建单"
+   * （二维码必须能显示出来——保真不能变成新的故障点）。
+   *
+   * @param {string} authorizeUrl 授权页地址
+   */
+  async function resolveQrSessionContext(authorizeUrl) {
+    try {
+      const entry = await walkToCasPortal(authorizeUrl);
+      if (!entry.ok) return { ok: false, reason: entry.error.message };
+      const { portalUrl } = entry.data;
+
+      // 先真把那张门户页取回来：响应会种下 CAS 会话 cookie（页面的 cookie 就是这么来的）
+      const portalPage = await request(portalUrl.href);
+      if (!portalPage.ok) return { ok: false, reason: portalPage.error.message };
+
+      const form = new URLSearchParams();
+      for (const [name, value] of portalUrl.searchParams) form.set(name, value);
+      form.set("languageCode", form.get("lang") ?? "zh-cn");
+      form.set("pageName", "login");
+      form.set("interfaceName", "login/getPageInfo");
+      form.set("supportHarmonyTheme", "false");
+      form.set("urlParam", portalUrl.search.slice(1));
+
+      const pageInfo = await requestJson(
+        `${endpoints.casOrigin}${endpoints.pageInfoPath}?reflushCode=${random()}&cVersion=${endpoints.cVersion}`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            accept: QR_PAGE_ACCEPT,
+            origin: endpoints.casOrigin,
+            referer: portalUrl.href,
+          },
+          body: form.toString(),
+        },
+      );
+      if (!pageInfo.ok) return { ok: false, reason: pageInfo.error.message };
+
+      const localInfo = isRecord(pageInfo.data?.localInfo) ? pageInfo.data.localInfo : {};
+      const pageToken = typeof pageInfo.data?.pageToken === "string" ? pageInfo.data.pageToken : "";
+      const pageTokenKey = typeof pageInfo.data?.pageTokenKey === "string" ? pageInfo.data.pageTokenKey : "";
+      const device = await resolveDeviceIdentity({
+        portalUrl,
+        pageToken,
+        pageTokenKey,
+        lang: typeof localInfo.lang === "string" ? localInfo.lang : "zh-cn",
+      });
+      return {
+        ok: true,
+        data: {
+          portalUrl: portalUrl.href,
+          pageToken,
+          pageTokenKey,
+          device: device.ok ? device.data : null,
+          deviceReason: device.ok ? null : device.reason,
+          cookieCount: jar.size(),
+        },
+      };
+    } catch (cause) {
+      return { ok: false, reason: `上下文那一步抛了：${messageOf(cause)}` };
+    }
+  }
+
+  /**
+   * 用一份设备指纹换服务端下发的 `sid`（R31）——它就是页面建单时带的 `deviceID`。
+   *
+   * 形状来自探针抓到的实物请求（`test/fixtures/r31-page-fingerprint.json` 就是它）：
+   * `POST /CAS/IDM_W/ajaxHandler/dev?reflushCode=…&cVersion=…`，正文是
+   * `{pageToken, pageTokenKey, <页面公共上下文>, fp}`，响应 `{isSuccess:1, sid:"<84 位 hex>"}`。
+   *
+   * **服务端回空 sid 就是"不认这份指纹"**（探针实测：cs 写错/不写/内容不合形状一律空串），
+   * 所以空 sid 一律当失败——宁可建单时不带 `deviceID`，也不自己编一个（编的那个骗不过服务端，
+   * 只会让"扫码不关联"更难查）。
+   */
+  async function resolveDeviceIdentity({ portalUrl, pageToken, pageTokenKey, lang }) {
+    if (pageToken === "" || pageTokenKey === "") {
+      return { ok: false, reason: "门户页没给出 pageToken/pageTokenKey（指纹接口要它）" };
+    }
+    const form = new URLSearchParams();
+    // 页面那份公共上下文（探针实测的字段表：只这几个，不多带）
+    for (const name of ["reqClientType", "loginChannel", "clientID", "lang", "state", "terminalType"]) {
+      const value = portalUrl.searchParams.get(name);
+      if (value !== null && value !== "") form.set(name, value);
+    }
+    form.set("languageCode", form.get("lang") ?? lang ?? "zh-cn");
+    form.set("pageToken", pageToken);
+    form.set("pageTokenKey", pageTokenKey);
+    form.set(
+      "fp",
+      encodeFingerprint(
+        deviceFingerprintFields({
+          now: now(),
+          lang: form.get("lang") ?? "zh-cn",
+          platform: process.platform === "win32" ? "Win32" : process.platform,
+        }),
+      ),
+    );
+
+    const answer = await requestJson(
+      `${endpoints.casOrigin}${endpoints.deviceFingerPath}?reflushCode=${random()}&cVersion=${endpoints.cVersion}`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          accept: QR_PAGE_ACCEPT,
+          origin: endpoints.casOrigin,
+          referer: portalUrl.href,
+        },
+        body: form.toString(),
+      },
+    );
+    if (!answer.ok) return { ok: false, reason: answer.error.message };
+    const sid = answer.data?.sid;
+    if (typeof sid !== "string" || sid.length <= 1) {
+      return { ok: false, reason: "服务端没给出 sid（=不认这份指纹）" };
+    }
+    return ok({ deviceID: sid, deviceType: "7" });
+  }
+
+  /**
+   * 走一遍 CAS 链，拿"确认之后换码"所需的页面配置。
+   *
+   * 只在**已经确认**之后才调用：二维码的显示与轮询本身不依赖它（实探证明那两个端点是无状态的），
+   * 所以链路的任何失败都发生在"用户已经扫码"之后，代价最小。
+   */
+  async function resolveCasContext(authorizeUrl) {
+    const entry = await walkToCasPortal(authorizeUrl);
+    if (!entry.ok) return entry;
+    const { portalUrl } = entry.data;
+
+    // 同一串参数换到移动登录页：换码所需的页面配置在那张页上（R16 实测）
     const mobileUrl = `${endpoints.casOrigin}${endpoints.mobileLoginPath}${portalUrl.search}`;
     const mobilePage = await request(mobileUrl);
     if (!mobilePage.ok) return mobilePage;
@@ -349,17 +565,42 @@ export function createHuaweiQrPort(options = {}) {
         }
         onEvent(event);
       };
+
+      /**
+       * R31：建单前先取"会话上下文"（CAS 链 → 门户页 → getPageInfo → 指纹换 sid）。
+       *
+       * 拿到就用它（cookie 罐 + `deviceID`/`deviceType` + Referer），拿不到就**降级**——
+       * 二维码必须照常显示：这一步只是"像页面一样说话"，不是显示二维码的前提。
+       */
+      const context = await resolveQrSessionContext(authorizeUrl);
+      if (context.ok) {
+        const device = context.data.device;
+        log(
+          `二维码建单上下文（R31 全保真）：门户页=${new URL(context.data.portalUrl).pathname}；` +
+            `cookie=${context.data.cookieCount} 项；` +
+            (device === null
+              ? `deviceID 降级：${context.data.deviceReason}`
+              : `deviceID=服务端 sid（${device.deviceID.length} 位 hex）`),
+        );
+      } else {
+        log(`二维码建单上下文（R31 全保真）降级：${context.reason}；照旧建单（不带 deviceID/cookie）`);
+      }
+
       mine = createSession({
         createUrl: endpoints.create,
         pollUrl: endpoints.poll,
         intervalMs: endpoints.intervalMs,
         deadlineMs: timeoutMs,
-        fetchImpl,
+        fetchImpl: protocolFetch,
         now,
         setTimer,
         clearTimer,
         random,
         log,
+        // 建单表单的额外字段：服务端下发的 deviceID + deviceType=7（页面就是这么带的）
+        createParams: context.ok && context.data.device !== null ? context.data.device : undefined,
+        // 建单/轮询的 Referer：那张画着二维码的门户页
+        extraHeaders: context.ok ? { referer: context.data.portalUrl } : undefined,
         onEvent: (event) => {
           emit(event);
           if (event.status !== QR_LOGIN_STATUS.confirmed) return;

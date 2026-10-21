@@ -1,0 +1,25 @@
+{
+  "note": "R31 探针（headless Chromium 真开官方二维码页）抓到的设备指纹原值：探针自己浏览器的匿名指纹，不含账号信息。留原值只为让单测钉住「我们的编码器与页面逐字节一致」。",
+  "source": "scripts/probe-qr-fidelity.mjs → .probe/r31-fidelity.json 的 fidelity.deviceIdentity.rawFingerprint",
+  "capturedAt": "2026-10-20T23:46:25.453Z",
+  "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "requestUrlShape": {
+    "path": "/CAS/IDM_W/ajaxHandler/dev",
+    "queryKeys": [
+      "reflushCode",
+      "cVersion"
+    ]
+  },
+  "requestFieldNames": [
+    "pageToken",
+    "pageTokenKey",
+    "reqClientType",
+    "loginChannel",
+    "clientID",
+    "lang",
+    "languageCode",
+    "state",
+    "fp"
+  ],
+  "fingerprint": "sNyzj7iEu5z5i/3B8cL5yOGD44z9ne/T4tnt3LiG44Aaf0clHS0cI0ciEyEScFxoAjdQex4kGnscfxwpH3seLQptCX4OMAltHCZBIRMrS3kdeU0pHn9KKxp9T3xOeBVyFHVNeU59TXRKeRl+GSAvGSgeO18qXWFRZ19sXm5Ual5oVmZTdBZhGiQOOQDP6IHvgAt5RSYUcFY3AM39yvmd+c37mK+YpJeix/XG8sL4kfWSp5+vzPrKrc+szqmO5JPh3fqX95X6xI7im/Oe8ZG227vU7qPHssKiwM+rjOWH49+q26/L7IXogEI7Unw4eV4zQicbTSVKektsGHYdIRgnFjNBIVdrW2hfbks5UHJJeEdgLFxmVGFYZ0BIIkMlSHoffB4lF3JGc0QiFSYXL0t5TnseKRBrWmlRZgE4UmNUMlApEDoLPQ8+G3kLNw88XmgFPQk4AMb1l67P/sShkveV9pOixaD6nKvO+pz5m/yY8sbylPY="
+}

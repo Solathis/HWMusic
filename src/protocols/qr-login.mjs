@@ -61,12 +61,23 @@
  * R29（用户真机反馈之 4：扫码之后轮询仍是"未扫"）在这一层只落**观测**，不落行为：
  * 诊断结论是"扫码从未关联到我们会话，而落点在手机侧"（四条证据见 `docs/API_CONTRACT.md` §1.8 的
  * R29 段：建单/轮询与官方页逐参数相同、页面代码里 `confirmQRLogin` 是唯一出向请求、手机 UA 打开
- * content URL 不翻档、真机四会话 90 轮全是 `103000200`/`"Please to login."`）。所以本层**一行行为
+ * content URL 不翻档、真机四会话 90 轮全是 `103000200`/`"Please to login."`）。所以那一轮本层**一行行为
  * 都没改**，只把下一轮真机可判所需的两样东西记下来：
  * - **建单一行**（[`describeQrContent`]）：这张码指向哪、带哪些**非敏感**上下文参数
  *   （`qRCode` 与 token/session 类参数一律丢掉）；
- * - **轮询每行**（[`sanitizeErrorDesc`] + 时刻 + `t+…s` 节奏）：`errorDesc` 是**唯一**能区分
- *   "压根没扫"与"扫了但手机侧没登录"的那句话——状态码 `103000200` 两种情况共用。
+ * - **轮询每行**（[`sanitizeErrorDesc`] + 时刻 + `t+…s` 节奏）：`errorDesc` 是**唯一**能拿来**推断**
+ *   "压根没扫"与"扫了但手机侧没登录"的那句话——状态码 `103000200` 两种情况共用
+ *   （**R31 更正措辞**：它是线索，不是判据；没有对照组，别当成"唯一能区分"的证据）。
+ *
+ * R31（用户指令：界面不变、不用移动端 UA、继续修自己生成的二维码）在这一层落**请求形状**，
+ * 三处，全部来自探针实物（`scripts/probe-qr-fidelity.mjs`，headless Chromium 真开官方二维码页）：
+ * - 建单请求的 URL **去掉查询串**（页面就是 `getqrContent.split("?")[0]`，见 [`qrCreateRequestUrl`]）；
+ *   端点常量仍带模板查询串——它是六个参数的唯一真源；
+ * - 建单表单可以多带 `deviceID`/`deviceType`（[`createQrSession`] 的 `createParams`：
+ *   那颗 `deviceID` 是**服务端下发的 sid**，由端口层拿一份设备指纹换回来）；
+ * - 建单/轮询的 `accept` 与 `Referer` 与页面同款（[`QR_PAGE_ACCEPT`] + `extraHeaders`）。
+ * 本层仍然**只收注入**：cookie 罐、UA、Referer、deviceID 的来源都在端口层（`src/main/qr-login.mjs`），
+ * 这样"协议形状"与"从哪拿上下文"两件事不互相牵连。
  */
 import { err, ok } from "../shared/result.ts";
 
@@ -144,6 +155,38 @@ export const QR_LOCAL_EXPIRY_GRACE_MS = 3_000;
 
 /** 建单表单里那些"从端点模板查询串取"的参数名。 */
 export const QR_CREATE_PARAMS = ["appID", "confirmFlag", "version", "reqClientType", "loginChannel", "appBrand"];
+
+/**
+ * 建单/轮询的 `accept` 头（R31：页面用的就是这一串，`application/json` 只是它的子集）。
+ *
+ * 为什么照抄而不是"写个等价的"：这两个请求是同一个页面、同一套 axios 发的，
+ * 头里差一个字符就是"我们和页面不一样"；协议保真的价值在于**没有可解释的差异**。
+ */
+export const QR_PAGE_ACCEPT = "application/json, text/plain, */*";
+
+/**
+ * 建单请求的 URL（R31）：**把查询串丢掉**，只留 origin + path。
+ *
+ * 真源（探针 `scripts/probe-qr-fidelity.mjs`，headless Chromium 真开官方二维码页）：
+ * 页面建单发的是 `POST https://id1.cloud.huawei.com/DimensionalCode/getqrInfo`——**一个查询串都没有**，
+ * 那六个参数走表单。而页面自己也是这么做的：`this.localInfo.getqrContent.split("?")[0]`。
+ *
+ * 端点常量（[`HUAWEI_QR_ENDPOINTS.create`]）仍然带模板查询串——它是**六个参数的唯一真源**
+ * （[`buildQrCreateBody`] 从它取），所以这里丢的只是"请求上多挂的那截"，不是参数本身。
+ *
+ * @param {string} createUrl 端点模板（可能带查询串）
+ * @returns {string} 真正要打的地址（认不出的串原样返回，不猜一个 URL 出来）
+ */
+export function qrCreateRequestUrl(createUrl) {
+  try {
+    const url = new URL(String(createUrl));
+    url.search = "";
+    url.hash = "";
+    return url.href;
+  } catch {
+    return String(createUrl);
+  }
+}
 
 /**
  * `errorDesc` 进日志时的长度上限（R29）。
@@ -374,6 +417,21 @@ export function createQrSession(options = {}) {
     onEvent = () => undefined,
     log = () => undefined,
     random = Math.random,
+    /**
+     * 建单时额外带的表单字段（R31：`{deviceID, deviceType}`）。
+     *
+     * 为什么由调用方注入而不是本层写死：`deviceID` 是**服务端下发的 sid**（页面拿一份设备指纹
+     * 去 `/CAS/IDM_W/ajaxHandler/dev` 换回来的，见 `src/protocols/device-fingerprint.mjs`），
+     * 那一步需要 CAS 会话上下文（pageToken/cookie），只有端口层拿得到。本层只负责"给了就带上"。
+     */
+    createParams = undefined,
+    /**
+     * 建单/轮询额外带的请求头（R31：`{referer}`）。
+     *
+     * 页面这两个请求的 Referer 就是那张画着二维码的门户页；端口层知道它，本层不知道，
+     * 所以同样走注入。默认不加（本层不编一个 Referer 出来）。
+     */
+    extraHeaders = undefined,
   } = options;
 
   let status = QR_LOGIN_STATUS.idle;
@@ -454,10 +512,14 @@ export function createQrSession(options = {}) {
   async function create() {
     let response;
     try {
-      response = await fetchImpl(createUrl, {
+      response = await fetchImpl(qrCreateRequestUrl(createUrl), {
         method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
-        body: buildQrCreateBody(createUrl, { extra: options.createParams }),
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          accept: QR_PAGE_ACCEPT,
+          ...(extraHeaders ?? {}),
+        },
+        body: buildQrCreateBody(createUrl, { extra: createParams }),
       });
     } catch (cause) {
       return err(`二维码建单请求失败：${messageOf(cause)}`, QR_ERROR_KINDS.networkError);
@@ -587,7 +649,11 @@ export function createQrSession(options = {}) {
     try {
       response = await fetchImpl(url, {
         method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          accept: QR_PAGE_ACCEPT,
+          ...(extraHeaders ?? {}),
+        },
         body: buildQrPollBody(current?.qrToken ?? ""),
       });
     } catch (cause) {
