@@ -17,12 +17,19 @@ import {
   HUAWEI_MUSIC_LOGINEX_ENDPOINT,
   HUAWEI_MUSIC_LOGINEX_PATH,
   MUSIC_BUSINESS_OK,
+  MUSIC_PROFILE_CLAIM_AVATAR_KEYS,
+  MUSIC_PROFILE_CLAIM_NAME_KEYS,
+  MUSIC_PROFILE_NESTED_CONTAINER_KEYS,
   MUSIC_SESSION_DIGEST_USERNAME,
   MUSIC_SESSION_ERROR_KINDS,
+  attachClaimProfile,
   buildMusicDigestHeader,
   createHuaweiMusicSessionPort,
   digestCreatedAt,
+  mergeProfiles,
+  nestedContainerKeyNamesOf,
   parseMusicSessionResponse,
+  profileFromClaims,
   profileFromResponse,
   profileOfSessionRecord,
   topLevelKeysOf,
@@ -232,13 +239,112 @@ test("诊断：顶层键名日志只给键名（排序、限量），值一个�
   const exchange = portOf({ fetchImpl: impl, portOptions: { log: (line) => logged.push(line) } });
   await exchange({ accessToken: AT, endpoint: HUAWEI_MUSIC_LOGINEX_ENDPOINT });
 
-  assert.equal(logged.length, 1, "每次兑换一条（成功路径一条 INFO）");
+  assert.equal(logged.length, 1, "每次兑换一条（成功路径一条 INFO；没有容器就只这一条）");
   assert.match(logged[0], /result, snsUserID, token, userName/, "键名按字典序给出（这就是要看的东西）");
   assert.ok(!logged[0].includes(MUSIC_TOKEN), "令牌值不许进日志");
   assert.ok(!logged[0].includes(AT), "AT 不许进日志");
   assert.ok(!logged[0].includes("听歌的人"), "资料值也不进日志（只要键名）");
   assert.deepEqual(topLevelKeysOf({ b: 1, a: 2, c: 3 }), ["a", "b", "c"]);
   assert.deepEqual(topLevelKeysOf(null), []);
+});
+
+// —— 3.6 profile 的第二来源（R40：loginex 一层容器 + id_token claims） -----------------
+
+test("R40 诊断：loginex 两个容器的一层键名日志（只记键名，值一个都不出现）", async () => {
+  const logged = [];
+  const { impl } = fakeFetch({
+    body: {
+      result: { resultCode: MUSIC_BUSINESS_OK },
+      token: MUSIC_TOKEN,
+      queryAllSubInfoResp: { userInfo: { userName: "听歌的人" }, level: 3 },
+      queryAppConfigDetailResp: { configList: [{ vipType: "2" }] },
+    },
+  });
+  const exchange = portOf({ fetchImpl: impl, portOptions: { log: (line) => logged.push(line) } });
+  await exchange({ accessToken: AT, endpoint: HUAWEI_MUSIC_LOGINEX_ENDPOINT });
+
+  const nested = logged.filter((line) => line.includes("容器一层键名"));
+  assert.equal(nested.length, 3, `两个容器各一条 + 一层子对象一条：${JSON.stringify(logged)}`);
+  assert.match(nested[0], /queryAllSubInfoResp: level, userInfo/, "容器自己的键名（排序）");
+  assert.match(nested[1], /queryAllSubInfoResp\.userInfo: userName/, "一层子对象的键名也报（资料最可能在这里）");
+  assert.match(nested[2], /queryAppConfigDetailResp: configList/);
+  const joined = logged.join("\n");
+  assert.ok(!joined.includes("听歌的人"), "资料值不进日志");
+  assert.ok(!joined.includes(MUSIC_TOKEN), "令牌不进日志");
+
+  assert.deepEqual(MUSIC_PROFILE_NESTED_CONTAINER_KEYS, ["queryAllSubInfoResp", "queryAppConfigDetailResp"], "容器名来自真机键名日志");
+  assert.deepEqual(nestedContainerKeyNamesOf({ b: 1 }), [], "响应对不上就什么都不报（不抛）");
+  assert.deepEqual(nestedContainerKeyNamesOf({ queryAllSubInfoResp: { z: 1, a: 2 } }), ["queryAllSubInfoResp: a, z"], "键名排序");
+});
+
+test("R40 profile：往 queryAllSubInfoResp / queryAppConfigDetailResp 里读一层（防御式接线）", () => {
+  const viaChild = profileFromResponse({
+    queryAllSubInfoResp: { userInfo: { userName: "嵌两层的人", headUrl: "https://music-pics-drcn.dbankcdn.cn/a.jpg" } },
+  });
+  assert.deepEqual(viaChild, { userName: "嵌两层的人", avatarUrl: "https://music-pics-drcn.dbankcdn.cn/a.jpg" });
+
+  const viaArray = profileFromResponse({ queryAppConfigDetailResp: { items: [{ nickName: "数组里的人" }] } });
+  assert.deepEqual(viaArray, { userName: "数组里的人" }, "一层数组里的对象元素也算一层");
+
+  // 白名单仍然管用：容器里那个头像地址不在 CDN 白名单内 → 不存
+  assert.deepEqual(
+    profileFromResponse({ queryAllSubInfoResp: { avatar: "https://evil.example.com/a.jpg", userName: "有名字" } }),
+    { userName: "有名字" },
+  );
+  // VIP 的判据也没有放宽：容器里的 memberShip 含 6 照样认（同一份候选表）
+  assert.deepEqual(profileFromResponse({ queryAllSubInfoResp: { memberShip: 6 } }), { vip: true });
+});
+
+test("R40 profile：id_token claims 只取 name/nickname 与 picture/avatar（VIP 不从 claims 取）", () => {
+  assert.deepEqual(MUSIC_PROFILE_CLAIM_NAME_KEYS, ["name", "nickname"]);
+  assert.deepEqual(MUSIC_PROFILE_CLAIM_AVATAR_KEYS, ["picture", "avatar"]);
+
+  assert.deepEqual(
+    profileFromClaims({ sub: "不该带", name: "账号名", picture: "https://music-pics-drcn.dbankcdn.cn/p.jpg" }),
+    { userName: "账号名", avatarUrl: "https://music-pics-drcn.dbankcdn.cn/p.jpg" },
+  );
+  assert.deepEqual(profileFromClaims({ nickname: "昵称" }), { userName: "昵称" }, "name 缺就用 nickname");
+  assert.deepEqual(profileFromClaims({ name: "账号名", nickname: "昵称" }), { userName: "账号名" }, "name 优先");
+  assert.deepEqual(
+    profileFromClaims({ picture: "https://evil.example.com/p.jpg" }),
+    {},
+    "白名单外的头像不进 profile（存了也只是个画不出来的死地址）",
+  );
+  // claims 里有会员样子的字段也不认：**没有证据**（memberShip 那条规则属于 loginex 响应）
+  assert.deepEqual(profileFromClaims({ vip: true, is_premium: true, memberShip: 6 }), {}, "VIP 不从 claims 取");
+  for (const bad of [null, undefined, 42, "x", []]) assert.deepEqual(profileFromClaims(bad), {}, String(bad));
+});
+
+test("R40 profile 合并：loginex 优先、claims 只补空缺；认不出就不动原记录", () => {
+  assert.deepEqual(mergeProfiles({ userName: "loginex" }, { userName: "claims" }), { userName: "loginex" });
+  assert.deepEqual(mergeProfiles({ avatarUrl: "a" }, { userName: "claims", avatarUrl: "b" }), {
+    userName: "claims",
+    avatarUrl: "a",
+  });
+  assert.deepEqual(mergeProfiles({ vip: true }, {}), { vip: true });
+
+  const record = { musicSession: MUSIC_TOKEN, userId: "SNS-1", expireTime: "20261121000000" };
+  const merged = attachClaimProfile(record, { name: "账号名", picture: "https://cdn.dbankcdn.cn/p.jpg", sub: "不该带" });
+  assert.deepEqual(merged, {
+    musicSession: MUSIC_TOKEN,
+    userId: "SNS-1",
+    expireTime: "20261121000000",
+    profile: { userName: "账号名", avatarUrl: "https://cdn.dbankcdn.cn/p.jpg" },
+  });
+  assert.equal("sub" in (merged.profile ?? {}), false, "claims 里的其余键一个都不进记录");
+  assert.equal("id_token" in merged, false, "**claims 原文不落盘**（记录会进 DPAPI 信封）");
+
+  // 有 profile 时只补空缺，不覆盖
+  const both = attachClaimProfile({ musicSession: MUSIC_TOKEN, profile: { userName: "loginex 的名字" } }, { name: "claims 的名字" });
+  assert.deepEqual(both.profile, { userName: "loginex 的名字" });
+
+  // 认不出 / 没有 claims → **同一个对象**（不制造"多了一个空 profile"的假变化）
+  assert.equal(attachClaimProfile(record, { sub: "只有 sub" }), record);
+  assert.equal(attachClaimProfile(record, null), record);
+  assert.equal(attachClaimProfile(null, { name: "x" }), null, "坏记录原样返回，不抛");
+
+  // 合并出来的 profile 与载荷投影同形（三个键，能被 profileOfSessionRecord 认出来）
+  assert.deepEqual(profileOfSessionRecord(merged), { userName: "账号名", avatarUrl: "https://cdn.dbankcdn.cn/p.jpg" });
 });
 
 // —— 4. 端口行为 ---------------------------------------------------------------------

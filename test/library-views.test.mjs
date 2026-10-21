@@ -20,8 +20,13 @@ import {
   libraryFailureText,
 } from "../src/renderer/features/library/library-state.mjs";
 import {
+  PLAYLIST_ENQUEUE_LABEL,
+  PLAYLIST_PLAY_ALL_LABEL,
+  playlistDetailMetaText,
+  playlistDetailTitleOf,
   playlistIdOf,
   playlistNameOf,
+  playlistPartialNoticeText,
   playlistSongCountOf,
 } from "../src/renderer/features/library/playlist-fields.mjs";
 import {
@@ -64,7 +69,7 @@ test("视图枚举：六个页面 + 设置都在枚举里，且侧边栏条目�
     "settings",
   ]);
 
-  assert.ok(SIDEBAR_VIEWS.length >= 5, "侧边栏至少要覆盖收藏/歌单/历史/搜索/设置");
+  assert.ok(SIDEBAR_VIEWS.length >= 4, "侧边栏至少要覆盖收藏/歌单/历史/设置");
   const seen = new Set();
   for (const entry of SIDEBAR_VIEWS) {
     assert.equal(isViewId(entry.id), true, `侧边栏条目必须是已知视图：${entry.id}`);
@@ -78,6 +83,18 @@ test("视图枚举：六个页面 + 设置都在枚举里，且侧边栏条目�
   for (const id of ["album", "artist", "playlist-detail"]) {
     assert.equal(seen.has(id), false, `${id} 是"从别处跳进来"的页面，不该占侧边栏`);
   }
+  /**
+   * R40 裁决（**改写**了 R8 那条"侧边栏要覆盖搜索"）：搜索入口从导航项换成侧栏顶部的常驻
+   * 输入框（`SidebarInput`），所以 `VIEW.search` **必须不再**占导航的一行——否则界面上会有
+   * 两个搜索入口（一个常驻框 + 一条导航项），点哪个都说不清。
+   * `VIEW.search` 仍是合法视图（内容区的结果页用它），只是不进 `SIDEBAR_VIEWS`。
+   */
+  assert.equal(
+    SIDEBAR_VIEWS.some((entry) => entry.id === VIEW.search),
+    false,
+    "搜索不再是导航项（入口是侧栏顶部的常驻搜索框）",
+  );
+  assert.equal(isViewId(VIEW.search), true, "搜索仍是一个可用的视图（结果页要用它）");
   assert.equal(NAV_LIST_TESTID, "nav-list", "导航列表的测试锚点是契约（源码扫描也钉它）");
 });
 
@@ -230,6 +247,30 @@ test("歌单投影：名字/曲目数/封面地址的兜底；拿不到的曲目
   assert.equal(playlistSongCountOf({ songCount: "12" }), 12);
   assert.equal(playlistSongCountOf({}), null, "数不出来就说不知道（不许显示「0 首」）");
   assert.equal(playlistSongCountOf({ songCount: -3 }), null);
+});
+
+test("R40 歌单详情头部：标题/元信息/「只加载了一部分」的说明（不把已加载说成全部）", () => {
+  // 标题：接口那份优先，其次视图参数带过来的名字，两个都没有才是兜底
+  assert.equal(playlistDetailTitleOf({ name: "接口的名字" }, "卡片的名字"), "接口的名字");
+  assert.equal(playlistDetailTitleOf({}, "卡片的名字"), "卡片的名字", "接口没给就用卡片带来的（界面不显示空标题）");
+  assert.equal(playlistDetailTitleOf(null, null), "未命名歌单");
+  assert.equal(playlistDetailTitleOf({ name: "   " }, "  "), "未命名歌单", "空白不算名字");
+
+  // 元信息：有总数说总数；分页没走完才补"已加载"；没有总数只说已加载
+  assert.equal(playlistDetailMetaText({ songCount: 1623 }, 50, true), "共 1623 首 · 已加载 50 首");
+  assert.equal(playlistDetailMetaText({ songCount: 22 }, 22, false), "共 22 首", "分页走完时两个数字相等，不写两遍");
+  assert.equal(playlistDetailMetaText(null, 50, true), "已加载 50 首", "没有总数就不说「共」");
+  assert.equal(playlistDetailMetaText(null, 0, false), "已加载 0 首");
+  assert.equal(playlistDetailMetaText({ songCount: "abc" }, 3, false), "已加载 3 首", "坏总数按没有总数处理");
+
+  // 「只加载了一部分」的说明：必须说出来（否则用户以为"播放全部"是整张歌单）
+  assert.match(playlistPartialNoticeText(50), /前 50 首/);
+  assert.match(playlistPartialNoticeText(50), /已加载/);
+  assert.match(playlistPartialNoticeText(3), /^这一页只加载了前 3 首/);
+
+  // 两个按钮的文案只有这一处真源
+  assert.equal(PLAYLIST_PLAY_ALL_LABEL, "播放全部");
+  assert.equal(PLAYLIST_ENQUEUE_LABEL, "加入队列");
 });
 
 test("运行日志：只收非空文本、最新的在最后、条数有上限（长跑不涨内存）", () => {

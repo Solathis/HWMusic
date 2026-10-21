@@ -14,7 +14,7 @@
  * 就是这些页面今天最常显示的那句话——这是如实，不是坏掉。
  */
 import { useCallback, useEffect, useRef, useState } from "react"
-import { SearchIcon } from "lucide-react"
+import { ListPlusIcon, ListMusicIcon, PlayIcon } from "lucide-react"
 
 import {
   LIBRARY_ALBUM,
@@ -40,12 +40,21 @@ import {
   SelectValue,
 } from "./components/ui/select"
 import { Switch } from "./components/ui/switch"
-import { EmptyState, GridSkeleton, ListSkeleton, LoadFailed, TrackTable } from "./components"
+import { CoverArt, EmptyState, GridSkeleton, ListSkeleton, LoadFailed, TrackTable } from "./components"
+import { AmllBackground } from "./AmllBackground.tsx"
 import { LOG_ENTRY_LIMIT, LogTerminal } from "./log-terminal.tsx"
 import type { LogEntry } from "./log-terminal.tsx"
 import { coreCall, getAutostart, isCoreError, setAutostart } from "./host-api"
 import { PlaylistGrid } from "./playlist-grid.tsx"
 import { libraryEmptyText, libraryFailureText } from "./features/library/library-state.mjs"
+import {
+  PLAYLIST_ENQUEUE_LABEL,
+  PLAYLIST_PLAY_ALL_LABEL,
+  playlistCoverUrlOf,
+  playlistDetailMetaText,
+  playlistDetailTitleOf,
+  playlistPartialNoticeText,
+} from "./features/library/playlist-fields.mjs"
 import {
   APPEARANCE_NOTICE_TEXT,
   CLOSE_BEHAVIORS,
@@ -204,68 +213,159 @@ export function PlaylistsPage({
   return <PlaylistGrid playlists={resource.data ?? []} emptyText={libraryEmptyText(view)} onOpen={onOpenPlaylist} />
 }
 
-export function PlaylistDetailPage({ view, ...navigation }: { view: View } & PageNavigationProps) {
-  const select = useCallback((data: { songs?: unknown[] }) => data.songs ?? [], [])
-  const resource = useLibraryResource<unknown[]>(
-    LIBRARY_PLAYLIST_DETAIL,
-    { playlistId: viewParam(view, "playlistId"), page: 1, pageSize: LIST_PAGE_SIZE },
-    select,
-    viewParam(view, "playlistId") !== null,
+/**
+ * 歌单详情页（R40 **删除重写**）。
+ *
+ * 旧版只有一个曲目表：没有歌单名、没有封面、没有"播放全部"——点进一张歌单像是掉进了一份
+ * 无名列表。现在三块：
+ *
+ * 1. **头部**：大封面 + 歌单名 + 元信息（共几首 / 已加载几首）+ 动作按钮。头部底景用 AMLL
+ *    官方的 `BackgroundRender`（`AmllBackground`）：封面地址交给它之前先由宿主用 `new Image()`
+ *    加载成 `HTMLImageElement`——**不是 fetch**（CSP 的 `connect-src` 只有 self/ipc，
+ *    字符串地址会被 AMLL 拿去 fetch 而撞墙；图片走的是 `img-src`）；
+ * 2. **动作**：`播放全部` = 用这一页的曲目整队替换并从第一首开始（`playQueue`）；
+ *    `加入队列` = 追加到队尾、不动正在播的那一首（`enqueue`）。两个都**只作用于已加载的曲目**，
+ *    分页没走完时页面上有一句说明（不把"前 50 首"说成"整张歌单"）；
+ * 3. **正文**：曲目表（沿用 `TrackTable`：双击播放、键盘可达、艺人/专辑跳转）。
+ *
+ * 数据来源仍是**一次一页**的歌单详情频道（`LIBRARY_PLAYLIST_DETAIL`，载荷 `{playlistId, page,
+ * pageSize}`）：`data.playlist` 是协议层归一化过的歌单元信息（名字/封面/曲目数都从它读，
+ * 不在渲染层再解析一份原始响应）。
+ */
+export interface PlaylistDetailData {
+  songs: unknown[]
+  playlist: unknown
+  hasMore: boolean
+}
+
+export function PlaylistDetailPage({
+  view,
+  onPlayAll,
+  onEnqueue,
+  ...navigation
+}: {
+  view: View
+  /** 播放全部：把这一页的曲目整队替换并播放第一首 */
+  onPlayAll?: (songs: unknown[]) => void
+  /** 加入队列：追加到队尾（不动正在播的那一首） */
+  onEnqueue?: (songs: unknown[]) => void
+} & PageNavigationProps) {
+  const playlistId = viewParam(view, "playlistId")
+  const select = useCallback(
+    (data: { songs?: unknown[]; playlist?: unknown; hasMore?: unknown }): PlaylistDetailData => ({
+      songs: data.songs ?? [],
+      playlist: data.playlist ?? null,
+      // 只有协议层明说"还有下一页"才算更多（渲染层不自己从条数猜）
+      hasMore: data.hasMore === true,
+    }),
+    [],
   )
-  return <TrackListView emptyText={libraryEmptyText(view)} resource={resource} {...navigation} />
+  const resource = useLibraryResource<PlaylistDetailData>(
+    LIBRARY_PLAYLIST_DETAIL,
+    { playlistId, page: 1, pageSize: LIST_PAGE_SIZE },
+    select,
+    playlistId !== null,
+  )
+
+  if (resource.status === "loading") return <ListSkeleton />
+  if (resource.status === "error") return <LoadFailed text={libraryFailureText(resource.failure)} />
+
+  const data = resource.data
+  const songs = data?.songs ?? []
+  const playlist = data?.playlist ?? null
+  const hasMore = data?.hasMore === true
+  const coverUrl = playlistCoverUrlOf(playlist)
+  const title = playlistDetailTitleOf(playlist, viewParam(view, "name"))
+  const actionsDisabled = songs.length === 0
+
+  return (
+    <div className="flex flex-col" data-testid="playlist-detail">
+      <Card className="relative m-4 overflow-hidden">
+        {/* 头部底景：AMLL 官方流体背景（封面经 new Image() 载入 = img-src 路径，不是 fetch） */}
+        <div className="absolute inset-0" aria-hidden="true">
+          <AmllBackground playing={false} hasLyric albumUrl={coverUrl} />
+        </div>
+        {/* 压暗层：令牌色的半透明层，保证名字在任意封面上都读得清（与歌词舞台同一手法） */}
+        <div className="absolute inset-0 bg-background/75" aria-hidden="true" />
+
+        <CardContent className="relative flex flex-col gap-4 sm:flex-row sm:items-end">
+          <CoverArt
+            coverUrl={coverUrl}
+            className="size-32 shrink-0 rounded-lg"
+            iconClassName="size-10"
+            icon={ListMusicIcon}
+          />
+          <div className="flex min-w-0 flex-1 flex-col gap-2">
+            <CardTitle className="truncate text-2xl">{title}</CardTitle>
+            <CardDescription>{playlistDetailMetaText(playlist, songs.length, hasMore)}</CardDescription>
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <Button disabled={actionsDisabled || onPlayAll === undefined} onClick={() => onPlayAll?.(songs)}>
+                <PlayIcon />
+                {PLAYLIST_PLAY_ALL_LABEL}
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={actionsDisabled || onEnqueue === undefined}
+                onClick={() => onEnqueue?.(songs)}
+              >
+                <ListPlusIcon />
+                {PLAYLIST_ENQUEUE_LABEL}
+              </Button>
+            </div>
+            {hasMore ? (
+              <p className="text-xs text-muted-foreground">{playlistPartialNoticeText(songs.length)}</p>
+            ) : null}
+          </div>
+        </CardContent>
+      </Card>
+
+      <TrackTable
+        songs={songs}
+        emptyText={libraryEmptyText(view)}
+        onActivate={(song, index) => navigation.onActivateTrack(song, index, songs)}
+        onOpenAlbum={navigation.onOpenAlbum}
+        onOpenArtist={navigation.onOpenArtist}
+      />
+    </div>
+  )
 }
 
 // ---------------------------------------------------------------------------
-// 搜索：输入 + 提交（回车也能搜）
+// 搜索：结果（输入框在侧栏顶部，R40 从页内搬走）
 // ---------------------------------------------------------------------------
 
-export function SearchPage({ ...navigation }: PageNavigationProps) {
-  const view = createView(VIEW.search)
-  const [keyword, setKeyword] = useState("")
-  const [submitted, setSubmitted] = useState<string | null>(null)
+/**
+ * 搜索结果页（R40 删掉页内输入框，只剩结果）。
+ *
+ * 检索词**由外壳经视图参数交下来**（`VIEW.search` 的 `keyword`）：入口在侧栏的常驻搜索框，
+ * 结果在内容区，两处必须是同一条数据——页面自己存一份就会出现"侧栏显示 A、内容区显示 B"。
+ * 所以这里既不渲染输入框，也不持有 keyword 状态：没提交过（没有 keyword）就显示
+ * "输入关键字开始搜索。"，提交过就按同一档规则显示结果或「查无所获」。
+ *
+ * 页面本身不再自带滚动容器：结果直接落在内容区那一个滚动根里（R39 已记待裁决的重复层，
+ * 这里随输入框一起去掉）。
+ */
+export function SearchPage({ view, ...navigation }: { view: View } & PageNavigationProps) {
+  const keyword = viewParam(view, "keyword")
   const select = useCallback((data: { songs?: unknown[] }) => data.songs ?? [], [])
 
-  // 没提交过就不发请求：空关键字在 core 侧是 invalid_payload（那不是用户想看到的"错误"）
+  // 没提交过（keyword 为 null/空）就不发请求：空关键字在 core 侧是 invalid_payload，
+  // 那不是用户想看到的"错误"（"输入关键字开始搜索。"才是实话）
   const resource = useLibraryResource<unknown[]>(
     LIBRARY_SEARCH,
-    { keyword: submitted ?? "", page: 1, pageSize: LIST_PAGE_SIZE },
+    { keyword: keyword ?? "", page: 1, pageSize: LIST_PAGE_SIZE },
     select,
-    submitted !== null,
+    keyword !== null,
   )
 
+  if (keyword === null) return <EmptyState text={libraryEmptyText(view)} />
+
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <form
-        className="flex shrink-0 items-center gap-2 px-4 py-3"
-        onSubmit={(event) => {
-          event.preventDefault()
-          const trimmed = keyword.trim()
-          setSubmitted(trimmed === "" ? null : trimmed)
-        }}
-      >
-        <Input
-          value={keyword}
-          onChange={(event) => setKeyword(event.target.value)}
-          placeholder="搜索歌曲、歌手或专辑"
-          aria-label="搜索关键字"
-        />
-        <Button type="submit" variant="secondary">
-          <SearchIcon />
-          搜索
-        </Button>
-      </form>
-      {submitted === null ? (
-        <EmptyState text={libraryEmptyText(view)} />
-      ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <TrackListView
-            emptyText={libraryEmptyText(view, { searched: true })}
-            resource={resource}
-            {...navigation}
-          />
-        </div>
-      )}
-    </div>
+    <TrackListView
+      emptyText={libraryEmptyText(view, { searched: true })}
+      resource={resource}
+      {...navigation}
+    />
   )
 }
 

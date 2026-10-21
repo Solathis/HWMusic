@@ -49,6 +49,8 @@ import {
   SidebarGroup,
   SidebarGroupContent,
   SidebarGroupLabel,
+  SidebarHeader,
+  SidebarInput,
   SidebarInset,
   SidebarMenu,
   SidebarMenuButton,
@@ -121,18 +123,27 @@ export function App() {
  *
  * 这里**只有图标**：导航条目、标签、顺序全部来自 views.mjs 的 SIDEBAR_VIEWS——
  * 再抄一份条目列表，就会出现"导航里有个页面上没有的入口"这种漂移。
+ *
+ * R40：`VIEW.search` 没有图标了（它不是导航项），搜索入口是侧栏顶部那个常驻输入框。
  */
 const NAV_ICONS = {
   [VIEW.favorites]: HeartIcon,
   [VIEW.playlists]: ListMusicIcon,
   [VIEW.history]: HistoryIcon,
-  [VIEW.search]: SearchIcon,
   [VIEW.settings]: SettingsIcon,
 }
 
 export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
   const [view, setView] = useState(() => createView(VIEW.favorites))
   const [stageOpen, setStageOpen] = useState(false)
+  /**
+   * 侧栏搜索框里的文字（R40）。
+   *
+   * 它**只活在输入框里**：真正的检索词随视图走（`VIEW.search` 的 `keyword` 参数），
+   * 这样"搜过什么"与"内容区正在显示什么"永远是同一条数据。输入框保留最后一次提交的文字，
+   * 用户抬眼就能看见自己在搜什么（清空输入框不会把结果清掉——那是两件事）。
+   */
+  const [keyword, setKeyword] = useState("")
   /** 退出登录失败那一句（用户主动点的动作，失败必须看得见；成功时界面由 auth:status 广播接管） */
   const [logoutFailure, setLogoutFailure] = useState<string | null>(null)
   // 托盘可用性：null = **还没取到**（不是"不可用"，也不是"可用"）
@@ -156,6 +167,22 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
   const navigate = useCallback((next: unknown) => {
     setView(normalizeView(next))
   }, [])
+
+  /**
+   * 提交一次搜索（R40）：把关键字放进 **`VIEW.search` 的视图参数**，内容区随之切到结果页。
+   *
+   * 为什么关键字走视图参数而不是留在搜索页的组件状态里：入口在侧栏（外壳），结果在内容区（页面），
+   * 两者必须是同一条数据——页面自己存一份就会出现"侧栏显示 A、内容区显示 B 的结果"。
+   * 空白关键字不发请求（core 侧那是 `invalid_payload`），此时切到搜索页显示"输入关键字开始搜索。"。
+   */
+  const submitSearch = useCallback(
+    (value: string) => {
+      const trimmed = value.trim()
+      setKeyword(trimmed)
+      navigate(createView(VIEW.search, { keyword: trimmed }))
+    },
+    [navigate],
+  )
 
   /**
    * 托盘可用性：启动时问宿主一次（R11）。
@@ -216,8 +243,7 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
     [runtime],
   )
 
-  const onOpenAlbum = useCallback(
-    (albumId: string, song: unknown) => {
+  const onOpenAlbum = useCallback(    (albumId: string, song: unknown) => {
       navigate(createView(VIEW.album, { albumId, name: trackAlbumOf(song) }))
     },
     [navigate],
@@ -239,6 +265,27 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
   )
 
   const navigation = { onActivateTrack, onOpenAlbum, onOpenArtist }
+
+  /**
+   * 歌单详情页的两个动作（R40）：都是**整队替换 / 追加**，动作全部转给播放运行时
+   * （页面拿不到音频，也拿不到地址——与双击播放同一条纪律）。
+   *
+   * `playAll` 用 `playQueue`（整队替换 + 从第一首开播）；`enqueue` 用 `enqueue`
+   * （追加到队尾、不动正在播的那一首）。两者都只作用于页面交上来的那批曲目。
+   */
+  const onPlayAll = useCallback(
+    (songs: unknown[]) => {
+      void runtime.player.playQueue(songs, 0)
+    },
+    [runtime],
+  )
+
+  const onEnqueue = useCallback(
+    (songs: unknown[]) => {
+      runtime.player.enqueue(songs)
+    },
+    [runtime],
+  )
 
   /** 账号资料的三项投影（缺什么兜什么，绝不编：见 features/auth/account.mjs）。 */
   const accountName = accountNameText(profile)
@@ -267,9 +314,10 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
       case VIEW.playlists:
         return <PlaylistsPage onOpenPlaylist={onOpenPlaylist} />
       case VIEW.playlistDetail:
-        return <PlaylistDetailPage view={view} {...navigation} />
+        return <PlaylistDetailPage view={view} onPlayAll={onPlayAll} onEnqueue={onEnqueue} {...navigation} />
       case VIEW.search:
-        return <SearchPage {...navigation} />
+        // 关键字从视图参数来（侧栏那个常驻输入框提交的就是它）：页面自己不存检索词，见 submitSearch
+        return <SearchPage view={view} {...navigation} />
       case VIEW.album:
         return <AlbumPage view={view} {...navigation} />
       case VIEW.artist:
@@ -298,6 +346,31 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
   return (
     <SidebarProvider className="h-full min-h-0">
       <Sidebar>
+        {/*
+          侧栏顶部的常驻搜索框（R40 取代了原来那条「搜索」导航项）。
+          用 shadcn sidebar 官方的 `SidebarInput`（它就是这个位置的原语）；
+          回车提交（`type="submit"`），结果渲染在右侧内容区——所以这里**只有入口，没有结果**。
+          没有做"边打字边搜"：那是每敲一个字母一次请求。
+        */}
+        <SidebarHeader>
+          <form
+            className="flex items-center gap-1"
+            onSubmit={(event) => {
+              event.preventDefault()
+              submitSearch(keyword)
+            }}
+          >
+            <SidebarInput
+              value={keyword}
+              onChange={(event) => setKeyword(event.target.value)}
+              placeholder="搜索歌曲、歌手或专辑"
+              aria-label="搜索关键字"
+            />
+            <Button type="submit" variant="ghost" size="icon-sm" aria-label="搜索" disabled={keyword.trim() === ""}>
+              <SearchIcon />
+            </Button>
+          </form>
+        </SidebarHeader>
         <SidebarContent>
           <SidebarGroup>
             <SidebarGroupLabel>音乐库</SidebarGroupLabel>
@@ -423,7 +496,8 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
           />
         </div>
 
-        <PlayerBar runtime={runtime} state={playback} />
+        {/* R40：封面/曲目信息也是"进入播放页（歌词舞台）"的入口，与头部那枚按钮同一个 state */}
+        <PlayerBar runtime={runtime} state={playback} onOpenStage={() => setStageOpen(true)} />
       </SidebarInset>
     </SidebarProvider>
   )

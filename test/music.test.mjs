@@ -714,8 +714,106 @@ test("歌词（R38）：已加载的曲目条目自带 lyricAddress → 直接�
   );
 });
 
-test("歌词（R38）：白名单外的条目地址不进索引（不会被下载）", async () => {
+// —— R40：第 4 档「按专辑补条目索引」（重启后直接播恢复出来的队列那一档） -----------------
+
+test("歌词（R40）：索引里没有 + 播放响应给了 albumID → 用既有专辑端点补一次条目索引，取到歌词", async () => {
   const { calls, fetchImpl } = scriptedFetch((url) => {
+    if (url.includes("/api/playback")) {
+      // 播放响应：没有歌词地址，但内嵌的 songInfo 给了专辑 id（与 songSimpleInfos 同形）
+      return jsonResponse(okBody({ fileURL: "https://cdn.dbankcdn.cn/a.mp3", songInfo: { contentID: "s9", albumID: "A9" } }));
+    }
+    if (url.includes("/api/album")) {
+      const query = new URL(url).searchParams;
+      if (query.get("albumCode") !== "A9") throw new Error(`专辑 id 不对：${url}`);
+      // 专辑响应里的条目自带 lyricAddress（真机实测：albumInfoEx.songSimpleInfos[] 3/3 都有）
+      return jsonResponse(
+        okBody({ albumInfoEx: { albumInfo: { contentID: "A9", contentName: "专辑" }, songSimpleInfos: [wireSong("s9", { albumID: "A9", lyricAddress: "https://cdn.dbankcdn.cn/s9.lrc" })] } }),
+      );
+    }
+    if (url.endsWith("/s9.lrc")) return new Response("[00:01.00]专辑补来的歌词", { status: 200 });
+    throw new Error(`不该请求：${url}`);
+  });
+  const api = apiOf({ fetchImpl });
+
+  const lyrics = await api.getLyrics({ trackId: "s9" });
+  assert.equal(lyrics.ok, true, JSON.stringify(lyrics));
+  assert.match(lyrics.data.text, /专辑补来的歌词/);
+  assert.ok(
+    calls.some((call) => call.url.includes("/api/album")),
+    "第 4 档真的去问了既有专辑端点（不发明端点）",
+  );
+  // 顺序：先播放响应，再专辑，最后下载歌词
+  assert.deepEqual(
+    calls.map((call) => (call.url.includes("/api/playback") ? "playback" : call.url.includes("/api/album") ? "album" : "lrc")),
+    ["playback", "album", "lrc"],
+  );
+});
+
+test("歌词（R40）：播放响应没给专辑 id → 不打专辑端点，照旧如实回 invalid_response（不猜 id）", async () => {
+  const { calls, fetchImpl } = scriptedFetch((url) => {
+    if (url.includes("/api/playback")) return jsonResponse(okBody({ fileURL: "https://cdn.dbankcdn.cn/a.mp3" }));
+    throw new Error(`不该请求：${url}`);
+  });
+  const api = apiOf({ fetchImpl });
+
+  const lyrics = await api.getLyrics({ trackId: "s9" });
+  assert.equal(lyrics.ok, false);
+  assert.equal(lyrics.error.kind, MUSIC_ERROR_KINDS.invalidResponse);
+  assert.equal(calls.some((call) => call.url.includes("/api/album")), false, "没有专辑 id 就不该瞎试");
+});
+
+test("歌词（R40）：专辑里没有这一首（或专辑端点失败）→ 仍然如实回 invalid_response，并把原因记进 warnings", async () => {
+  const { fetchImpl } = scriptedFetch((url) => {
+    if (url.includes("/api/playback")) {
+      return jsonResponse(okBody({ fileURL: "https://cdn.dbankcdn.cn/a.mp3", songInfo: { contentID: "s9", albumID: "A9" } }));
+    }
+    if (url.includes("/api/album")) {
+      // 专辑响应里只有别的曲目（没有 s9）
+      return jsonResponse(okBody({ albumInfoEx: { songInfo: {}, songSimpleInfos: [wireSong("other", { albumID: "A9", lyricAddress: "https://cdn.dbankcdn.cn/other.lrc" })] } }));
+    }
+    throw new Error(`不该请求：${url}`);
+  });
+  const api = apiOf({ fetchImpl });
+
+  const lyrics = await api.getLyrics({ trackId: "s9" });
+  assert.equal(lyrics.ok, false);
+  assert.equal(lyrics.error.kind, MUSIC_ERROR_KINDS.invalidResponse);
+});
+
+test("歌词（R40）：回落那一档只记键名（值不进日志）——专辑 id 与响应内容都不许出现在日志里", async () => {
+  const logs = [];
+  const { fetchImpl } = scriptedFetch((url) => {
+    if (url.includes("/api/playback")) {
+      return jsonResponse(
+        okBody({ fileURL: "https://cdn.dbankcdn.cn/a.mp3", songInfo: { contentID: "s9", albumID: "A9", albumName: "不该进日志的专辑名" } }),
+      );
+    }
+    if (url.includes("/api/album")) return jsonResponse(okBody({ albumInfoEx: { songSimpleInfos: [] } }));
+    throw new Error(`不该请求：${url}`);
+  });
+  const api = apiOf({ fetchImpl, api: { log: (line) => logs.push(line) } });
+
+  await api.getLyrics({ trackId: "s9" });
+  const line = logs.find((entry) => entry.includes("歌词回落"));
+  assert.ok(line, `要有一行回落诊断：${JSON.stringify(logs)}`);
+  assert.match(line, /albumID/, "播放响应的键名要给出来（这就是要看的东西）");
+  assert.match(line, /songInfo 键名/, "内嵌 songInfo 的键名也要（专辑 id 最可能在那里）");
+  assert.ok(!line.includes("不该进日志的专辑名"), "响应里的值不进日志");
+  assert.ok(!line.includes("A9"), "连专辑 id 的值也不进日志（只记键名）");
+});
+
+test("歌词（R40）：日志口默认不存在时也不崩（协议层自己不写日志）", async () => {
+  const { fetchImpl } = scriptedFetch((url) => {
+    if (url.includes("/api/playback")) return jsonResponse(okBody({ fileURL: "https://cdn.dbankcdn.cn/a.mp3", albumID: "A9" }));
+    if (url.includes("/api/album")) return jsonResponse(okBody({ albumInfoEx: { songSimpleInfos: [] } }));
+    throw new Error(`不该请求：${url}`);
+  });
+  const api = apiOf({ fetchImpl });
+  const lyrics = await api.getLyrics({ trackId: "s9" });
+  assert.equal(lyrics.ok, false, "没有 log 注入位时照旧走完这条链");
+});
+
+test("歌词（R38）：白名单外的条目地址不进索引（不会被下载）", async () => {  const { calls, fetchImpl } = scriptedFetch((url) => {
     if (url.includes("/api/playlist/detail")) {
       return jsonResponse(
         okBody({

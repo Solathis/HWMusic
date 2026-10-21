@@ -128,6 +128,53 @@ test("播放器栏接通：data-state 由状态机给（不再是 placeholder）
   assert.match(components, /onActivate\?\.\(song,\s*index\)/, "键盘激活同理（回车/空格）");
 });
 
+/**
+ * R40 第 6 项（用户要求「控件居中，不随左侧内容宽度漂移」）。
+ *
+ * 判据不是"看起来在中间"，而是**结构上就是中间**：控件组用绝对定位钉在 50% 上
+ * （`left-1/2 -translate-x-1/2`）。等分（`flex-1 basis-0`）做不到这件事——两侧内容天然不等宽，
+ * 等分只能让剩余空间相等，控件的实际中点仍会漂。真机实测偏差 0px（`.tmp/r40-player-bar.json`：
+ * 栏中点 768、控件组中点 768，侧栏收起后仍是 768）。
+ */
+test("R40 播放器栏三区：控件组绝对居中 + 封面/曲目信息是「进入播放页」的入口", () => {
+  const components = stripComments(read("src/renderer/components.tsx"));
+
+  assert.match(components, /data-testid="player-controls"/, "控件组要有锚点（CDP/测试按它量中点）");
+  assert.match(
+    components,
+    /className="absolute left-1\/2 flex -translate-x-1\/2 items-center gap-1"/,
+    "控件组必须绝对居中（left-1/2 + -translate-x-1/2）：等分两侧做不到真居中",
+  );
+  assert.doesNotMatch(components, /ml-auto flex items-center gap-1/, "旧的「控件挂右」布局已删（那是用户报的问题）");
+  assert.match(components, /data-testid="player-track-info"/, "左区（封面 + 曲目信息）要有锚点");
+  assert.match(components, /onOpenStage/, "左区可点 = 打开歌词舞台（同一个 state）");
+  assert.match(components, /min-w-0/, "左区要能在窄窗里收缩（truncate 的前提）");
+  assert.match(components, /data-testid="player-bar-trailing"/, "右区是明确的空占位（三区语义不塌）");
+
+  // 外壳把它接到与头部按钮**同一个** state 上
+  const app = stripComments(read("src/renderer/App.tsx"));
+  assert.match(app, /onOpenStage=\{\(\)\s*=>\s*setStageOpen\(true\)\}/, "封面点击开舞台（与头部「歌词」同一个 setStageOpen）");
+  assert.match(app, /aria-label="歌词"/, "头部那枚按钮仍在（两个入口，一个 state）");
+
+  // 舞台底景带上当前曲目的封面（地址经 AmllBackground 的 new Image() 加载 = img-src 路径）
+  const stage = stripComments(read("src/renderer/playback-stage.tsx"));
+  assert.match(stage, /albumUrl=\{trackCoverUrlOf\(state\.track\)\}/, "舞台背景用当前曲目的封面");
+  const background = stripComments(read("src/renderer/AmllBackground.tsx"));
+  assert.match(background, /new Image\(\)/, "封面由宿主用 new Image() 载入（AMLL 只认 HTMLImageElement）");
+  assert.doesNotMatch(background, /\bfetch\s*\(/, "**不是 fetch**（CSP connect-src 只有 self/ipc，会被拦）");
+  assert.match(background, /addEventListener\(\s*"error"/, "加载失败要回退（不留碎图、不抛）");
+  /**
+   * `crossOrigin` 必须在 `src` 之前设（R40 真机取证：没带 CORS 的跨域图会把画布 taint，
+   * AMLL 采样时 `getImageData` 抛 SecurityError；带了就既不 taint 也照常加载）。
+   * 顺序写错等于没设——所以这里同时钉"设了"和"设在 src 前面"。
+   */
+  assert.match(background, /image\.crossOrigin = "anonymous"/, "跨域封面必须带 crossOrigin=anonymous（否则 AMLL 采样会抛 SecurityError）");
+  assert.ok(
+    background.indexOf('image.crossOrigin = "anonymous"') < background.indexOf("image.src = url"),
+    "crossOrigin 必须在 src 之前设（设晚了这次请求已经发出去了）",
+  );
+});
+
 test("外壳：App 挂载运行时、队列面板真实数据、歌词开关与舞台接线", () => {
   const app = stripComments(read("src/renderer/App.tsx"));
   assert.match(app, /usePlayer\(/, "播放运行时经 hook 挂载（单例在模块层）");

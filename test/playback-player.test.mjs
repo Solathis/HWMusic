@@ -556,6 +556,65 @@ test("playTracks/playQueue：双击列表里的某一首 = 用整个列表当队
   assert.equal(state.track.name, "歌2");
 });
 
+// —— R40：加入队列（歌单详情页的「加入队列」） -----------------------------------------
+
+test("R40 enqueue：追加到队尾、**不动正在播的那一首**（与整队替换是两件事）", async () => {
+  const { player, fake, resolved, persisted } = makePlayer();
+  await player.playQueue(songs(2), 0);
+  assert.equal(player.snapshot().status, "playing");
+  const sourcesBefore = fake.calls.sources.length;
+  const playBefore = fake.calls.play;
+
+  const added = player.enqueue(songs(3).map((song, index) => ({ ...song, id: String(2000 + index) })));
+  assert.equal(added.ok, true);
+  assert.deepEqual(added.data, { added: 3, queueLength: 5, index: 0 });
+
+  const state = player.snapshot();
+  assert.equal(state.entries.length, 5, "原来 2 首 + 新来 3 首");
+  assert.deepEqual(state.entries.map((entry) => entry.id), ["1000", "1001", "2000", "2001", "2002"], "追加在后面，顺序不变");
+  assert.equal(state.index, 0, "当前索引不动");
+  assert.equal(state.status, "playing", "正在播的那一首不许被打回停止（换队列才停，加入队列不停）");
+  assert.equal(state.loaded, true, "已装载的状态也不许被作废");
+  assert.equal(fake.calls.sources.length, sourcesBefore, "不重新装载音频源");
+  assert.equal(fake.calls.play, playBefore, "不重新播放");
+  assert.deepEqual(resolved, ["1000"], "只取过被点那首的地址");
+  assert.equal(persisted.length, 2, "队列变了要写盘（第二次是追加）");
+  assert.deepEqual(persisted.at(-1), { ids: ["1000", "1001", "2000", "2001", "2002"], index: 0 });
+});
+
+test("R40 enqueue：空队列时追加 = 建立队列并停在第一首，但**不自动出声**", async () => {
+  const { player, fake } = makePlayer();
+  const added = player.enqueue(songs(2));
+
+  assert.deepEqual(added.data, { added: 2, queueLength: 2, index: 0 });
+  const state = player.snapshot();
+  assert.equal(state.index, 0, "索引指向第一首（否则「播放/下一首」都没有落点）");
+  assert.equal(state.track.id, "1000");
+  assert.equal(state.status, "idle", "没有用户手势的自动出声是打扰（与 restore 同一条纪律）");
+  assert.equal(fake.calls.play, 0);
+  assert.equal(fake.calls.sources.length, 0, "还没取地址、没装载");
+});
+
+test("R40 enqueue：没有标识的条目 / 空列表一律不产生变化（不写盘、不改状态）", () => {
+  const { player, persisted } = makePlayer();
+  player.enqueue([{ name: "没有 id" }]);
+  assert.deepEqual(player.snapshot().entries, []);
+  assert.equal(persisted.length, 0, "什么都没变就不写盘");
+
+  player.enqueue(songs(1));
+  const before = persisted.length;
+  const after = player.enqueue([]);
+  assert.deepEqual(after.data, { added: 0, queueLength: 1, index: 0 });
+  assert.equal(persisted.length, before, "空追加不写盘");
+});
+
+test("R40 enqueue：同一首歌可以出现两次（不去重、不排序——追加的语义就是「原样排到后面」）", () => {
+  const { player } = makePlayer();
+  player.enqueue(songs(1));
+  player.enqueue(songs(1));
+  assert.deepEqual(player.snapshot().entries.map((entry) => entry.id), ["1000", "1000"]);
+});
+
 test("player:command（R11 托盘预登记）：命令表是唯一真源，认不出的命令结构化拒绝", async () => {
   assert.deepEqual(PLAYER_COMMANDS, ["play", "pause", "toggle", "next", "previous"]);
   assert.equal(isPlayerCommand("toggle"), true);

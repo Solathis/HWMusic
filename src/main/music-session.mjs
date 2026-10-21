@@ -128,6 +128,25 @@ export const MUSIC_PROFILE_MEMBER_KEYS = ["memberShip"];
 export const MUSIC_PROFILE_MEMBER_MARK = "6";
 /** profile 可能挂在这些容器下（候选容器；都取不到就看顶层）。 */
 export const MUSIC_PROFILE_CONTAINER_KEYS = ["data", "userInfo", "userInfoEx"];
+/**
+ * R40：`loginex` 响应里两个**有名字的容器**（真机实证的顶层键名里就有它们，
+ * 见 `.tmp/dev-visible.log` 15:52 那行）：`queryAllSubInfoResp` / `queryAppConfigDetailResp`。
+ *
+ * 顶层没有用户名/头像（R38 的候选键因此全扑空），账号资料最可能就在这两个容器**里面**
+ * ——所以 R40 对它们做**一层**读取（容器自己、它的一层子对象、一层数组里的对象元素），
+ * 并把键名记进日志。这是**简报指定的防御式接线，不是证据**：读到什么算什么，读不到就兜底。
+ */
+export const MUSIC_PROFILE_NESTED_CONTAINER_KEYS = ["queryAllSubInfoResp", "queryAppConfigDetailResp"];
+/**
+ * id_token claims 里的名字/头像候选（R40；简报点名的四个键）。
+ *
+ * 只认这四个：OIDC 标准里还有 `preferred_username`/`given_name` 之类，但**没有证据**说明
+ * 华为的 id_token 里有它们——少认一个键的代价是暂时不显示，多认一个猜错的键的代价是显示错人。
+ */
+export const MUSIC_PROFILE_CLAIM_NAME_KEYS = ["name", "nickname"];
+export const MUSIC_PROFILE_CLAIM_AVATAR_KEYS = ["picture", "avatar"];
+/** 键名日志里每个容器最多报多少个子容器（防止一整棵配置树把日志刷满）。 */
+export const MUSIC_PROFILE_NESTED_LOG_LIMIT = 8;
 /** 名字的显示上限（字段长度未知；截断只为不让界面被撑破）。 */
 export const MUSIC_PROFILE_NAME_MAX = 40;
 
@@ -143,14 +162,53 @@ function flagOf(value) {
   return null;
 }
 
-/** profile 的候选容器：响应本体在前，其次是那三个可能的容器（都是对象才算）。 */
+/** profile 的候选容器：响应本体在前，其次是那几个可能的容器（都是对象才算）。 */
 function profileContainersOf(payload) {
   const containers = [payload];
   for (const key of MUSIC_PROFILE_CONTAINER_KEYS) {
     const nested = payload[key];
     if (isObject(nested)) containers.push(nested);
   }
+  // R40：两个有名字的容器再做**一层**（容器自己 + 一层子对象 + 一层数组元素）
+  for (const key of MUSIC_PROFILE_NESTED_CONTAINER_KEYS) {
+    const container = payload[key];
+    if (!isObject(container)) continue;
+    containers.push(container);
+    for (const value of Object.values(container)) {
+      if (isObject(value)) containers.push(value);
+      else if (Array.isArray(value)) {
+        for (const item of value) if (isObject(item)) containers.push(item);
+      }
+    }
+  }
   return containers;
+}
+
+/**
+ * `queryAllSubInfoResp` / `queryAppConfigDetailResp` 的**一层嵌套键名**（R40 诊断）。
+ *
+ * 只报键名、**不报值**：这两个容器里可能就有账号资料（名字/头像/会员档位），
+ * 值是用户的个人信息，键名才是"下一步该读哪个字段"的证据。
+ *
+ * @param {unknown} payload loginex 响应
+ * @returns {string[]} 每个容器/子容器一行（`容器名: a, b, c`）
+ */
+export function nestedContainerKeyNamesOf(payload) {
+  if (!isObject(payload)) return [];
+  const lines = [];
+  for (const key of MUSIC_PROFILE_NESTED_CONTAINER_KEYS) {
+    const container = payload[key];
+    if (!isObject(container)) continue;
+    lines.push(`${key}: ${Object.keys(container).sort().join(", ")}`);
+    let shown = 0;
+    for (const [childKey, value] of Object.entries(container)) {
+      if (!isObject(value)) continue;
+      if (shown >= MUSIC_PROFILE_NESTED_LOG_LIMIT) break;
+      shown += 1;
+      lines.push(`${key}.${childKey}: ${Object.keys(value).sort().join(", ")}`);
+    }
+  }
+  return lines;
 }
 
 /**
@@ -215,6 +273,79 @@ export function profileFromResponse(payload, options = {}) {
 /** profile 是否有可展示的内容（空对象 = 什么都没认出来）。 */
 export function hasProfileContent(profile) {
   return isObject(profile) && (profile.userName !== undefined || profile.avatarUrl !== undefined || profile.vip === true);
+}
+
+/**
+ * id_token 的 claims → profile（R40；**取到才存**，与 `profileFromResponse` 同一份纪律）。
+ *
+ * 只取名字与头像：
+ * - 头像同样**必须过媒体白名单**（白名单外的地址渲染层画不出来，存了也只是个死地址）；
+ * - **VIP 不从 claims 取**：claims 里没有"有证据"的会员字段（`memberShip` 那条规则属于
+ *   loginex 响应），猜一个 `vip`/`is_premium` 出来就是拿用户的会员身份开玩笑——宁可少显示。
+ *
+ * @param {unknown} claims `idTokenClaimsOf` 的产物
+ * @param {{isSafeUrl?: (url: string) => boolean}} [options]
+ * @returns {{userName?: string, avatarUrl?: string}} 可能为空对象
+ */
+export function profileFromClaims(claims, options = {}) {
+  const isSafeUrl = options.isSafeUrl ?? isSafeMediaUrl;
+  const profile = {};
+  if (!isObject(claims)) return profile;
+
+  for (const key of MUSIC_PROFILE_CLAIM_NAME_KEYS) {
+    const name = textOf(claims[key]);
+    if (name !== null) {
+      profile.userName = name.slice(0, MUSIC_PROFILE_NAME_MAX);
+      break;
+    }
+  }
+  for (const key of MUSIC_PROFILE_CLAIM_AVATAR_KEYS) {
+    const value = textOf(claims[key]);
+    if (value !== null && isSafeUrl(value)) {
+      profile.avatarUrl = value;
+      break;
+    }
+  }
+  return profile;
+}
+
+/**
+ * 合并两份 profile：**前者优先**，后者只补空缺（R40）。
+ *
+ * 为什么 loginex 优先于 id_token：前者是音乐业务自己的账号数据（VIP 规则也在那边），
+ * 后者是账号域的 OIDC claims——同一件事有两个来源时，业务域那份更贴近"这个应用里显示谁"。
+ * claims 的价值在于**补空缺**（loginex 顶层根本没有名字/头像）。
+ */
+export function mergeProfiles(primary, fallback) {
+  const base = isObject(primary) ? primary : {};
+  const extra = isObject(fallback) ? fallback : {};
+  const merged = { ...base };
+  if (merged.userName === undefined && extra.userName !== undefined) merged.userName = extra.userName;
+  if (merged.avatarUrl === undefined && extra.avatarUrl !== undefined) merged.avatarUrl = extra.avatarUrl;
+  if (merged.vip === undefined && extra.vip === true) merged.vip = true;
+  return merged;
+}
+
+/**
+ * 把 id_token claims 里认出的 profile **补进**会话记录（R40）。
+ *
+ * 只补空缺、只多一个 `profile` 键：其余字段（音乐 token、userId、expireTime）原样带过。
+ * 认不出任何东西时返回**原来的对象**（不制造"多了一个空 profile"的假变化）。
+ *
+ * **不落盘原始 token**：`claims` 本身不进记录，只有从里面提取出的名字/头像/wip 三个键进
+ * ——会话记录会随 DPAPI 信封落盘，凭据与 claims 原文都不该在那里。
+ *
+ * @param {unknown} record `parseMusicSessionResponse` 的产物
+ * @param {unknown} claims id_token 的 claims（null 就是没有）
+ * @param {{isSafeUrl?: (url: string) => boolean}} [options]
+ * @returns {unknown} 合并后的记录（没有可补的就是原对象）
+ */
+export function attachClaimProfile(record, claims, options = {}) {
+  if (!isObject(record)) return record;
+  const fromClaims = profileFromClaims(claims, options);
+  if (!hasProfileContent(fromClaims)) return record;
+  const merged = mergeProfiles(record.profile, fromClaims);
+  return { ...record, profile: merged };
 }
 
 /**
@@ -358,6 +489,11 @@ export function createHuaweiMusicSessionPort({
     // R38：**只记键名**（不记任何值）——这条链的响应形状一直没有实证，
     // 下一次真机登录就能从这一行看出"profile 到底叫什么名字"，而不是继续猜候选键。
     log(`loginex 响应顶层键名（只记键名，不记值）：${topLevelKeysOf(payload).join(", ")}`);
+    // R40：顶层已经证实没有名字/头像（真机 15:52 那次的键名日志），所以再看一层——
+    // 两个"容器"对象的键名（含一层子容器）。同样只记键名：里面是账号资料，值是用户的个人信息。
+    for (const line of nestedContainerKeyNamesOf(payload)) {
+      log(`loginex 容器一层键名（只记键名，不记值）：${line}`);
+    }
     return parseMusicSessionResponse(payload, { isSafeUrl });
   };
 }

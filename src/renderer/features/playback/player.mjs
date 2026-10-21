@@ -497,6 +497,41 @@ export function createPlayer(options = {}) {
     return start(queued.data.index, { manual: true });
   }
 
+  /**
+   * 往队列**末尾追加**（R40；歌单详情页的「加入队列」）。
+   *
+   * 与 `setQueue`/`playQueue` 的区别只有一件事：**不动正在播的那一首**。整队替换会把音频
+   * 里装着的上一首打回停止（换队列 = 停止播放，那是对的语义），而"加入队列"不是换队列——
+   * 用户要的是"这些排到后面去"，正在响的那一首必须继续响。
+   *
+   * 四条边界：
+   * 1. **空队列时追加 = 建立队列并停在第一首**（`index` 从 -1 变成 0，出现可播曲目），
+   *    但**不自动开播**：没有用户手势的出声是打扰（与 `restore` 同一条纪律）；
+   * 2. **不去重、不排序**：同一首歌在队列里出现两次是合法的（`queueEntriesOf` 的既有语义），
+   *    追加的语义就是"把这一批原样排到后面"；
+   * 3. **已装载的那一首不动**：`loadedId` 与音频源都不碰（只有整队替换才需要作废它们）；
+   * 4. 空列表/没有标识的条目一律不产生变化（`added: 0`），不写盘（`persist` 自己会去重）。
+   *
+   * @returns {{ok: true, data: {added: number, queueLength: number, index: number}}}
+   */
+  function enqueue(items) {
+    const appended = queueEntriesOf(items);
+    if (appended.length === 0) {
+      return done({ added: 0, queueLength: state.entries.length, index: state.index });
+    }
+    const entries = [...state.entries, ...appended];
+    // 原本空队列：索引指向新队列的第一首（状态从"没得放"变成"可以放"，但仍不自动开播）
+    const index = state.index < 0 ? 0 : state.index;
+    publish({
+      entries,
+      index,
+      track: entries[index] ?? null,
+      error: null,
+    });
+    persist();
+    return done({ added: appended.length, queueLength: entries.length, index });
+  }
+
   function clear() {
     token += 1;
     loadedId = null;
@@ -668,6 +703,7 @@ export function createPlayer(options = {}) {
     dispose,
     setQueue,
     playQueue,
+    enqueue,
     playAt: (index) => start(index, { manual: true }),
     play,
     pause,

@@ -624,6 +624,33 @@ export function inlineLyricsOf(raw) {
   return null;
 }
 
+/**
+ * 专辑 id（R40）：**与 `normalizeTrack` 同一份候选表**（`albumID` 是已实证的那个名字——
+ * 真机证据：专辑响应的 `$.albumInfoEx.songSimpleInfos[i]` 里有 `albumID`/`albumName`，
+ * 见 `.tmp/r38-probe-lyrics.json`；`albumId`/`albumNamePair.id` 是同一处的历史拼写兜底）。
+ *
+ * 用途只有一个：歌词索引里没有这条曲目时，用专辑 id 去**既有**的专辑端点补一次条目
+ * （见 `getLyrics` 的第 ④ 档）。取不到就是 null——**不猜**。
+ */
+export function albumIdOf(raw) {
+  if (!isObject(raw)) return null;
+  for (const container of lyricContainersOf(raw)) {
+    const pair = isObject(container.albumNamePair) ? container.albumNamePair : null;
+    const candidates = [container.albumID, container.albumId, pair?.id, pair?.albumID];
+    for (const candidate of candidates) {
+      const value = textOf(candidate);
+      if (value !== null) return value;
+    }
+  }
+  return null;
+}
+
+/** 对象顶层键名（**只记键名，不记值**；诊断用）。坏形状回空数组。 */
+export function objectKeysOf(value, limit = 30) {
+  if (!isObject(value)) return [];
+  return Object.keys(value).sort().slice(0, Math.max(1, limit));
+}
+
 function unwrapLyricValue(value, depth = 0) {
   if (typeof value !== "string" || depth > 2) return null;
   const text = value.trim();
@@ -651,7 +678,7 @@ function favoritesHasMore(received, limit) {
  *          pageSize?: number, maxPages?: number, flagKeys?: string[],
  *          isSafeUrl?: (url: string) => boolean, timeoutMs?: number,
  *          discoveryLimit?: number, discoveryPageCap?: number,
- *          lyricIndexLimit?: number}} options
+ *          lyricIndexLimit?: number, log?: Function}} options
  *
  * `session` 是 `{token, snsUserID}`（音乐会话；`snsUserID` 是收藏/歌单发现必需的
  * `targetSnsUserID` 来源）。可以传对象，也可以传函数（会话在运行时才会变——
@@ -669,6 +696,12 @@ export function createMusicApi(options = {}) {
   const isSafeUrl = options.isSafeUrl ?? isSafeMediaUrl;
   const timeoutMs = positiveInt(options.timeoutMs, MUSIC_TIMEOUT_MS);
   const sessionSource = options.session;
+  /**
+   * 诊断口（R40）：**只记键名**的日志（协议层自己不写日志，与 `createHuaweiMusicSessionPort`
+   * 的 `log` 同一条纪律）。目前只有一处用：歌词回落到专辑补索引时，把播放响应的键名记下来
+   * ——"播放响应里到底有没有 `albumID`"这句话没有实证，靠这一行在真机上看到，而不是靠猜。
+   */
+  const log = typeof options.log === "function" ? options.log : () => undefined;
   /** 被设置**显式关闭**的端点（`musicEndpoints: {favorites: null}`）：报错要说得比"尚未确定"更准。 */
   const disabledEndpoints = new Set(options.disabledEndpoints ?? []);
 
@@ -1173,16 +1206,24 @@ export function createMusicApi(options = {}) {
   }
 
   /**
-   * 歌词文本（R12；R32 起默认**从播放响应推导**；R38 起先看列表条目里那条地址）。
+   * 歌词文本（R12；R32 起默认**从播放响应推导**；R38 起先看列表条目里那条地址；
+   * R40 增补"按专辑补条目索引"的第四档）。
    *
-   * 三条路，按"最可能有、最便宜"排序：
+   * 四条路，按"最可能有、最便宜"排序：
    * 1. 设置里显式注入过 `musicEndpoints.lyrics` → 直接打那个端点（形状按候选键宽容读取）；
    * 2. **已加载过的曲目条目里那条 `lyricAddress`**（见 `lyricAddressIndex`）：官方 H5 走的就是
    *    列表里这条地址；命中就省掉一次播放请求。地址可能带时效签名——下载失败不算结论，继续往下走；
    * 3. 播放响应：`lyricAddress`（白名单内，含内嵌的 `songInfo`）→ 下载文本；
    *    没有地址就看内嵌的 `contentExInfo.lyrics`。
+   * 4. **专辑补索引**（R40）：播放响应里既没有地址也没有内嵌歌词时，用它给的专辑 id 去
+   *    **既有**的专辑端点拉一次详情——那条响应的条目自带 `lyricAddress`（真机实测 3/3 有），
+   *    归一化时顺手进索引，于是"本次运行从没在任何列表里加载过"的曲目（典型：重启后直接播
+   *    恢复出来的队列，见 docs/KNOWN_LIMITATIONS.md B23）也还有一次机会。
+   *    **代价与边界**：多一次专辑请求（只在前面几档全落空时才发生）；专辑 id 只能来自**播放响应
+   *    自己承认的字段**（`albumID`，与 `normalizeTrack` 同一份候选表）——它没给就没有这一档，
+   *    仍然如实回 `invalid_response`（不猜 id、不编地址）。
    *
-   * 三条都没有才回 `invalid_response`，且**不把整段响应体当歌词**塞给渲染层。
+   * 四条都没有才回 `invalid_response`，且**不把整段响应体当歌词**塞给渲染层。
    * 拿到的文本**不进日志、不落盘**：它只经这一帧交给渲染层。
    */
   async function getLyrics(request = {}) {
@@ -1222,6 +1263,34 @@ export function createMusicApi(options = {}) {
     }
     const inline = inlineLyricsOf(result.data);
     if (inline !== null) return ok({ text: inline, format: "lrc", warnings });
+
+    // ④ 专辑补索引（R40）：播放响应里没有歌词地址，就用它给的专辑 id 去**既有**的专辑端点
+    //    拉一次详情——`getAlbum` 走的是同一套归一化（`trackOptions`），条目自带的 `lyricAddress`
+    //    会顺手进索引，于是"从没在任何列表里加载过的曲目"（典型：重启后直接播恢复出来的队列）
+    //    也还有一次机会。取不到专辑 id 就照旧如实回下面那个 `invalid_response`（不猜、不编地址）。
+    const albumId = albumIdOf(result.data);
+    if (albumId !== null) {
+      // 只记键名（不记值，**连专辑 id 的值也不记**）：这条路的成败取决于"播放响应里到底有没有
+      // albumID"，而那个形状一直没有实证——下一台真机跑一次就能从这一行看出来（协议层不自造事实）。
+      log(
+        "歌词回落：播放响应里没有歌词地址，按专辑补一次条目索引" +
+          `（只记键名，不记值）｜播放响应顶层键名：${objectKeysOf(result.data).join(", ")}` +
+          `｜songInfo 键名：${objectKeysOf(result.data.songInfo).join(", ")}`,
+      );
+      const album = await getAlbum(albumId, {});
+      if (!album.ok) {
+        warnings.push(album.error.kind ?? "album_failed");
+      } else {
+        const indexed = indexedLyricAddress(id);
+        if (indexed !== null) {
+          const fetched = await fetchLyricsText(indexed);
+          if (fetched.ok) return ok({ text: fetched.data, format: "lrc", warnings });
+          warnings.push(fetched.error.kind);
+        } else {
+          warnings.push("album_without_this_track");
+        }
+      }
+    }
 
     return err(
       "这首歌没有可用的歌词（已加载的曲目条目与播放响应里都没有白名单内的歌词地址，也没有内嵌歌词）",

@@ -43,7 +43,13 @@
  * 3. **端点未知就是未知**：`loginex` 的**默认值只在有公开证据时才写**（R17 之前是 `null`）；
  *    显式注入 `null` 时返回结构化错误，一次请求都不发。
  */
-import { createAttempt, exchangeAuthorizationCode, AUTH_ERROR_KINDS as OAUTH_ERROR_KINDS } from "../protocols/auth.mjs";
+import {
+  createAttempt,
+  exchangeAuthorizationCode,
+  idTokenClaimKeysOf,
+  idTokenClaimsOf,
+  AUTH_ERROR_KINDS as OAUTH_ERROR_KINDS,
+} from "../protocols/auth.mjs";
 import {
   LOGIN_ERROR_KINDS,
   LOGIN_FLOW_STATUS,
@@ -58,6 +64,7 @@ import { CORE_ERROR_KINDS, err, ok } from "../shared/result.ts";
 import { QR_LOGIN_STATUS } from "../protocols/qr-login.mjs";
 import {
   HUAWEI_MUSIC_LOGINEX_ENDPOINT,
+  attachClaimProfile,
   createHuaweiMusicSessionPort,
   profileOfSessionRecord,
 } from "./music-session.mjs";
@@ -560,6 +567,31 @@ export function createAuthManager(deps: AuthManagerDeps) {
   }
 
   /**
+   * token 响应里的 `id_token` → claims（R40）。
+   *
+   * 真机证据（`.tmp/dev-visible.log` 15:52 那次登录）：token 响应顶层键名是
+   * `access_token, expires_in, id_token, refresh_token, scope, token_type`，而 **loginex 响应顶层
+   * 没有名字/头像**（R38 的候选键全扑空）——OIDC 的 claims 段是账号资料最可能的载体。
+   *
+   * 三件事只在这里做一次：
+   * 1. 解码（`idTokenClaimsOf`：只认三段式 base64url，坏形状回 null，**不抛**）；
+   * 2. **只记键名**的日志（claims 里有 `sub` 这类标识，值不进日志）；
+   * 3. 把 claims 交给调用方去补 profile（值只在内存里活到本次登录收尾）。
+   *
+   * 解码失败**不影响登录**：记一条日志、按"没有 claims"继续（`attachClaimProfile` 会原样返回）。
+   */
+  function claimsOfIdToken(idToken: unknown): Record<string, unknown> | null {
+    if (typeof idToken !== "string" || idToken.trim() === "") return null;
+    const claims = idTokenClaimsOf(idToken) as Record<string, unknown> | null;
+    if (claims === null) {
+      log("id_token 解码失败（不是三段式 JWT）：本次不从 claims 取账号资料，界面照旧走兜底");
+      return null;
+    }
+    log(`id_token claims 键名（只记键名，不记值）：${idTokenClaimKeysOf(idToken).join(", ")}`);
+    return claims;
+  }
+
+  /**
    * **授权码之后的那半条链**（开窗路径与二维码路径共用）。
    *
    * 抽出来的理由不是"少写几行"，而是让两条路不可能各自演化：谁能登录、什么算登录成功、
@@ -581,6 +613,8 @@ export function createAuthManager(deps: AuthManagerDeps) {
     if (typeof accessToken !== "string" || accessToken === "") {
       return failWith(err("令牌响应里没有 access_token（详情见日志）", OAUTH_ERROR_KINDS.invalidResponse));
     }
+    // R40：id_token 的 claims（名字/头像的第二来源）。解码失败只是没有它，不影响登录。
+    const claims = claimsOfIdToken((tokens.data as { idToken?: unknown }).idToken);
 
     // 端点被显式关掉时**在兑换之前**收口：一次请求都不发（"不猜 URL"这条不变的落点）。
     // 放在这里而不是交给端口：端口只管"拿到端点怎么发"，"能不能发"是状态机的决定。
@@ -593,7 +627,11 @@ export function createAuthManager(deps: AuthManagerDeps) {
       return failWith(err(music.error.message, music.error.kind ?? CORE_ERROR_KINDS.internal));
     }
 
-    const verified = await verifySession(music.data);
+    // R40：把 claims 里认出的名字/头像**补**进会话记录（loginex 那份优先，claims 只补空缺）。
+    // 只有提取出的三个键随会话记录进 DPAPI 信封；**claims 原文与 id_token 都不落盘**。
+    const sessionRecord = attachClaimProfile(music.data, claims);
+
+    const verified = await verifySession(sessionRecord);
     if (!verified.ok) {
       // 没验过的会话不许广播"已登录"：失败的类别原样上报（区分"失效"与"没验成"）
       return failWith(err(verified.error.message, verified.error.kind ?? CORE_ERROR_KINDS.internal));
@@ -602,7 +640,7 @@ export function createAuthManager(deps: AuthManagerDeps) {
     // epoch 过渡：**存盘成功之后**才把会话与 epoch 一起翻过去（在途请求继续绑旧会话）
     const nextEpoch = epoch + 1;
     try {
-      await sessionStore.saveMusicSession(music.data);
+      await sessionStore.saveMusicSession(sessionRecord);
     } catch (cause) {
       return failWith(
         err(
@@ -611,7 +649,7 @@ export function createAuthManager(deps: AuthManagerDeps) {
         ),
       );
     }
-    session = music.data;
+    session = sessionRecord;
     epoch = nextEpoch;
     announce({ busy: false });
     return ok({ session, epoch });

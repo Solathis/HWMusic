@@ -109,6 +109,9 @@ let musicSessionSource = null;
 const musicService = createMusicService({
   settingsData: settings.data,
   session: () => (musicSessionSource === null ? null : musicSessionSource()),
+  // R40：协议层的诊断口（**只记键名**）。目前只有一处输出：歌词回落到"按专辑补索引"时，
+  // 记下播放响应的键名——"播放响应里有没有 albumID"这句话得靠真机日志，不靠猜。
+  log,
 });
 for (const [channel, handler] of Object.entries(createLibraryHandlers({ api: musicService.api }))) {
   dispatcher.register(channel, handler);

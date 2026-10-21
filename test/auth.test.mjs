@@ -23,6 +23,8 @@ import {
   createCodeVerifier,
   createState,
   exchangeAuthorizationCode,
+  idTokenClaimKeysOf,
+  idTokenClaimsOf,
   isTokenExpired,
   refreshAccessToken,
 } from "../src/protocols/auth.mjs";
@@ -186,8 +188,7 @@ test("兑换：成功路径用注入端点与表单正文，映射字段并算�
   });
 });
 
-test("兑换：缺少端点/授权码/verifier → 结构化错误，且不发起请求", async () => {
-  const { calls, fetchImpl } = captureFetch(() => jsonResponse({ access_token: "nope" }));
+test("兑换：缺少端点/授权码/verifier → 结构化错误，且不发起请求", async () => {  const { calls, fetchImpl } = captureFetch(() => jsonResponse({ access_token: "nope" }));
   const base = { endpoint: TOKEN_ENDPOINT, code: "C", codeVerifier: "V", fetchImpl };
 
   for (const [label, patch, kind] of [
@@ -297,3 +298,52 @@ test("过期判定：过期/临界/未知一律算过期（宁多刷一次），
   assert.equal(isTokenExpired({}, { now }), true, "没有到期字段 → 按过期处理");
   assert.equal(isTokenExpired(null, { now }), true);
 });
+
+// —— R40：id_token（OIDC JWT）的 claims 解码 -------------------------------------------------
+//
+// 为什么要它：token 响应里有 `id_token`（真机 15:52 的键名日志），而 loginex 响应**顶层**
+// 没有名字/头像——claims 是账号资料最可能的载体。解码只做"能不能读出对象"这件事：
+// **不验签**（JWKS 是另一个端点，本轮不发明）、坏形状回 null、**任何情况都不抛**。
+
+/** 造一个真实形状的 JWT（三段 base64url；签名段是占位，因为这里只解码不验签）。 */
+const jwtOf = (claims, header = { alg: "RS256", typ: "JWT" }) =>
+  `${base64UrlEncode(JSON.stringify(header))}.${base64UrlEncode(JSON.stringify(claims))}.c2ln`;
+
+test("R40 id_token：合法三段式 → claims 对象；未填充的 base64url 也认", () => {
+  const claims = { sub: "S-1", name: "账号名", picture: "https://music-pics-drcn.dbankcdn.cn/p.jpg", iat: 1 };
+  assert.deepEqual(idTokenClaimsOf(jwtOf(claims)), claims);
+
+  // base64url 不带 `=` 填充（JWT 的规定形态）：手工拼一个长度需要填充的 payload
+  const padded = Buffer.from(JSON.stringify({ name: "aa" }), "utf8").toString("base64url");
+  assert.equal(padded.includes("="), false, "base64url 输出不该带填充");
+  assert.deepEqual(idTokenClaimsOf(`h.${padded}.s`), { name: "aa" });
+});
+
+test("R40 id_token：坏形状一律 null（不抛）——少段/空段/非 base64url/不是 JSON/不是对象", () => {
+  for (const bad of [
+    null,
+    undefined,
+    "",
+    "   ",
+    42,
+    "ID-TOKEN",
+    "a.b",
+    "a.b.c.d",
+    "a..c",
+    "a.!!!!.c",
+    `a.${base64UrlEncode("not json")}.c`,
+    `a.${base64UrlEncode("[1,2,3]")}.c`,
+    `a.${base64UrlEncode("null")}.c`,
+    `a.${base64UrlEncode('"字符串"')}.c`,
+  ]) {
+    assert.equal(idTokenClaimsOf(bad), null, `坏形状必须是 null：${String(bad)}`);
+  }
+});
+
+test("R40 id_token：键名助手只给排序后的键名（claims 的值一个都不出现）", () => {
+  const token = jwtOf({ picture: "https://cdn.dbankcdn.cn/p.jpg", sub: "S-1", name: "账号名", aud: "101444301" });
+  assert.deepEqual(idTokenClaimKeysOf(token), ["aud", "name", "picture", "sub"], "排序、只键名");
+  assert.deepEqual(idTokenClaimKeysOf("not-a-jwt"), [], "解不出来就是空数组（调用方据此不记日志）");
+  assert.deepEqual(idTokenClaimKeysOf(jwtOf({ b: 1, a: 2 }), 1), ["a"], "限量");
+});
+

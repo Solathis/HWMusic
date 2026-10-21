@@ -92,6 +92,7 @@ function managerOf(overrides = {}) {
   const host = overrides.host ?? fakeHost();
   const broadcasts = [];
   const notices = [];
+  const logs = [];
   const store = overrides.sessionStore ?? fakeSessionStore();
   const auth = createAuthManager({
     host: host.host ?? host,
@@ -108,9 +109,10 @@ function managerOf(overrides = {}) {
       notices.push(text);
       return { ok: true, data: null };
     },
-    log: () => {},
+    // R40：日志收进数组（只记键名的那几条诊断要靠它断言"值一个都没出现"）
+    log: overrides.log ?? ((message) => logs.push(message)),
   });
-  return { auth, host, store, broadcasts, notices };
+  return { auth, host, store, broadcasts, notices, logs };
 }
 
 /**
@@ -176,6 +178,86 @@ test("login 成功链：createAttempt → 开窗 → 回调 → 换 AT → 换�
   assert.ok(
     broadcasts.every((entry) => entry.channel === AUTH_STATUS),
     "登录状态只走 auth:status 广播（app:notice 留给宿主级提示）",
+  );
+});
+
+// —— R40：id_token 的 claims 补进账号资料（登录链上只做一次，不落盘 token） ---------------
+
+/** 造一个真实形状的 JWT（三段 base64url；只解码不验签，所以签名段是占位）。 */
+const jwtOf = (claims) =>
+  `${Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url")}.` +
+  `${Buffer.from(JSON.stringify(claims)).toString("base64url")}.c2ln`;
+
+test("R40 login：id_token 的 claims 补进会话记录（名字/头像），且 claims 值不进日志、原文不落盘", async () => {
+  const claims = {
+    sub: "不该带出去的标识",
+    name: "账号名",
+    picture: "https://music-pics-drcn.dbankcdn.cn/p.jpg",
+    aud: "101444301",
+  };
+  const { store, logs, result } = await loginWith(realCallback, {
+    exchangeCode: async () => ({ ok: true, data: { ...ACCOUNT_TOKENS, idToken: jwtOf(claims) } }),
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const saved = store.calls.find(([kind]) => kind === "save")?.[1];
+  assert.deepEqual(
+    saved,
+    { ...MUSIC_SESSION, profile: { userName: "账号名", avatarUrl: "https://music-pics-drcn.dbankcdn.cn/p.jpg" } },
+    "claims 里认出的名字/头像随会话记录落盘（其余字段原样）",
+  );
+  assert.equal("id_token" in saved, false, "**id_token 原文不落盘**");
+  assert.equal("sub" in (saved.profile ?? {}), false, "claims 里的其余键一个都不带");
+
+  // 日志：只记键名（claims 的值一个都不出现）
+  const claimsLine = logs.find((line) => line.includes("id_token claims 键名"));
+  assert.ok(claimsLine, `要有一条 claims 键名日志：${JSON.stringify(logs)}`);
+  assert.match(claimsLine, /aud, name, picture, sub/, "键名排序给出");
+  assert.ok(!logs.join("\n").includes("账号名"), "claims 的值不进日志");
+  assert.ok(!logs.join("\n").includes("不该带出去的标识"), "claims 的标识不进日志");
+  assert.ok(!logs.join("\n").includes(jwtOf(claims)), "token 原文不进日志");
+
+  // 广播载荷里的 profile 与落盘那一份同源（界面点亮的依据）
+  assert.deepEqual(result.data.session.profile, saved.profile);
+});
+
+test("R40 login：id_token 不是 JWT / 缺失 → 登录照旧成功，只多一条日志（走兜底）", async () => {
+  for (const idToken of ["ID-1", "a.b", ""]) {
+    const { store, logs, result } = await loginWith(realCallback, {
+      exchangeCode: async () => ({ ok: true, data: { ...ACCOUNT_TOKENS, idToken } }),
+    });
+    assert.equal(result.ok, true, `坏 id_token 不该影响登录：${idToken}`);
+    const saved = store.calls.find(([kind]) => kind === "save")?.[1];
+    assert.deepEqual(saved, MUSIC_SESSION, "认不出就一个字都不加（界面走兜底）");
+    if (idToken === "ID-1" || idToken === "a.b") {
+      assert.ok(
+        logs.some((line) => line.includes("id_token 解码失败")),
+        `要如实记一条解码失败：${JSON.stringify(logs)}`,
+      );
+    } else {
+      assert.equal(
+        logs.some((line) => line.includes("id_token")),
+        false,
+        "压根没有 id_token 时不记日志（没有这件事要说）",
+      );
+    }
+  }
+});
+
+test("R40 login：loginex 已有 profile 时 claims 只补空缺（同一件事两个来源，业务域优先）", async () => {
+  const { store } = await loginWith(realCallback, {
+    exchangeCode: async () => ({
+      ok: true,
+      data: { ...ACCOUNT_TOKENS, idToken: jwtOf({ name: "claims 的名字", picture: "https://cdn.dbankcdn.cn/p.jpg" }) },
+    }),
+    exchangeMusicSession: async () => ({ ok: true, data: { ...MUSIC_SESSION, profile: { userName: "loginex 的名字" } } }),
+  });
+
+  const saved = store.calls.find(([kind]) => kind === "save")?.[1];
+  assert.deepEqual(
+    saved.profile,
+    { userName: "loginex 的名字", avatarUrl: "https://cdn.dbankcdn.cn/p.jpg" },
+    "名字用 loginex 那份，头像由 claims 补上",
   );
 });
 

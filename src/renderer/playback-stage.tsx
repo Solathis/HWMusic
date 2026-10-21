@@ -19,6 +19,7 @@ import { Button } from "./components/ui/button"
 import { AmllBackground } from "./AmllBackground.tsx"
 import { AmllLyricsPanel } from "./AmllLyricsPanel.tsx"
 import { lyricsNoticeText } from "./features/playback/playback-state.mjs"
+import { trackCoverUrlOf } from "./features/library/track-fields.mjs"
 import type { PlayerRuntime } from "./features/playback/player-runtime.ts"
 import type { PlayerState } from "./features/playback/use-player.ts"
 
@@ -37,7 +38,11 @@ export function PlaybackStage({ open, runtime, state, onClose }: PlaybackStagePr
 
   return (
     <div className="absolute inset-0 overflow-hidden" data-testid="playback-stage">
-      <AmllBackground playing={state.status === "playing"} hasLyric={hasLyric} />
+      {/*
+        底景（R40 起带上当前曲目的封面）：地址交给 `AmllBackground` 之后由**它**用
+        `new Image()` 载入（`img-src` 白名单内的地址，不是 fetch）——这一层不碰图片加载。
+      */}
+      <AmllBackground playing={state.status === "playing"} hasLyric={hasLyric} albumUrl={trackCoverUrlOf(state.track)} />
       <div className="absolute inset-0 bg-background/80" data-testid="playback-stage-dim" aria-hidden="true" />
 
       {hasLyric ? (

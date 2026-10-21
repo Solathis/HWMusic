@@ -84,19 +84,19 @@ const CANVAS_EXCEPTION_FILES = ["src/renderer/login-gate.tsx"];
  * - `App.tsx`：`SidebarInset` 的内容区（页面切换的落点）。换成 `ScrollArea` 会把每个页面
  *   塞进 radix 的 `display:table` 内容盒（`ScrollAreaContent`），页面里的百分比高度/`flex-1`
  *   全部失去参照——六个页面的布局要一起重验，超出本轮范围；
- * - `pages.tsx`（搜索页）：那一层 `overflow-y-auto` 在当前布局下**量不到自己的滚动**
- *   （外层内容高度是 auto，`flex-1` 不生效），页面实际由上一个根滚动——它是重复的一层；
  * - `favorites-page.tsx`：收藏页的滚动根**必须**是它自己——`IntersectionObserver` 的 `root`
  *   与 `scrollTop` 位置记忆都要那个真实元素，而 radix 的 viewport 拿不到 ref
  *   （`components/ui/scroll-area.tsx` 是生成原语，不手改）。
  *
- * 三处都记进 task-39-report.md 的「待裁决」，由 kimicode 裁决是"保留并写清理由"还是
- * "改造页面级滚动根"。用例断言**计数逐文件相等**：新写一处自绘滚动容器会红；
- * 把某处改成 `ScrollArea` 也会红（那时请连同这个集合一起改——它是一份决定记录，不是挡路的）。
+ * **R40 删掉了 `pages.tsx` 那一处**（R39 待裁决 ② 的落地）：它是搜索页里那层包住结果的
+ * `overflow-y-auto`，而搜索页的输入框已经搬到侧栏——结果直接落在 `App.tsx` 那个页面级滚动根里，
+ * 重复的一层随之消失（采集函数也真的量不到它自己的滚动，R39 已记）。所以例外集合现在是两处。
+ *
+ * 用例断言**计数逐文件相等**：新写一处自绘滚动容器会红；把某处改成 `ScrollArea` 也会红
+ * （那时请连同这个集合一起改——它是一份决定记录，不是挡路的）。
  */
 const SCROLL_ROOT_EXCEPTIONS = {
   "src/renderer/App.tsx": 1,
-  "src/renderer/pages.tsx": 1,
   "src/renderer/favorites-page.tsx": 1,
 };
 
@@ -196,6 +196,25 @@ test("组件契约：TrackTable / PlayerBar / QueuePanel / GridSkeleton 都在 c
   assert.match(source, /onDoubleClick=/, "双击播放是简报要求的交互");
   assert.match(source, /onKeyDown=/, "键盘可达是简报要求的交互");
   assert.match(source, /aria-pressed=/, "收藏切换要有可读的按下状态（不是只有颜色）");
+
+  /**
+   * R40 第 5 项：曲目表**不许出现横向滚动**。
+   *
+   * 真机取证（`.tmp/r40-table-baseline.json`）说明默认的 `auto` 布局就是根因：列宽由内容决定，
+   * 表格在 1024 宽的内容区里长到 1361 px。所以这里钉三件事：
+   * ① `table-fixed`（列宽由这张表说了算）；② 列宽配比写在一处常量里、艺人/专辑是百分比
+   * （内容再长也只在列内截断）；③ 每一列都从那个常量取宽度（不许有人偷偷写回 `w-40`）。
+   */
+  assert.match(source, /<Table className="table-fixed"/, "曲目表必须是 table-fixed（auto 布局会被 nowrap 内容撑破）");
+  assert.match(source, /const TRACK_COLUMN_WIDTHS = \{/, "列宽配比要有名字（一处真源，不是散落的魔法值）");
+  assert.match(source, /artist: "w-\[18%\]"/, "艺人是百分比列宽（按容器收，不按内容撑）");
+  assert.match(source, /album: "w-\[22%\]"/, "专辑同理");
+  assert.doesNotMatch(
+    stripComments(source),
+    /w-40/,
+    "旧的固定 160px 列宽已删（它正是溢出的那一版）——注释里提它是说明文字，代码里不许再有",
+  );
+  assert.match(source, /max-w-full truncate/, "列内内容要真截断（ellipsis），不是只靠列宽");
 });
 
 test("播放器栏已接通：data-state 由状态机给、UI 层不持有音频也不碰 core（R9 翻转）", () => {
@@ -264,4 +283,40 @@ test("库页面的数据入口：一次一页地走 coreCall，频道名来自�
     /libraryEmptyText\(view, \{ searched: true \}\)/,
     "搜索页的「查无所获」要用 searched 那一档（不是「输入关键字开始搜索」）",
   );
+});
+
+/**
+ * R40 第 4 项：搜索入口只有一个——侧栏顶部那个常驻框。
+ *
+ * 这条扫描钉的是"delete-then-rewrite"真的发生了：入口在外壳（`SidebarInput` + 提交时切视图），
+ * 页面只剩结果（**没有第二个输入框**，也不再自己存检索词）。留两个输入入口的下场是
+ * 侧栏显示 A、内容区显示 B 的结果，用户不知道哪个算数。
+ */
+test("R40 搜索布局：入口只有侧栏那个常驻框，搜索页里没有第二个输入框", () => {
+  const app = stripComments(read("src/renderer/App.tsx"));
+  assert.match(app, /<SidebarHeader>/, "常驻搜索框放在侧栏顶部（shadcn 官方位置）");
+  assert.match(app, /<SidebarInput\b/, "用 shadcn sidebar 的 SidebarInput 原语");
+  assert.match(app, /createView\(VIEW\.search, \{ keyword/, "提交时把关键字放进搜索视图的参数（结果页据此取数）");
+  assert.match(app, /<SearchPage view=\{view\}/, "搜索页要拿到视图（关键字从那里来）");
+  // 导航图标表里不许再有搜索（它是"导航项"的图标表；搜索已经不是导航项）
+  const navIcons = app.slice(app.indexOf("const NAV_ICONS"), app.indexOf("export function LibraryShell"));
+  assert.ok(navIcons.length > 0, "要能在 App.tsx 里定位 NAV_ICONS");
+  assert.doesNotMatch(navIcons, /VIEW\.search/, "搜索图标不再进导航图标表（它已经不是导航项）");
+
+  const pages = stripComments(read("src/renderer/pages.tsx"));
+  const searchPage = pages.slice(pages.indexOf("export function SearchPage"), pages.indexOf("export function AlbumPage"));
+  assert.ok(searchPage.length > 0, "要在 pages.tsx 里找到 SearchPage 这一段");
+  assert.doesNotMatch(searchPage, /<Input\b/, "搜索页里不许再有输入框（入口已搬到侧栏）");
+  assert.doesNotMatch(searchPage, /<form\b/, "表单也随输入框一起走");
+  assert.match(searchPage, /viewParam\(view, "keyword"\)/, "检索词从视图参数读（不自己存一份）");
+  assert.match(searchPage, /libraryEmptyText\(view, \{ searched: true \}\)/, "「查无所获」那一档照旧");
+
+  // 歌单详情页（R40 第 2 项）：头部 + 两个动作 + 表格，且动作只作用于已加载的曲目
+  const detail = pages.slice(pages.indexOf("export function PlaylistDetailPage"), pages.indexOf("// 搜索：结果"));
+  assert.match(detail, /PLAYLIST_PLAY_ALL_LABEL/, "「播放全部」的文案来自纯逻辑模块");
+  assert.match(detail, /PLAYLIST_ENQUEUE_LABEL/, "「加入队列」同理");
+  assert.match(detail, /playlistPartialNoticeText/, "分页没走完要有一句说明（不把已加载说成全部）");
+  assert.match(detail, /<AmllBackground/, "头部底景用 AMLL 官方流体背景");
+  assert.match(detail, /<TrackTable/, "正文仍是那一个曲目表（第 5 项修好之后）");
+  assert.doesNotMatch(detail, /\bfetch\s*\(/, "封面仍然只能走 <img>/new Image（不 fetch）");
 });

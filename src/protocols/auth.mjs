@@ -244,6 +244,59 @@ function toTokenSet(payload, { now, previousRefreshToken = null }) {
 }
 
 /**
+ * `id_token`（OIDC JWT）→ claims 对象（**只解码，不验签**；解不出就是 `null`）。
+ *
+ * R40 增补。为什么需要它：`loginex` 响应顶层**没有**用户名/头像（真机实证：顶层只有
+ * `ageLevel/expireTime/gender/queryAllSubInfoResp/queryAppConfigDetailResp/realNameAuth/
+ * realNameLevel/result/snsUserID/token/userFlag/userHC/userID`），而 token 响应里有
+ * `id_token`——OIDC 的 claims 段才是账号资料（名字/头像）的标准载体。
+ *
+ * 四条边界，每条都是刻意的：
+ * 1. **不验签**：这是一个刚从 TLS 连接上拿到的响应，不是从不可信来源转发的 token；
+ *    验签要 JWKS（另一个端点、另一份缓存），本轮不发明那个端点；
+ * 2. **只认三段式**（`header.payload.signature`）且 payload 段是 base64url：别的形状一律
+ *    `null`——`id_token` 未必永远是 JWT，猜着解只会得到一个乱码对象；
+ * 3. **不抛异常**：坏形状（少段、非法字符、不是 JSON、JSON 不是对象）全部回 `null`，
+ *    调用方据此走兜底（登录链不能因为一个诊断字段把整次登录搞崩）；
+ * 4. **不记值**：本函数只返回对象，日志一律由调用方只记**键名**（claims 里有 `sub` 这类标识）。
+ *
+ * @param {unknown} idToken
+ * @returns {Record<string, unknown> | null}
+ */
+export function idTokenClaimsOf(idToken) {
+  if (!isNonEmptyString(idToken)) return null;
+  const parts = String(idToken).trim().split(".");
+  if (parts.length !== 3) return null;
+  const payload = parts[1];
+  if (payload === "" || !/^[A-Za-z0-9_-]+$/.test(payload)) return null;
+
+  let decoded;
+  try {
+    decoded = Buffer.from(payload, "base64url").toString("utf8");
+  } catch {
+    return null;
+  }
+  try {
+    const claims = JSON.parse(decoded);
+    return claims !== null && typeof claims === "object" && !Array.isArray(claims) ? claims : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `id_token` 的 claims 键名（排序，只键名）——**只给日志用**。
+ *
+ * 与 `idTokenClaimsOf` 分开的理由：调用方要的是"这次响应里有哪些 claim"，
+ * 而不是"claims 里有什么值"；写成两件事，才不会有人在日志里顺手把 claims 打出来。
+ */
+export function idTokenClaimKeysOf(idToken, limit = 40) {
+  const claims = idTokenClaimsOf(idToken);
+  if (claims === null) return [];
+  return Object.keys(claims).sort().slice(0, Math.max(1, limit));
+}
+
+/**
  * 令牌响应顶层键名的**键名日志**（R38 诊断；只记键名、绝不记值）。
  *
  * 为什么需要它：`token` 端点的响应里到底有没有用户资料字段（名字/头像/VIP）从来没有实证——

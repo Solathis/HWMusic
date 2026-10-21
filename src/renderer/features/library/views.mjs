@@ -24,12 +24,17 @@ export const VIEW = {
 
 export const VIEW_IDS = Object.freeze(Object.values(VIEW));
 
-/** 侧边栏导航（顺序即显示顺序）。专辑/歌手/歌单详情从表格与网格跳进去，不占侧边栏。 */
+/**
+ * 侧边栏导航（顺序即显示顺序）。专辑/歌手/歌单详情从表格与网格跳进去，不占侧边栏。
+ *
+ * R40：**「搜索」不再是一条导航项**——搜索入口是侧栏顶部那个常驻的 `SidebarInput`
+ * （用户裁决：常驻搜索框取代导航项，结果仍然渲染在右侧内容区）。`VIEW.search` 依然是
+ * 一个视图（内容区的搜索结果页要用它），只是不再占导航列表的一行。
+ */
 export const SIDEBAR_VIEWS = Object.freeze([
   { id: VIEW.favorites, label: "我的收藏" },
   { id: VIEW.playlists, label: "我的歌单" },
   { id: VIEW.history, label: "播放历史" },
-  { id: VIEW.search, label: "搜索" },
   { id: VIEW.settings, label: "设置" },
 ]);
 

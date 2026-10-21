@@ -137,6 +137,7 @@ export function createMusicService({
   pageSize,
   random = randomBytes,
   now = () => new Date(),
+  log,
 } = {}) {
   const { endpoints, disabled } = resolveMusicEndpoints(settingsData);
 
@@ -166,6 +167,8 @@ export function createMusicService({
     ...(fetchImpl === undefined ? {} : { fetchImpl }),
     sessionHeaders: sessionHeaders ?? digestHeaders,
     ...(pageSize === undefined ? {} : { pageSize }),
+    // R40：诊断口（只记键名）。协议层自己不写日志，默认不记——装配处不给就没有输出。
+    ...(typeof log === "function" ? { log } : {}),
   });
   return { api, endpoints, disabled, configured: Object.keys(endpoints).length > 0 };
 }

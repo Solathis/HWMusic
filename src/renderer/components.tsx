@@ -185,10 +185,35 @@ export interface TrackTableProps {
 }
 
 /**
+ * 曲目表的列宽配比（R40；`table-fixed` 下这就是真实列宽）。
+ *
+ * **为什么要 `table-fixed`**（真机取证，`.tmp/r40-table-baseline.json`）：默认的 `auto` 布局里
+ * 列宽由内容决定，`w-40` 只是一个"建议"——艺人/专辑那两列被 nowrap 的长名字撑到 318 / 479 px，
+ * 表格实测长到 1361 px 而内容区只有 1024 px（视口 1280 − 侧栏 256），于是整张表横向溢出，
+ * 用户必须右滑才能看完（这正是用户报的那件事）。固定布局下**列宽由这张表说了算**，
+ * 内容再长也只在列内截断。
+ *
+ * 配比：`#`／时长／收藏是固定小列，艺人/专辑按百分比（长名字在两列里截断），
+ * 标题列不给宽度 → 吃掉剩下的全部空间（固定布局的规则：只此一列自动分配余量）。
+ */
+const TRACK_COLUMN_WIDTHS = {
+  index: "w-10",
+  artist: "w-[18%]",
+  album: "w-[22%]",
+  duration: "w-16",
+  favorite: "w-12",
+}
+
+/**
  * 曲目表。
  *
  * 键盘可达：行本身可聚焦，回车/空格等于双击（鼠标用户与键盘用户拿到同一件事）。
  * 艺人/专辑是 shadcn 的 link 按钮——跳不过去（缺 id）时禁用，而不是点了没反应。
+ *
+ * R40：`table-fixed` + 显式列宽配比 + cell 内真截断，**任何窗宽都不出现横向滚动**
+ * （见 `TRACK_COLUMN_WIDTHS` 的说明）。行 key 带上行号：列表里出现同一首歌两次是合法的
+ * （收藏/历史都可能有重复），只按 id 做 key 会让 React 报重复 key 并可能少渲染一行
+ * ——真机上抓到过 200 条这种警告（`.tmp/r40-dupe-keys.json`）。
  */
 export function TrackTable({
   songs,
@@ -204,15 +229,15 @@ export function TrackTable({
   const favorited = new Set(favoritedIds)
 
   return (
-    <Table data-testid="track-table">
+    <Table className="table-fixed" data-testid="track-table">
       <TableHeader>
         <TableRow>
-          <TableHead className="w-10 text-center">#</TableHead>
+          <TableHead className={`${TRACK_COLUMN_WIDTHS.index} text-center`}>#</TableHead>
           <TableHead>标题</TableHead>
-          <TableHead className="w-40">艺人</TableHead>
-          <TableHead className="w-40">专辑</TableHead>
-          <TableHead className="w-16 text-right">时长</TableHead>
-          <TableHead className="w-12" />
+          <TableHead className={TRACK_COLUMN_WIDTHS.artist}>艺人</TableHead>
+          <TableHead className={TRACK_COLUMN_WIDTHS.album}>专辑</TableHead>
+          <TableHead className={`${TRACK_COLUMN_WIDTHS.duration} text-right`}>时长</TableHead>
+          <TableHead className={TRACK_COLUMN_WIDTHS.favorite} />
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -223,7 +248,7 @@ export function TrackTable({
           const isFavorited = id !== null && favorited.has(id)
           return (
             <TableRow
-              key={id ?? `row-${index}`}
+              key={`${id ?? "row"}-${index}`}
               tabIndex={0}
               aria-label={`${trackNameOf(song)}，双击播放`}
               onDoubleClick={() => onActivate?.(song, index)}
@@ -312,6 +337,12 @@ export function TrackTable({
 export interface PlayerBarProps {
   runtime: PlayerRuntime
   state: PlayerState
+  /**
+   * 打开歌词舞台（R40）：**封面与曲目信息整块**都是入口，与头部那枚「歌词」按钮**同一个 state**
+   * （用户直觉是"点正在播放这一条进播放页"，而头部的图标按钮不一定被注意到）。
+   * 不传就是不接（按钮语义不变，也不会出现"点了没反应"的死区——那时整块只是不可点）。
+   */
+  onOpenStage?: () => void
 }
 
 /** 播放模式 → 图标（四种模式的取值唯一真源是 player.mjs 的 PLAYBACK_MODES）。 */
@@ -322,7 +353,7 @@ const MODE_ICONS = {
   shuffle: ShuffleIcon,
 }
 
-export function PlayerBar({ runtime, state }: PlayerBarProps) {
+export function PlayerBar({ runtime, state, onOpenStage }: PlayerBarProps) {
   const [dragMs, setDragMs] = useState<number | null>(null)
   const player = runtime.player
 
@@ -333,23 +364,59 @@ export function PlayerBar({ runtime, state }: PlayerBarProps) {
   const ModeIcon = MODE_ICONS[state.mode as keyof typeof MODE_ICONS] ?? ListMusicIcon
   const VolumeIcon = state.muted ? VolumeXIcon : state.volume === 0 ? VolumeXIcon : state.volume < 0.5 ? Volume1Icon : Volume2Icon
 
+  /** 左区：封面 + 曲目信息（R40 起整块可点 = 进歌词舞台）。 */
+  const trackInfo = (
+    <>
+      <CoverArt coverUrl={trackCoverUrlOf(state.track)} className="size-10 rounded-md" />
+      <div className="flex min-w-0 flex-col">
+        <span className="truncate text-sm font-medium">{trackTitleOf(state.track)}</span>
+        <span className="truncate text-xs text-muted-foreground">
+          {state.track === null ? playerStatusText(state) : `${trackArtistOf(state.track)} · ${playerStatusText(state)}`}
+        </span>
+      </div>
+    </>
+  )
+
   return (
     <div
       className="flex shrink-0 flex-col gap-2 border-t bg-background px-4 py-2"
       data-state={state.status}
       data-testid="player-bar"
     >
-      <div className="flex items-center gap-3">
-        {/* R38：当前曲目封面（播放中本来就有 coverUrl 投影；没有就是图标占位） */}
-        <CoverArt coverUrl={trackCoverUrlOf(state.track)} className="size-10 rounded-md" />
-        <div className="flex min-w-0 flex-col">
-          <span className="truncate text-sm font-medium">{trackTitleOf(state.track)}</span>
-          <span className="truncate text-xs text-muted-foreground">
-            {state.track === null ? playerStatusText(state) : `${trackArtistOf(state.track)} · ${playerStatusText(state)}`}
-          </span>
+      {/*
+        三区布局（R40 用户要求"控件居中"）：
+        左 = 封面 + 曲目信息（min-w-0 + truncate，窄窗先牺牲它）；中 = 播放控件组；
+        右 = 附加区（本轮为空占位，保持左中右三段的语义不塌成一团）。
+
+        **控件用绝对定位实现真居中**（`left-1/2 -translate-x-1/2`），而不是
+        `flex-1 basis-0` 的两侧等分：两侧内容天然不等宽（左边是封面 + 两行文字，右边是空占位），
+        等分只能让"剩余空间"相等，控件的实际中点仍会随左侧文字长度漂移。
+        代价是极窄窗宽下中区可能与左区重叠——那时左侧文字先截断，控件本身始终完整可点。
+      */}
+      <div className="relative flex items-center gap-3">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          {onOpenStage === undefined ? (
+            <div className="flex min-w-0 items-center gap-3" data-testid="player-track-info">
+              {trackInfo}
+            </div>
+          ) : (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="flex h-auto min-w-0 flex-1 items-center justify-start gap-3 px-1 py-1 text-left"
+              aria-label="打开歌词"
+              data-testid="player-track-info"
+              onClick={onOpenStage}
+            >
+              {trackInfo}
+            </Button>
+          )}
         </div>
 
-        <div className="ml-auto flex items-center gap-1">
+        <div
+          className="absolute left-1/2 flex -translate-x-1/2 items-center gap-1"
+          data-testid="player-controls"
+        >
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="icon" aria-label={`播放模式：${playbackModeLabel(state.mode)}`}>
@@ -400,6 +467,9 @@ export function PlayerBar({ runtime, state }: PlayerBarProps) {
             <SkipForwardIcon />
           </Button>
         </div>
+
+        {/* 右区：本轮没有要放的控件（音量在下面那行），留空占位保持三区语义 */}
+        <div className="flex min-w-0 flex-1 items-center justify-end gap-1" data-testid="player-bar-trailing" />
       </div>
 
       <div className="flex items-center gap-3">

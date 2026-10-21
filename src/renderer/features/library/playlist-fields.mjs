@@ -60,3 +60,68 @@ export function playlistCoverUrlOf(playlist) {
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// 歌单详情页头部（R40）：标题、元信息与两个动作的文案
+// ---------------------------------------------------------------------------
+//
+// 为什么要单列这几条纯函数：头部会显示"共几首 / 已加载几首"，而那两个数字来自两处
+// （接口上报的总数、页面已加载的条数）。写进组件里就只能靠人眼核对——而"把已加载 50 首
+// 说成共 50 首"正是这类页面最容易撒的谎（歌单可能有 1623 首）。
+
+/** 「播放全部」按钮文案（唯一出处：组件不再抄一份）。 */
+export const PLAYLIST_PLAY_ALL_LABEL = "播放全部";
+/** 「加入队列」按钮文案。 */
+export const PLAYLIST_ENQUEUE_LABEL = "加入队列";
+/** 列表没有名字时的兜底标题（与歌单卡一致：不显示空壳）。 */
+export const PLAYLIST_FALLBACK_NAME = "未命名歌单";
+
+/**
+ * 头部标题：优先用接口给的歌单名，没有歌单对象时回落到视图参数里的名字（从歌单卡带过来的）。
+ * 两个都没有才是兜底文案——**不显示空标题**。
+ *
+ * @param {unknown} playlist 协议层归一化过的歌单对象（可能是 null/坏形状）
+ * @param {string|null} [fallbackName] 视图参数里的名字（歌单卡带过来的）
+ * @returns {string}
+ */
+export function playlistDetailTitleOf(playlist, fallbackName = null) {
+  if (isObject(playlist)) {
+    for (const key of ["name", "playlistName", "title"]) {
+      const value = textOf(playlist[key]);
+      if (value !== null) return value;
+    }
+  }
+  return textOf(fallbackName) ?? PLAYLIST_FALLBACK_NAME;
+}
+
+/**
+ * 头部那行元信息。
+ *
+ * - 接口上报了总数 → "共 N 首"；**只在真的分页没走完时**再补一句"已加载 M 首"
+ *   （分页走完时两个数字必然相等，写两遍只是噪音）；
+ * - 没有总数 → 就说已加载多少（"已加载 M 首"），不说"共"；
+ * - 后面的动作按钮只作用于**已加载**的曲目——这句话由 `playlistPartialNoticeText` 说。
+ *
+ * @param {unknown} playlist 协议层归一化过的歌单对象
+ * @param {number} loadedCount 页面已加载的曲目条数
+ * @param {boolean} [hasMore] 协议层是否明说还有下一页
+ * @returns {string}
+ */
+export function playlistDetailMetaText(playlist, loadedCount, hasMore = false) {
+  const loaded = Number.isInteger(loadedCount) && loadedCount >= 0 ? loadedCount : 0;
+  const total = playlistSongCountOf(playlist);
+  if (total === null) return `已加载 ${loaded} 首`;
+  if (hasMore && loaded < total) return `共 ${total} 首 · 已加载 ${loaded} 首`;
+  return `共 ${total} 首`;
+}
+
+/**
+ * 「只加载了一部分」的说明（分页没走完时显示）。
+ *
+ * 必须说：那两个按钮作用于页面手里的这批曲目，而不是整张歌单——不说就是在骗人
+ * （用户点了"播放全部"，队列里却只有前 50 首）。
+ */
+export function playlistPartialNoticeText(loadedCount) {
+  const loaded = Number.isInteger(loadedCount) && loadedCount >= 0 ? loadedCount : 0;
+  return `这一页只加载了前 ${loaded} 首：播放全部与加入队列都只作用于已加载的曲目。`;
+}

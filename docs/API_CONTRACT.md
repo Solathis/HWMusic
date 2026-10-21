@@ -299,14 +299,25 @@ auth:status → {loggedIn: boolean, busy: boolean, message?: string,
   `core_call(auth:get-status)` 问一次（与托盘可用性查询同款模式：状态由拥有者答），
   应答**与上面这条广播同形状**（同一个载荷构造点）；查询**不触发广播**，
   也**不带 `message`**——那是"刚发生的那件事"，属于广播，快照只答"现在是什么"。
-- **可选 `profile`（R38 增补，左下角账号区）**：来自 loginex 响应里**认得出**的那几项
-  （`src/main/music-session.mjs` 的 `profileFromResponse`：名字候选 `userName`/`nickName`/`nickname`，
+- **可选 `profile`（R38 增补，左下角账号区；R40 加两个来源）**：来自三处**认得出**的那几项
+  （`src/main/music-session.mjs`）：
+  ① loginex 响应（`profileFromResponse`：名字候选 `userName`/`nickName`/`nickname`，
   头像候选 `headUrl`/`headImage`/`avatarUrl`/`avatar`/`head` 且**必须过 CDN 白名单**，VIP 只认
-  明确的布尔或有实测证据的 `memberShip` 含 `6`）。**认不出就不带这个键**（也就不显示）——
-  旧会话（R38 之前登录的）没有 `profile`，界面如实显示兜底（头像占位 + "已登录"）。
+  明确的布尔或有实测证据的 `memberShip` 含 `6`；R40 起还会往两个**有名字的容器**
+  `queryAllSubInfoResp` / `queryAppConfigDetailResp` 里读**一层**——简报指定的防御式接线，
+  **不是证据**）；
+  ② **id_token 的 claims（R40）**：token 响应的顶层键名里确实有 `id_token`（真机 15:52 取证），
+  而 loginex **顶层没有**用户名/头像（同一次取证的顶层键名共 13 个，没有一个是名字/头像）。
+  协议层按 OIDC 的 `header.payload.signature` 解码 payload 段（`idTokenClaimsOf`：三段式
+  base64url 才认，坏形状回 `null`、**不抛**、**不验签**），取 `name`/`nickname` 与
+  `picture`/`avatar`（头像同样过白名单）；**VIP 不从 claims 取**（claims 里没有有证据的会员字段）。
+  loginex 那份**优先**，claims 只补空缺（`mergeProfiles`）。
+  **认不出就不带这个键**（也就不显示）——旧会话（R38 之前登录的）没有 `profile`，
+  界面如实显示兜底（头像占位 + "已登录"）。
   **不新开频道**：Rust 的频道常量表是硬钉的 parity，状态里多一个可选字段不必动 Rust。
-  这条链的响应形状一直缺实证，所以两个兑换点各加了一条**只记键名**的日志
-  （token 响应 / loginex 响应；**值一律不进日志**）。
+  这条链的响应形状一直缺实证，所以兑换点加了**只记键名**的日志（token 响应顶层 / `id_token`
+  claims / loginex 响应顶层 / loginex 两个容器的一层；**值一律不进日志**），
+  会话记录里只多一个由它们提取出的 `profile`（**claims 原文与 id_token 都不落盘**）。
 
 **已知缺口（R7 如实登记，不硬绕）**：wry 0.57（tauri 2.12 的 webview 层）只注册 WebView2 的
 `NavigationStarting`（主框架级），**没有** `FrameNavigationStarting`。官方页若从 **iframe** 内部发起
@@ -1059,7 +1070,7 @@ nonce=…, created=…[, token=…]`，见 §1.5.1 ②）；`snsUserID`（收藏
 | 音质**不虚标** | `confirmedPlaybackQuality(playQuality, type)`：`"3"+flac → lossless`、`"1"+mp3 → standard`，对不上就是 `unknown` |
 | 播放地址必须落在 CDN 白名单 | 非白名单域 → `unsafe_media_url`（文案只带域名）。白名单与参考**逐字相同**：`dbankcdn.cn` / `tingmall.com` / `kuke.com` |
 
-#### 2.3.2 歌词（R32 从播放响应推导；**R38 真机取证后改为三档**）
+#### 2.3.2 歌词（R32 从播放响应推导；R38 真机取证后改为三档；**R40 增补第四档**）
 
 参考实现里**没有独立歌词端点**。R38 用真实会话取证（CDP 只读，只记字段名与域名）：
 
@@ -1069,21 +1080,31 @@ GET 200，3.3 KiB / 0.9 KiB / 22 B（三条分别是 3332 / 900 / 22 字节）�
 没有任何歌词类字段**——`getLyrics` 从前只问播放响应，所以真机上永远回"没有可用的歌词"
 （歌词窗与歌词舞台停在`歌词暂时取不到`）。
 
-所以 `getLyrics` 现在是三档，按"最可能有、最便宜"排序：
+所以 `getLyrics` 现在是四档，按"最可能有、最便宜"排序：
 
 | 档 | 来源 | 说明 |
 |---|---|---|
 | 1 | 设置里显式注入的 `musicEndpoints.lyrics` | 形状按候选键宽容读取；那条路的响应形状**没有实测证据**，只在显式注入时使用 |
 | 2 | **已加载过的曲目条目自带的 `lyricAddress`** | 官方 H5 走的就是列表里这条地址。协议层在 `normalizeTrack` 时把它记进**进程内索引**（`trackId → 地址`，上限 400 条先进先出，**不落盘、不跨进程**）；取歌词时再**过一次 CDN 白名单**。命中就省掉一次播放请求 |
 | 3 | 播放响应 | `lyricAddress`（含内嵌的 `songInfo`，按**同一份候选表**读）→ 下载；没有地址就看内嵌歌词（`contentExInfo.lyrics`，最多剥两层 JSON 字符串） |
+| 4 | **按专辑补条目索引**（R40） | 第 2、3 档都落空时：用**播放响应自己给出的**专辑 id（`albumID`，与 `normalizeTrack` 同一份候选表；含内嵌 `songInfo`）经**既有的**专辑端点拉一次详情——那条响应的条目自带 `lyricAddress`，归一化时顺手进索引，于是"本次运行从没在任何列表里加载过"的曲目（典型：重启后直接播恢复出来的队列）还有一次机会。**代价**：多一次专辑请求（只在前面几档全落空时发生）。**边界**：播放响应没给专辑 id 就没有这一档（不猜 id、不编地址），仍然如实回下一段的 `invalid_response` |
 
-三条都没有 → `invalid_response`（**不把整段响应体当歌词**塞给渲染层——那只会让歌词窗显示一坨 JSON）。
+四档都没有 → `invalid_response`（**不把整段响应体当歌词**塞给渲染层——那只会让歌词窗显示一坨 JSON）。
 下载一律：CDN 白名单内、有界读取（上限 512 KiB）、**不跟随跳转**。
 
+**第 4 档带一行只记键名的诊断日志**（`createMusicApi` 的 `log` 注入位，装配在 sidecar）：
+回落时记下播放响应的顶层键名与 `songInfo` 键名——"播放响应里到底有没有 `albumID`"这句话
+**尚未实测**（协议层改动要 sidecar 重启才生效），下一台真机跑一次就能从这一行看到答案。
+
+**现场取证（R40，运行中的实例）**：`playback:lyrics` 对**列表加载过的曲目**与**恢复队列里的曲目**
+都回了文本（850 / 1081 字符，`warnings: []`），歌词舞台 `[data-testid="playback-stage"]` 里
+AMLL 面板挂载、无提示行——即 R38 的第 2 档在真机上确实生效（证据 `.tmp/r40-b23-probe.json`、
+`.tmp/r40-stage-after-click.json`）。**B23 的边界因此收窄到"这次运行谁都没加载过的那首"**。
+
 **边界（如实登记）**：索引只包含**用户自己已经加载过的列表条目**（见到的才会被记住）。所以
-"重启后直接播恢复出来的队列、且本次运行还没打开过任何列表"这一档仍然只能走第 3 档；
-那条路的实测结论是"播放响应里没有歌词字段"，因此**这一档很可能仍取不到歌词**——
-这是数据源的边界，不是可以靠猜字段绕过去的（不发明端点、不编地址）。
+"重启后直接播恢复出来的队列、且本次运行还没打开过任何列表"这一档仍然只能走第 3、4 档；
+第 3 档的实测结论是"播放响应里没有歌词字段"，第 4 档取决于播放响应有没有给专辑 id
+（见上面的诊断日志）——**都不是可以靠猜字段绕过去的**（不发明端点、不编地址）。
 
 ### 2.4 CDN 域（已确认可达）
 
@@ -1952,3 +1973,23 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
   账号区 4 条，另有两条旧断言按新契约重写）、tsc 0 错、`build:web` ✓、acceptance 6/0/0。
   **渲染层改动已经 HMR 在运行实例上取证**（`.tmp/r38-verify-ui.json`）；协议层/主进程改动
   **需重启 sidecar 生效**。
+
+- 2026-10-21（Task R40）：
+  1. **§1.7 的 `auth:status.profile` 扩到三个来源**：loginex 顶层（真机已证扑空）→ loginex 的
+     `queryAllSubInfoResp` / `queryAppConfigDetailResp` 两个容器**读一层** → **`id_token` 的
+     claims**（`header.payload.signature` 只解码 payload 段：三段式 base64url 才认、坏形状回 `null`、
+     **不验签**、**不抛**；取 `name`/`nickname` 与 `picture`/`avatar` 且头像过 CDN 白名单；
+     **VIP 不从 claims 取**）。loginex 那份优先、claims 只补空缺；只有提取出的三个键随会话记录
+     进 DPAPI 信封（**claims 原文与 id_token 都不落盘**）。日志新增三条**只记键名**的行
+     （`id_token` claims 键名 / loginex 容器一层键名 ×N），值一律不进日志。
+  2. **§2.3.2 歌词增第四档**：索引没命中且**播放响应自己给了 `albumID`**（与 `normalizeTrack`
+     同一份候选表，含内嵌 `songInfo`）→ 经**既有**专辑端点补一次条目索引（那条响应的条目自带
+     `lyricAddress`）→ 取到就下载；没给专辑 id 就没有这一档，仍如实回 `invalid_response`。
+     该档带一行**只记键名**的诊断（播放响应顶层键名 + `songInfo` 键名）——"播放响应里有没有
+     `albumID`"尚无实证，靠真机日志回答。`createMusicApi` 新增 `options.log` 注入位（协议层自己不写日志）。
+  3. **频道的载荷与常量表一行未动**（R40 全部改动都在既有频道内：没有新开频道、没有改 CSP/白名单）。
+  4. 渲染层（歌单详情页头部 + 播放全部/加入队列、搜索移到侧栏常驻框、曲目表 `table-fixed`、
+     PlayerBar 控件居中、封面点击进歌词舞台）**已 HMR/页面重载在运行实例上取证**；
+     测试 node **832 pass / 0 fail**（+22）、tsc 0 错、`build:web` ✓、acceptance 6/0/0。
+     **AMLL 封面必须带 `crossOrigin="anonymous"`**（不带会把画布 taint，AMLL 采样时
+     `getImageData` 抛 `SecurityError`；实测 CDN 会回 ACAO）。
