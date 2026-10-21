@@ -9,6 +9,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { HUAWEI_QR_ENDPOINTS, QR_PORT_ERROR_KINDS, createHuaweiQrPort } from "../src/main/qr-login.mjs";
+import { createAttempt } from "../src/protocols/auth.mjs";
+import {
+  LOGIN_ERROR_KINDS,
+  LOGIN_TIMEOUT_MS,
+  consumeCallback,
+  parseCallback,
+} from "../src/protocols/login-callback.mjs";
 import { QR_LOGIN_STATUS } from "../src/protocols/qr-login.mjs";
 import { decodeFingerprint, fingerprintChecksum } from "../src/protocols/device-fingerprint.mjs";
 
@@ -751,6 +758,14 @@ const R33_RELAY_URL =
 const R33_HMS_CALLBACK = "hms://redirect_uri?code=CODE&state=STATE";
 
 /**
+ * R34 起：`R33_RELAY_URL`（查询里带 `code`）会被**策略①参数直构**当场收下（那正是真机要的修法），
+ * 于是它**不再**经过"跟随"那条路。要单独钉住策略②（302 Location），剧本必须换一个
+ * **查询里没有 `code`** 的 https 中转页——真实世界里它就是"code 还没落到参数上"的那一跳。
+ */
+const R34_PLAIN_RELAY_URL =
+  "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?state=STATE&redirect_uri=hms%3A%2F%2Fredirect_uri";
+
+/**
  * R33 的假世界：`codeRemoteLogin` 交回一份**可编排**的 callbackURL，中转页的每一跳按剧本回答。
  *
  * @param {{callbackURL?: string, relay?: (url: string, hop: number) => ({status: number, location?: string, body?: string}) | null}} [config]
@@ -856,14 +871,14 @@ test("R33：callbackURL 本来就是 hms:// → 直通（一个多余请求都�
 });
 
 test("R33：https 中转页 302 → Location 是 hms:// 回调 → 跟随一跳（manual + 同一罐 cookie + 同款头）", async () => {
-  const { port, world, confirmations, events } = await runR33();
+  const { port, world, confirmations, events } = await runR33({ callbackURL: R34_PLAIN_RELAY_URL });
 
   assert.equal(confirmations.length, 1, `真实形状必须能收尾：${JSON.stringify(events.at(-1))}`);
   assert.equal(confirmations[0].callbackUrl, R33_HMS_CALLBACK, "交回登录链路的必须是 hms:// 的那一条");
 
   const relay = world.relayCalls();
   assert.equal(relay.length, 1, "只跟随一跳");
-  assert.equal(relay[0].url, R33_RELAY_URL, "跟随的就是 codeRemoteLogin 交回的那个地址");
+  assert.equal(relay[0].url, R34_PLAIN_RELAY_URL, "跟随的就是 codeRemoteLogin 交回的那个地址");
   /**
    * `redirect: "manual"` 是这一跳的**关键**：自动跟随的话 302 会被换成 hms:// 那次导航的失败
    * （Electron/undici 跟不了自定义 scheme），Location 也就读不到了。
@@ -880,18 +895,20 @@ test("R33：https 中转页 302 → Location 是 hms:// 回调 → 跟随一跳�
 test("R33：两跳（https → https → hms://）也要跟到底", async () => {
   const second = "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?step=2&code=CODE";
   const { port, world, confirmations, events } = await runR33({
-    relay: (url) => (url === R33_RELAY_URL ? { status: 302, location: second } : { status: 302, location: R33_HMS_CALLBACK }),
+    callbackURL: R34_PLAIN_RELAY_URL,
+    relay: (url) => (url === R34_PLAIN_RELAY_URL ? { status: 302, location: second } : { status: 302, location: R33_HMS_CALLBACK }),
   });
 
   assert.equal(confirmations.length, 1, `两跳中转也要收尾：${JSON.stringify(events.at(-1))}`);
   assert.equal(confirmations[0].callbackUrl, R33_HMS_CALLBACK);
-  assert.deepEqual(world.relayCalls().map((call) => call.url), [R33_RELAY_URL, second]);
+  assert.deepEqual(world.relayCalls().map((call) => call.url), [R34_PLAIN_RELAY_URL, second]);
   port.cancel();
 });
 
 test("R33：中转页最多跟 5 跳（第 5 跳拿到 hms:// 收尾；第 6 跳要不到就结构化报错）", async () => {
   const hopUrl = (n) => `https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?hop=${n}`;
   const { port, world, confirmations } = await runR33({
+    callbackURL: R34_PLAIN_RELAY_URL,
     // 连着 5 次 https 中转，第 5 跳的 Location 才是回调 —— 边界以内，必须收尾
     relay: (_url, hop) => ({ status: 302, location: hop === 5 ? R33_HMS_CALLBACK : hopUrl(hop) }),
   });
@@ -902,6 +919,7 @@ test("R33：中转页最多跟 5 跳（第 5 跳拿到 hms:// 收尾；第 6 跳
 
   // 一直给 https 中转（永远不给回调）→ 到第 5 跳就停，结构化报错（不猜、也不无限跟）
   const stuck = await runR33({
+    callbackURL: R34_PLAIN_RELAY_URL,
     relay: (_url, hop) => ({ status: 302, location: hopUrl(hop + 1) }),
   });
   assert.equal(stuck.confirmations.length, 0, "跟不到回调就不许把任何东西当成功交出去");
@@ -913,8 +931,9 @@ test("R33：中转页最多跟 5 跳（第 5 跳拿到 hms:// 收尾；第 6 跳
   stuck.port.cancel();
 });
 
-test("R33：中转页 200（没有 Location）→ 结构化报错，不回显 URL", async () => {
+test("R33：中转页 200（没有 Location、响应体里也没有回调字面量）→ 结构化报错，不回显 URL", async () => {
   const { port, events, confirmations } = await runR33({
+    callbackURL: R34_PLAIN_RELAY_URL,
     relay: () => ({ status: 200, body: "<html>请重新登录</html>" }),
   });
 
@@ -930,6 +949,7 @@ test("R33：中转页 200（没有 Location）→ 结构化报错，不回显 UR
 
 test("R33：Location 是别的 hms 域（不是 redirect_uri 回调）→ 结构化报错，不猜", async () => {
   const { port, events, confirmations } = await runR33({
+    callbackURL: R34_PLAIN_RELAY_URL,
     relay: () => ({ status: 302, location: "hms://evil.example.com/steal?code=CODE&state=STATE" }),
   });
 
@@ -943,7 +963,12 @@ test("R33：Location 是别的 hms 域（不是 redirect_uri 回调）→ 结构
 });
 
 test("R33：跟随那一跳网络失败 → network_error（与换码接口失败分得清）", async () => {
+  /**
+   * R34 起这条剧本必须用**查询里没有 `code`** 的中转页：带 `code` 的那些会被策略①当场收下、
+   * 一个请求都不发（那正是策略①要的效果），"跟随那一跳失败"根本无从发生。
+   */
   const { port, events, confirmations } = await runR33({
+    callbackURL: R34_PLAIN_RELAY_URL,
     relay: () => {
       throw new Error("假装网络断了");
     },
@@ -981,6 +1006,401 @@ test("R31 上下文只拿一次：start 不会为了建单打两遍 CAS 链（�
     world.calls.some((call) => call.url.includes("/codeRemoteLogin")),
     false,
     "没有人确认过，换码链一步都不许走",
+  );
+  port.cancel();
+});
+
+// ---------------------------------------------------------------------------
+// R34（用户指令 2026-10-21）：最后一跳**三策略按证据序**收尾
+//
+// R33 把"跟随 302"这条路修对了，但真机那条链**没有**走到它：`callbackURL` 是 https 中转页，
+// 服务端 fetch 它拿到的是 **HTTP 200**（HTML 页面，浏览器里靠页面自己的 JS 跳 `hms://`），
+// 没有 Location。而 R16 契约里那句"`callbackURL` 带 code"是**读 bundle 的推断**——
+// 用户本轮澄清：它只是参考，当时**未实测**。所以不再押注任何单一路径，按证据序实现三条：
+//
+//   ① **参数直构**（最省、证据最强）：中转页的查询参数里既有 `code`、又有 `redirect_uri`
+//      解码后等于 `hms://redirect_uri` → 我们自己就是那份 redirect_uri 的处理者，
+//      直接构造 `hms://redirect_uri?code&state` 交回，**一个请求都不发**；
+//      （`code` 不在查询里 → 策略①不成立，落 ②；state 缺省时只带 `code`，
+//        "形状对不对"交给下游 `parseCallback`/`consumeCallback` 判，这里不编一个 state）
+//   ② **302 Location 跟随**（R33 已有，保留）：服务端哪天真改回直跳仍然成立；
+//   ③ **200 响应体提取**：跟随的那一跳回 2xx、体里带着 `hms://redirect_uri?` 字面量
+//      （页面 JS 跳转的目标）→ 提取**原文**交回（不加不减）。
+//
+// 三败 → 既有结构化错误（`qr_callback_redirect_failed`）：不猜、不回显 URL（凭据边界）。
+// 顺序 ① → ② → ③：① 不成立才发请求，② 拿到 2xx 才看体。
+//
+// 驱动复用 R33 的 `runR33`：同一条"建单 → 未扫 → 已确认 → 换码 → 收尾"，只是剧本换了。
+// ---------------------------------------------------------------------------
+
+test("R34 策略①：中转页查询里 code + redirect_uri=hms://redirect_uri → 直接构造回调，一个请求都不发", async () => {
+  const { port, world, confirmations, events } = await runR33({ callbackURL: R33_RELAY_URL });
+
+  assert.equal(confirmations.length, 1, `参数齐备就要当场收尾：${JSON.stringify(events.at(-1))}`);
+  assert.equal(confirmations[0].callbackUrl, R33_HMS_CALLBACK);
+  assert.equal(world.relayCalls().length, 0, "code 与 redirect_uri 都在参数里，中转页根本不必再打一次");
+  assert.equal(events.at(-1).status, QR_LOGIN_STATUS.confirmed);
+  port.cancel();
+});
+
+test("R34 策略①：查询里没有 code → 不直构（无中生有一个 code 是最坏的猜法），落策略②", async () => {
+  const { port, world, confirmations, events } = await runR33({
+    callbackURL: R34_PLAIN_RELAY_URL,
+    relay: () => ({ status: 302, location: R33_HMS_CALLBACK }),
+  });
+
+  assert.equal(confirmations.length, 1, `没有 code 就按 302 跟随收尾：${JSON.stringify(events.at(-1))}`);
+  assert.equal(confirmations[0].callbackUrl, R33_HMS_CALLBACK);
+  assert.equal(world.relayCalls().length, 1, "策略①不成立 → 照旧跟随那一跳");
+  port.cancel();
+});
+
+test("R34 策略①：redirect_uri 解码后不是 hms://redirect_uri → 不直构（不把 code 塞进别人的回调）", async () => {
+  const { port, world, confirmations, events } = await runR33({
+    callbackURL:
+      "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?code=CODE" +
+      "&redirect_uri=https%3A%2F%2Fevil.example.com%2Fcb",
+    relay: () => ({ status: 200, body: "<html>请重新登录</html>" }),
+  });
+
+  assert.equal(confirmations.length, 0, "redirect_uri 不是我们的回调，就不许拿它的 code 构造一条 hms:// 回调");
+  assert.equal(world.relayCalls().length, 1, "策略①不成立才轮到策略②（跟随那一跳要照常发出）");
+  const failure = events.at(-1);
+  assert.equal(failure.status, QR_LOGIN_STATUS.failed);
+  assert.equal(failure.errorKind, QR_PORT_ERROR_KINDS.callbackRedirectFailed);
+  assert.equal(failure.message.includes("evil.example.com"), false, "文案不许回显那个地址");
+  port.cancel();
+});
+
+test("R34 策略①：查询里没有 state → 只带 code（不编一个 state 出来；形状留给下游判）", async () => {
+  const { port, confirmations, events } = await runR33({
+    callbackURL: "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?code=CODE&redirect_uri=hms%3A%2F%2Fredirect_uri",
+  });
+
+  assert.equal(confirmations.length, 1, `参数够构造就收尾：${JSON.stringify(events.at(-1))}`);
+  assert.equal(confirmations[0].callbackUrl, "hms://redirect_uri?code=CODE", "参数里有什么就是什么，一个字符都不加");
+  assert.equal(events.at(-1).status, QR_LOGIN_STATUS.confirmed);
+
+  // 形状"不完整"这件事**不在这里判**：parseCallback 才是判真伪的地方（R34 的口径：只构造，不裁决）
+  const parsed = parseCallback("hms://redirect_uri?code=CODE");
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.error.kind, LOGIN_ERROR_KINDS.missingParams);
+  port.cancel();
+});
+
+test("R34 策略①：code/state 的编码原样搬过去（不做解码再编码）", async () => {
+  const { port, confirmations } = await runR33({
+    callbackURL:
+      "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?code=A%2BB%2Fc&state=S%2B1" +
+      "&redirect_uri=hms%3A%2F%2Fredirect_uri",
+  });
+
+  assert.equal(confirmations.length, 1);
+  assert.equal(
+    confirmations[0].callbackUrl,
+    "hms://redirect_uri?code=A%2BB%2Fc&state=S%2B1",
+    "解码再编码会把 `%2B` 变成 `+`（服务端看到的就不是同一个字符了）：只搬原文",
+  );
+  port.cancel();
+});
+
+test("R34 策略①：302 跳到一条**带 code** 的 loginCallback（链终点）→ 也直构，不再多打一次", async () => {
+  const { port, world, confirmations } = await runR33({
+    callbackURL: R34_PLAIN_RELAY_URL,
+    relay: (url) =>
+      url === R34_PLAIN_RELAY_URL
+        ? { status: 302, location: R33_RELAY_URL }
+        : { status: 200, body: "<html>链终点那条已经带着 code，走到这里就是多打了一次</html>" },
+  });
+
+  assert.equal(confirmations.length, 1);
+  assert.equal(confirmations[0].callbackUrl, R33_HMS_CALLBACK);
+  assert.deepEqual(
+    world.relayCalls().map((call) => call.url),
+    [R34_PLAIN_RELAY_URL],
+    "链终点那条 URL 自己带着 code + redirect_uri，不必再去 fetch 它",
+  );
+  port.cancel();
+});
+
+test("R34 策略③：跟随那一跳回 200、体里带着 hms://redirect_uri? 字面量 → 提取原文交回", async () => {
+  const { port, world, confirmations, events } = await runR33({
+    callbackURL: R34_PLAIN_RELAY_URL,
+    relay: () => ({
+      status: 200,
+      body: '<html><script>window.location.href="hms://redirect_uri?code=CODE&state=STATE"</script></html>',
+    }),
+  });
+
+  assert.equal(confirmations.length, 1, `真机上就是这个形状（200 + 页面自己跳）：${JSON.stringify(events.at(-1))}`);
+  assert.equal(confirmations[0].callbackUrl, R33_HMS_CALLBACK, "提取的就是那串字面量原文（不加不减）");
+  assert.equal(world.relayCalls().length, 1, "只打了跟随那一跳（体就在它的响应里）");
+  assert.equal(events.at(-1).status, QR_LOGIN_STATUS.confirmed);
+  port.cancel();
+});
+
+test("R34 策略③：字面量被 JS/HTML 包装（引号、尖括号、分号）→ 边界处不加不减", async () => {
+  const literal = "hms://redirect_uri?code=C%2BD&state=S1";
+  const { port, confirmations } = await runR33({
+    callbackURL: R34_PLAIN_RELAY_URL,
+    relay: () => ({ status: 200, body: `<html>\n<script>\n  location.replace('${literal}');\n</script>\n</html>` }),
+  });
+
+  assert.equal(confirmations.length, 1);
+  assert.equal(confirmations[0].callbackUrl, literal, "两侧的引号/分号/尖括号都不是回调的一部分");
+  port.cancel();
+});
+
+test("R34 策略③：跟了两跳才拿到 200 页面 → 体里提取（跳数与提取来自同一跳）", async () => {
+  const second = "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?step=2";
+  const { port, world, confirmations, events } = await runR33({
+    callbackURL: R34_PLAIN_RELAY_URL,
+    relay: (url) =>
+      url === R34_PLAIN_RELAY_URL
+        ? { status: 302, location: second }
+        : { status: 200, body: '<script>location.href="hms://redirect_uri?code=CODE&state=STATE"</script>' },
+  });
+
+  assert.equal(confirmations.length, 1, `第二跳的体里也要能提取：${JSON.stringify(events.at(-1))}`);
+  assert.equal(confirmations[0].callbackUrl, R33_HMS_CALLBACK);
+  assert.deepEqual(world.relayCalls().map((call) => call.url), [R34_PLAIN_RELAY_URL, second]);
+  port.cancel();
+});
+
+test("R34 策略③：体里只有别的 hms 域（钓鱼形状）→ 不提取、结构化报错、不回显", async () => {
+  const { port, events, confirmations } = await runR33({
+    callbackURL: R34_PLAIN_RELAY_URL,
+    relay: () => ({ status: 200, body: '<a href="hms://evil.example.com/steal?code=CODE&state=STATE">继续</a>' }),
+  });
+
+  assert.equal(confirmations.length, 0, "正则锚的是 hms://redirect_uri 精确开头：别的 hms 域一个字都不许提");
+  const failure = events.at(-1);
+  assert.equal(failure.status, QR_LOGIN_STATUS.failed);
+  assert.equal(failure.errorKind, QR_PORT_ERROR_KINDS.callbackRedirectFailed);
+  assert.match(failure.message, /200/);
+  assert.equal(failure.message.includes("evil.example.com"), false, "文案不许回显那个地址");
+  port.cancel();
+});
+
+test("R34 三策略全败：200、体里没有字面量、参数里也没有 code → 结构化错误（不猜、不回显）", async () => {
+  const { port, world, confirmations, events } = await runR33({
+    callbackURL: R34_PLAIN_RELAY_URL,
+    relay: () => ({ status: 200, body: "<html>登录超时，请回到首页重新发起</html>" }),
+  });
+
+  assert.equal(confirmations.length, 0);
+  assert.equal(world.relayCalls().length, 1, "三条策略都试过一遍（②发请求、③看体）才认输");
+  const failure = events.at(-1);
+  assert.equal(failure.status, QR_LOGIN_STATUS.failed);
+  assert.equal(failure.errorKind, QR_PORT_ERROR_KINDS.callbackRedirectFailed);
+  assert.match(failure.message, /200/);
+  assert.equal(failure.message.includes("loginCallback"), false, "文案不许回显 URL");
+  assert.equal(failure.message.includes("redirect_uri="), false);
+  port.cancel();
+});
+
+// ---------------------------------------------------------------------------
+// R34 state 接线核实（简报点名必须核实的那一处）
+//
+// 问题：QR 链的 state 与 OAuth attempt 的 state 是不是**同一个**？不是同一个的话，
+// `consumeCallback(expectedState: attempt.state)` 会把真机上正确的回调拒掉。
+//
+// 证据（真机探针存档，两条都点名了 state）：
+// - `.tmp/getLoginWay.json`：CAS 跳转里的 `service` 已经嵌着**我们那张授权页查询串**，
+//   包括 `state=probe-state`（probe 自己传的值）——CAS 侧是**原样回带**，不是自己另生成一个；
+// - `.tmp/cas-getPageInfo-mobile.json`：移动登录页下发回来的 `localInfo.service` 同样带着
+//   `state=probe-state`，而这一串就是换码请求里 `service` 字段的来源。
+//
+// 代码路径（一处都没换过 state）：`attempt.authorizeUrl`（含 attempt.state）
+//   → `walkToCasPortal` 把整串查询当表单正文 POST 给 getLoginWay
+//   → 门户页/移动页 URL（同一串参数）→ `getPageInfo` 表单 → `localInfo.service`
+//   → `codeRemoteLogin` 的 `service` → `callbackURL` 的 `state` → 策略①直构 → `consumeCallback` 比对。
+//
+// 结论：**已经是同一个 state，不需要改接线**。下面这条用例把它钉住：
+// 假世界照真机那样**从我们发出去的那串参数里取 state 回带**，最后交给**真的** consumeCallback 判。
+// ---------------------------------------------------------------------------
+
+/** CAS 门户域（`HUAWEI_QR_ENDPOINTS.casOrigin` 的字面量；白名单校验认的就是它的 origin）。 */
+const CAS_ORIGIN = "https://id1.cloud.huawei.com";
+
+/** R34 state 接线用的假世界：CAS 侧从 getLoginWay 的正文里取 state，一路原样回带（探针实测的形状）。 */
+function makeR34StateWorld() {
+  const calls = [];
+  const loginCallbackBase = "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback";
+  /** 服务端"记住"的那份授权上下文（真机上 CAS 就是这么把它嵌进 service 的）。 */
+  let state = "";
+  let polls = 0;
+
+  const fetchImpl = async (url, init = {}) => {
+    const target = String(url);
+    calls.push({
+      url: target,
+      method: init.method ?? "GET",
+      body: String(init.body ?? ""),
+      headers: init.headers ?? {},
+    });
+    const answer = (status, body, headers = {}) => ({
+      ok: status >= 200 && status < 300,
+      status,
+      headers: {
+        get: (name) => headers[name.toLowerCase()] ?? null,
+        getSetCookie: () => headers["set-cookie-list"] ?? [],
+      },
+      async text() {
+        return typeof body === "string" ? body : JSON.stringify(body ?? {});
+      },
+    });
+
+    if (target.includes("/oauth2/ajax/getLoginWay")) {
+      // 真机实测（.tmp/getLoginWay.json）：CAS 跳转的 service 里嵌着**我们发出去的那串参数**
+      state = new URLSearchParams(String(init.body ?? "")).get("state") ?? "";
+      const service =
+        `${loginCallbackBase}?state=${encodeURIComponent(state)}` +
+        `&redirect_uri=${encodeURIComponent("hms://redirect_uri")}&access_type=offline`;
+      return answer(200, {
+        isSuccess: "true",
+        loginInteractInfo: { cas: { casLoginRedirectUrl: `${CAS_ORIGIN}/CAS/remoteLogin?service=${encodeURIComponent(service)}` } },
+      });
+    }
+    if (target.startsWith(`${CAS_ORIGIN}/CAS/remoteLogin`)) {
+      const service = new URL(target).searchParams.get("service") ?? "";
+      return answer(302, "", {
+        location:
+          `${CAS_ORIGIN}:443/CAS/portal/loginAuth.html?reqClientType=90&loginChannel=90000300` +
+          `&clientID=101444301&lang=zh-cn&state=${encodeURIComponent(state)}&service=${encodeURIComponent(service)}`,
+      });
+    }
+    if (target.includes("/CAS/portal/loginAuth.html")) {
+      return answer(200, "<html></html>", { "set-cookie-list": ["JSESSIONID=portal-session; Path=/"] });
+    }
+    if (target.includes("/CAS/mobile/standard/login.html")) {
+      return answer(200, "<html></html>", { "set-cookie-list": ["CASTGC=cas-ticket; Path=/"] });
+    }
+    if (target.includes("/login/getPageInfo")) {
+      const form = new URLSearchParams(String(init.body ?? ""));
+      const service = form.get("service") ?? "";
+      return answer(200, {
+        isSuccess: 1,
+        pageToken: PAGE_INFO.pageToken,
+        pageTokenKey: PAGE_INFO.pageTokenKey,
+        localInfo: {
+          // 真机实测（.tmp/cas-getPageInfo-mobile.json）：这一串**带本次 state**
+          service,
+          state: form.get("state") ?? "",
+          loginUrl: `${CAS_ORIGIN}:443/CAS/portal/loginAuth.html`,
+          reqClientType: "90",
+          loginChannel: "90000300",
+          lang: "zh-cn",
+          getqrContent: PAGE_INFO.localInfo.getqrContent,
+          asyncURL: PAGE_INFO.localInfo.asyncURL,
+          qrcodeRequestInterval: 2000,
+        },
+      });
+    }
+    if (target.includes("/ajaxHandler/dev")) return answer(200, { isSuccess: 1, sid: R31_SID });
+    if (target.includes("/DimensionalCode/getqrInfo")) {
+      return answer(200, CREATE_PAYLOAD, { "set-cookie-list": ["JSESSIONID=qr-session; Path=/"] });
+    }
+    if (target.includes("/DimensionalCode/async")) {
+      polls += 1;
+      return answer(
+        200,
+        polls === 1
+          ? { resultCode: "103000200" }
+          : { resultCode: "0", userAccount: "u", code: "c", userID: "1", siteID: "1", accountType: "1", opType: "4" },
+      );
+    }
+    if (target.includes("/codeRemoteLogin")) {
+      const service = new URLSearchParams(String(init.body ?? "")).get("service") ?? "";
+      const echoed = new URL(service).searchParams.get("state") ?? "";
+      // 真机那个形状：state 与 code 都在参数里（策略①据此直构）
+      return answer(200, {
+        isSuccess: "1",
+        callbackURL: `${loginCallbackBase}?state=${encodeURIComponent(echoed)}&code=CODE&redirect_uri=${encodeURIComponent("hms://redirect_uri")}&access_type=offline`,
+      });
+    }
+    // 注意：这里**没有** `/loginCallback` 这条路由——策略①成立时它一个请求都不该发
+    throw new Error(`假 fetch 不认识这个地址：${target}`);
+  };
+  return { fetchImpl, calls };
+}
+
+/** 跑一遍完整的确认链（真 `createAttempt` 造的授权页 URL → 换码 → 收尾）。 */
+async function runR34State(authorizeUrl) {
+  const clock = timers();
+  const world = makeR34StateWorld();
+  const events = [];
+  const confirmations = [];
+  const logs = [];
+  const port = createHuaweiQrPort({
+    fetchImpl: world.fetchImpl,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    now: () => 1_700_000_000_000,
+    random: () => 0.5,
+    log: (message) => logs.push(message),
+    timeoutMs: null,
+  });
+  await port.start({
+    authorizeUrl,
+    onEvent: (event) => events.push(event),
+    onConfirmed: (result) => confirmations.push(result),
+  });
+  await clock.tick(); // 未扫
+  await clock.tick(); // 已确认 → 换码链
+  for (let round = 0; round < 40; round += 1) await Promise.resolve();
+  return { port, world, events, confirmations, logs };
+}
+
+test("R34 state 接线：确认链交回的回调，state 就是 attempt.state（一路原样回带 → consumeCallback 通过）", async () => {
+  const attempt = createAttempt({ authorizeEndpoint: "https://oauth-login.platform.hicloud.com/oauth2/v3/authorize" });
+  const { port, world, confirmations, events, logs } = await runR34State(attempt.authorizeUrl);
+
+  assert.equal(confirmations.length, 1, `state 接线通了才有回调：${JSON.stringify(events.at(-1))}`);
+
+  // ① 我们把 attempt.state 交出去了（getLoginWay 的正文就是授权页那串查询）
+  const loginWay = world.calls.find((call) => call.url.includes("getLoginWay"));
+  assert.ok(loginWay);
+  assert.equal(new URLSearchParams(loginWay.body).get("state"), attempt.state);
+
+  // ② 页面配置接口（建单前那次 + 换码那次）带的是同一个 state
+  const pageInfoCalls = world.calls.filter((call) => call.url.includes("/login/getPageInfo"));
+  assert.ok(pageInfoCalls.length >= 2, `建单上下文一次、换码一次：${pageInfoCalls.length}`);
+  for (const call of pageInfoCalls) {
+    assert.equal(new URLSearchParams(call.body).get("state"), attempt.state, "state 只有一个真源：attempt.state");
+  }
+
+  // ③ 换码请求的 `service` 里也带着它（真机上它就是 localInfo.service 那一串）
+  const confirm = world.calls.find((call) => call.url.includes("/codeRemoteLogin"));
+  const service = new URLSearchParams(confirm.body).get("service");
+  assert.equal(new URL(service).searchParams.get("state"), attempt.state);
+
+  // ④ 策略①直构出来的回调，state 正是 attempt.state；且**没有**为中转页发过任何请求
+  assert.equal(confirmations[0].callbackUrl, `hms://redirect_uri?code=CODE&state=${attempt.state}`);
+  assert.equal(world.calls.some((call) => call.url.includes("/loginCallback")), false);
+
+  // ⑤ 交给**真的** consumeCallback（auth-manager 的 finishQrLogin 用的就是它）——必须通过
+  const consumed = consumeCallback(confirmations[0].callbackUrl, {
+    expectedState: attempt.state,
+    createdAt: attempt.createdAt,
+    timeoutMs: LOGIN_TIMEOUT_MS,
+  });
+  assert.equal(consumed.ok, true, `确认链交回的回调必须过 state 校验：${JSON.stringify(consumed)}`);
+  assert.equal(consumed.data.code, "CODE");
+
+  // 反面控制：换一个 state 就拒 —— 证明上面那条不是"校验形同虚设"
+  const foreign = consumeCallback(confirmations[0].callbackUrl, {
+    expectedState: "不是这一次的-state",
+    createdAt: attempt.createdAt,
+    timeoutMs: LOGIN_TIMEOUT_MS,
+  });
+  assert.equal(foreign.ok, false);
+  assert.equal(foreign.error.kind, LOGIN_ERROR_KINDS.stateMismatch);
+
+  assert.equal(
+    logs.join("\n").includes(attempt.state),
+    false,
+    "state 是这次尝试的凭据，日志里一个字都不许出现",
   );
   port.cancel();
 });

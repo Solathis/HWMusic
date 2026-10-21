@@ -26,10 +26,13 @@
  * `isQrlogin:false` 且**不下发** `getqrContent`/`asyncURL`（实探记录），二维码配置只在
  * 移动登录页的 `localInfo` 里。这不是绕路，是华为自己页面之间的同一条链。
  *
- * **实测状态（R33 更新）**：`codeRemoteLogin` 这一段**已有真机证据**——用户扫码 + 手机确认之后，
- * 轮询见到 `0`、换码接口跑通并交回了 `callbackURL`（形状 = https 中转页，见文件末尾的 R33 段）。
- * 仍然只有真机能验的是**那份中转页 302 的真实往返**（R33 按 OAuth 302 语义实现），
- * 以及其后的 `code → 令牌兑换`（`consumeCallback → exchangeCode`，需要真实授权码）。
+ * **实测状态（R34 更新）**：`codeRemoteLogin` 这一段**已有真机证据**——用户扫码 + 手机确认之后，
+ * 轮询见到 `0`、换码接口跑通并交回了 `callbackURL`（形状 = https 中转页，见文件末尾的 R33/R34 段）。
+ * R33 按 OAuth 302 语义跟随它；**R34 的真机证据表明真机那条链回的是 HTTP 200**（页面自带 JS 跳
+ * `hms://`），所以现在是三策略按证据序收尾（参数直构 → 302 跟随 → 响应体提取）。
+ * 仍然只有真机能验的是那句**HTTP 200 页面里到底写的是哪一串跳转字面量**
+ * （策略③按"页面 JS 跳转目标"的通用形状实现），以及其后的
+ * `code → 令牌兑换`（`consumeCallback → exchangeCode`，需要真实授权码）。
  *
  * R20 增补（手动刷新 = 活动会话期间重启）：
  * - `start()` 天然就是"停旧会话 + 开新会话"（旧会话 `cancel()`，新会话新 qrToken/qrCode）；
@@ -86,6 +89,35 @@
  * （带同一口 QR 链 cookie 罐与同款头），最多跟 `QR_CALLBACK_MAX_REDIRECTS` 跳；
  * 形状对不上（非 3xx / 没有 Location / 跳去的不是 `hms://redirect_uri` 回调 / 超过跳数）一律
  * **结构化错误不猜**，文案不回显 URL（凭据边界）。`parseCallback` 成功之后的链一行未动。
+ *
+ * R34 增补（用户真机证据 + 用户澄清 2026-10-21：最后一步是 **HTTP 200**，不是 302）：
+ * R33 那条"跟随 302"在真机上**没有走到**——服务端 fetch 那份 https 中转页得到的是 **HTTP 200**
+ * （HTML 页面，浏览器里靠页面自己的 JS 跳 `hms://`），没有 `Location` 可读；而 R16 契约里
+ * "`callbackURL` 带 code"那句是**读 bundle 的推断**，用户澄清它**只是参考、当时未实测**。
+ * 于是 `resolveCallbackUrl` 改成**三条策略按证据序**（不押注任何单一路径）：
+ *
+ * 1. **参数直构**（最省、证据最强）：起点或某一跳的 URL 查询参数里既有 `code`、又有 `redirect_uri`
+ *    解码后等于 `hms://redirect_uri` → 我们自己就是那份 redirect_uri 的处理者，直接构造
+ *    `hms://redirect_uri?code[&state]` 交回，**一个请求都不发**；`state` 缺省时只带 `code`
+ *    （不编一个 state：形状完不完整交给下游 `parseCallback`/`consumeCallback` 判）。
+ *    全程**搬原文**（不解码、不重编码）：`code` 是凭据，`%2B` 解成 `+` 就是另一个字符了。
+ * 2. **302 Location 跟随**（R33 已有，保留）：服务端哪天真改回直跳仍然成立。
+ * 3. **响应体提取**：某一跳回 2xx、没有 `Location`、但体里带着 `hms://redirect_uri?` 字面量
+ *    （页面 JS 的跳转目标）→ 正则锚定精确开头、提取**原文**交回（不加不减）。
+ *
+ * 三条全败 → 既有结构化错误（不猜、不回显 URL）。诊断日志按 `via` 说清是哪条收的场
+ * （`params` / `location` / `body`），**state 值一个字符都不进日志**。
+ *
+ * **state 接线核实（R34 的必核项）**：QR 链的 state 与 OAuth attempt 的 state **已经是同一个**，
+ * 不需要改接线。证据与路径：`.tmp/getLoginWay.json`（CAS 把**我们发出去的那串授权参数**
+ * ——含 `state=probe-state`——原样嵌进 `casLoginRedirectUrl.service`）与
+ * `.tmp/cas-getPageInfo-mobile.json`（移动登录页下发的 `localInfo.service` 同样带着它），
+ * 而代码路径一处都没换过 state：`attempt.authorizeUrl` → `walkToCasPortal` 把整串查询当表单正文
+ * POST 给 `getLoginWay` → 门户/移动页 URL（同一串参数）→ `getPageInfo` 表单 → `localInfo.service`
+ * → `codeRemoteLogin` 的 `service` → `callbackURL` 的 `state` → 策略①直构 → `consumeCallback` 比对
+ * （`auth-manager.ts` 的 `finishQrLogin` 传的正是 `expectedState: attempt.state`）。
+ * 钉在 `test/qr-port.test.mjs` 的"R34 state 接线"一条：假世界照真机那样从我们发出去的那串参数里
+ * 取 state 回带，最后交给**真的** `consumeCallback` 判（含"换个 state 就拒"的反面控制）。
  */
 import { OAUTH_REDIRECT_URI } from "../protocols/auth.mjs";
 import { LOGIN_TIMEOUT_MS, isCallback } from "../protocols/login-callback.mjs";
@@ -200,6 +232,108 @@ function absoluteUrl(value, base) {
   }
 }
 
+/** `?` 之后的查询串（`#` 之后不算；与 `login-callback.mjs` 同一口径）。 */
+function rawQueryOf(value) {
+  const withoutFragment = String(value).split("#", 1)[0];
+  const index = withoutFragment.indexOf("?");
+  return index === -1 ? "" : withoutFragment.slice(index + 1);
+}
+
+/**
+ * 查询串里某个参数的**原文**（不解码、不重编码）。
+ *
+ * 为什么不用 `URLSearchParams` 取值：它会把 `%2B` 解成 `+`，我们再用它拼回去就成了 `%2B` ↔ `+`
+ * 的往返——服务端看到的已经不是同一个字符了。`code`/`state` 是**凭据**，只能原样搬运。
+ *
+ * 同名参数重复出现时回 `null`（形状不认，不猜；与 `parseCallback` 对重复参数的口径一致）。
+ *
+ * @param {string} url
+ * @param {string} name
+ * @returns {string|null} 原文；`null` = 没有这个参数 / 重复出现
+ */
+function rawQueryValue(url, name) {
+  let found = null;
+  for (const pair of rawQueryOf(url).split("&")) {
+    if (pair === "") continue;
+    const index = pair.indexOf("=");
+    const key = index === -1 ? pair : pair.slice(0, index);
+    if (key !== name) continue;
+    if (found !== null) return null;
+    found = index === -1 ? "" : pair.slice(index + 1);
+  }
+  return found;
+}
+
+/** 解码后的参数值（**只用来判形状**，拿到的值不参与构造）；解不出来就是 `null`。 */
+function decodedQueryValue(url, name) {
+  const raw = rawQueryValue(url, name);
+  if (raw === null || raw === "") return null;
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * R34 策略①**参数直构**：这条 URL 的查询参数够不够我们自己把回调拼出来？
+ *
+ * 判据两条（缺一不可）：
+ * 1. `code` 在查询里且非空——中转页的**参数**里真有授权码（R16 契约那句"带 code"是读 bundle
+ *    的推断、用户澄清只是参考，所以**没有 code 就绝不直构**，老老实实落策略②）；
+ * 2. `redirect_uri` 解码后**等于** `hms://redirect_uri`——我们就是那份 redirect_uri 的处理者，
+ *    所以这份 code 是发给**我们**的（换成别的 redirect_uri 就是把别人的 code 塞进我们的回调，不干）。
+ *
+ * `state` 有就带上、没有就只带 `code`：**不编一个 state 出来**。回调"形状完不完整"不在这里判
+ * ——`parseCallback` / `consumeCallback` 才是判真伪的地方（缺 state 到那里会得到 missing_params，
+ * 那是一条**看得见的**失败，胜过这里替它圆一个假的过去）。
+ *
+ * 构造全程**搬原文**（见 [`rawQueryValue`]）：不解码、不重编码、不加不减。
+ *
+ * @param {string} url 起点或某一跳的 URL（调用方已保证是字符串）
+ * @returns {string|null} 构造好的 `hms://redirect_uri?code[&state]`；`null` = 条件不成立
+ */
+function buildCallbackFromParams(url) {
+  if (schemeOf(url) !== "https") return null;
+  if (decodedQueryValue(url, "redirect_uri") !== OAUTH_REDIRECT_URI) return null;
+
+  const code = rawQueryValue(url, "code");
+  if (code === null || code === "") return null;
+  const state = rawQueryValue(url, "state");
+
+  const built =
+    state === null || state === ""
+      ? `${OAUTH_REDIRECT_URI}?code=${code}`
+      : `${OAUTH_REDIRECT_URI}?code=${code}&state=${state}`;
+  // 拼出来的必须真是那条回调（模板保证，但判真伪的真源只有一个 `isCallback`，不自己另写一套）
+  return isCallback(built) ? built : null;
+}
+
+/**
+ * R34 策略③**响应体提取**：页面自己用 JS 跳 `hms://` 时，跳转目标就在 200 那份 HTML 里。
+ *
+ * 锚点**从 `OAUTH_REDIRECT_URI` 拼出来**（不在这里再写一份 `hms://redirect_uri` 字面量：
+ * 回调地址的唯一真源是 `auth.mjs`，`test/login-parity.test.mjs` 会在全仓范围内钉住这条纪律），
+ * 找到一处即刻停：URL 里合法的字符都留着，遇 `"`/`'`/`` ` ``/`<`/`>`/空白/反斜杠就断
+ * （那些是 HTML/JS 的包装边界）——**提取原文不加不减**（`code`/`state` 的编码原样搬过去）。
+ *
+ * 取到的必须过 `isCallback`（判真伪的唯一真源）才认；认不出就当没有，落到既有结构化错误。
+ *
+ * @param {unknown} body 跟随那一跳的响应体
+ * @returns {string|null}
+ */
+function extractCallbackLiteral(body) {
+  const text = String(body ?? "");
+  // 字面量必须以「回调地址 + ?」开头（查询串是这段跳转目标的必要部分）
+  const anchor = `${OAUTH_REDIRECT_URI}?`;
+  const at = text.indexOf(anchor);
+  if (at === -1) return null;
+  let end = at + anchor.length;
+  while (end < text.length && !/[\s"'`<>\\]/.test(text[end])) end += 1;
+  const literal = text.slice(at, end);
+  return isCallback(literal) ? literal : null;
+}
+
 /** 极简 cookie jar：CAS 门户的 getPageInfo/换码要靠会话 cookie 关联（值不进日志）。 */
 function createCookieJar() {
   const jar = new Map();
@@ -311,28 +445,38 @@ export function createHuaweiQrPort(options = {}) {
   }
 
   /**
-   * R33：把换码交回的 **callbackURL** 收敛成 `hms://redirect_uri?code&state`。
+   * R33/R34：把换码交回的 **callbackURL** 收敛成 `hms://redirect_uri?code&state`。
    *
    * 真机证据（2026-10-21）：`codeRemoteLogin` 交回的是 **https 的 loginCallback 中转页**
-   * （`oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?…redirect_uri=hms%3A%2F%2Fredirect_uri`），
-   * 浏览器里它 302 到 `hms://redirect_uri?code&state`。此前我们把它原样喂给只认 `hms://` 的
-   * `parseCallback` → 最后一步报"不是登录回调 URL"，而扫码其实已经成功。
+   * （`oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?…redirect_uri=hms%3A%2F%2Fredirect_uri`）。
+   * R33 按 OAuth 302 语义跟随它拿 `Location`；**R34 的真机证据表明那条路在真机上走不到**：
+   * 服务端 fetch 这个地址得到的是 **HTTP 200**（一张 HTML 页面，浏览器里靠页面自己的 JS 跳
+   * `hms://`），没有 `Location` 可读。而 R16 契约里"`callbackURL` 带 code"那句是**读 bundle 的推断**
+   * （用户澄清：只是参考、当时未实测）——所以不再押注任何单一路径，按**证据序**三条策略：
    *
-   * 三条规矩：
-   * 1. `hms://` 开头 → **直通**（原样交回；下游 `parseCallback` 仍是唯一的判真伪之处，既有链零改动）；
-   * 2. `https://` → **跟随**：`redirect: "manual"` 自己读 `Location`（复用 [`request`]，于是自动带上
-   *    同一口 cookie 罐与同款头）。**必须 manual**：让 fetch 自动跟随会把 302 换成一次"自定义 scheme
-   *    的导航"（跟不了），`Location` 反而读不到——真机这一跳要的就是那颗 `Location`；
-   * 3. 形状对不上（非 3xx / 没有 `Location` / 跳去的不是 `hms://redirect_uri` 回调 /
-   *    超过 `QR_CALLBACK_MAX_REDIRECTS` 跳）→ **结构化错误，不猜**。
+   * 1. **参数直构**（[`buildCallbackFromParams`]，最省、证据最强）：这条 URL 的查询参数里
+   *    既有 `code`、又有 `redirect_uri` 解码后等于 `hms://redirect_uri` → 我们自己就是那份
+   *    redirect_uri 的处理者，**直接构造**回调交回，一个请求都不发；`state` 缺省就只带 `code`；
+   * 2. **302 Location 跟随**（R33 已有，保留）：`redirect: "manual"` 自己读 `Location`（复用
+   *    [`request`]，于是自动带上同一口 cookie 罐与同款头）。**必须 manual**：让 fetch 自动跟随
+   *    会把 302 换成一次"自定义 scheme 的导航"（跟不了），`Location` 反而读不到；
+   *    最多 `QR_CALLBACK_MAX_REDIRECTS` 跳；每一跳的 URL 也先过一遍策略①（链终点常常就是那条
+   *    带 `code` 的 loginCallback，不必再多打一次）；
+   * 3. **响应体提取**（[`extractCallbackLiteral`]）：某一跳回 2xx、没有 `Location`，但体里带着
+   *    `hms://redirect_uri?` 字面量 → 提取**原文**交回（真机那条链的收场形状）。
+   *
+   * 三条全败、或形状压根不认（非 https 中转页、非 3xx 又没有字面量、跳数超限、跳去的不是
+   * `hms://redirect_uri` 回调）→ **结构化错误，不猜**。
    *
    * 文案不回显 URL（凭据边界：那个地址里带着 `code`）；只回状态码与"形状哪里不对"。
    *
    * @param {string} callbackUrl `codeRemoteLogin` 交回的地址（调用方已保证非空字符串）
+   * @returns {Promise<object>} `{callbackUrl, hops, via}`；`via` ∈ `direct|params|location|body`
+   *          （只用于日志，不进广播）
    */
   async function resolveCallbackUrl(callbackUrl) {
     const start = callbackUrl.trim();
-    if (schemeOf(start) === "hms") return ok({ callbackUrl: start, hops: 0 });
+    if (schemeOf(start) === "hms") return ok({ callbackUrl: start, hops: 0, via: "direct" });
 
     let current = start;
     for (let hop = 0; hop < QR_CALLBACK_MAX_REDIRECTS; hop += 1) {
@@ -342,6 +486,10 @@ export function createHuaweiQrPort(options = {}) {
           QR_PORT_ERROR_KINDS.callbackRedirectFailed,
         );
       }
+      // 策略①：起点与每一跳的 URL 都先看参数——够就当场拼出来，一个请求都不发
+      const built = buildCallbackFromParams(current);
+      if (built !== null) return ok({ callbackUrl: built, hops: hop, via: "params" });
+
       // Referer 与换码那一步同款：浏览器里它就是从那张贴着二维码的页面跳过去的
       const answer = await request(current, {
         headers: { referer: `${endpoints.casOrigin}${endpoints.mobileLoginPath}` },
@@ -349,6 +497,9 @@ export function createHuaweiQrPort(options = {}) {
       if (!answer.ok) return answer;
       const { status } = answer.data;
       if (status < 300 || status >= 400) {
+        // 策略③：2xx 且这张页面自己带着跳转目标（真机那条链的收场形状）
+        const literal = status >= 200 && status < 300 ? extractCallbackLiteral(answer.data.text) : null;
+        if (literal !== null) return ok({ callbackUrl: literal, hops: hop + 1, via: "body" });
         return err(
           `扫码已确认，但中转页没有跳转到登录回调（HTTP ${status}）：本次登录无法收尾`,
           QR_PORT_ERROR_KINDS.callbackRedirectFailed,
@@ -362,7 +513,7 @@ export function createHuaweiQrPort(options = {}) {
         );
       }
       // 已经是回调就**原样**交出去（不让 URL 解析去动那串 code/state 的编码）
-      if (isCallback(location)) return ok({ callbackUrl: location, hops: hop + 1 });
+      if (isCallback(location)) return ok({ callbackUrl: location, hops: hop + 1, via: "location" });
       const next = absoluteUrl(location, current);
       if (schemeOf(next) !== "https") {
         return err(
@@ -653,10 +804,18 @@ export function createHuaweiQrPort(options = {}) {
       );
     }
 
-    // R33：最后一跳——真机上这个字段是 https 的 loginCallback 中转页，不是 hms:// 回调
+    // R33/R34：最后一跳——真机上这个字段是 https 的 loginCallback 中转页，不是 hms:// 回调
     const resolved = await resolveCallbackUrl(callbackUrl);
     if (!resolved.ok) return resolved;
-    if (resolved.data.hops > 0) {
+    // 诊断一行（不含 URL/凭据）：真机再失败时，这一行就能说明"三条策略里哪条收的场"
+    if (resolved.data.via === "params") {
+      log(
+        `二维码换码：callbackURL 是 https 中转页，查询参数里带着 code + redirect_uri=${OAUTH_REDIRECT_URI}` +
+          " → 直接构造回调（零跟随）",
+      );
+    } else if (resolved.data.via === "body") {
+      log(`二维码换码：中转页没有 302，响应体里带着 hms:// 回调字面量 → 提取原文交回（跟随 ${resolved.data.hops} 跳）`);
+    } else if (resolved.data.hops > 0) {
       log(`二维码换码：callbackURL 是 https 中转页 → 跟随 ${resolved.data.hops} 跳后拿到 hms:// 回调`);
     }
     return ok({ callbackUrl: resolved.data.callbackUrl });

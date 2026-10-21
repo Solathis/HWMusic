@@ -493,16 +493,20 @@ gitignore；`--no-browser` 只跑公开接口那两段）。**只碰公开页面
 POST https://id1.cloud.huawei.com/CAS/IDM_W/ajaxHandler/codeRemoteLogin?reflushCode=…&cVersion=UP_CAS_6.26.3.100
 表单 {pageToken, pageTokenKey, loginUrl, reqClientType, service, loginChannel, lang, appID,
       userID, siteID, accountType, code, qrCode, userAccount, opType}
-→ {callbackURL}      // = **https 的 loginCallback 中转页**（浏览器里它 302 到 hms://redirect_uri?code&state）
-                     //   R33：这一跳由确认链自己跟随，见本节 R33 段（真机证据）
+→ {callbackURL}      // = **https 的 loginCallback 中转页**
+                     //   R33：按 302 → Location 语义跟随它；**R34 真机改口：那条链回的是 HTTP 200**
+                     //   （HTML 页面，浏览器里靠页面自己的 JS 跳 hms://redirect_uri?code&state），
+                     //   见本节 R33/R34 段（三策略按证据序收尾）
 ```
 
 这条链的**每一步都读自页面自己的代码**（`/CAS/static_rss/green/rss_20260904/CAS/vue3/vuebuild/js/login/portal/`
 的 `qrCodeLogin-legacy.js` 与 `index-entry-legacy.js`；`getqrContent`/`asyncURL` 只作为**服务端配置值**出现，
 bundle 里没有任何硬编码的二维码端点字符串——这也是"必须走 getPageInfo 拿配置"的原因）。
-**实测状态（R33 更新）**：这一步**已有真机证据**——用户扫码 + 手机确认后轮询见到 `0`，本接口跑通并交回了
-`callbackURL`（形状见上：https 中转页）。仍未实测的是**那份中转页 302 的真实往返**（R33 按 OAuth 302 语义实现，
-要用户复测）。换码接口自己失败时是结构化错误（`qr_confirm_failed` + 服务端 `errorCode`），不猜。
+**实测状态（R34 更新）**：这一步**已有真机证据**——用户扫码 + 手机确认后轮询见到 `0`，本接口跑通并交回了
+`callbackURL`（形状见上：https 中转页）。**R16 那句"`callbackURL` 带 code"是读 bundle 的推断**，
+用户 R34 澄清：它**只是参考、当时未实测**——所以最后一跳不再押注"参数里一定有 code"这一条，
+按三策略（参数直构 / 302 跟随 / 200 响应体提取）依次试，见下方 R34 段。
+换码接口自己失败时是结构化错误（`qr_confirm_failed` + 服务端 `errorCode`），不猜。
 
 **本项目落地位置**：`src/protocols/qr-login.mjs`（状态机，端点注入）、`src/main/qr-login.mjs`
 （探针确认的端点常量 `HUAWEI_QR_ENDPOINTS` + CAS 换码链）、`auth:qr-start` 请求频道、
@@ -769,7 +773,65 @@ codeRemoteLogin → {callbackURL: "https://oauth-login1.cloud.huawei.com/oauth2/
 钉在 `test/qr-port.test.mjs` 的 R33 8 条：直通（一个多余请求都不发）/ 一跳 302（含
 `redirect: "manual"`、cookie 罐、UA、Referer 逐项）/ 两跳 / 5 跳边界与超限 /
 200 无 `Location` / `Location` 是别的 hms 域 / 跟随那一跳网络失败 / 形状不认不外发请求。
-**仍未实测**：那条 302 的真实往返（是本轮唯一没走过真机的形状）→ `docs/KNOWN_LIMITATIONS.md` A6。
+
+**R34（用户真机证据 + 用户澄清 2026-10-21）：最后一跳改成三策略按证据序收尾。**
+
+真机把 R33 那条路**走出了界**：R33 的"跟随 302 读 Location"在真机上**没有走到**——服务端 fetch 那份
+https 中转页拿到的是 **HTTP 200**（一张 HTML 页面，浏览器里靠页面自己的 JS 跳 `hms://`），
+**没有 `Location` 可读**，于是报「中转页没有跳转到登录回调（HTTP 200）」。同时用户澄清：
+R16 §③ 里"`callbackURL` = loginCallback URL **带 code**"那句是**读 bundle 的推断**，
+**只是参考、当时未实测** —— 所以最后一跳**不再押注任何单一路径**。
+
+`src/main/qr-login.mjs` 的 `resolveCallbackUrl` 按**证据序**三条策略（`hms://` 直通仍在最前）：
+
+| # | 策略 | 触发条件 | 代价 |
+|---|---|---|---|
+| ① | **参数直构** | 这条 URL（起点**或某一跳的 Location**）的查询里既有 `code`、又有 `redirect_uri` **解码后等于** `hms://redirect_uri` | **零请求**：直接构造 `hms://redirect_uri?code[&state]` |
+| ② | **302 Location 跟随**（R33 已有，保留） | ①不成立 → `redirect:"manual"` 读 `Location`（同一口 cookie 罐 + 同款头），≤ 5 跳 | 每跳一次请求 |
+| ③ | **响应体提取** | ②的那一跳回 **2xx**、没有 `Location`、体里带着 `hms://redirect_uri?` 字面量 | 无附加请求（体已在手） |
+
+四条口径（每条都有测试钉住）：
+
+1. **①只搬原文**：`code`/`state` 从查询串里按**原始字符**取用（不做"解码再编码"——`%2B` 解成 `+`
+   就是另一个字符了）；`state` 缺省时**只带 `code`**，**不编一个 state**。回调"形状完不完整"
+   **不在这里判**：`parseCallback`/`consumeCallback` 才是判真伪的地方（缺 state 到那里会得到
+   `missing_params`——那是一条看得见的失败，胜过替它圆一个假的过去）。
+2. **①的第二个条件是硬条件**：`redirect_uri` 不是 `hms://redirect_uri` 时**绝不直构**
+   （那等于把别人的 code 塞进我们的回调）。
+3. **③锚定精确开头**：锚点是 `OAUTH_REDIRECT_URI + "?"`（**不在这里再写一份 `hms://redirect_uri`
+   字面量**：唯一真源在 `auth.mjs`，`test/login-parity.test.mjs` 在全仓范围内钉这条纪律），
+   提取到 `"`/`'`/`` ` ``/`<`/`>`/空白/反斜杠为止（HTML/JS 的包装边界），**原文不加不减**；
+   取到的必须过 `isCallback` 才认（`hms://evil.example.com/…` 这类钓鱼形状一个字都不提）。
+4. **三策略全败 → 既有结构化错误**（`qr_callback_redirect_failed`）：不猜、**不回显 URL**
+   （那个地址里带着 `code`）。跟随那一跳的网络失败仍是 `network_error`；换码接口自己失败仍是
+   `qr_confirm_failed`。诊断日志按 `via`（`params`/`location`/`body`）说清是哪条收的场，
+   **state 值一个字符都不进日志**。
+
+**state 接线核实（R34 的必核项，结论：已经是同一个 state，不需要改接线）**
+
+- 证据（真机探针存档，两条都点名了 state）：`.tmp/getLoginWay.json` —— CAS 把**我们发出去的那串
+  授权参数**（含 `state=probe-state`）原样嵌进 `casLoginRedirectUrl.service`；
+  `.tmp/cas-getPageInfo-mobile.json` —— 移动登录页下发的 `localInfo.service` 同样带着 `state=probe-state`。
+  **CAS 侧是原样回带，不是自己另生成一个。**
+- 代码路径（一处都没换过 state）：`attempt.authorizeUrl`（含 `attempt.state`）
+  → `walkToCasPortal` 把整串查询当表单正文 POST 给 `getLoginWay` → 门户/移动页 URL（同一串参数）
+  → `getPageInfo` 表单 → `localInfo.service` → `codeRemoteLogin` 的 `service` → `callbackURL` 的 `state`
+  → 策略①直构 → `consumeCallback(expectedState: attempt.state)` 比对。
+- 钉在 `test/qr-port.test.mjs` 的"R34 state 接线"一条：假世界照真机那样**从我们发出去的那串参数里
+  取 state 回带**，逐环断言（getLoginWay 正文、两次 getPageInfo 表单、换码 `service`），
+  最后交给**真的** `consumeCallback` 判通过——外加"换个 state 就拒"的反面控制（证明校验不是形同虚设）。
+
+钉在 `test/qr-port.test.mjs` 的 R34 12 条：策略①直构（零请求）/ 没有 code → 落② /
+`redirect_uri` 不是我们的不直构 / 没有 state 只带 code（并断言 `parseCallback` 会判 `missing_params`）/
+编码原样（`%2B` 不变 `+`）/ 302 链终点带 code 也直构（不多打一次）/ 策略③ 200 提取原文 /
+包装边界不加不减 / 两跳后从体里提取 / 体里只有别的 hms 域不提取 / 三策略全败结构化 /
+state 接线（含反面控制）。R33 那条"跟随那一跳网络失败"的剧本改用**查询里没有 code** 的中转页
+（带 code 的会被①当场收下，那一跳根本不会发生）。
+
+**仍未实测**：那句 HTTP 200 页面里**到底写的是哪一串跳转字面量**（③按"页面 JS 跳转目标"的通用形状实现，
+真机若给的是别的写法——例如把 `&` 写成 HTML 实体 `&amp;` 的属性值——③会提不出可用字面量，
+仍走结构化失败；`&amp;` 这一类**本轮不处理**，按"原文不加不减"的口径登记在此）→
+`docs/KNOWN_LIMITATIONS.md` A6。
 
 ## 2. 音乐业务接口
 
