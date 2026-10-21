@@ -55,11 +55,13 @@ test("频道：全部来自共享常量（不写字面量，channel-parity 已�
     "SETTINGS_GET",
     "SETTINGS_SET",
     "SETTINGS_TEST_PROXY",
-    "AUTH_LOGOUT",
   ]) {
     assert.match(page, new RegExp(`\\b${constant}\\b`), `设置页要用共享常量 ${constant}`);
   }
   assert.match(page, /from\s+"\.\.\/shared\/request-channels\.ts"/, "频道常量从共享真源导入");
+  // R38：`AUTH_LOGOUT` **不再**出现在设置页——退出搬到左下角账号区（App 的 SidebarFooter），
+  // 唯一实现收在 host-api 的 `coreLogout`（那一份由 proxy-settings-form.test.mjs 钉住）。
+  assert.doesNotMatch(page, /AUTH_LOGOUT/, "设置页不再直接摸退出频道（那一块已删）");
 });
 
 test("读取：settings:get 只打一次（挂载时），不是每次渲染一趟", () => {

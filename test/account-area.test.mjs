@@ -1,0 +1,103 @@
+/**
+ * R38 · 左下角账号区（`auth:status` 载荷里的可选 `profile` → 能渲染的三项）。
+ *
+ * 钉的是三条"不造假数据"的口径（它们全都会被界面直接暴露出来）：
+ * 1. **旧载荷必须照旧能认**：`auth:status` 的老形状没有 `profile` 这一格（R38 之前登录的会话
+ *    就是这样），解析必须回 `null`、**不抛**，界面走兜底（头像占位 + "已登录"）；
+ * 2. **缺什么兜什么，绝不编**：没有名字 → "已登录"（不显示 userId：那不是给人看的东西）；
+ *    没有头像 → `null`（`Avatar` 落到图标兜底）；VIP 只在 `vip === true` 时显示；
+ * 3. **形状不认识就当没有**：载荷是别人的数据，多余键、坏类型一律忽略。
+ *
+ * 先写先看红。
+ */
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+import {
+  ACCOUNT_FALLBACK_NAME,
+  ACCOUNT_LOGOUT_DESCRIPTION,
+  ACCOUNT_LOGOUT_FAILED_TEXT,
+  ACCOUNT_LOGOUT_TITLE,
+  accountAvatarUrl,
+  accountIsVip,
+  accountLogoutFailureText,
+  accountNameText,
+  profileFromStatusPayload,
+} from "../src/renderer/features/auth/account.mjs";
+
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const read = (relative) => readFileSync(`${repoRoot}${relative}`, "utf8");
+
+test("载荷解析：带 profile 认（只认那三个键），不带/坏形状回 null（旧载荷照旧能认）", () => {
+  assert.deepEqual(
+    profileFromStatusPayload({
+      loggedIn: true,
+      busy: false,
+      profile: { userName: "听歌的人", avatarUrl: "https://cdn.dbankcdn.cn/a.jpg", vip: true, userId: "SNS-1" },
+    }),
+    { userName: "听歌的人", avatarUrl: "https://cdn.dbankcdn.cn/a.jpg", vip: true },
+    "多余的键（userId 之类）不进投影",
+  );
+
+  // R38 之前的老载荷：没有 profile 这一格
+  assert.equal(profileFromStatusPayload({ loggedIn: true, busy: false }), null);
+  assert.equal(profileFromStatusPayload({ loggedIn: false, busy: false, message: "登录未完成" }), null);
+  assert.equal(profileFromStatusPayload(null), null);
+  assert.equal(profileFromStatusPayload(undefined), null);
+
+  // 坏形状一律当成"没有资料"，绝不抛
+  for (const bad of [42, "profile", [], { profile: null }, { profile: [] }, { profile: {} }]) {
+    assert.equal(profileFromStatusPayload(bad), null, JSON.stringify(bad));
+  }
+
+  // 只有一部分：缺的那部分就是缺（不是空串、不是占位符）
+  assert.deepEqual(profileFromStatusPayload({ profile: { vip: true } }), { vip: true });
+  assert.deepEqual(profileFromStatusPayload({ profile: { userName: "  名字  " } }), { userName: "名字" });
+  assert.deepEqual(profileFromStatusPayload({ profile: { userName: "   " } }), null, "空白名字等于没有名字");
+  assert.deepEqual(profileFromStatusPayload({ profile: { avatarUrl: 7 } }), null, "头像不是字符串就当没有");
+});
+
+test("显示：没有名字就是「已登录」（不显示 userId），VIP 只认明确的 true", () => {
+  assert.equal(accountNameText({ userName: "听歌的人" }), "听歌的人");
+  assert.equal(accountNameText(null), ACCOUNT_FALLBACK_NAME);
+  assert.equal(accountNameText({}), ACCOUNT_FALLBACK_NAME);
+  assert.equal(accountNameText({ userName: "  " }), ACCOUNT_FALLBACK_NAME);
+  assert.equal(ACCOUNT_FALLBACK_NAME, "已登录", "兜底那句话是实话：会话在，只是不知道它叫什么");
+  assert.doesNotMatch(ACCOUNT_FALLBACK_NAME, /userId|账号|uid/i);
+
+  assert.equal(accountAvatarUrl({ avatarUrl: "https://cdn.dbankcdn.cn/a.jpg" }), "https://cdn.dbankcdn.cn/a.jpg");
+  assert.equal(accountAvatarUrl({}), null);
+  assert.equal(accountAvatarUrl(null), null);
+
+  assert.equal(accountIsVip({ vip: true }), true);
+  assert.equal(accountIsVip({ vip: false }), false);
+  assert.equal(accountIsVip({}), false);
+  assert.equal(accountIsVip(null), false);
+});
+
+test("退出：文案与失败人话都来自这一处（core 的原话优先，认不出才用兜底那句）", () => {
+  assert.equal(ACCOUNT_LOGOUT_TITLE, "退出登录");
+  assert.match(ACCOUNT_LOGOUT_DESCRIPTION, /重新扫码登录/, "说明要写清代价（重扫成本高）");
+  assert.equal(accountLogoutFailureText({ message: "core 尚未就绪", kind: "core_unavailable" }), "core 尚未就绪");
+  assert.equal(accountLogoutFailureText({ message: "   " }), ACCOUNT_LOGOUT_FAILED_TEXT);
+  assert.equal(accountLogoutFailureText(null), ACCOUNT_LOGOUT_FAILED_TEXT);
+  assert.equal(accountLogoutFailureText("boom"), ACCOUNT_LOGOUT_FAILED_TEXT);
+});
+
+test("接线：资料与登录状态来自同一份载荷；账号区只用这一个模块的投影", () => {
+  const gate = read("src/renderer/login-gate.tsx");
+  assert.match(gate, /profileFromStatusPayload\(payload\)/, "门禁解析 profile（与状态同一处 apply）");
+  assert.match(gate, /profile: AccountProfile/, "AuthGate 暴露 profile 给外壳");
+  assert.doesNotMatch(gate, /\.userId\b/, "userId 不是给人看的（不显示账号标识）");
+
+  const app = read("src/renderer/App.tsx");
+  for (const helper of ["accountNameText(", "accountAvatarUrl(", "accountIsVip(", "accountLogoutFailureText("]) {
+    assert.match(app, new RegExp(helper.replace("(", "\\(")), `账号区要用纯逻辑模块的 ${helper}）`);
+  }
+  assert.match(app, /data-testid=\{ACCOUNT_AREA_TESTID\}/, "账号区要有测试锚点（CDP 取证也靠它）");
+  assert.match(app, /data-testid=\{ACCOUNT_VIP_TESTID\}/, "VIP 徽标要有锚点");
+  // 徽标只在为真时渲染（不是靠 CSS 藏起来）
+  assert.match(app, /\{accountVip \?/, "VIP 徽标由 accountIsVip 的结论决定");
+});

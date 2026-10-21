@@ -17,7 +17,6 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { SearchIcon } from "lucide-react"
 
 import {
-  AUTH_LOGOUT,
   LIBRARY_ALBUM,
   LIBRARY_ARTIST,
   LIBRARY_HISTORY,
@@ -56,7 +55,6 @@ import {
   closeBehaviorLabel,
   closeBehaviorNotice,
   closeBehaviorPatch,
-  loginStatusText,
   passwordHint,
   proxyFormFromSettings,
   proxyPatchFromForm,
@@ -500,16 +498,6 @@ export function SettingsPage({ queue = null, trayAvailable = TRAY_AVAILABLE, lyr
     }
   }
 
-  async function logout() {
-    setFailure(null)
-    try {
-      await coreCall(AUTH_LOGOUT, null)
-      // 不在这里自己跳回门禁页：`auth:status` 广播会把门禁层翻回来（唯一真源在 core）
-    } catch (error) {
-      setFailure(settingsFailureText(error))
-    }
-  }
-
   const busy = saving || testing
 
   return (
@@ -803,26 +791,6 @@ export function SettingsPage({ queue = null, trayAvailable = TRAY_AVAILABLE, lyr
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground">{queueSummaryText(queueSummary(queue))}</p>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>登录</CardTitle>
-          <CardDescription>
-            登录始终在华为官方的登录窗口里完成，本应用不接触你的凭据。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex items-center gap-3">
-          {/* 设置页只存在于 app-shell 里，而 app-shell 只在门禁判定为"已登录"时渲染
-              （`shouldShowLoginGate`）：这里的"已登录"是结构给的事实，不是页面自己猜的。
-              退出之后 `auth:status` 广播会把门禁翻回来，这个页面随之卸载。 */}
-          <span className="text-sm" role="status">
-            {loginStatusText(true)}
-          </span>
-          <Button variant="secondary" onClick={() => void logout()}>
-            退出登录
-          </Button>
         </CardContent>
       </Card>
     </div>

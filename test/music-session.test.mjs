@@ -23,6 +23,9 @@ import {
   createHuaweiMusicSessionPort,
   digestCreatedAt,
   parseMusicSessionResponse,
+  profileFromResponse,
+  profileOfSessionRecord,
+  topLevelKeysOf,
 } from "../src/main/music-session.mjs";
 
 const AT = "AT-SECRET-VALUE";
@@ -150,6 +153,92 @@ test("响应解析：成功码但 token 是空串 → invalid_response（空令�
   const result = parseMusicSessionResponse({ result: { resultCode: MUSIC_BUSINESS_OK }, token: "   " });
   assert.equal(result.ok, false);
   assert.equal(result.error.kind, MUSIC_SESSION_ERROR_KINDS.invalidResponse);
+});
+
+// —— 3.5 profile（R38：名字/头像/VIP 只收认得出的，认不出不显示） ----------------------
+
+test("profile：名字/头像/VIP 都取到 → 进会话记录（头像必须过 CDN 白名单）", () => {
+  const result = parseMusicSessionResponse({
+    result: { resultCode: MUSIC_BUSINESS_OK },
+    token: MUSIC_TOKEN,
+    snsUserID: "SNS-1",
+    userName: "听歌的人",
+    headUrl: "https://music-pics-drcn.dbankcdn.cn/avatar.jpg",
+    memberShip: 6,
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.data.profile, {
+    userName: "听歌的人",
+    avatarUrl: "https://music-pics-drcn.dbankcdn.cn/avatar.jpg",
+    vip: true,
+  });
+});
+
+test("profile：头像不在白名单 / 类型不对 / 空串一律不存（界面走兜底，不留碎图）", () => {
+  const foreign = parseMusicSessionResponse({
+    result: { resultCode: MUSIC_BUSINESS_OK },
+    token: MUSIC_TOKEN,
+    nickname: "名字",
+    avatarUrl: "https://evil.example.com/a.jpg",
+  });
+  assert.equal(foreign.ok, true);
+  assert.deepEqual(foreign.data.profile, { userName: "名字" }, "白名单外的头像不许进会话记录");
+
+  for (const bad of [{ avatar: 42 }, { head: { url: "https://cdn.dbankcdn.cn/a.jpg" } }, { headUrl: "   " }]) {
+    const result = parseMusicSessionResponse({ result: { resultCode: MUSIC_BUSINESS_OK }, token: MUSIC_TOKEN, ...bad });
+    assert.equal(result.data.profile, undefined, `坏形状的头像不存：${JSON.stringify(bad)}`);
+  }
+});
+
+test("profile：VIP 只认明确的布尔或有证据的数值（memberShip 含 6）；其余不猜", () => {
+  const ok = (fields) => parseMusicSessionResponse({ result: { resultCode: MUSIC_BUSINESS_OK }, token: MUSIC_TOKEN, ...fields });
+
+  assert.equal(ok({ vipFlag: true }).data.profile.vip, true);
+  assert.equal(ok({ isVip: "1" }).data.profile.vip, true);
+  assert.equal(ok({ memberFlag: 1 }).data.profile.vip, true);
+  assert.equal(ok({ memberShip: "16" }).data.profile.vip, true, "官方 H5 把含 6 的值当会员类别");
+
+  // 认不出的：0/缺省/没证据的数值字段（vipLevel、vipType）→ **不显示**（不猜枚举）
+  assert.equal(ok({ memberShip: 0 }).data.profile, undefined, "数值 0 是明确不是会员 → 不携带");
+  assert.equal(ok({ vipFlag: "yes" }).data.profile, undefined, "只认 0/1/true/false 这几种明确写法");
+  assert.equal(ok({ vipLevel: 3 }).data.profile, undefined, "vipLevel 没有枚举证据 → 不猜（宁可少显示）");
+  assert.equal(ok({ vipType: "2" }).data.profile, undefined);
+  assert.equal(ok({}).data.profile, undefined, "什么都没有就不带 profile 这个键");
+});
+
+test("profile：响应为空对象 / 坏形状 → 不抛、不造假（返回空对象）", () => {
+  for (const bad of [null, undefined, 42, "x", []]) {
+    assert.deepEqual(profileFromResponse(bad), {}, String(bad));
+  }
+  assert.deepEqual(profileFromResponse({ data: { userName: "嵌在 data 里" } }), { userName: "嵌在 data 里" });
+});
+
+test("profile：会话记录里的 profile 只搬那三个键（旧会话没有这一格 → null，界面走兜底）", () => {
+  assert.equal(profileOfSessionRecord({ musicSession: MUSIC_TOKEN, userId: "SNS-1" }), null, "R38 之前建的会话没有 profile");
+  assert.equal(profileOfSessionRecord(null), null);
+  assert.deepEqual(
+    profileOfSessionRecord({ musicSession: MUSIC_TOKEN, profile: { userName: "名字", avatarUrl: "https://cdn.dbankcdn.cn/a.jpg", vip: true, extra: "不该带" } }),
+    { userName: "名字", avatarUrl: "https://cdn.dbankcdn.cn/a.jpg", vip: true },
+    "白名单外的键不许跟着载荷出去",
+  );
+  assert.equal(profileOfSessionRecord({ profile: { vip: false } }), null, "只有 false 等于什么都没认出来");
+});
+
+test("诊断：顶层键名日志只给键名（排序、限量），值一个都不出现", async () => {
+  const logged = [];
+  const { impl } = fakeFetch({
+    body: { result: { resultCode: MUSIC_BUSINESS_OK }, token: MUSIC_TOKEN, snsUserID: "SNS-1", userName: "听歌的人" },
+  });
+  const exchange = portOf({ fetchImpl: impl, portOptions: { log: (line) => logged.push(line) } });
+  await exchange({ accessToken: AT, endpoint: HUAWEI_MUSIC_LOGINEX_ENDPOINT });
+
+  assert.equal(logged.length, 1, "每次兑换一条（成功路径一条 INFO）");
+  assert.match(logged[0], /result, snsUserID, token, userName/, "键名按字典序给出（这就是要看的东西）");
+  assert.ok(!logged[0].includes(MUSIC_TOKEN), "令牌值不许进日志");
+  assert.ok(!logged[0].includes(AT), "AT 不许进日志");
+  assert.ok(!logged[0].includes("听歌的人"), "资料值也不进日志（只要键名）");
+  assert.deepEqual(topLevelKeysOf({ b: 1, a: 2, c: 3 }), ["a", "b", "c"]);
+  assert.deepEqual(topLevelKeysOf(null), []);
 });
 
 // —— 4. 端口行为 ---------------------------------------------------------------------

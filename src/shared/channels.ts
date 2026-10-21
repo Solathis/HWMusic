@@ -22,7 +22,8 @@ export const CORE_EVENT = "core:event";
 export const APP_NOTICE = "app:notice" as const;
 
 /**
- * 登录状态广播（R7 增补）：`{loggedIn: boolean, busy: boolean, message?: string}`。
+ * 登录状态广播（R7 增补）：`{loggedIn: boolean, busy: boolean, message?: string,
+ * profile?: {userName?: string, avatarUrl?: string, vip?: boolean}}`。
  *
  * 为什么是独立频道而不是复用 `app:notice`：`app:notice` 的语义是"给用户看的提示文案"，
  * 而登录状态是**状态**——渲染层的门禁与 R8 主界面靠它决定"该显示哪一层"，
@@ -34,6 +35,13 @@ export const APP_NOTICE = "app:notice" as const;
  *
  * 启动期的那一条也会经 Rust 的 NoticeQueue 排队（渲染层就绪后冲刷），所以"渲染层还没订阅"
  * 不会丢掉"已登录"这个事实。
+ *
+ * R38 增补**可选** `profile`（左下角账号区的名字/头像/VIP）：它来自 loginex 响应里认得出的
+ * 那几项（`src/main/music-session.mjs` 的 `profileFromResponse`，认不出就不带这个键）。
+ * **载荷是可选的、向前兼容的**：R38 之前建的会话没有这一格，解析（
+ * `src/renderer/features/auth/account.mjs` 的 `profileFromStatusPayload`）必须认旧形状，
+ * 界面走兜底（头像占位 + "已登录"）。**不新开频道**：Rust 侧的频道常量表是硬钉的 parity
+ * （`src-tauri/src/bridge.rs`），状态里多一个可选字段不需要动 Rust。
  */
 export const AUTH_STATUS = "auth:status" as const;
 

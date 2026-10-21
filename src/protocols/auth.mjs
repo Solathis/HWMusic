@@ -244,9 +244,26 @@ function toTokenSet(payload, { now, previousRefreshToken = null }) {
 }
 
 /**
+ * 令牌响应顶层键名的**键名日志**（R38 诊断；只记键名、绝不记值）。
+ *
+ * 为什么需要它：`token` 端点的响应里到底有没有用户资料字段（名字/头像/VIP）从来没有实证——
+ * 登录链成功后只取了 `access_token`。把键名记下来，下一次真机登录就有真实形状可依，
+ * 而不是继续往候选表里加猜测键。回调默认空实现（协议层自己不写日志）。
+ */
+function reportResponseKeys(payload, onResponseKeys) {
+  if (typeof onResponseKeys !== "function") return;
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return;
+  const keys = Object.keys(payload).sort().slice(0, 40);
+  if (keys.length === 0) return;
+  onResponseKeys(keys);
+}
+
+/**
  * 授权码兑换（token endpoint，带 code_verifier）。
  * @param {{endpoint: string, code: string, codeVerifier: string, redirectUri?: string, clientId?: string,
- *          fetchImpl?: Function, now?: number, signal?: AbortSignal}} params
+ *          fetchImpl?: Function, now?: number, signal?: AbortSignal,
+ *          onResponseKeys?: (keys: string[]) => void}} params
+ *   `onResponseKeys`（R38）：拿到了响应体就把**顶层键名**交出去（只记键名，见 `reportResponseKeys`）。
  * @returns {Promise<{ok: true, data: object} | {ok: false, error: {message: string, kind: string}}>}
  */
 export async function exchangeAuthorizationCode({
@@ -258,6 +275,7 @@ export async function exchangeAuthorizationCode({
   fetchImpl = globalThis.fetch,
   now = Date.now(),
   signal,
+  onResponseKeys,
 } = {}) {
   if (!isHttpsEndpoint(endpoint)) return endpointError("token 端点");
   if (!isNonEmptyString(code)) return err("授权码为空", AUTH_ERROR_KINDS.missingParam);
@@ -279,6 +297,7 @@ export async function exchangeAuthorizationCode({
   });
   if (!response.ok) return response;
 
+  reportResponseKeys(response.data, onResponseKeys);
   const tokenSet = toTokenSet(response.data, { now });
   if (tokenSet === null) return err("token 端点响应里没有 access_token", AUTH_ERROR_KINDS.invalidResponse);
   return ok(tokenSet);
@@ -294,6 +313,7 @@ export async function refreshAccessToken({
   fetchImpl = globalThis.fetch,
   now = Date.now(),
   signal,
+  onResponseKeys,
 } = {}) {
   if (!isHttpsEndpoint(endpoint)) return endpointError("token 端点");
   if (!isNonEmptyString(refreshToken)) return err("refresh_token 为空", AUTH_ERROR_KINDS.missingParam);
@@ -310,6 +330,7 @@ export async function refreshAccessToken({
   });
   if (!response.ok) return response;
 
+  reportResponseKeys(response.data, onResponseKeys);
   const tokenSet = toTokenSet(response.data, { now, previousRefreshToken: refreshToken });
   if (tokenSet === null) return err("token 端点响应里没有 access_token", AUTH_ERROR_KINDS.invalidResponse);
   return ok(tokenSet);

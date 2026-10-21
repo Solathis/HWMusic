@@ -90,6 +90,15 @@ import {
 import { Button } from "./components/ui/button"
 import { Skeleton } from "./components/ui/skeleton"
 import { coreCall, isCoreError, onCoreEvent, rendererReady } from "./host-api"
+import { profileFromStatusPayload } from "./features/auth/account.mjs"
+
+/**
+ * 账号资料的渲染层形状（与 `features/auth/account.mjs` 的投影同形；`null` = 认不出任何一项）。
+ *
+ * 类型写在 TS 这一侧而不是从 `.mjs` 里 import：那个模块是纯 JS（跑在 node 测试里），
+ * 形状的唯一真源是它的 `profileFromStatusPayload`——类型只是给编辑器用的镜像。
+ */
+export type AccountProfile = { userName?: string; avatarUrl?: string; vip?: boolean } | null
 import {
   LOGIN_GATE_EVENT,
   LOGIN_GATE_TITLE,
@@ -119,11 +128,21 @@ import {
 import { QR_SIZE_PX, paintQrCanvas } from "./features/auth/qr-canvas.mjs"
 import { ThemeControl } from "./theme-control"
 
-/** `auth:status` 广播的载荷（与 src/shared/channels.ts 的说明同源）。 */
+/**
+ * `auth:status` 广播的载荷（与 src/shared/channels.ts 的说明同源）。
+ *
+ * R38 增补可选 `profile`（名字/头像/VIP）：**旧载荷没有这个键也必须能认**——
+ * 它是可选字段，解析一律走 `profileFromStatusPayload`（认不出就返回 `null`，界面走兜底）。
+ */
 export interface AuthStatusPayload {
   loggedIn: boolean
   busy: boolean
   message?: string
+  profile?: {
+    userName?: string
+    avatarUrl?: string
+    vip?: boolean
+  }
 }
 
 /** `auth:qr` 广播的载荷（二维码的生命周期，与 sidecar 的 QR_LOGIN_STATUS 同值）。 */
@@ -137,6 +156,14 @@ export interface QrStatusPayload {
 
 export interface AuthGate {
   state: ReturnType<typeof initialGateState>
+  /**
+   * 账号资料（R38）：名字/头像/VIP 三项的**可渲染投影**，认不出任何一项就是 `null`。
+   *
+   * 为什么由门禁这一层给出：`auth:status` 的订阅与 R19 的那次主动查询都在这里，
+   * 资料与登录状态**来自同一份载荷**——另起一处订阅会让"状态说已登录、资料说没登录"这种事
+   * 有地方长出来。左下角账号区（App 的 SidebarFooter）只是它的消费者。
+   */
+  profile: AccountProfile
   /** 发起 / 重新发起二维码（自动开始、二维码容器点击、"重试"都走这一条） */
   startQr: () => void
   /**
@@ -180,6 +207,8 @@ function statusEventOf(payload: AuthStatusPayload | null | undefined) {
  */
 export function useAuthGate(): AuthGate {
   const [state, setState] = useState(initialGateState)
+  /** 账号资料（R38）：与登录状态来自**同一份** `auth:status` 载荷，只是各存一份投影。 */
+  const [profile, setProfile] = useState<AccountProfile>(null)
   /** 自动开始只发起一次（StrictMode 会重复跑 effect：两次建单 = 白白换掉一张用户正在扫的码） */
   const qrStartedRef = useRef(false)
 
@@ -188,11 +217,17 @@ export function useAuthGate(): AuthGate {
     let unlistenStatus: (() => void) | null = null
     let unlistenQr: (() => void) | null = null
 
+    /** 载荷 → 门禁状态 + 账号资料（广播与 R19 的查询应答**共用这一处**）。 */
+    const applyStatus = (payload: AuthStatusPayload | null | undefined) => {
+      setState((current) => reduceGateState(current, statusEventOf(payload)))
+      setProfile(profileFromStatusPayload(payload))
+    }
+
     void (async () => {
       try {
         unlistenStatus = await onCoreEvent<AuthStatusPayload>(AUTH_STATUS, (payload) => {
           if (disposed) return
-          setState((current) => reduceGateState(current, statusEventOf(payload)))
+          applyStatus(payload)
         })
         unlistenQr = await onCoreEvent<QrStatusPayload>(AUTH_QR, (payload) => {
           if (disposed) return
@@ -213,7 +248,7 @@ export function useAuthGate(): AuthGate {
         // 订阅就位、启动期队列冲刷过之后，主动问一次当前状态（见本钩子的说明）
         const snapshot = await coreCall<AuthStatusPayload>(AUTH_GET_STATUS, null)
         if (disposed) return
-        setState((current) => reduceGateState(current, statusEventOf(snapshot)))
+        applyStatus(snapshot)
       } catch (failure) {
         // 外壳起不来（core 没启动、查询频道还不存在）不该让界面白屏，但**也不许猜档位**：
         // 查不到是"还不知道"，不是"未登录"。如实把那句话放到状态行上——空转的
@@ -323,7 +358,7 @@ export function useAuthGate(): AuthGate {
     return () => clearInterval(timer)
   }, [expiresAt])
 
-  return { state, startQr, startLogin }
+  return { state, profile, startQr, startLogin }
 }
 
 /** 二维码画布：内容换一张就重画（编码与纠错全交给库，这里不碰二维码算法）。 */

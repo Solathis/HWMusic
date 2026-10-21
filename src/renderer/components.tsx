@@ -17,6 +17,7 @@
  * 不做"点了看起来成功、其实什么都没存"的乐观更新。
  */
 import { useState } from "react"
+import type { ComponentType } from "react"
 import {
   HeartIcon,
   ListMusicIcon,
@@ -59,6 +60,7 @@ import {
   trackAlbumOf,
   trackArtistIdOf,
   trackArtistsOf,
+  trackCoverUrlOf,
   trackDurationOf,
   trackIdOf,
   trackNameOf,
@@ -80,6 +82,58 @@ export function EmptyState({ text }: { text: string }) {
     <p className="px-4 py-10 text-center text-sm text-muted-foreground" role="status">
       {text}
     </p>
+  )
+}
+
+/**
+ * 封面（R38）：`<img>` + 兜底占位。
+ *
+ * 三条硬约束（docs/API_CONTRACT.md §2.4）：
+ * - **只用 `<img src>`，绝不 fetch**：图片走 CSP 的 `img-src` 白名单，而 `connect-src`
+ *   只有 self/ipc——`fetch` 那张封面一定被拦掉，界面上表现为一片空白（比占位更糟）；
+ * - **加载失败落回占位**：白名单内的地址也可能 404/过期，`onError` 之后不再留碎图；
+ * - **地址由协议层筛过**（`normalizeTrack`/`normalizePlaylist` 只带 CDN 白名单内的地址），
+ *   这里的 `coverUrl === null` 是常态（无封面/未投影），不是错误。
+ *
+ * 视觉只有令牌类与 lucide 图标，尺寸由调用方给（`size-9`/`size-10` 之类）。
+ */
+export function CoverArt({
+  coverUrl,
+  className,
+  iconClassName,
+  icon: Icon = MusicIcon,
+}: {
+  coverUrl: string | null
+  /** 尺寸/圆角等令牌类（由调用方给，例如 `size-10 rounded-md`） */
+  className?: string
+  /** 占位图标的尺寸类（默认 `size-5`） */
+  iconClassName?: string
+  /** 占位图标（默认音符；歌单卡用清单图标，与它自己的语义一致） */
+  icon?: ComponentType<{ className?: string }>
+}) {
+  // 失败状态记的是**哪一个地址**失败过，而不是一个裸布尔：地址一换就自动重新给一次机会。
+  // 裸布尔会粘死 `PlayerBar`（:338）那一个跨曲目常驻的实例——一首歌的封面 404 一次，
+  // 之后每一首都永久落图标占位。TrackTable / QueuePanel 的行按条目重挂、`key` 一变就复位，
+  // 所以这个 bug 只在 PlayerBar 露头（R38 审查 §1）。
+  // 用"从 props 推"而不是 `useEffect(..., [coverUrl])` 复位：effect 在**绘制之后**才跑，
+  // 换歌那一帧会先画出上一首留下的占位图标（React 官方的 "You Might Not Need an Effect" 也推荐前者）。
+  const [failedUrl, setFailedUrl] = useState<string | null>(null)
+  const showImage = coverUrl !== null && failedUrl !== coverUrl
+
+  return (
+    <div className={`flex shrink-0 items-center justify-center overflow-hidden bg-muted ${className ?? ""}`}>
+      {showImage ? (
+        <img
+          src={coverUrl}
+          alt=""
+          loading="lazy"
+          className="size-full object-cover"
+          onError={() => setFailedUrl(coverUrl)}
+        />
+      ) : (
+        <Icon className={`text-muted-foreground ${iconClassName ?? "size-5"}`} />
+      )}
+    </div>
   )
 }
 
@@ -181,7 +235,13 @@ export function TrackTable({
               className="focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
             >
               <TableCell className="text-center tabular-nums text-muted-foreground">{index + 1}</TableCell>
-              <TableCell className="font-medium">{trackNameOf(song)}</TableCell>
+              <TableCell className="font-medium">
+                {/* R38：小封面（`<img>` + 占位兜底见 CoverArt）——地址来自协议层的白名单投影 */}
+                <div className="flex min-w-0 items-center gap-2">
+                  <CoverArt coverUrl={trackCoverUrlOf(song)} className="size-9 rounded-md" iconClassName="size-4" />
+                  <span className="truncate">{trackNameOf(song)}</span>
+                </div>
+              </TableCell>
               <TableCell>
                 <Button
                   variant="link"
@@ -280,9 +340,8 @@ export function PlayerBar({ runtime, state }: PlayerBarProps) {
       data-testid="player-bar"
     >
       <div className="flex items-center gap-3">
-        <div className="flex size-10 shrink-0 items-center justify-center rounded-md bg-muted">
-          <MusicIcon className="size-5 text-muted-foreground" />
-        </div>
+        {/* R38：当前曲目封面（播放中本来就有 coverUrl 投影；没有就是图标占位） */}
+        <CoverArt coverUrl={trackCoverUrlOf(state.track)} className="size-10 rounded-md" />
         <div className="flex min-w-0 flex-col">
           <span className="truncate text-sm font-medium">{trackTitleOf(state.track)}</span>
           <span className="truncate text-xs text-muted-foreground">
@@ -425,6 +484,8 @@ export function QueuePanel({ entries, index, onSelect, onClear }: QueuePanelProp
                 aria-current={position === index ? "true" : undefined}
                 onClick={() => onSelect?.(position)}
               >
+                {/* R38：队列行的小封面（恢复出来的条目只有标识，占位是常态） */}
+                <CoverArt coverUrl={trackCoverUrlOf(entry)} className="size-6 rounded-sm" iconClassName="size-3.5" />
                 <span className="truncate">{trackTitleOf(entry)}</span>
                 <span className="ml-auto shrink-0 text-xs text-muted-foreground">{trackArtistOf(entry)}</span>
               </Button>

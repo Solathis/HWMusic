@@ -309,6 +309,10 @@ function coverUrlOf(item, isSafeUrl) {
  *
  * **没有 id 的条目一律返回 null**（调用方如实丢弃并计数，绝不编一个 id——
  * 列表里出现删不掉的幽灵行比少一行糟得多）。
+ *
+ * R38：条目自带的歌词地址（`lyricAddress`，真机实测在列表条目上存在）不进曲目投影
+ * （渲染层不需要、投影契约不动），而是经 `options.onLyricAddress(id, url)` 交给调用方
+ * ——`createMusicApi` 用它填**进程内的地址索引**，供 `getLyrics` 取歌词（见那边的说明）。
  */
 export function normalizeTrack(item, options = {}) {
   const isSafeUrl = options.isSafeUrl ?? isSafeMediaUrl;
@@ -320,6 +324,10 @@ export function normalizeTrack(item, options = {}) {
   const albumId = textOf(item.albumID ?? item.albumId ?? albumPair?.id ?? albumPair?.albumID);
   const albumName = textOf(item.albumName ?? albumPair?.name ?? albumPair?.albumName);
   const coverUrl = coverUrlOf(item, isSafeUrl);
+  if (typeof options.onLyricAddress === "function") {
+    const lyricAddress = lyricAddressOf(item, { isSafeUrl });
+    if (lyricAddress !== null) options.onLyricAddress(id, lyricAddress);
+  }
   const track = { id };
   if (name !== null) track.name = name;
   const singer = artistsTextOf(item);
@@ -552,24 +560,47 @@ function contentExInfoOf(raw) {
 }
 
 /**
+ * 歌词地址/内嵌歌词的**候选容器**（R38 增补）。
+ *
+ * 为什么不止看响应本体（真机取证，2026-10-21）：曲目条目（`songSimpleInfos[]` 那一档）**自带
+ * `lyricAddress`**（实测该批次 3/3 条都有，域在 `safe-media-url.mjs` 的白名单内）；
+ * 而播放响应是按音频文件组织的，同一首歌的歌词地址未必平铺在顶层。
+ * `songInfo` 正是**同一个曲目条目形状**（`parsePlaybackPayload` 也从它读 `duration`），
+ * 所以它里面的 `lyricAddress` / `contentExInfo` 与顶层按同一份候选表读——
+ * 这仍然是"读已有字段"，不是发明字段：所有候选都要过 CDN 白名单才算数。
+ */
+function lyricContainersOf(raw) {
+  const containers = [raw];
+  const songInfo = isObject(raw.songInfo) ? raw.songInfo : null;
+  if (songInfo !== null) containers.push(songInfo);
+  return containers;
+}
+
+/** 一个容器里的歌词地址候选（顺序即优先级：先本体的，再 `contentExInfo` 里那几种形态）。 */
+function lyricAddressCandidatesOf(container) {
+  const values = [container.lyricAddress, container.lyricAddres];
+  const extra = contentExInfoOf(container);
+  if (extra !== null) {
+    values.push(extra.lyricAddress, extra.lyricAddres, extra.lyrics?.lyricAddress, extra.lyrics?.lineByLineLyric);
+  }
+  values.push(container.lyrics?.lineByLineLyric);
+  return values;
+}
+
+/**
  * 歌词资源地址（参考 `lyricAddressFrom` 的字段清单，含历史拼写 `lyricAddres`）。
  * 只认 CDN 白名单内的地址——歌词资源同样走那条白名单。
+ *
+ * R38：候选容器从"响应本体"扩到"响应本体 + 内嵌曲目对象（`songInfo`）"，
+ * 每个容器内部仍按同一份字段清单读（见 `lyricContainersOf`）。
  */
 export function lyricAddressOf(raw, options = {}) {
   const isSafeUrl = options.isSafeUrl ?? isSafeMediaUrl;
   if (!isObject(raw)) return null;
-  const extra = contentExInfoOf(raw) ?? {};
-  const values = [
-    raw.lyricAddress,
-    raw.lyricAddres,
-    extra.lyricAddress,
-    extra.lyricAddres,
-    extra.lyrics?.lyricAddress,
-    extra.lyrics?.lineByLineLyric,
-    raw.lyrics?.lineByLineLyric,
-  ];
-  for (const value of values) {
-    if (typeof value === "string" && isSafeUrl(value)) return value;
+  for (const container of lyricContainersOf(raw)) {
+    for (const value of lyricAddressCandidatesOf(container)) {
+      if (typeof value === "string" && isSafeUrl(value)) return value;
+    }
   }
   return null;
 }
@@ -577,14 +608,18 @@ export function lyricAddressOf(raw, options = {}) {
 /**
  * 内嵌歌词文本（参考 `inlineLyricsFrom`）：有的播放响应不给地址，直接把歌词塞在
  * `contentExInfo.lyrics` 里，而且**可能再套一层 JSON 字符串**（最多剥两层）。
+ *
+ * R38：与 `lyricAddressOf` 同一处扩到 `songInfo`（同一份候选表，不另立规则）。
  */
 export function inlineLyricsOf(raw) {
   if (!isObject(raw)) return null;
-  const extra = contentExInfoOf(raw) ?? {};
-  const values = [extra.lyrics, extra.Lyrics, raw.lyrics, raw.Lyrics];
-  for (const value of values) {
-    const text = unwrapLyricValue(value);
-    if (text !== null) return text;
+  for (const container of lyricContainersOf(raw)) {
+    const extra = contentExInfoOf(container) ?? {};
+    const values = [extra.lyrics, extra.Lyrics, container.lyrics, container.Lyrics];
+    for (const value of values) {
+      const text = unwrapLyricValue(value);
+      if (text !== null) return text;
+    }
   }
   return null;
 }
@@ -615,7 +650,8 @@ function favoritesHasMore(received, limit) {
  *          sessionHeaders?: (context: {key: string, authenticated: boolean}) => Record<string, string>,
  *          pageSize?: number, maxPages?: number, flagKeys?: string[],
  *          isSafeUrl?: (url: string) => boolean, timeoutMs?: number,
- *          discoveryLimit?: number, discoveryPageCap?: number}} options
+ *          discoveryLimit?: number, discoveryPageCap?: number,
+ *          lyricIndexLimit?: number}} options
  *
  * `session` 是 `{token, snsUserID}`（音乐会话；`snsUserID` 是收藏/歌单发现必需的
  * `targetSnsUserID` 来源）。可以传对象，也可以传函数（会话在运行时才会变——
@@ -635,6 +671,45 @@ export function createMusicApi(options = {}) {
   const sessionSource = options.session;
   /** 被设置**显式关闭**的端点（`musicEndpoints: {favorites: null}`）：报错要说得比"尚未确定"更准。 */
   const disabledEndpoints = new Set(options.disabledEndpoints ?? []);
+
+  /**
+   * 曲目条目里的歌词地址**进程内索引**（R38）：`trackId → 白名单内的歌词地址`。
+   *
+   * 为什么需要它（真机取证 2026-10-21）：华为的曲目条目自带 `lyricAddress`（列表/专辑响应
+   * `songSimpleInfos[]` 实测该批次 3/3 有，域在白名单内），而
+   * **播放响应里没有**——`getLyrics` 从前只问播放响应，所以永远拿不到歌词。
+   * 官方 H5 也是拿列表里那条地址，而不是"按曲目 id 再问一次歌词"。
+   *
+   * 三条边界：
+   * 1. **只在进程内存**：不落盘、不进设置、不跨进程（sidecar 重启即空，没有"上次的地址还能用"的假象）；
+   * 2. **只记已经加载过的条目**：用户没在列表里见过的曲目，索引里就没有（那时仍走播放响应那条路）；
+   * 3. **有上限、先进先出**：浏览几千首也不会让这张表无界增长。
+   * 另外地址可能带时效签名——取歌词时**先过一遍白名单**，下载失败就照旧回落到播放响应那条路。
+   */
+  const lyricAddressIndex = new Map();
+  const lyricAddressIndexLimit = positiveInt(options.lyricIndexLimit, 400);
+
+  function rememberLyricAddress(trackId, address) {
+    if (!isNonEmptyString(trackId) || !isNonEmptyString(address)) return;
+    if (!isSafeUrl(address)) return;
+    // 重新记一次要挪到队尾（"最近见过"才是最可能还有效的那个）
+    if (lyricAddressIndex.has(trackId)) lyricAddressIndex.delete(trackId);
+    lyricAddressIndex.set(trackId, address);
+    while (lyricAddressIndex.size > lyricAddressIndexLimit) {
+      const oldest = lyricAddressIndex.keys().next().value;
+      lyricAddressIndex.delete(oldest);
+    }
+  }
+
+  /** 取索引里的地址（**再过一次白名单**：索引里的东西也要自己证明自己还在名单内）。 */
+  function indexedLyricAddress(trackId) {
+    const value = lyricAddressIndex.get(trackId);
+    if (typeof value !== "string") return null;
+    return isSafeUrl(value) ? value : null;
+  }
+
+  /** 曲目归一化的共同选项：白名单校验 + 顺手把歌词地址记进索引（唯一一处拼它）。 */
+  const trackOptions = { isSafeUrl, onLyricAddress: rememberLyricAddress };
 
   /** 当前音乐会话（对象或"返回对象的函数"两种传法都认）。 */
   function currentSession() {
@@ -801,7 +876,7 @@ export function createMusicApi(options = {}) {
     }
 
     function accept(page) {
-      const normalized = normalizeListPage(page, { isSafeUrl });
+      const normalized = normalizeListPage(page, trackOptions);
       skipped += normalized.skipped;
       let added = 0;
       for (const item of normalized.songs) {
@@ -870,7 +945,7 @@ export function createMusicApi(options = {}) {
     const pageSize = positiveInt(request.pageSize, defaultPageSize);
     const result = await listFavoritesPage({ page, pageSize });
     if (!result.ok) return result;
-    const normalized = normalizeListPage(result.data, { isSafeUrl });
+    const normalized = normalizeListPage(result.data, trackOptions);
     return ok({
       page,
       pageSize,
@@ -962,7 +1037,7 @@ export function createMusicApi(options = {}) {
       if (!result.ok) return { failure: result };
       const container = pickPath(result.data, "playListInfoEx");
       if (!isObject(container)) return { empty: true, result };
-      const songs = extractList({ list: container.playListSongInfoList ?? [] }).map((item) => normalizeTrack(item, { isSafeUrl })).filter((track) => track !== null);
+      const songs = extractList({ list: container.playListSongInfoList ?? [] }).map((item) => normalizeTrack(item, trackOptions)).filter((track) => track !== null);
       const playlist = normalizePlaylist({ ...(isObject(container.playListInfo) ? container.playListInfo : {}), contentType: "5" }, { isSafeUrl });
       return { songs, playlist, received: Array.isArray(container.playListSongInfoList) ? container.playListSongInfoList.length : 0 };
     }
@@ -974,7 +1049,7 @@ export function createMusicApi(options = {}) {
       if (!result.ok) return { failure: result };
       const container = pickPath(result.data, "musicListInfoEx");
       if (!isObject(container)) return { empty: true, result };
-      const songs = extractList({ list: container.songSimpleInfos ?? [] }).map((item) => normalizeTrack(item, { isSafeUrl })).filter((track) => track !== null);
+      const songs = extractList({ list: container.songSimpleInfos ?? [] }).map((item) => normalizeTrack(item, trackOptions)).filter((track) => track !== null);
       const detail = isObject(container.musicListDetail) ? container.musicListDetail : {};
       const playlist = normalizePlaylist({ ...detail, contentType: detail.contentType ?? "4" }, { isSafeUrl });
       return { songs, playlist, received: Array.isArray(container.songSimpleInfos) ? container.songSimpleInfos.length : 0 };
@@ -1026,7 +1101,7 @@ export function createMusicApi(options = {}) {
       },
     });
     if (!result.ok) return result;
-    const normalized = normalizeListPage(result.data, { isSafeUrl });
+    const normalized = normalizeListPage(result.data, trackOptions);
     return ok({
       songs: normalized.songs,
       skipped: normalized.skipped,
@@ -1044,7 +1119,7 @@ export function createMusicApi(options = {}) {
     if (!result.ok) return result;
     const container = pickPath(result.data, "albumInfoEx") ?? {};
     const songs = extractList({ list: container.songSimpleInfos ?? [] })
-      .map((item) => normalizeTrack(item, { isSafeUrl }))
+      .map((item) => normalizeTrack(item, trackOptions))
       .filter((track) => track !== null);
     return ok({
       albumId: albumId.trim(),
@@ -1064,7 +1139,7 @@ export function createMusicApi(options = {}) {
     if (!result.ok) return result;
     const container = pickPath(result.data, "artistInfoEx") ?? {};
     const songs = extractList({ list: container.songSimpleInfos ?? [] })
-      .map((item) => normalizeTrack(item, { isSafeUrl }))
+      .map((item) => normalizeTrack(item, trackOptions))
       .filter((track) => track !== null);
     // 歌手页的曲目是**有限列表**（参考：start 分页未验证，不造无限滚动接口）
     return ok({ artistId: artistId.trim(), songs, detail: result.data });
@@ -1074,7 +1149,7 @@ export function createMusicApi(options = {}) {
   async function getHistory(request = {}) {
     const result = await call("history", { params: { contentType: "1" } });
     if (!result.ok) return result;
-    const normalized = normalizeListPage(result.data, { isSafeUrl });
+    const normalized = normalizeListPage(result.data, trackOptions);
     return ok({ songs: normalized.songs, skipped: normalized.skipped, hasMore: false, reportedTotal: normalized.reportedTotal });
   }
 
@@ -1098,32 +1173,47 @@ export function createMusicApi(options = {}) {
   }
 
   /**
-   * 歌词文本（R12；R32 起默认**从播放响应推导**——参考实现里没有独立歌词端点）。
+   * 歌词文本（R12；R32 起默认**从播放响应推导**；R38 起先看列表条目里那条地址）。
    *
-   * 两条路：
+   * 三条路，按"最可能有、最便宜"排序：
    * 1. 设置里显式注入过 `musicEndpoints.lyrics` → 直接打那个端点（形状按候选键宽容读取）；
-   * 2. 否则：取一次播放响应 → `lyricAddress`（CDN 白名单内）→ 下载文本；
+   * 2. **已加载过的曲目条目里那条 `lyricAddress`**（见 `lyricAddressIndex`）：官方 H5 走的就是
+   *    列表里这条地址；命中就省掉一次播放请求。地址可能带时效签名——下载失败不算结论，继续往下走；
+   * 3. 播放响应：`lyricAddress`（白名单内，含内嵌的 `songInfo`）→ 下载文本；
    *    没有地址就看内嵌的 `contentExInfo.lyrics`。
    *
+   * 三条都没有才回 `invalid_response`，且**不把整段响应体当歌词**塞给渲染层。
    * 拿到的文本**不进日志、不落盘**：它只经这一帧交给渲染层。
    */
   async function getLyrics(request = {}) {
     const trackId = request.trackId ?? request.id;
     if (!isNonEmptyString(trackId)) return err("歌词接口需要 trackId", MUSIC_ERROR_KINDS.missingParam);
+    const id = trackId.trim();
 
     if (isNonEmptyString(endpoints.lyrics)) {
-      const direct = await call("lyrics", { params: { contentID: trackId.trim(), contentType: "1" } });
+      const direct = await call("lyrics", { params: { contentID: id, contentType: "1" } });
       if (!direct.ok) return direct;
       return parseLyricsPayload(direct.data);
     }
 
+    const warnings = [];
+
+    // ② 进程内索引里那条地址（用户已经加载过的列表条目自带的）
+    const indexed = indexedLyricAddress(id);
+    if (indexed !== null) {
+      const fetched = await fetchLyricsText(indexed);
+      if (fetched.ok) return ok({ text: fetched.data, format: "lrc", warnings });
+      // 地址过期/被拒：如实记一笔，继续走播放响应那条路（它可能给出一个新地址）
+      warnings.push(fetched.error.kind);
+    }
+
+    // ③ 播放响应（含内嵌 songInfo 的同一份候选表）
     const qualityType = MUSIC_QUALITY_TYPES[request.quality ?? "standard"] ?? MUSIC_QUALITY_TYPES.standard;
     const result = await call("playback", {
-      params: { contentCode: trackId.trim(), contentType: "1", qualityType },
+      params: { contentCode: id, contentType: "1", qualityType },
     });
     if (!result.ok) return result;
 
-    const warnings = [];
     const address = lyricAddressOf(result.data, { isSafeUrl });
     if (address !== null) {
       const fetched = await fetchLyricsText(address);
@@ -1134,7 +1224,7 @@ export function createMusicApi(options = {}) {
     if (inline !== null) return ok({ text: inline, format: "lrc", warnings });
 
     return err(
-      "播放响应里没有可用的歌词（既没有 CDN 白名单内的 lyricAddress，也没有内嵌歌词）",
+      "这首歌没有可用的歌词（已加载的曲目条目与播放响应里都没有白名单内的歌词地址，也没有内嵌歌词）",
       MUSIC_ERROR_KINDS.invalidResponse,
     );
   }

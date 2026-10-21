@@ -102,11 +102,12 @@ export const PLAYBACK_RESOLVE_URL = "playback:resolve-url" as const;
  * `parseLrc` 的职责（R9 的 `features/lyrics/amll-adapter.ts` 在它之上补 `[offset:]` 与翻译行）。
  * 把解析放在 sidecar 会让渲染层拿到的是一份"别人解析好的东西"，AMLL 的版本一变就对不上。
  *
- * **文本来源（R32 换血）**：参考实现里没有独立歌词端点——歌词从**播放响应**里取
- * （`lyricAddress` 走 CDN 白名单下载，或内嵌的 `contentExInfo.lyrics`）。
- * 所以默认那条路的第一个缺的端点其实是 `playback`；失败时协议层回结构化
- * `endpoint_unknown`（界面说"歌词来源尚未配置"）或 `invalid_response`
- * （"这首歌的响应里没有歌词"）——两者不互相冒充。
+ * **文本来源（R32 换血；R38 按真机取证改成三档）**：参考实现里没有独立歌词端点。R38 的真机
+ * 取证（2026-10-21）发现：**曲目条目自带 `lyricAddress`**（列表/专辑响应实测都有，域在白名单内、
+ * 无查询串、GET 200 且是真 LRC），而**播放响应里没有任何歌词字段**。所以顺序是
+ * 「显式注入的歌词端点 → 用户已加载过的条目里那条地址（协议层的进程内索引）→ 播放响应」。
+ * 失败时协议层回结构化 `endpoint_unknown`（界面说"歌词来源尚未配置"）或 `invalid_response`
+ * （"这首歌没有可用的歌词"）——两者不互相冒充。
  */
 export const PLAYBACK_LYRICS = "playback:lyrics" as const;
 

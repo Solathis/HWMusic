@@ -45,9 +45,12 @@ export function playlistSongCountOf(playlist) {
 }
 
 /**
- * 封面地址：**本任务不渲染远程封面**（图片要过 CSP 的 img-src 白名单与 CDN 校验，
- * 那是待联调确认的一条链路，见 docs/API_CONTRACT.md §2.4）。
- * 这里仍把地址读出来并列在类型里，好让接入时只改一处——但现在没有任何 UI 用它。
+ * 封面地址（R38 起真的被 `PlaylistGrid` 用上了）。
+ *
+ * 协议层 `normalizePlaylist` 只在 CDN 白名单内才带 `coverUrl`（白名单外的地址在那边就被丢掉），
+ * 所以这里读到的要么是白名单内的地址，要么是 null。渲染层只把它交给 `<img src>`——
+ * **绝不 fetch**（CSP `connect-src` 只有 self/ipc；图片走 `img-src`，见 §2.4）。
+ * 取不到回 null，由调用方决定占位（界面上不留碎图）。
  */
 export function playlistCoverUrlOf(playlist) {
   if (!isObject(playlist)) return null;

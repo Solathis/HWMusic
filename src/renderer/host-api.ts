@@ -20,6 +20,7 @@ import {
   CORE_SET_AUTOSTART,
 } from "../shared/commands.ts";
 import { CORE_EVENT } from "../shared/channels.ts";
+import { AUTH_LOGOUT } from "../shared/request-channels.ts";
 import type { CoreError } from "../shared/result.ts";
 import type { RequestChannel } from "../shared/request-channels.ts";
 
@@ -77,6 +78,20 @@ export async function rendererReady(): Promise<number> {
   } catch (failure) {
     throw normalizeFailure(failure);
   }
+}
+
+/**
+ * 退出登录（R38）：`core_call(auth:logout)` 的**唯一实现**。
+ *
+ * 为什么收进这里（而不是让某个页面自己写一行 coreCall）：R38 把退出入口从设置页搬到了左下角
+ * 账号区，而"退出"必须始终是**同一件事**——一个频道、一种载荷（`null`）。摆在具名封装里，
+ * 第二份实现就没有地方可长（设置页那份已经删掉了）。
+ *
+ * 失败抛 `CoreError` 形状（与 `coreCall` 同一套归一）：调用方用 `accountLogoutFailureText`
+ * 变成人话，别把原始错误糊到界面上。成功后**不需要**任何跳转：`auth:status` 广播会把门禁翻回来。
+ */
+export async function coreLogout(): Promise<unknown> {
+  return coreCall(AUTH_LOGOUT, null);
 }
 
 /**

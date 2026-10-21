@@ -23,6 +23,8 @@ import {
   createMusicApi,
   decodeEnvelope,
   extractList,
+  inlineLyricsOf,
+  lyricAddressOf,
   normalizePlaylist,
   normalizeTrack,
   parseFileInfos,
@@ -679,6 +681,156 @@ test("歌词：注入过独立歌词端点就直接打它（宽容读候选键�
   const refused = await junk.getLyrics({ trackId: "s1" });
   assert.equal(refused.ok, false);
   assert.equal(refused.error.kind, MUSIC_ERROR_KINDS.invalidResponse);
+});
+
+test("歌词（R38）：已加载的曲目条目自带 lyricAddress → 直接用那条地址，不再问播放端点", async () => {
+  const { calls, fetchImpl } = scriptedFetch((url) => {
+    if (url.includes("/api/playlist/detail")) {
+      return jsonResponse(
+        okBody({
+          playListInfoEx: {
+            playListInfo: { contentID: "p1", contentName: "歌单" },
+            playListSongInfoList: [wireSong("s1", { lyricAddress: "https://cdn.dbankcdn.cn/s1.lrc" })],
+          },
+        }),
+      );
+    }
+    if (url.endsWith("/s1.lrc")) return new Response("[00:01.00]条目里的歌词", { status: 200 });
+    throw new Error(`不该请求：${url}`);
+  });
+  const api = apiOf({ fetchImpl });
+
+  // 先加载列表（条目里的地址在这一步进索引）
+  const detail = await api.getPlaylistDetail("p1");
+  assert.equal(detail.ok, true);
+
+  const lyrics = await api.getLyrics({ trackId: "s1" });
+  assert.equal(lyrics.ok, true, "列表条目里的歌词地址应当能取到歌词");
+  assert.match(lyrics.data.text, /条目里的歌词/);
+  assert.equal(
+    calls.some((call) => call.url.includes("/api/playback")),
+    false,
+    "命中索引就不该再打播放端点（官方 H5 也是拿列表里那条地址）",
+  );
+});
+
+test("歌词（R38）：白名单外的条目地址不进索引（不会被下载）", async () => {
+  const { calls, fetchImpl } = scriptedFetch((url) => {
+    if (url.includes("/api/playlist/detail")) {
+      return jsonResponse(
+        okBody({
+          playListInfoEx: {
+            playListInfo: { contentID: "p1", contentName: "歌单" },
+            playListSongInfoList: [wireSong("s1", { lyricAddress: "https://evil.example.com/s1.lrc" })],
+          },
+        }),
+      );
+    }
+    assert.match(url, /playback/, "白名单外的地址绝不能被下载");
+    return jsonResponse(okBody({ fileURL: "https://cdn.dbankcdn.cn/a.mp3" }));
+  });
+  const api = apiOf({ fetchImpl });
+  await api.getPlaylistDetail("p1");
+
+  const lyrics = await api.getLyrics({ trackId: "s1" });
+  assert.equal(lyrics.ok, false);
+  assert.equal(lyrics.error.kind, MUSIC_ERROR_KINDS.invalidResponse);
+  assert.equal(
+    calls.some((call) => call.url.includes("evil.example.com")),
+    false,
+    "白名单外的地址一次都不许发出去",
+  );
+});
+
+test("歌词（R38）：索引里的地址过期（下载失败）→ 回落播放响应那条路", async () => {
+  const { calls, fetchImpl } = scriptedFetch((url) => {
+    if (url.includes("/api/playlist/detail")) {
+      return jsonResponse(
+        okBody({
+          playListInfoEx: {
+            playListInfo: { contentID: "p1", contentName: "歌单" },
+            playListSongInfoList: [wireSong("s1", { lyricAddress: "https://cdn.dbankcdn.cn/stale.lrc" })],
+          },
+        }),
+      );
+    }
+    if (url.endsWith("/stale.lrc")) return new Response("gone", { status: 403 });
+    if (url.includes("/api/playback")) {
+      return jsonResponse(okBody({ fileURL: "https://cdn.dbankcdn.cn/a.mp3", lyricAddress: "https://cdn.dbankcdn.cn/fresh.lrc" }));
+    }
+    return new Response("[00:01.00]新地址", { status: 200 });
+  });
+  const api = apiOf({ fetchImpl });
+  await api.getPlaylistDetail("p1");
+
+  const lyrics = await api.getLyrics({ trackId: "s1" });
+  assert.equal(lyrics.ok, true, "过期地址不是结论：要继续走播放响应那条路");
+  assert.match(lyrics.data.text, /新地址/);
+  assert.equal(calls.at(-1).url.endsWith("/fresh.lrc"), true);
+});
+
+test("歌词（R38）：播放响应内嵌的 songInfo 按同一份候选表读（含 contentExInfo 是 JSON 字符串）", () => {
+  assert.equal(
+    lyricAddressOf({ songInfo: { lyricAddress: "https://cdn.dbankcdn.cn/in.lrc" } }),
+    "https://cdn.dbankcdn.cn/in.lrc",
+    "songInfo 就是列表里那种曲目条目：它自带的 lyricAddress 要认",
+  );
+  assert.equal(lyricAddressOf({ songInfo: { lyricAddress: "https://evil.example.com/in.lrc" } }), null);
+  assert.equal(
+    lyricAddressOf({ songInfo: { contentExInfo: JSON.stringify({ lyrics: { lyricAddress: "https://cdn.dbankcdn.cn/ex.lrc" } }) } }),
+    "https://cdn.dbankcdn.cn/ex.lrc",
+  );
+  assert.equal(
+    inlineLyricsOf({ songInfo: { contentExInfo: JSON.stringify({ lyrics: "[00:01.00]内嵌在 songInfo" }) } }),
+    "[00:01.00]内嵌在 songInfo",
+  );
+});
+
+test("歌词（R38）：索引有上限（FIFO）——超限时最旧一条被淘汰，新条目照旧命中", async () => {
+  const { calls, fetchImpl } = scriptedFetch((url) => {
+    if (url.includes("/api/playlist/detail")) {
+      return jsonResponse(
+        okBody({
+          playListInfoEx: {
+            playListInfo: { contentID: "p1", contentName: "歌单" },
+            playListSongInfoList: [1, 2, 3].map((n) =>
+              wireSong(`s${n}`, { lyricAddress: `https://cdn.dbankcdn.cn/s${n}.lrc` }),
+            ),
+          },
+        }),
+      );
+    }
+    if (url.endsWith("/s3.lrc")) return new Response("[00:01.00]最新一条", { status: 200 });
+    // 淘汰之后只许回落播放响应；被淘汰的 s1.lrc 一次都不许再请求
+    if (!url.includes("/api/playback")) throw new Error(`不该请求：${url}`);
+    return jsonResponse(okBody({ fileURL: "https://cdn.dbankcdn.cn/a.mp3" }));
+  });
+  // 上限压到 2：进 3 条时只该留下最后两条（s1 是被淘汰的那一条）
+  const api = apiOf({ fetchImpl, api: { lyricIndexLimit: 2 } });
+  await api.getPlaylistDetail("p1");
+
+  const newest = await api.getLyrics({ trackId: "s3" });
+  assert.equal(newest.ok, true, "上限内的条目应当命中索引并下到歌词");
+  assert.match(newest.data.text, /最新一条/);
+  assert.equal(
+    calls.some((call) => call.url.includes("/api/playback")),
+    false,
+    "命中索引就不该问播放端点",
+  );
+
+  const evicted = await api.getLyrics({ trackId: "s1" });
+  assert.equal(evicted.ok, false, "s1 已被淘汰：只剩播放响应那条路（那里没有歌词）");
+  assert.equal(evicted.error.kind, MUSIC_ERROR_KINDS.invalidResponse);
+  assert.equal(
+    calls.some((call) => call.url.endsWith("/s1.lrc")),
+    false,
+    "被淘汰的地址不该再被下载（否则上限就是摆设）",
+  );
+  assert.equal(
+    calls.some((call) => call.url.includes("/api/playback")),
+    true,
+    "淘汰后如实回落播放响应，而不是凭空变出歌词",
+  );
 });
 
 test("HTTP/网络失败：结构化错误，且绝不把响应体整段当消息回显", async () => {

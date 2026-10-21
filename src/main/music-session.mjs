@@ -31,6 +31,7 @@
 import { randomBytes } from "node:crypto";
 
 import { err, ok } from "../shared/result.ts";
+import { isSafeMediaUrl } from "../protocols/safe-media-url.mjs";
 
 /** 音乐业务域（公开契约 §1"业务域"）。 */
 export const HUAWEI_MUSIC_BASE = "https://api-drcn.music.dbankcloud.cn";
@@ -95,6 +96,153 @@ function messageOf(cause) {
   return "未知错误（详情见日志）";
 }
 
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** 非空字符串（去首尾空白）；其余一律 null。 */
+function textOf(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+/**
+ * profile（名字/头像/VIP）的**候选键**（R38；防御式取键，取到才存）。
+ *
+ * 为什么是"候选 + 认不出就不显示"而不是写死三个字段名：`loginex` 端点的**响应形状没有实测
+ * 证据**（公开契约只登记了 `token`/`snsUserID`/`expireTime` 三项，参考实现也只取 token）。
+ * 唯一一条真机线索是参考仓库的功能验证里那句"本人资料接口返回 `memberShip=6`，H5 代码把含 6
+ * 的值映射为会员类别"——所以会员标记只认 `memberShip` 这一个**有证据**的数值规则，
+ * `vipLevel`/`vipType` 之类**没有枚举证据的数值字段不猜**（猜错会把非会员标成会员）。
+ *
+ * 名字/头像取到就用；类型不对、不在媒体白名单内、认不出的值一律**不存**——
+ * 界面宁可显示兜底（头像占位 + "已登录"），也不显示一个编出来的名字。
+ */
+export const MUSIC_PROFILE_NAME_KEYS = ["userName", "nickName", "nickname"];
+export const MUSIC_PROFILE_AVATAR_KEYS = ["headUrl", "headImage", "avatarUrl", "avatar", "head"];
+/** 明确的布尔/0-1 标志位（`true`/`1`/`"1"`/`"true"` → 会员）。 */
+export const MUSIC_PROFILE_VIP_FLAG_KEYS = ["vipFlag", "isVip", "memberFlag", "vip"];
+/** 会员类别字段（实测证据：`memberShip`，官方 H5 把"含 6"的值当会员类别）。 */
+export const MUSIC_PROFILE_MEMBER_KEYS = ["memberShip"];
+export const MUSIC_PROFILE_MEMBER_MARK = "6";
+/** profile 可能挂在这些容器下（候选容器；都取不到就看顶层）。 */
+export const MUSIC_PROFILE_CONTAINER_KEYS = ["data", "userInfo", "userInfoEx"];
+/** 名字的显示上限（字段长度未知；截断只为不让界面被撑破）。 */
+export const MUSIC_PROFILE_NAME_MAX = 40;
+
+/** 明确的布尔（`true`/`1`/`"1"`/`"true"` → true；`false`/`0`/`"0"`/`"false"` → false；其余 null）。 */
+function flagOf(value) {
+  if (value === true || value === 1) return true;
+  if (value === false || value === 0) return false;
+  if (typeof value === "string") {
+    const text = value.trim().toLowerCase();
+    if (text === "1" || text === "true") return true;
+    if (text === "0" || text === "false") return false;
+  }
+  return null;
+}
+
+/** profile 的候选容器：响应本体在前，其次是那三个可能的容器（都是对象才算）。 */
+function profileContainersOf(payload) {
+  const containers = [payload];
+  for (const key of MUSIC_PROFILE_CONTAINER_KEYS) {
+    const nested = payload[key];
+    if (isObject(nested)) containers.push(nested);
+  }
+  return containers;
+}
+
+/**
+ * 从响应里抠 profile（**取到才存**）。
+ *
+ * @param {object} payload loginex 响应
+ * @param {{isSafeUrl?: (url: string) => boolean}} [options] 头像 URL 的白名单校验（默认 `isSafeMediaUrl`）
+ * @returns {{userName?: string, avatarUrl?: string, vip?: boolean}} 可能为空对象（空对象 = 认不出任何一项）
+ */
+export function profileFromResponse(payload, options = {}) {
+  const isSafeUrl = options.isSafeUrl ?? isSafeMediaUrl;
+  const profile = {};
+  if (!isObject(payload)) return profile;
+
+  for (const container of profileContainersOf(payload)) {
+    if (profile.userName === undefined) {
+      for (const key of MUSIC_PROFILE_NAME_KEYS) {
+        const name = textOf(container[key]);
+        if (name !== null) {
+          profile.userName = name.slice(0, MUSIC_PROFILE_NAME_MAX);
+          break;
+        }
+      }
+    }
+    if (profile.avatarUrl === undefined) {
+      for (const key of MUSIC_PROFILE_AVATAR_KEYS) {
+        const value = textOf(container[key]);
+        // 头像要过媒体白名单：渲染层只认 CSP `img-src` 里那些域，白名单外的地址画不出来
+        if (value !== null && isSafeUrl(value)) {
+          profile.avatarUrl = value;
+          break;
+        }
+      }
+    }
+    if (profile.vip === undefined) {
+      for (const key of MUSIC_PROFILE_VIP_FLAG_KEYS) {
+        const flag = flagOf(container[key]);
+        if (flag === true) {
+          profile.vip = true;
+          break;
+        }
+      }
+      if (profile.vip === undefined) {
+        for (const key of MUSIC_PROFILE_MEMBER_KEYS) {
+          const raw = container[key];
+          if (raw === undefined || raw === null || raw === "") continue;
+          const text = String(raw).trim();
+          // 只认有证据的那条规则（含 6 = 会员类别）；0 是"明确不是"，其余数值认不出就不显示
+          if (text.includes(MUSIC_PROFILE_MEMBER_MARK)) profile.vip = true;
+          else if (Number(text) === 0) profile.vip = false;
+          break;
+        }
+      }
+    }
+  }
+
+  // 明确的"不是会员"不进载荷（界面只在为真时才显示徽标，缺省与 false 是同一件事）
+  if (profile.vip === false) delete profile.vip;
+  return profile;
+}
+
+/** profile 是否有可展示的内容（空对象 = 什么都没认出来）。 */
+export function hasProfileContent(profile) {
+  return isObject(profile) && (profile.userName !== undefined || profile.avatarUrl !== undefined || profile.vip === true);
+}
+
+/**
+ * 会话记录里的 profile → `auth:status` 载荷里的可选 profile（R38）。
+ *
+ * 只搬**白名单内那三个键**（名字/头像/VIP），其余一律不带：载荷是渲染层的输入，
+ * 不该把整份会话记录（里面有音乐 token）之类的东西递出去。旧会话（R38 之前建的）没有
+ * `profile` 这一格 → 返回 null，界面照旧显示兜底（头像占位 + "已登录"），**不造假数据**。
+ */
+export function profileOfSessionRecord(value) {
+  if (!isObject(value)) return null;
+  const raw = value.profile;
+  if (!isObject(raw)) return null;
+  const profile = {};
+  const userName = textOf(raw.userName);
+  if (userName !== null) profile.userName = userName.slice(0, MUSIC_PROFILE_NAME_MAX);
+  const avatarUrl = textOf(raw.avatarUrl);
+  if (avatarUrl !== null) profile.avatarUrl = avatarUrl;
+  if (raw.vip === true) profile.vip = true;
+  return Object.keys(profile).length === 0 ? null : profile;
+}
+
+/** 响应体顶层键名（**只记键名，绝不记值**；诊断用）。 */
+export function topLevelKeysOf(payload, limit = 40) {
+  if (!isObject(payload)) return [];
+  return Object.keys(payload).sort().slice(0, Math.max(1, limit));
+}
+
 /**
  * loginex 响应 → 本项目的会话形状。
  *
@@ -102,12 +250,13 @@ function messageOf(cause) {
  * - `token`      → `musicSession`（**会话凭据**，进 DPAPI 信封，不进日志）
  * - `snsUserID`  → `userId`
  * - `expireTime` → 原样保留为 14 位 `yyyyMMddHHmmss` 字符串
+ * - profile（R38）→ `profile`（名字/头像/VIP，**取到才存**：见 `profileFromResponse`）
  *
  * **刻意不把它换算成 `expiresAt` 毫秒**：契约明写"时区尚未完全确认"，换算错了就是一个
  * 看起来精确、实际偏 8 小时的时间戳；而这个项目的续期本来就没打通（失效要重扫）。
  * 原始串留下，等真机联调确认时区后再决定怎么用。
  */
-export function parseMusicSessionResponse(payload) {
+export function parseMusicSessionResponse(payload, options = {}) {
   if (payload === null || typeof payload !== "object") {
     return err("音乐会话兑换响应不是 JSON 对象", MUSIC_SESSION_ERROR_KINDS.invalidResponse);
   }
@@ -127,10 +276,12 @@ export function parseMusicSessionResponse(payload) {
 
   const snsUserID = payload.snsUserID;
   const expireTime = payload.expireTime;
+  const profile = profileFromResponse(payload, options);
   return ok({
     musicSession: token,
     ...(typeof snsUserID === "string" && snsUserID.trim() !== "" ? { userId: snsUserID } : {}),
     ...(typeof expireTime === "string" && expireTime.trim() !== "" ? { expireTime } : {}),
+    ...(hasProfileContent(profile) ? { profile } : {}),
   });
 }
 
@@ -142,6 +293,8 @@ export function parseMusicSessionResponse(payload) {
  * @param {Function} [options.random]     注入随机源（测试用；默认 node:crypto）
  * @param {Function} [options.now]       注入时钟（测试用；默认 `() => new Date()`）
  * @param {number}   [options.timeoutMs]  单次请求超时
+ * @param {Function} [options.log]        只记**键名**的诊断口（R38；默认不记）
+ * @param {Function} [options.isSafeUrl]  头像 URL 的白名单校验（默认 `isSafeMediaUrl`）
  * @returns {(params: {accessToken: string, endpoint: string}) => Promise<import("../shared/result.ts").CoreResult<unknown>>}
  */
 export function createHuaweiMusicSessionPort({
@@ -149,6 +302,8 @@ export function createHuaweiMusicSessionPort({
   random = randomBytes,
   now = () => new Date(),
   timeoutMs = MUSIC_SESSION_TIMEOUT_MS,
+  log = () => undefined,
+  isSafeUrl = isSafeMediaUrl,
 } = {}) {
   return async function exchangeMusicSession({ accessToken, endpoint } = {}) {
     if (typeof endpoint !== "string" || endpoint.trim() === "") {
@@ -200,6 +355,9 @@ export function createHuaweiMusicSessionPort({
     } catch {
       return err("音乐会话端点响应不是 JSON", MUSIC_SESSION_ERROR_KINDS.invalidResponse);
     }
-    return parseMusicSessionResponse(payload);
+    // R38：**只记键名**（不记任何值）——这条链的响应形状一直没有实证，
+    // 下一次真机登录就能从这一行看出"profile 到底叫什么名字"，而不是继续猜候选键。
+    log(`loginex 响应顶层键名（只记键名，不记值）：${topLevelKeysOf(payload).join(", ")}`);
+    return parseMusicSessionResponse(payload, { isSafeUrl });
   };
 }

@@ -137,6 +137,26 @@ export function trackArtistIdOf(item) {
 }
 
 /**
+ * 封面地址（R38 接线）。
+ *
+ * 协议层 `normalizeTrack` 产出的曲目**只在自己的白名单里**才会带 `coverUrl`
+ * （`picture.bigImgURL` 等 → 白名单外的地址在投影时就被丢掉），所以这里读到的要么是
+ * 一个 CDN 白名单内的地址，要么是 null。渲染层只把它交给 `<img src>`——**绝不 fetch**
+ * （CSP 的 `connect-src` 只有 self/ipc，见 docs/API_CONTRACT.md §2.4）。
+ *
+ * 候选表与歌单那边同形（`playlistCoverUrlOf`）：字段名多一个不多，取不到就回 null，
+ * 由调用方决定占位（界面上不留碎图）。
+ */
+export function trackCoverUrlOf(item) {
+  if (!isObject(item)) return null;
+  for (const key of ["coverUrl", "cover", "picUrl", "imageUrl"]) {
+    const value = textOf(item[key]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+/**
  * 时长读数：**只认 `duration`**。
  *
  * 为什么不去猜 `durationMs`/`time` 这些别的名字：单位与名字都待联调确认，

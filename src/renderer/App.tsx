@@ -14,19 +14,34 @@
  */
 import { useCallback, useEffect, useState } from "react"
 import {
+  CrownIcon,
   HistoryIcon,
   HeartIcon,
   ListMusicIcon,
+  LogOutIcon,
   MicVocalIcon,
   SearchIcon,
   SettingsIcon,
   ScrollTextIcon,
+  UserIcon,
 } from "lucide-react"
 
-import { APP_BRAND_LABEL } from "../shared/app-name.mjs"
 import { APP_OPEN_SETTINGS } from "../shared/channels.ts"
 import { LoginGate, useAuthGate } from "./login-gate"
+import type { AccountProfile } from "./login-gate"
 import { Button } from "./components/ui/button"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "./components/ui/alert-dialog"
+import { Avatar, AvatarFallback, AvatarImage } from "./components/ui/avatar"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "./components/ui/sheet"
 import {
   Sidebar,
@@ -35,7 +50,6 @@ import {
   SidebarGroup,
   SidebarGroupContent,
   SidebarGroupLabel,
-  SidebarHeader,
   SidebarInset,
   SidebarMenu,
   SidebarMenuButton,
@@ -57,6 +71,20 @@ import {
   SettingsPage,
 } from "./pages.tsx"
 import { shouldShowLoginGate } from "./features/auth/login-gate-logic.mjs"
+import {
+  ACCOUNT_AREA_TESTID,
+  ACCOUNT_LOGOUT_CANCEL,
+  ACCOUNT_LOGOUT_CONFIRM,
+  ACCOUNT_LOGOUT_DESCRIPTION,
+  ACCOUNT_LOGOUT_TITLE,
+  ACCOUNT_NAME_TESTID,
+  ACCOUNT_VIP_LABEL,
+  ACCOUNT_VIP_TESTID,
+  accountAvatarUrl,
+  accountIsVip,
+  accountLogoutFailureText,
+  accountNameText,
+} from "./features/auth/account.mjs"
 import { usePlayer } from "./features/playback/use-player.ts"
 import { useLyricsWindow } from "./use-lyrics-window.ts"
 import {
@@ -71,7 +99,7 @@ import {
 import { libraryEmptyText } from "./features/library/library-state.mjs"
 import { playlistNameOf } from "./features/library/playlist-fields.mjs"
 import { trackAlbumOf, trackArtistsOf } from "./features/library/track-fields.mjs"
-import { getTrayAvailable, onCoreEvent } from "./host-api"
+import { getTrayAvailable, coreLogout, onCoreEvent } from "./host-api"
 import { TRAY_AVAILABLE, trayAvailabilityFromAnswer } from "./features/settings/settings-form.mjs"
 
 export function App() {
@@ -84,7 +112,7 @@ export function App() {
   // app-shell：登录之后才存在的那一块（R7 的测试锚点，R8 保留）
   return (
     <div className="h-full w-full" data-shell="app-shell">
-      <LibraryShell />
+      <LibraryShell profile={gate.profile} />
     </div>
   )
 }
@@ -103,9 +131,11 @@ const NAV_ICONS = {
   [VIEW.settings]: SettingsIcon,
 }
 
-export function LibraryShell() {
+export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
   const [view, setView] = useState(() => createView(VIEW.favorites))
   const [stageOpen, setStageOpen] = useState(false)
+  /** 退出登录失败那一句（用户主动点的动作，失败必须看得见；成功时界面由 auth:status 广播接管） */
+  const [logoutFailure, setLogoutFailure] = useState<string | null>(null)
   // 托盘可用性：null = **还没取到**（不是"不可用"，也不是"可用"）
   const [trayAvailable, setTrayAvailable] = useState<boolean | null>(null)
   const notices = useNoticeLog()
@@ -204,6 +234,27 @@ export function LibraryShell() {
 
   const navigation = { onActivateTrack, onOpenAlbum, onOpenArtist }
 
+  /** 账号资料的三项投影（缺什么兜什么，绝不编：见 features/auth/account.mjs）。 */
+  const accountName = accountNameText(profile)
+  const accountAvatar = accountAvatarUrl(profile)
+  const accountVip = accountIsVip(profile)
+
+  /**
+   * 退出登录（R38 从设置页搬到这里）。
+   *
+   * 三件事都只有一处实现：确认框（`AlertDialog`）负责"防误触"，真正的调用走
+   * `host-api` 的 `coreLogout`（唯一的 `auth:logout` 出口），失败只在这里显示一句人话。
+   * **不做任何跳转**：`auth:status` 广播会把门禁翻回来（成功后这个组件随之卸载）。
+   */
+  async function confirmLogout() {
+    setLogoutFailure(null)
+    try {
+      await coreLogout()
+    } catch (cause) {
+      setLogoutFailure(accountLogoutFailureText(cause))
+    }
+  }
+
   /** 页面切换：一个 switch，没有路由库。收藏页常驻，所以这里没有它的分支。 */
   function renderPage() {
     switch (view.id) {
@@ -239,9 +290,6 @@ export function LibraryShell() {
   return (
     <SidebarProvider className="h-full min-h-0">
       <Sidebar>
-        <SidebarHeader className="px-3 py-2">
-          <span className="truncate text-sm font-medium">{APP_BRAND_LABEL}</span>
-        </SidebarHeader>
         <SidebarContent>
           <SidebarGroup>
             <SidebarGroupLabel>音乐库</SidebarGroupLabel>
@@ -263,6 +311,51 @@ export function LibraryShell() {
           </SidebarGroup>
         </SidebarContent>
         <SidebarFooter>
+          {/*
+            账号区（R38）：头像 + 名字 + VIP 徽标 + 退出登录。
+            资料来自 `auth:status` 载荷的可选 `profile`（门禁那一层解析后交下来）——
+            旧会话没有 profile 时这里显示兜底（头像占位 + "已登录"），**不造假数据**。
+            退出走 `AlertDialog` 二次确认：误触的代价是重新扫码。
+          */}
+          <div className="flex items-center gap-2 px-1 py-0.5" data-testid={ACCOUNT_AREA_TESTID}>
+            <Avatar size="sm">
+              {accountAvatar === null ? null : <AvatarImage src={accountAvatar} alt="" />}
+              <AvatarFallback>
+                <UserIcon className="size-3.5" />
+              </AvatarFallback>
+            </Avatar>
+            <span className="truncate text-sm" data-testid={ACCOUNT_NAME_TESTID}>
+              {accountName}
+            </span>
+            {accountVip ? (
+              <CrownIcon className="size-3.5 shrink-0 text-muted-foreground" aria-label={ACCOUNT_VIP_LABEL} data-testid={ACCOUNT_VIP_TESTID} />
+            ) : null}
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button variant="ghost" size="icon-sm" className="ml-auto" aria-label={ACCOUNT_LOGOUT_TITLE}>
+                  <LogOutIcon />
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>{ACCOUNT_LOGOUT_TITLE}</AlertDialogTitle>
+                  <AlertDialogDescription>{ACCOUNT_LOGOUT_DESCRIPTION}</AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>{ACCOUNT_LOGOUT_CANCEL}</AlertDialogCancel>
+                  <AlertDialogAction onClick={() => void confirmLogout()}>
+                    {ACCOUNT_LOGOUT_CONFIRM}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          </div>
+          {logoutFailure === null ? null : (
+            <p className="px-1 text-xs text-destructive" role="alert">
+              {logoutFailure}
+            </p>
+          )}
+
           {/* 运行日志：core 经 app:notice 上来的真实提示（代理生效、启动提示……） */}
           <Sheet>
             <SheetTrigger asChild>

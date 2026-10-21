@@ -285,7 +285,8 @@ core_login_chrome {action:"theme", theme:"light"|...}     → {theme: ...}      
 **渲染层 ← sidecar 的登录状态广播（R7 增补的广播频道）**
 
 ```
-auth:status → {loggedIn: boolean, busy: boolean, message?: string}
+auth:status → {loggedIn: boolean, busy: boolean, message?: string,
+               profile?: {userName?: string, avatarUrl?: string, vip?: boolean}}
 ```
 
 - 为什么结论走广播而不是 `core_call` 的返回值：渲染层那条调用链（Rust `core_call`）有 60 秒上限，
@@ -298,6 +299,14 @@ auth:status → {loggedIn: boolean, busy: boolean, message?: string}
   `core_call(auth:get-status)` 问一次（与托盘可用性查询同款模式：状态由拥有者答），
   应答**与上面这条广播同形状**（同一个载荷构造点）；查询**不触发广播**，
   也**不带 `message`**——那是"刚发生的那件事"，属于广播，快照只答"现在是什么"。
+- **可选 `profile`（R38 增补，左下角账号区）**：来自 loginex 响应里**认得出**的那几项
+  （`src/main/music-session.mjs` 的 `profileFromResponse`：名字候选 `userName`/`nickName`/`nickname`，
+  头像候选 `headUrl`/`headImage`/`avatarUrl`/`avatar`/`head` 且**必须过 CDN 白名单**，VIP 只认
+  明确的布尔或有实测证据的 `memberShip` 含 `6`）。**认不出就不带这个键**（也就不显示）——
+  旧会话（R38 之前登录的）没有 `profile`，界面如实显示兜底（头像占位 + "已登录"）。
+  **不新开频道**：Rust 的频道常量表是硬钉的 parity，状态里多一个可选字段不必动 Rust。
+  这条链的响应形状一直缺实证，所以两个兑换点各加了一条**只记键名**的日志
+  （token 响应 / loginex 响应；**值一律不进日志**）。
 
 **已知缺口（R7 如实登记，不硬绕）**：wry 0.57（tauri 2.12 的 webview 层）只注册 WebView2 的
 `NavigationStarting`（主框架级），**没有** `FrameNavigationStarting`。官方页若从 **iframe** 内部发起
@@ -1050,17 +1059,31 @@ nonce=…, created=…[, token=…]`，见 §1.5.1 ②）；`snsUserID`（收藏
 | 音质**不虚标** | `confirmedPlaybackQuality(playQuality, type)`：`"3"+flac → lossless`、`"1"+mp3 → standard`，对不上就是 `unknown` |
 | 播放地址必须落在 CDN 白名单 | 非白名单域 → `unsafe_media_url`（文案只带域名）。白名单与参考**逐字相同**：`dbankcdn.cn` / `tingmall.com` / `kuke.com` |
 
-#### 2.3.2 歌词（R32 起从播放响应推导）
+#### 2.3.2 歌词（R32 从播放响应推导；**R38 真机取证后改为三档**）
 
-参考实现里**没有独立歌词端点**——歌词从**播放响应**里取：
+参考实现里**没有独立歌词端点**。R38 用真实会话取证（CDP 只读，只记字段名与域名）：
 
-1. `lyricAddress`（含历史拼写 `lyricAddres`）或 `contentExInfo.lyrics.lyricAddress` /
-   `lineByLineLyric`，且**必须落在 CDN 白名单内**才去下载（有界读取，上限 512 KiB，不跟随跳转）；
-2. 没有地址就看内嵌歌词（`contentExInfo.lyrics` / `lyrics`，**最多剥两层 JSON 字符串**）；
-3. 两者都没有 → `invalid_response`（**不把整段响应体当歌词**塞给渲染层——那只会让歌词窗显示一坨 JSON）。
+**真机事实（2026-10-21，`library:album` 原始响应）**：曲目条目 `albumInfoEx.songSimpleInfos[]`
+**自带 `lyricAddress`**（3/3 条都有，`https://music-pics-drcn.dbankcdn.cn/...`，**无查询串=无时效签名**，
+GET 200，3.3 KiB / 0.9 KiB / 22 B（三条分别是 3332 / 900 / 22 字节），含 LRC 时间戳行 80/46/1 行）；而**播放响应（`file/bycontentcode`）里
+没有任何歌词类字段**——`getLyrics` 从前只问播放响应，所以真机上永远回"没有可用的歌词"
+（歌词窗与歌词舞台停在`歌词暂时取不到`）。
 
-设置里若显式注入了 `musicEndpoints.lyrics`，`getLyrics` 就直接打那个端点（宽容读候选键）；
-那条路的响应形状**没有实测证据**，所以只在显式注入时使用。
+所以 `getLyrics` 现在是三档，按"最可能有、最便宜"排序：
+
+| 档 | 来源 | 说明 |
+|---|---|---|
+| 1 | 设置里显式注入的 `musicEndpoints.lyrics` | 形状按候选键宽容读取；那条路的响应形状**没有实测证据**，只在显式注入时使用 |
+| 2 | **已加载过的曲目条目自带的 `lyricAddress`** | 官方 H5 走的就是列表里这条地址。协议层在 `normalizeTrack` 时把它记进**进程内索引**（`trackId → 地址`，上限 400 条先进先出，**不落盘、不跨进程**）；取歌词时再**过一次 CDN 白名单**。命中就省掉一次播放请求 |
+| 3 | 播放响应 | `lyricAddress`（含内嵌的 `songInfo`，按**同一份候选表**读）→ 下载；没有地址就看内嵌歌词（`contentExInfo.lyrics`，最多剥两层 JSON 字符串） |
+
+三条都没有 → `invalid_response`（**不把整段响应体当歌词**塞给渲染层——那只会让歌词窗显示一坨 JSON）。
+下载一律：CDN 白名单内、有界读取（上限 512 KiB）、**不跟随跳转**。
+
+**边界（如实登记）**：索引只包含**用户自己已经加载过的列表条目**（见到的才会被记住）。所以
+"重启后直接播恢复出来的队列、且本次运行还没打开过任何列表"这一档仍然只能走第 3 档；
+那条路的实测结论是"播放响应里没有歌词字段"，因此**这一档很可能仍取不到歌词**——
+这是数据源的边界，不是可以靠猜字段绕过去的（不发明端点、不编地址）。
 
 ### 2.4 CDN 域（已确认可达）
 
@@ -1109,8 +1132,15 @@ Rust 镜像见 §3 的 parity 钉）：
 加载中 → 骨架屏；失败 → `endpoint_unknown` 说"未配置"、其余类别说人话；真的空 → 一句空态。
 **失败绝不复用空态文案**——那会把"连不上"说成"你什么都没有"。
 
-**仍然未接线**：封面/背景图链路（CSP `img-src` + CDN 白名单已经具备，但曲目投影里还没有一个
-UI 消费者）；音质/试听标注（`actualQuality` 与 `auditionLikely` 已在协议层算出，UI 本任务不显示）。
+**封面（R38 点亮）**：曲目/歌单归一化里本来就有 `coverUrl`（只带 CDN 白名单内的地址），
+渲染层现在真的消费它了——歌单卡、曲目行、播放栏、队列行统一走 `<img src>`（`loading="lazy"` +
+失败落回 lucide 图标占位），**绝不 `fetch`**：图片走 CSP `img-src`，而 `connect-src` 只有
+self/ipc（`fetch` 那张图一定被拦，界面上是一片空白，比占位更糟）。真机实测（2026-10-21）
+歌单/曲目 `coverUrl` 全部落在白名单域内（`*.dbankcdn.cn`、`image.tingmall.com`），无需扩白名单。
+
+**仍然未接线**：`AmllBackground` 的专辑图（它在 AMLL 里要的是 `HTMLImageElement`，传字符串会被
+AMLL 自己 `fetch` 而撞 `connect-src`；接它得先命令式建 `Image()` 并处理加载竞态，属另一件事）；
+音质/试听标注（`actualQuality` 与 `auditionLikely` 已在协议层算出，UI 不显示）。
 
 ### 2.6 播放器 ↔ sidecar 的通道（R9 落地）
 
@@ -1886,3 +1916,39 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
   → `docs/KNOWN_LIMITATIONS.md` **B21**。
   测试：node **753 pass / 0 fail**（+17：指纹模块 10、协议层 3、端口层 4）、tsc 0 错、
   acceptance 6/0/0、cargo **239 pass + 0 fail + 1 ignored**（源码一行未动，跑一遍确认没回归）。
+
+- 2026-10-21（Task R38）：**登录后主界面五项修复**（首次以真实会话联调主界面；CDP 只读取证）。
+  1. **左上角品牌重复**：`App.tsx` 的 `SidebarHeader` 那句品牌删掉（与窗口标题栏重复），
+     `SidebarHeader` 随之整块消失（不留空壳节点）；`APP_BRAND_LABEL` 仍有调用方（`main.tsx`
+     的 `document.title`），导出保留；
+  2. **封面点亮（§2.5）**：真机实测歌单/曲目 `coverUrl` **全部落在白名单域内**
+     （`contentcenter-drcn.dbankcdn.cn` / `image.tingmall.com` / `music-pics-drcn.dbankcdn.cn`），
+     所以只需渲染层接线：歌单卡、曲目行、播放栏、队列行统一 `<img src>` + `loading="lazy"` +
+     失败落回 lucide 占位（`components.tsx` 的 `CoverArt` 一处实现）。**绝不 `fetch`**
+     （图片走 `img-src`，`connect-src` 只有 self/ipc）；白名单与 CSP 一行未改。
+     `AmllBackground` 的专辑图**仍不接**（AMLL 要 `HTMLImageElement`，接它得命令式建 `Image()`
+     并处理加载竞态，属另一件事）；
+  3. **歌词（§2.3.2 重写）**：真机取证发现 **`lyricAddress` 长在曲目条目上**
+     （`songSimpleInfos[]`，实测 3/3 条都有，无查询串、GET 200、是真的 LRC），而
+     **播放响应里没有**任何歌词字段——旧实现只问播放响应，所以真机上永远"没有可用的歌词"。
+     `getLyrics` 改成三档：显式注入的端点 → **已加载条目的地址**（`normalizeTrack` 顺手记进
+     进程内索引：`trackId → 地址`，上限 400 条 FIFO，**不落盘、不跨进程**，取用时再验一次白名单）
+     → 播放响应（`lyricAddress`，含内嵌 `songInfo` 的同一份候选表 / 内嵌歌词）。
+     边界如实登记：索引只有"用户见过的条目"，重启后直接播恢复队列仍可能没歌词（见
+     `docs/KNOWN_LIMITATIONS.md` B23）；
+  4. **账号资料（§1.7 的 `auth:status` 载荷）**：`loginex` 响应形状无实证，所以只做
+     **防御式候选键** + **只记键名**的 INFO 日志（loginex 与 token 响应各一条，值一律不进日志）：
+     名字 `userName`/`nickName`/`nickname`，头像 `headUrl`/`headImage`/`avatarUrl`/`avatar`/`head`
+     且**必须过 CDN 白名单**，VIP 只认明确布尔或**有证据的** `memberShip` 含 `6`
+     （"含 6 = 会员类别"来自参考仓库的功能验证记录；`vipLevel`/`vipType` 没有枚举证据 →
+     不猜、不显示）。profile 随会话进 DPAPI 信封，并经**既有** `auth:status` 暴露
+     （**不新开频道**：Rust 的频道常量表是硬钉 parity）。旧会话没有 profile → 左下角如实兜底
+     （头像占位 + "已登录"），重新扫码登录一次才点亮；
+  5. **退出登录搬到左下角**：设置页整块「登录状态与退出」删除（`loginStatusText` 随之删除，
+     不留死代码），退出改在 `SidebarFooter` 的账号区：`AlertDialog` 二次确认（「退出后需要
+     重新扫码登录。」），确认后走**唯一实现** `host-api` 的 `coreLogout`（`auth:logout` 的
+     唯一出口，载荷仍是 `null`）；失败在账号区显示一句人话，成功不做跳转（`auth:status` 广播接管）。
+  测试：node **799 pass / 0 fail**（+10：R38 歌词三档 4 条、`music-session` profile 6 条、
+  账号区 4 条，另有两条旧断言按新契约重写）、tsc 0 错、`build:web` ✓、acceptance 6/0/0。
+  **渲染层改动已经 HMR 在运行实例上取证**（`.tmp/r38-verify-ui.json`）；协议层/主进程改动
+  **需重启 sidecar 生效**。

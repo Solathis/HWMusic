@@ -694,10 +694,22 @@ test("重查（R19）：挂载 effect 里**订阅之后**先报就绪、再查�
   // 两处喂的状态事件必须是同一份映射（各写一份 = 早晚漂移）
   const mapping = gate.match(/function statusEventOf\(/g) ?? [];
   assert.equal(mapping.length, 1, "广播与查询共用同一个载荷 → 事件映射（statusEventOf）");
+  assert.match(
+    effect,
+    /const applyStatus = [\s\S]*?reduceGateState\(current, statusEventOf\(payload\)\)/,
+    "effect 里只有**一个** apply：广播回调与查询应答都经它进状态机（statusEventOf 只在那里被调用）",
+  );
   assert.equal(
-    (effect.match(/statusEventOf\(/g) ?? []).length,
+    (effect.match(/applyStatus\(/g) ?? []).length,
     2,
-    "effect 里广播回调与查询应答各喂一次，且都经 statusEventOf",
+    "applyStatus：广播与查询各喂一次（R38 起账号资料也走这同一次）",
+  );
+  // R38：账号资料与登录状态**来自同一份载荷、同一处解析**（另起一处订阅就会让
+  // "状态说已登录、资料说没登录"有地方长出来）
+  assert.match(
+    effect,
+    /const applyStatus = [\s\S]*?setProfile\(profileFromStatusPayload\(payload\)\)/,
+    "profile 的解析必须与登录状态在同一处 apply 里（同一份 payload）",
   );
 });
 

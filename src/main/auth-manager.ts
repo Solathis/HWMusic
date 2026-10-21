@@ -56,7 +56,11 @@ import { AUTH_QR, AUTH_STATUS } from "../shared/channels.ts";
 import { CORE_ERROR_KINDS, err, ok } from "../shared/result.ts";
 
 import { QR_LOGIN_STATUS } from "../protocols/qr-login.mjs";
-import { HUAWEI_MUSIC_LOGINEX_ENDPOINT, createHuaweiMusicSessionPort } from "./music-session.mjs";
+import {
+  HUAWEI_MUSIC_LOGINEX_ENDPOINT,
+  createHuaweiMusicSessionPort,
+  profileOfSessionRecord,
+} from "./music-session.mjs";
 import { createHuaweiQrPort } from "./qr-login.mjs";
 import {
   HOST_LOGIN_STATUS,
@@ -229,6 +233,26 @@ export interface RestoreStatus {
   error?: { message: string; kind?: string };
 }
 
+/**
+ * `auth:status` 载荷里那一格 `profile`（R38）：**认不出就没有这个键**，界面照旧显示兜底。
+ * 取值来自 [`statusPayload`] 唯一的构造点，形状与 `src/renderer/login-gate.tsx` 的 `AccountProfile`、
+ * `docs/API_CONTRACT.md` §2.6 的载荷说明一致（三处说的是同一件事）。
+ */
+export type AuthProfile = { userName?: string; avatarUrl?: string; vip?: boolean };
+
+/**
+ * `auth:status` 的载荷形状（**广播与 `auth:get-status` 应答共用，唯一一处定义**）。
+ *
+ * `message` 只有真有事说的时候才出现（没有这个键 ≠ 值是 undefined）：渲染层靠
+ * `typeof payload.message === "string"` 判"这条广播带话"；`profile` 同理。
+ */
+export type AuthStatusPayload = {
+  loggedIn: boolean;
+  busy: boolean;
+  message?: string;
+  profile?: AuthProfile;
+};
+
 const defaultLog = (message: string) => console.error("[hwmusic-core]", message);
 
 /**
@@ -278,12 +302,25 @@ export function createAuthManager(deps: AuthManagerDeps) {
     // 没传才取 R17 确认的默认值。写成 `?? HUAWEI_OAUTH_ENDPOINTS.loginex` 会让"关掉"变成"打开"。
     loginex: "loginex" in (deps.endpoints ?? {}) ? (deps.endpoints?.loginex ?? null) : HUAWEI_OAUTH_ENDPOINTS.loginex,
   };
-  const exchangeCode = deps.exchangeCode ?? exchangeAuthorizationCode;
-  const exchangeMusicSession = deps.exchangeMusicSession ?? createHuaweiMusicSessionPort();
+  /**
+   * 授权码兑换（默认 R4 的 `exchangeAuthorizationCode`）。
+   *
+   * R38：默认实现多接了一个**只记键名**的诊断口——token 端点的响应里到底有没有用户资料字段
+   * （名字/头像/VIP）一直没有实证，把顶层键名记下来，下一次真机登录就有真实形状可依
+   * （**键名，不是值**：响应里就是 access_token/refresh_token）。
+   */
+  const exchangeCode =
+    deps.exchangeCode ??
+    ((params: { endpoint: string; code: string; codeVerifier: string }) =>
+      exchangeAuthorizationCode({
+        ...params,
+        onResponseKeys: (keys) => log(`token 响应顶层键名（只记键名，不记值）：${keys.join(", ")}`),
+      }));
+  const log = deps.log ?? defaultLog;
+  const exchangeMusicSession = deps.exchangeMusicSession ?? createHuaweiMusicSessionPort({ log });
   const verifySession = deps.verifySession ?? verifySessionUnavailable;
   const broadcast = deps.broadcast ?? (() => undefined);
   const notify = deps.notify ?? ((text: string) => log(`提示：${text}`));
-  const log = deps.log ?? defaultLog;
   const qrPort: QrLoginPort =
     deps.qrPort ?? (createHuaweiQrPort({ log }) as QrLoginPort);
 
@@ -317,6 +354,17 @@ export function createAuthManager(deps: AuthManagerDeps) {
     | { kind: "openFailure"; message: string; errorKind: string };
 
   /**
+   * 会话里的 profile（R38）→ `auth:status` 载荷里的可选 profile。
+   *
+   * **null 就不带这个键**（文案克制，也免得渲染层去分辨"空对象"与"没有"）：
+   * 旧会话（R38 之前登录的）没有 `profile` 这一格，界面照旧显示兜底（头像占位 + "已登录"），
+   * 重新扫码登录一次之后才会点亮。**不造假数据**：认不出名字就不给名字。
+   */
+  function profileOfSession(): AuthProfile | null {
+    return profileOfSessionRecord(session);
+  }
+
+  /**
    * `auth:status` 的载荷形状（**广播与 `auth:get-status` 的应答共用这一处**）。
    *
    * 共用的理由不是"少写几行"：R19 那条查询频道的契约就是"与广播同形状"，两处各拼一份载荷，
@@ -324,17 +372,16 @@ export function createAuthManager(deps: AuthManagerDeps) {
    *
    * `message` 只有真有事说的时候才出现（对象里没有这个键 ≠ 值是 undefined）：
    * 渲染层靠 `typeof payload.message === "string"` 判"这条广播带话"。
+   * `profile`（R38）同理：没有可展示的资料就**不带这个键**。
    */
-  function statusPayload(extra: { busy?: boolean; message?: string } = {}): {
-    loggedIn: boolean;
-    busy: boolean;
-    message?: string;
-  } {
-    const payload: { loggedIn: boolean; busy: boolean; message?: string } = {
+  function statusPayload(extra: { busy?: boolean; message?: string } = {}): AuthStatusPayload {
+    const payload: AuthStatusPayload = {
       loggedIn: session !== null,
       busy: extra.busy ?? false,
     };
     if (typeof extra.message === "string" && extra.message !== "") payload.message = extra.message;
+    const profile = profileOfSession();
+    if (profile !== null) payload.profile = profile;
     return payload;
   }
 
@@ -959,8 +1006,11 @@ export function createAuthManager(deps: AuthManagerDeps) {
      *
      * 它**不广播**（有应答就不需要再播一条），也**不带 message**：那是"刚发生的那件事"，
      * 属于广播；快照只答"现在是什么"。
+     *
+     * 返回类型就是 [`AuthStatusPayload`]（与 `statusPayload` 同一份定义）：R38 给载荷加了可选
+     * `profile`，标注若各写一份，就会退化成"运行时带了、类型上查不到"的那种假不一致。
      */
-    statusSnapshot(): { loggedIn: boolean; busy: boolean; message?: string } {
+    statusSnapshot(): AuthStatusPayload {
       return statusPayload({ busy });
     },
 

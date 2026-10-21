@@ -20,6 +20,13 @@
  * 改成钉"只收一个布尔"的 `loginStatusText`（结构性保证比白名单更强），并补了
  * 队列摘要文案与「外观跟随系统」两条。
  *
+ * R38 补记（用户指令 2026-10-21）：设置页的「登录状态与退出」区块**整块删掉**——
+ * 登录状态展示与左下角账号区重复，退出入口搬到左下角账号区（App 的 `SidebarFooter`，
+ * 走 `AlertDialog` 二次确认）。所以：
+ * - `loginStatusText` 随区块一起删（它已无消费者，留着就是死代码）；
+ * - 第 8 节改成钉**新契约**：设置页里不再有登录状态与退出入口，退出只有一处实现
+ *   （`host-api` 的 `coreLogout`，唯一 `auth:logout` 出口）。
+ *
  * 先写先看红。
  */
 import test from "node:test";
@@ -33,7 +40,6 @@ import {
   CLOSE_BEHAVIOR_LABELS,
   closeBehaviorNotice,
   closeBehaviorPatch,
-  loginStatusText,
   passwordHint,
   proxyFormFromSettings,
   proxyPatchFromForm,
@@ -369,38 +375,41 @@ test("失败文案：认得的类别给「原因 + 下一步」，认不得的�
 });
 
 // ---------------------------------------------------------------------------
-// 8. 登录状态（裁决：只显示「已登录/未登录」+ 退出按钮，不显示账号标识）
+// 8. 登录状态与退出（R38 改写：设置页那一整块删掉，退出只剩左下角账号区一处）
 // ---------------------------------------------------------------------------
 //
-// 为什么没有"账号标识"这一段：`auth:status` 的载荷只有 `{loggedIn, busy, message?}`
-// ——**没有**昵称/uid 之类的字段，而 R10 不为显示去扩协议。所以这里钉的不是"投影白名单"
-// （那是上一版的写法），而是一条更强的结构性保证：**这个函数只收一个布尔**，
-// 会话对象、凭据、任何账号字段在函数签名上就进不来。
+// 为什么不是"投影白名单"：`auth:status` 的载荷是**别人的数据**，形状不认识就当没有
+// （R38 增补的可选 `profile` 由 `features/auth/account.mjs` 的 `profileFromStatusPayload` 解析）。
+// 这一段钉两件事：
+// 1. 设置页**不再**有登录状态字样与退出入口（删干净，不是注释掉）——展示与左下角账号区重复；
+// 2. 退出只有**一处实现**：`host-api` 的 `coreLogout`（唯一 `auth:logout` 出口），
+//    界面上的那个按钮走它，二次确认由 `AlertDialog` 负责。
 
-test("登录状态：只认一个布尔，账号字段与凭据在结构上没有入口", () => {
-  assert.equal(loginStatusText(true), "已登录。");
-  assert.equal(loginStatusText(false), "未登录。");
-
-  // 传进来一个会话对象也只是做真值判定（=== true）：没有第二个入参可以漏出来
-  assert.equal(loginStatusText({ musicSession: PASSWORD, nickname: "听歌的人" }), "未登录。");
-  assert.equal(loginStatusText(null), "未登录。");
-  assert.equal(loginStatusText(undefined), "未登录。");
-
-  const logic = read(LOGIC_FILE);
-  assert.doesNotMatch(
-    logic,
-    /nickname|userId|musicSession|accessToken/,
-    "auth:status 载荷里没有这些字段，设置页也不许出现它们的名字（出现即意味着有人在猜协议）",
-  );
-});
-
-test("登录状态：退出按钮只有「退出登录」这一个动作，且走 auth:logout 常量", () => {
+test("登录状态与退出：设置页那一块已删净（不留注释掉的残骸、不留半个 Card）", () => {
   const page = read(PAGE_FILE);
   const settingsPage = page.slice(page.indexOf("export function SettingsPage("));
-  assert.match(settingsPage, /loginStatusText\(/, "状态字样来自纯逻辑模块（只有一处文案真源）");
-  assert.match(settingsPage, /AUTH_LOGOUT/, "退出走共享常量（不写字面量频道名）");
-  assert.match(settingsPage, /退出登录/, "按钮文案要说到做到");
-  assert.ok(!/账号|昵称/.test(settingsPage), `不显示账号标识（裁决）：${settingsPage.match(/账号|昵称/)}`);
+  assert.ok(settingsPage.length > 100, "必须在 pages.tsx 里找到 SettingsPage");
+
+  assert.doesNotMatch(page, /loginStatusText/, "设置页不再有登录状态字样（那个函数已删）");
+  assert.doesNotMatch(settingsPage, /AUTH_LOGOUT/, "设置页不再自己调退出频道");
+  assert.doesNotMatch(settingsPage, /退出登录/, "设置页不再有退出入口（搬去左下角账号区）");
+  assert.doesNotMatch(settingsPage, /<CardTitle>登录<\/CardTitle>/, "「登录」那一张卡整块删掉");
+});
+
+test("退出登录：只有一处实现（host-api 的 coreLogout），界面入口在左下角账号区", () => {
+  const api = read("src/renderer/host-api.ts");
+  assert.match(api, /export async function coreLogout\(/, "退出收进具名封装（唯一 auth:logout 出口）");
+  assert.match(api, /coreCall\(AUTH_LOGOUT, null\)/, "载荷仍是 null（与设置页那一版同一件事）");
+  assert.doesNotMatch(api, /coreCall\(\s*["'`]auth:logout["'`]/, "频道名走共享常量，不写字面量");
+
+  const app = read("src/renderer/App.tsx");
+  assert.match(app, /\bcoreLogout\b/, "左下角账号区走同一个实现（不复制第二份）");
+  assert.match(app, /AlertDialog/, "退出要二次确认（误触的代价是重新扫码）");
+  assert.match(app, /ACCOUNT_LOGOUT_DESCRIPTION/, "说明文案来自纯逻辑模块（只有一处真源）");
+
+  const account = read("src/renderer/features/auth/account.mjs");
+  assert.match(account, /退出后需要重新扫码登录/, "说明要写清代价");
+  assert.match(account, /ACCOUNT_LOGOUT_TITLE = "退出登录"/, "确认框标题就是那个动作");
 });
 
 // ---------------------------------------------------------------------------
