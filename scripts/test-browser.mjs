@@ -85,7 +85,8 @@ import { DEFAULT_LYRICS_CONFIG } from "../../src/renderer/features/lyrics/lyrics
 const LRC = ${JSON.stringify(FIXTURE_LRC)};
 let currentTheme = "light";
 const songs = Array.from({ length: 36 }, (_, index) => ({
-  id: String(index + 1), name: "浏览器守卫曲目 " + (index + 1), artists: "守卫艺人", duration: 12,
+  id: String(index + 1), name: "浏览器守卫曲目 " + (index + 1), artists: "守卫艺人", album: "守卫专辑", duration: 12,
+  coverUrl: "https://music.dbankcdn.cn/guard-cover-" + (index % 2 === 0 ? "warm" : "cool") + ".png",
 }));
 mockIPC((command, args) => {
   if (command === "core_call") {
@@ -113,6 +114,15 @@ function Guard() {
     window.__guard = {
       snapshot: () => runtime.player.snapshot(),
       setTime: (ms) => runtime.player.seek(ms),
+      nextTrack: () => runtime.player.next(),
+      prepareRepeatedQueue: () => runtime.player.playQueue([songs[0], songs[0]], 0),
+      markRuntime() { this.markedRuntime = runtime; },
+      sameRuntime: () => window.__guard.markedRuntime === getPlayerRuntime(),
+      async setCoverFailure() {
+        await runtime.player.playQueue(songs.map((song) => ({ ...song, coverUrl: "https://music.dbankcdn.cn/guard-cover-broken.png" })), 0);
+        runtime.player.pause();
+        runtime.player.seek(700);
+      },
       setLyrics: (status) => runtime.player.setLyrics([], status),
       restoreLyrics: async () => {
         const { parseAmllLyrics } = await import("../../src/renderer/features/lyrics/amll-adapter.ts");
@@ -368,10 +378,14 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
   const browser = launched.browser;
   const { server, port } = await startServer(guardDir);
   const checks = [];
-  const add = (id, ok, detail) => checks.push({ id, ok, detail });
+  const add = (id, ok, detail) => {
+    checks.push({ id, ok, detail });
+    log(`  ${ok ? "PASS" : "FAIL"}  ${id.padEnd(22)} ${detail}`);
+  };
 
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
+    page.setDefaultTimeout(15_000);
     const consoleErrors = [];
     const pageErrors = [];
     page.on("console", (message) => {
@@ -389,6 +403,15 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       });
     });
 
+    for (const [name, background] of [["warm", { r: 230, g: 72, b: 32 }], ["cool", { r: 24, g: 100, b: 232 }]]) {
+      const cover = await sharp({ create: { width: 256, height: 256, channels: 3, background } }).png().toBuffer();
+      await page.route(`https://music.dbankcdn.cn/guard-cover-${name}.png`, (route) => route.fulfill({
+        contentType: "image/png", body: cover, headers: { "access-control-allow-origin": "*" },
+      }));
+    }
+    await page.route("https://music.dbankcdn.cn/guard-cover-broken.png", (route) => route.fulfill({
+      status: 200, contentType: "image/png", body: Buffer.from("invalid image"), headers: { "access-control-allow-origin": "*" },
+    }));
     const stage = page.getByTestId("playback-stage");
     const activeLine = '[data-testid="amll-lyrics-panel"] [class*="lyricMainLine"][class*="active"]';
     const underlay = '[data-slot="sidebar-container"], [data-slot="sidebar-inset"] > header, [data-slot="sidebar-inset"] > .relative, [data-slot="sidebar-inset"] > [data-testid="player-bar"]';
@@ -413,6 +436,45 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
         document.elementFromPoint(x, y)?.closest('[data-testid="playback-stage"]')));
       add(`${theme}-full-coverage`, box?.x === 0 && box?.y === 0 && box?.width === 1280 && box?.height === 800 && covered, `舞台 ${JSON.stringify(box)}，四角命中舞台=${covered}`);
       add(`${theme}-background`, await stage.locator('[data-testid="amll-background"] canvas').count() > 0, "完整舞台内使用官方背景画布");
+      const unnamedButtons = await stage.locator("button").evaluateAll((buttons) => buttons.filter((button) =>
+        button.getBoundingClientRect().width > 0 && !button.getAttribute("aria-label") && !button.textContent?.trim()).length);
+      add(`${theme}-no-unwired-controls`, unnamedButtons === 0, `未接线/无名称的可见按钮 ${unnamedButtons} 个`);
+      const officialControls = await stage.evaluate((element) => ({
+        mediaButton: Boolean(element.querySelector('button[aria-label="播放"][class*="mediaButton"]')),
+        progress: Boolean(element.querySelector('[aria-label="播放进度"] [class*="nowPlayingSlider"]')),
+        volume: Boolean(element.querySelector('[aria-label="音量"] [class*="volumeControl"]')),
+        legacyBar: Boolean(element.querySelector('[data-testid="player-bar"]')),
+      }));
+      add(`${theme}-official-player-controls`, officialControls.mediaButton && officialControls.progress && officialControls.volume
+        && !officialControls.legacyBar, JSON.stringify(officialControls));
+      const coverGeometry = await page.evaluate(async () => {
+        const cover = document.querySelector('[data-testid="playback-stage-cover"]');
+        const lyric = document.querySelector('[data-testid="amll-lyrics-panel"]');
+        const rect = (element) => {
+          if (!element) return null;
+          const b = element.getBoundingClientRect();
+          return { x: b.x, y: b.y, right: b.right, bottom: b.bottom, width: b.width, height: b.height };
+        };
+        const art = cover && [cover, ...cover.querySelectorAll("*")].find((e) => getComputedStyle(e).backgroundImage.includes("guard-cover-warm.png"));
+        const url = window.__guard.snapshot().track.coverUrl;
+        const image = new Image();
+        image.crossOrigin = "anonymous";
+        const loaded = await new Promise((resolve) => { image.onload = () => resolve(true); image.onerror = () => resolve(false); image.src = url; });
+        return { cover: rect(cover), lyric: rect(lyric), backgroundMatches: Boolean(art), loaded };
+      });
+      add(`${theme}-cover-left-lyrics-right`, Boolean(coverGeometry.cover && coverGeometry.lyric
+        && coverGeometry.cover.width > 150 && coverGeometry.cover.height > 150
+        && coverGeometry.cover.right <= coverGeometry.lyric.x && coverGeometry.lyric.width > 300
+        && coverGeometry.lyric.right <= 1280), JSON.stringify(coverGeometry));
+      let coverPixels = { mean: [], visible: false };
+      if (coverGeometry.cover?.width > 0) {
+        const { x, y, width, height } = coverGeometry.cover;
+        const shot = await page.screenshot({ clip: { x: Math.round(x + width * .25), y: Math.round(y + height * .25), width: Math.round(width * .5), height: Math.round(height * .5) } });
+        const stats = await sharp(shot).stats();
+        const mean = stats.channels.slice(0, 3).map((channel) => Math.round(channel.mean));
+        coverPixels = { mean, visible: mean[0] > mean[1] + 80 && mean[0] > mean[2] + 100 };
+      }
+      add(`${theme}-cover-loaded-pixels`, coverGeometry.loaded && coverGeometry.backgroundMatches && coverPixels.visible, JSON.stringify(coverPixels));
       const pixels = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-paused-line.png`));
       add(`${theme}-paused-text-pixels`, pixels.ink > 60, JSON.stringify(pixels));
       await page.screenshot({ path: path.join(guardDir, `${theme}-stage.png`) });
@@ -424,6 +486,25 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       const diff = pixelDiffRatio(await sharp(before).raw().toBuffer(), await sharp(inverted).raw().toBuffer());
       add(`${theme}-opaque-underlay`, diff < 0.0001, `反转侧栏/header/列表/原底栏后整窗像素差异 ${(diff * 100).toFixed(4)}%（必须≈0）`);
 
+      const backgroundMean = async () => {
+        const shot = await page.screenshot({ clip: { x: 700, y: 24, width: 400, height: 24 } });
+        return (await sharp(shot).stats()).channels.slice(0, 3).map((channel) => Math.round(channel.mean));
+      };
+      const warm = await backgroundMean();
+      await stage.getByRole("button", { name: "下一首", exact: true }).click();
+      await page.waitForFunction(() => window.__guard.snapshot().index === 1 && window.__guard.snapshot().status === "playing");
+      await page.waitForTimeout(1800);
+      await stage.getByRole("button", { name: "暂停", exact: true }).click();
+      const cool = await backgroundMean();
+      const colorDistance = Math.hypot(...warm.map((value, index) => value - cool[index]));
+      add(`${theme}-cover-theme-color`, colorDistance > 60 && Math.max(...warm) - Math.min(...warm) > 50
+        && Math.max(...cool) - Math.min(...cool) > 50, JSON.stringify({ warm, cool, colorDistance }));
+      await stage.getByRole("button", { name: "上一首", exact: true }).click();
+      await page.waitForFunction(() => window.__guard.snapshot().index === 0 && window.__guard.snapshot().status === "playing");
+      await page.waitForTimeout(1000);
+      await stage.getByRole("button", { name: "暂停", exact: true }).click();
+      await page.evaluate(() => window.__guard.setTime(700));
+
       await stage.getByRole("button", { name: "关闭歌词", exact: true }).click();
       const retained = await page.getByRole("textbox", { name: "搜索关键字", exact: true }).inputValue() === "保留页面状态"
         && await page.getByTestId("favorites-scroll-root").evaluate((element) => element.scrollTop) === scrollTop;
@@ -433,6 +514,13 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       await page.waitForTimeout(800);
       const reopened = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-reopened-line.png`));
       add(`${theme}-paused-reopen`, reopened.ink > 60, JSON.stringify(reopened));
+      await page.keyboard.press("Escape");
+      const escaped = await stage.count() === 0;
+      add(`${theme}-escape-close`, escaped, "无上层弹窗时 ESC 关闭舞台");
+      if (escaped) {
+        await page.getByRole("button", { name: "打开歌词", exact: true }).click();
+        await page.waitForTimeout(800);
+      }
 
       await stage.getByRole("button", { name: "播放", exact: true }).click();
       await page.waitForFunction(() => window.__guard.snapshot().status === "playing");
@@ -451,20 +539,94 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       await stage.getByRole("button", { name: "上一首", exact: true }).click();
       await page.waitForFunction(() => window.__guard.snapshot().index === 0 && window.__guard.snapshot().status === "playing");
       await stage.getByRole("button", { name: "暂停", exact: true }).click();
-      const slider = stage.locator('[aria-label="播放进度"] [role="slider"]');
+      const slider = stage.getByRole("slider", { name: "播放进度", exact: true });
       const oldTime = await page.evaluate(() => window.__guard.snapshot().currentTimeMs);
       await slider.focus();
       await slider.press("ArrowRight");
       add(`${theme}-player-controls`, await page.evaluate((old) => window.__guard.snapshot().currentTimeMs > old, oldTime), "舞台内播放/暂停/前后切歌/进度 Slider 真交互成功");
+      const officialSlider = slider.locator('[class*="nowPlayingSlider"]').first();
+      const sliderBox = await officialSlider.boundingBox();
+      if (sliderBox) {
+        await page.mouse.move(sliderBox.x + sliderBox.width * .2, sliderBox.y + sliderBox.height / 2);
+        await page.mouse.down();
+        let timer;
+        try {
+          await Promise.race([
+            page.mouse.move(sliderBox.x + sliderBox.width * .7, sliderBox.y + sliderBox.height / 2, { steps: 12 }),
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("官方进度拖动阻塞超过 8 秒")), 8000); }),
+          ]);
+        } finally { clearTimeout(timer); }
+        await page.mouse.up();
+      }
+      await page.waitForTimeout(200);
+      const seekMs = await page.evaluate(() => window.__guard.snapshot().currentTimeMs);
+      add(`${theme}-official-progress-drag`, Boolean(sliderBox) && seekMs > 6500 && seekMs < 9500, `官方 BouncingSlider 拖动后 ${seekMs}ms（总长 12000ms）`);
+      const volumeSlider = stage.getByRole("slider", { name: "音量", exact: true });
+      await volumeSlider.focus();
+      await volumeSlider.press("ArrowLeft");
+      const keyboardVolume = await page.evaluate(() => window.__guard.snapshot().volume);
+      const volumeBox = await volumeSlider.locator('[class*="inner"]').first().boundingBox();
+      if (volumeBox) await page.mouse.click(volumeBox.x + volumeBox.width * .4, volumeBox.y + volumeBox.height / 2);
+      await page.waitForTimeout(200);
+      const pointerVolume = await page.evaluate(() => window.__guard.snapshot().volume);
+      if (volumeBox) {
+        await page.mouse.move(volumeBox.x + volumeBox.width * .4, volumeBox.y + volumeBox.height / 2);
+        await page.mouse.down();
+        let timer;
+        try {
+          await Promise.race([
+            page.mouse.move(volumeBox.x + volumeBox.width * .6, volumeBox.y + volumeBox.height / 2, { steps: 8 }),
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("官方音量拖动阻塞超过 8 秒")), 8000); }),
+          ]);
+        } finally { clearTimeout(timer); }
+        await page.mouse.up();
+      }
+      await page.waitForTimeout(200);
+      const draggedVolume = await page.evaluate(() => window.__guard.snapshot().volume);
+      add(`${theme}-official-volume-drag`, Boolean(volumeBox) && draggedVolume > .5 && draggedVolume < .7, JSON.stringify({ draggedVolume }));
+      await stage.getByRole("button", { name: "静音", exact: true }).click();
+      const muted = await page.evaluate(() => window.__guard.snapshot().muted);
+      await stage.getByRole("button", { name: "取消静音", exact: true }).click();
+      add(`${theme}-official-volume`, keyboardVolume < 1 && pointerVolume > .25 && pointerVolume < .55 && muted
+        && await page.evaluate(() => !window.__guard.snapshot().muted), JSON.stringify({ keyboardVolume, pointerVolume, muted }));
+      for (const repeated of [false, true]) {
+        await page.evaluate(() => window.__guard.markRuntime());
+        if (repeated) await page.evaluate(() => window.__guard.prepareRepeatedQueue());
+        else await stage.getByRole("button", { name: "播放", exact: true }).click();
+        await page.waitForFunction(() => window.__guard.snapshot().status === "playing" && window.__guard.snapshot().durationMs > 0);
+        const previousIndex = await page.evaluate(() => window.__guard.snapshot().index);
+        const gestureBox = await slider.locator('[class*="nowPlayingSlider"]').first().boundingBox();
+        if (gestureBox) {
+          await page.mouse.move(gestureBox.x + gestureBox.width * .2, gestureBox.y + gestureBox.height / 2);
+          await page.mouse.down();
+          await page.mouse.move(gestureBox.x + gestureBox.width * .8, gestureBox.y + gestureBox.height / 2, { steps: 12 });
+          await page.waitForTimeout(100);
+        }
+        await page.evaluate(() => window.__guard.nextTrack());
+        await page.waitForFunction((index) => window.__guard.snapshot().index === index + 1
+          && window.__guard.snapshot().status === "playing", previousIndex);
+        const afterNext = await page.evaluate(() => ({ index: window.__guard.snapshot().index, timeMs: window.__guard.snapshot().currentTimeMs,
+          seekGeneration: window.__guard.snapshot().seekGeneration }));
+        await page.mouse.up();
+        await page.waitForTimeout(200);
+        const released = await page.evaluate(() => ({ index: window.__guard.snapshot().index, timeMs: window.__guard.snapshot().currentTimeMs,
+          seekGeneration: window.__guard.snapshot().seekGeneration, sameRuntime: window.__guard.sameRuntime() }));
+        add(`${theme}-drag-next-${repeated ? "same-id" : "new-id"}`, Boolean(gestureBox) && released.index === afterNext.index
+          && released.seekGeneration === afterNext.seekGeneration && released.timeMs < afterNext.timeMs + 2000 && released.sameRuntime,
+        JSON.stringify({ afterNext, released }));
+        await stage.getByRole("button", { name: "暂停", exact: true }).click();
+      }
+      await page.evaluate(() => window.__guard.ready());
       await stage.getByRole("button", { name: /^播放模式：/ }).click();
       await page.getByRole("menuitemradio", { name: "列表循环", exact: true }).click();
-      add(`${theme}-menu-stack`, await page.evaluate(() => window.__guard.snapshot().mode === "list-loop"), "PlayerBar 菜单 portal 在舞台上可点");
+      add(`${theme}-menu-stack`, await page.evaluate(() => window.__guard.snapshot().mode === "list-loop"), "官方 MediaButton 触发的模式菜单 portal 在舞台上可点");
       const queueTrigger = page.getByRole("button", { name: "播放队列", exact: true });
       await queueTrigger.focus();
       await queueTrigger.press("Enter");
       await page.locator('[data-slot="sheet-content"]').waitFor();
-      await page.locator('[data-slot="sheet-close"]').click();
+      await page.keyboard.press("Escape");
       await page.locator('[data-slot="sheet-content"]').waitFor({ state: "detached" });
+      add(`${theme}-sheet-escape-keeps-stage`, await stage.isVisible(), "ESC 先关闭上层 Sheet，不关闭舞台");
       const logoutTrigger = page.getByRole("button", { name: "退出登录", exact: true });
       await logoutTrigger.focus();
       await logoutTrigger.press("Enter");
@@ -480,6 +642,40 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
         const statusPixels = await textPixels(page, '[data-testid="playback-stage"] [role="status"]', theme, path.join(guardDir, `${theme}-${status}.png`));
         add(`${theme}-notice-${status}`, statusPixels.changed > 30 && (await notice.textContent())?.length > 0, JSON.stringify(statusPixels));
       }
+      await page.evaluate(() => window.__guard.restoreLyrics());
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      await stage.getByRole("button", { name: "播放", exact: true }).click();
+      const reducedMotion = await stage.evaluate((element) => {
+        const candidates = [element, ...element.querySelectorAll('[data-testid="playback-stage-cover"], [data-testid="playback-stage-cover"] *, [data-testid="playback-stage-player"] *, button[aria-label="关闭歌词"], button[aria-label="关闭歌词"] *')];
+        const nonzero = (value) => value.split(",").some((duration) => Number.parseFloat(duration) > 0);
+        const offenders = candidates.filter((node) => {
+          const style = getComputedStyle(node);
+          return nonzero(style.transitionDuration) || nonzero(style.animationDuration);
+        }).map((node) => ({ tag: node.tagName, className: node.getAttribute("class"), transition: getComputedStyle(node).transitionDuration,
+          animation: getComputedStyle(node).animationDuration }));
+        return { reduce: matchMedia("(prefers-reduced-motion: reduce)").matches, checked: candidates.length, offenders };
+      });
+      add(`${theme}-reduced-motion-computed`, reducedMotion.reduce && reducedMotion.checked > 10
+        && reducedMotion.offenders.length === 0, JSON.stringify(reducedMotion));
+      await stage.getByRole("button", { name: "暂停", exact: true }).click();
+      await page.setViewportSize({ width: 600, height: 900 });
+      await page.waitForTimeout(1200);
+      const portrait = await page.evaluate(() => {
+        const cover = document.querySelector('[data-testid="playback-stage-cover"]')?.getBoundingClientRect();
+        const lyric = document.querySelector('[data-testid="amll-lyrics-panel"]')?.getBoundingClientRect();
+        return { cover: cover?.toJSON(), lyric: lyric?.toJSON(), scrollWidth: document.documentElement.scrollWidth };
+      });
+      const portraitInk = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-portrait-line.png`));
+      add(`${theme}-official-portrait`, Boolean(portrait.cover && portrait.lyric && portrait.cover.width >= 40
+        && portrait.cover.bottom <= portrait.lyric.y + 1 && portrait.lyric.width > 200
+        && portrait.scrollWidth <= 600 && portraitInk.ink > 60), JSON.stringify({ ...portrait, ink: portraitInk.ink }));
+      await page.setViewportSize({ width: 1280, height: 800 });
+      await page.emulateMedia({ reducedMotion: "no-preference" });
+      await page.evaluate(() => window.__guard.setCoverFailure());
+      await page.waitForTimeout(1200);
+      const fallback = await stage.getByTestId("playback-stage-cover-fallback").count();
+      const fallbackInk = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-cover-fallback-line.png`));
+      add(`${theme}-cover-fallback`, fallback === 1 && fallbackInk.ink > 60, JSON.stringify({ fallback, ink: fallbackInk.ink }));
       await stage.getByRole("button", { name: "关闭歌词", exact: true }).click();
       await page.getByRole("button", { name: "播放队列", exact: true }).click();
       await page.locator('[data-slot="sheet-content"]').waitFor();
@@ -527,7 +723,6 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
 
   const pass = checks.filter((check) => check.ok).length;
   const fail = checks.filter((check) => !check.ok).length;
-  for (const check of checks) log(`  ${check.ok ? "PASS" : "FAIL"}  ${check.id.padEnd(22)} ${check.detail}`);
   return { pass, fail, skipped: 0, checks };
 }
 

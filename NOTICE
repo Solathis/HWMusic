@@ -24,7 +24,12 @@ Copyright (C) 2026 本项目作者
 - shadcn/ui —— MIT
 - radix-ui —— MIT
 - class-variance-authority —— MIT
-- Apple Music Like Lyrics / AMLL（@applemusic-like-lyrics/core、/lyric、/react）—— AGPL-3.0-only
+- Apple Music Like Lyrics / AMLL（@applemusic-like-lyrics/core、/lyric、/react、/react-full；歌词、封面、响应式布局与封面主题背景）—— AGPL-3.0-only
+- Jotai（jotai；AMLL full 声明的 peer，不代替应用播放器运行时）—— MIT
+- Motion（framer-motion、motion-dom、motion-utils；AMLL full 布局动效与 reduced-motion）—— MIT
+- classnames、corner-smoothing、figma-squircle（AMLL full 类名组合与封面圆角）—— MIT
+- react-toastify（AMLL full 声明的依赖，应用不新增通知状态机）—— MIT
+- @ungap/structured-clone（AMLL 声明的依赖）—— ISC
 - Lucide 图标（lucide-react）—— ISC
 - undici —— MIT
 - Node.js —— MIT

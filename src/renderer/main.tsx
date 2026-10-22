@@ -1,5 +1,6 @@
-// CSS 引入顺序契约（两个入口逐字一致）：AMLL core → amll-theme.css → styles.css
+// CSS 引入顺序契约（两个入口逐字一致）：AMLL core → full → amll-theme.css → styles.css
 import "@applemusic-like-lyrics/core/style.css"
+import "@applemusic-like-lyrics/react-full/style.css"
 import "./amll-theme.css"
 import "./styles.css"
 

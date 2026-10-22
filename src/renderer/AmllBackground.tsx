@@ -3,7 +3,7 @@
  *
  * 宿主只做三件事（其余全是官方组件的事）：
  * 1. 定位容器（绝对定位铺满舞台）；
- * 2. 把"在播/有没有歌词"这两个事实传下去（背景会据此调整活跃度）；
+ * 2. 把"在播/有没有歌词"这两个事实传下去（暂停用官方 staticMode，封面仍能完成取色过渡）；
  * 3. 给组件一个 100% 尺寸的盒子——AMLL 的渲染器按容器尺寸建画布，
  *    没有尺寸就什么都画不出来。
  *
@@ -51,7 +51,7 @@ export interface AmllBackgroundProps {
  * 不用 `decode()`：`load` 事件到了就说明解码必要的元数据已经可用，AMLL 自己会画；
  * `decode()` 在 WebView2 上还要多一层 Promise 竞态，收益只是省一次可能的闪烁。
  */
-function useAlbumImage(url: string | null | undefined): HTMLImageElement | null {
+export function useAlbumImage(url: string | null | undefined): HTMLImageElement | null {
   const [element, setElement] = useState<HTMLImageElement | null>(null)
 
   useEffect(() => {
@@ -84,17 +84,19 @@ function useAlbumImage(url: string | null | undefined): HTMLImageElement | null 
     }
   }, [url])
 
-  return element
+  return element?.getAttribute("src") === url ? element : null
 }
 
 export function AmllBackground({ playing, hasLyric, albumArt, albumUrl }: AmllBackgroundProps) {
   const loaded = useAlbumImage(albumUrl)
+  const album = albumArt ?? loaded ?? undefined
 
   return (
     <div className="absolute inset-0 overflow-hidden" data-testid="amll-background" aria-hidden="true">
       <BackgroundRender
-        album={albumArt ?? loaded ?? undefined}
-        playing={playing}
+        key={album?.src ?? "empty"}
+        album={album}
+        staticMode={!playing}
         hasLyric={hasLyric}
         renderScale={0.5}
         style={{ width: "100%", height: "100%" }}

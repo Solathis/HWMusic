@@ -105,26 +105,26 @@ test("歌词舞台：定位容器 + 压暗层 + 文案来自纯逻辑模块（�
   assert.match(stage, /bg-background\//, "压暗层用设计令牌（背景之上、歌词之下）");
   assert.match(stage, /lyricsNoticeText/, "占位文案来自 playback-state.mjs（三档不混）");
   assert.doesNotMatch(stripComments(stage), /歌词来源|还没有歌词|敬请期待/, "文案不许在组件里另写一份");
-  assert.match(stage, /from\s*"\.\/components\/ui\/button"/, "关闭按钮走 shadcn 原语");
+  assert.match(stage, /<MediaButton[^>]*aria-label="关闭歌词"/, "沉浸关闭按钮同样来自官方 AMLL");
 });
 
 /** 全应用遮挡与字迹像素由 scripts/test-browser.mjs 的完整组合回归验证。 */
-test("沉浸舞台：复用 PlayerBar、尊重 prefers-reduced-motion", () => {
+test("沉浸舞台：官方 full 控件复用同一 runtime、尊重 prefers-reduced-motion", () => {
   const stage = stripComments(read(STAGE));
-
-  // 播放控制复用同一个组件（不是复制一份控件）
-  assert.match(stage, /import \{ PlayerBar \} from "\.\/components"/, "舞台底部复用主界面那个 PlayerBar");
-  assert.match(stage, /<PlayerBar runtime=\{runtime\} state=\{state\} \/>/, "舞台里那个不接 onOpenStage（已经在舞台上了）");
-  assert.match(
-    stage,
-    /data-testid="playback-stage-player"/,
-    "舞台里那一条播放器要有自己的锚点（页面上会有两个 player-bar，取证要能点名）",
-  );
+  assert.doesNotMatch(stage, /<PlayerBar|import.*PlayerBar/, "主界面的 shadcn 底栏不复制进沉浸舞台");
+  for (const component of ["AutoLyricLayout", "Cover", "MusicInfo", "MediaButton", "BouncingSlider", "VolumeControl"]) {
+    assert.match(stage, new RegExp(`<${component}\\b`), `沉浸视觉使用官方 ${component}`);
+  }
+  assert.match(stage, /from "@applemusic-like-lyrics\/react-full"/, "控件来自官方 full 包");
+  assert.doesNotMatch(stage, /new Audio|HTMLAudioElement|coreCall\(/, "沉浸控件不重建音频或业务请求");
+  assert.match(stage, /runtime\.player/, "只转发到已有播放器运行时");
 
   // 3. 关闭入口与动画
   assert.match(stage, /aria-label="关闭歌词"/, "关闭按钮保留（右上角）");
   assert.match(stage, /motion-safe:animate-in/, "打开动效用官方能力，并且只在允许动效时播");
   assert.match(stage, /motion-safe:fade-in/, "淡入用官方的 fade-in 工具类");
+  assert.match(stage, /<MotionConfig reducedMotion="user">/, "官方 full 的 framer 布局动效也必须尊重用户设置");
+  assert.match(stage, /motion-reduce:transition-none/, "官方 Cover 的 CSS 过渡使用 Tailwind motion-reduce");
   assert.doesNotMatch(stage, /@keyframes|animation:\s/, "不许自己写关键帧（动效只走官方能力）");
 });
 

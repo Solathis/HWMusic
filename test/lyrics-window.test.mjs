@@ -536,13 +536,15 @@ test("歌词窗入口：lyrics-main.tsx 挂载 LyricsWindow（双入口那一份
   const entry = read("src/renderer/lyrics-main.tsx");
   assert.match(entry, /LyricsWindow/, "歌词窗入口必须挂载 LyricsWindow");
   assert.match(entry, /import\s*\{[^}]*LyricsWindow[^}]*\}\s*from\s*"\.\/LyricsWindow\.tsx"/, "从 LyricsWindow.tsx 导入");
-  // CSS 引入顺序契约（两个入口逐字一致）
-  for (const line of [
-    '@applemusic-like-lyrics/core/style.css',
+  const expectedCss = [
+    "@applemusic-like-lyrics/core/style.css",
+    "@applemusic-like-lyrics/react-full/style.css",
     "./amll-theme.css",
     "./styles.css",
-  ]) {
-    assert.ok(entry.includes(line), `入口必须保持 CSS 引入顺序契约：${line}`);
+  ];
+  for (const file of ["src/renderer/main.tsx", "src/renderer/lyrics-main.tsx"]) {
+    const imports = [...read(file).matchAll(/^import "([^"]+\.css)"/gm)].map((match) => match[1]);
+    assert.deepEqual(imports, expectedCss, `${file}：core → full → 变量接线 → 应用样式`);
   }
 });
 

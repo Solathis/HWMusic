@@ -153,6 +153,7 @@ export function createPlayer(options = {}) {
    *   muted: boolean,
    *   mode: string,
    *   seekGeneration: number,
+   *   playbackGeneration: number,
    *   restored: boolean,
    *   lyrics: {status: string, lines: Array<import("@applemusic-like-lyrics/lyric").LyricLine>},
    * }}
@@ -170,6 +171,7 @@ export function createPlayer(options = {}) {
     muted: false,
     mode: DEFAULT_PLAYBACK_MODE,
     seekGeneration: 0,
+    playbackGeneration: 0,
     restored: false,
     lyrics: { status: "unavailable", lines: [] },
   });
@@ -343,7 +345,7 @@ export function createPlayer(options = {}) {
   function restartCurrent() {
     if (!state.loaded) return start(state.index, { manual: false });
     audio.setCurrentTime(0);
-    publish({ currentTimeMs: 0, seekGeneration: state.seekGeneration + 1, error: null });
+    publish({ currentTimeMs: 0, seekGeneration: state.seekGeneration + 1, playbackGeneration: state.playbackGeneration + 1, error: null });
     if (state.status === PLAYER_STATUS.playing) return playAudio();
     return done({ status: state.status, index: state.index });
   }
@@ -370,6 +372,7 @@ export function createPlayer(options = {}) {
     publish({
       index,
       track: entry,
+      playbackGeneration: state.playbackGeneration + 1,
       error: null,
       ...(sameLoaded
         ? {}
@@ -402,7 +405,7 @@ export function createPlayer(options = {}) {
     if (!state.loaded) return start(state.index, { manual: false });
     if (state.status === PLAYER_STATUS.ended) {
       audio.setCurrentTime(0);
-      publish({ currentTimeMs: 0 });
+      publish({ currentTimeMs: 0, playbackGeneration: state.playbackGeneration + 1 });
     }
     return playAudio();
   }
@@ -425,7 +428,7 @@ export function createPlayer(options = {}) {
     if (state.entries.length === 0) return done({ status: state.status });
     if (state.mode === "single-loop") {
       audio.setCurrentTime(0);
-      publish({ currentTimeMs: 0, seekGeneration: state.seekGeneration + 1, error: null });
+      publish({ currentTimeMs: 0, seekGeneration: state.seekGeneration + 1, playbackGeneration: state.playbackGeneration + 1, error: null });
       return playAudio();
     }
     if (state.mode === "shuffle") return start(shuffleNext(), { manual: false });
@@ -478,6 +481,7 @@ export function createPlayer(options = {}) {
       entries,
       index,
       track: index >= 0 ? entries[index] : null,
+      playbackGeneration: state.playbackGeneration + 1,
       status: PLAYER_STATUS.idle,
       loaded: false,
       currentTimeMs: 0,
@@ -542,6 +546,7 @@ export function createPlayer(options = {}) {
       entries: [],
       index: -1,
       track: null,
+      playbackGeneration: state.playbackGeneration + 1,
       status: PLAYER_STATUS.idle,
       loaded: false,
       currentTimeMs: 0,
@@ -577,6 +582,7 @@ export function createPlayer(options = {}) {
       entries,
       index: clean.index,
       track: entries[clean.index] ?? null,
+      playbackGeneration: state.playbackGeneration + 1,
       status: PLAYER_STATUS.idle,
       loaded: false,
       currentTimeMs: 0,

@@ -83,7 +83,8 @@ export const ACCEPTANCE_PATHS = [
     why: "托盘没装上却把窗口藏了 = 用户关一次窗就再也找不回应用（旧仓缺陷）",
     tests: ["test/tray.test.mjs", "test/close-behavior.test.mjs"],
     anchors: [
-      { file: "src-tauri/src/tray.rs", pattern: /tray_by_id\(crate::TRAY_ID\)\.is_some\(\)/, why: "关窗决策要**现场查**托盘是否真装上" },
+      { file: "src-tauri/src/tray.rs", pattern: /let Some\(tray\) = app\.tray_by_id\(crate::TRAY_ID\) else \{ return false; \}/, why: "关窗决策现场查托盘句柄，缺失就不可用" },
+      { file: "src-tauri/src/tray.rs", pattern: /return check_registration\(tray\.rect\(\)\.map_err\(\|error\| error\.to_string\(\)\)\)\.is_ok\(\)/, why: "Windows 还须查真实 Shell 注册位置，不能仅凭内部句柄" },
       { file: "src-tauri/src/tray.rs", pattern: /CloseAction::PreventAndHide/, why: "托盘可用才藏窗口" },
       { file: "src-tauri/src/close_behavior.rs", pattern: /CLOSE_BEHAVIOR_TRAY/, why: "closeBehavior 字面量与 settings 同源" },
     ],

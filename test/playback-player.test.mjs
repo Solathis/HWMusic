@@ -654,3 +654,34 @@ test("player:command（R11 托盘预登记）：命令表是唯一真源，认�
   }
   assert.deepEqual(called, PLAYER_COMMANDS, "被拒的命令一个都不许执行");
 });
+
+test("播放代次隔离旧交互：同 id 重复条目、重播、自动循环与换队列均作废旧代次", async () => {
+  const { player, fake } = makePlayer();
+  const duplicate = songs(1)[0];
+  await player.playQueue([duplicate, duplicate], 0);
+  const first = player.snapshot().playbackGeneration;
+  assert.ok(Number.isInteger(first) && first > 0, "首次播放有可捕获的代次");
+  player.seek(4000);
+  player.setVolume(0.5);
+  player.pause();
+  await player.play();
+  assert.equal(player.snapshot().playbackGeneration, first, "进度、音量、暂停/恢复不作废当前拖动");
+  await player.next();
+  const second = player.snapshot().playbackGeneration;
+  assert.equal(player.snapshot().track.id, duplicate.id);
+  assert.equal(player.snapshot().index, 1);
+  assert.ok(second > first, "id 相同但条目不同仍是新代次");
+  await player.playAt(1);
+  const repeated = player.snapshot().playbackGeneration;
+  assert.ok(repeated > second, "同一条目被重新选择也取消旧交互");
+  player.setMode("single-loop");
+  fake.emit("ended");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const looped = player.snapshot().playbackGeneration;
+  assert.ok(looped > repeated, "自然单曲循环重新开播是新代次");
+  player.setQueue([duplicate], 0);
+  const replaced = player.snapshot().playbackGeneration;
+  assert.ok(replaced > looped, "换队列但复用同 id 也取消旧交互");
+  player.clear();
+  assert.ok(player.snapshot().playbackGeneration > replaced, "清空队列作废旧交互");
+});
