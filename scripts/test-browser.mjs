@@ -7,12 +7,11 @@
  * R8/R9/R12 的冒烟都是 `react-dom/server` 渲静态标记——它证明不了"AMLL 组件在真浏览器里
  * 真的挂上、真的画出了像素、真的跟着进度动"。这里补上这一段：
  *
- * 1. 用**真组件**（`AmllLyricsPanel` / `AmllBackground`，不是替身）+ 真 `parseAmllLyrics` 适配器
- *    在 Chromium 里挂载；
- * 2. DOM 级：面板/背景宿主尺寸非零、AMLL 把歌词文本渲进了 DOM；
- * 3. 像素级：截图裁到面板区域，用 sharp 算熵（空白面板熵≈0）与**两帧差异**
- *    （推进进度后必须变——受控组件 + rAF 进度泵真的在跑）；
- * 4. 运行期错误（console error / pageerror）一条都不许有。
+ * 1. 真 LibraryShell → PlaybackStage → AMLL/PlayerBar 组合，只在 Tauri IPC 边界给夹具；
+ * 2. 浅/暗语义主题，文字 Range 截图与隐藏文字后的同区域对比，不能把背景误算成歌词；
+ * 3. 反转下层侧栏/header/列表/播放器，舞台像素必须不受影响；
+ * 4. 暂停打开/重开、播放/seek、菜单与 Sheet/Dialog 真交互，桌面歌词也测字迹；
+ * 5. 运行期错误（console error / pageerror）一条都不许有。
  *
  * ## 口径：SKIP 不算成功
  *
@@ -23,12 +22,12 @@
  *
  * ## 被测产物
  *
- * 守卫跑在**构建产物**上（先 `npm run dist:sidecar` + `vite build`，CI 里就是这么排的）：
- * 渲染层产物存在与否在这里只作为"环境就绪"的证据记录下来，真正的断言在被挂载的组件上。
+ * 使用 build:web 产出的真实 CSS 与 esbuild 打包的生产组件；Tauri IPC 与音频响应为夹具。
+ * 这不替代真实 WebView2 的在线取词取证，真窗验证另行记录。
  */
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -70,63 +69,103 @@ export function chromiumCandidates({ env = process.env } = {}) {
   return candidates;
 }
 
-/** 守卫页面的挂载源码（生成物，不入库）。 */
+/** 守卫页面的挂载源码（生成物，不入库）；只在 Tauri IPC 边界提供夹具。 */
 export function harnessSource() {
   return `import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { mockIPC } from "@tauri-apps/api/mocks";
+import { emit } from "@tauri-apps/api/event";
 
-import { AmllBackground } from "../../src/renderer/AmllBackground.tsx";
-import { AmllLyricsPanel } from "../../src/renderer/AmllLyricsPanel.tsx";
-import { parseAmllLyrics } from "../../src/renderer/features/lyrics/amll-adapter.ts";
+import { LibraryShell } from "../../src/renderer/App.tsx";
+import { LyricsWindow } from "../../src/renderer/LyricsWindow.tsx";
+import { TooltipProvider } from "../../src/renderer/components/ui/tooltip.tsx";
+import { getPlayerRuntime } from "../../src/renderer/features/playback/player-runtime.ts";
+import { DEFAULT_LYRICS_CONFIG } from "../../src/renderer/features/lyrics/lyrics-window.mjs";
 
 const LRC = ${JSON.stringify(FIXTURE_LRC)};
-const lines = parseAmllLyrics(LRC).lines;
-
-// 真组件要的运行时替身：只提供 LyricPlayer 受控组件需要的那一个读数
-let currentTimeMs = 0;
-const runtime = { player: { snapshot: () => ({ currentTimeMs }) } };
+let currentTheme = "light";
+const songs = Array.from({ length: 36 }, (_, index) => ({
+  id: String(index + 1), name: "浏览器守卫曲目 " + (index + 1), artists: "守卫艺人", duration: 12,
+}));
+mockIPC((command, args) => {
+  if (command === "core_call") {
+    switch (args.channel) {
+      case "settings:get": return { settings: { schemaVersion: 1, data: {} } };
+      case "settings:set": return { settings: { schemaVersion: 1, data: args.payload.patch } };
+      case "library:favorites": return { songs, hasMore: false, skipped: 0, reportedTotal: songs.length };
+      case "playback:resolve-url": return { url: "https://music.dbankcdn.cn/guard.wav" };
+      case "playback:lyrics": return { text: LRC };
+      default: throw new Error("未提供守卫 IPC：" + args.channel);
+    }
+  }
+  if (command === "core_get_tray_available") return true;
+  if (command === "core_login_chrome") return { theme: currentTheme };
+  if (command === "core_lyrics_document") return emit("core:event", { channel: "lyrics:document", payload: args.document });
+  if (command === "core_lyrics_progress") return emit("core:event", { channel: "lyrics:progress", payload: args.progress });
+  if (command.startsWith("core_lyrics_")) return { config: DEFAULT_LYRICS_CONFIG, visible: false };
+  throw new Error("未提供守卫命令：" + command);
+}, { shouldMockEvents: true });
+const runtime = getPlayerRuntime();
 
 function Guard() {
-  const [seekGeneration] = useState(0);
+  const [desktop, setDesktop] = useState(false);
   useEffect(() => {
     window.__guard = {
-      lineCount: lines.length,
-      lineTexts: lines.map((line) => (line.words ?? []).map((word) => word.word).join("")),
-      setTime(ms) {
-        currentTimeMs = ms;
+      snapshot: () => runtime.player.snapshot(),
+      setTime: (ms) => runtime.player.seek(ms),
+      setLyrics: (status) => runtime.player.setLyrics([], status),
+      restoreLyrics: async () => {
+        const { parseAmllLyrics } = await import("../../src/renderer/features/lyrics/amll-adapter.ts");
+        runtime.player.setLyrics(parseAmllLyrics(LRC).lines, "ready");
       },
-      readTime: () => currentTimeMs,
+      setDesktop,
+      setHostTheme(choice) { currentTheme = choice; },
+      async desktopBeforeMount() {
+        const { getLyricsBridge } = await import("../../src/renderer/features/lyrics/lyrics-bridge.mjs");
+        await getLyricsBridge().subscribeReady(() => runtime.player.snapshot());
+        const state = runtime.player.snapshot();
+        await emit("core:event", { channel: "lyrics:document", payload: state.lyrics });
+        setDesktop(true);
+      },
+      async desktopDocument(status = "ready") {
+        const state = runtime.player.snapshot();
+        await emit("core:event", { channel: "lyrics:document", payload: {
+          status, lines: status === "ready" ? state.lyrics.lines : [],
+        }});
+        await emit("core:event", { channel: "lyrics:progress", payload: {
+          timeMs: state.currentTimeMs, playing: false, seekGeneration: state.seekGeneration,
+        }});
+      },
+      async ready() {
+        await runtime.initialize();
+        await runtime.player.playQueue(songs, 0);
+        runtime.player.pause();
+        runtime.player.seek(700);
+      },
     };
   }, []);
-  return (
-    <div style={{ position: "relative", width: 900, height: 420, background: "#141018" }}>
-      <AmllBackground playing hasLyric albumArt={undefined} />
-      <AmllLyricsPanel runtime={runtime} lines={lines} playing seekGeneration={seekGeneration} />
-    </div>
+  return desktop ? <LyricsWindow /> : (
+    <TooltipProvider>
+      <div className="h-full w-full" data-shell="app-shell">
+        <LibraryShell />
+      </div>
+    </TooltipProvider>
   );
 }
 
-createRoot(document.getElementById("root")).render(
-  <StrictMode>
-    <Guard />
-  </StrictMode>,
-);
+createRoot(document.getElementById("root")).render(<StrictMode><Guard /></StrictMode>);
 `;
 }
 
 /** 守卫页面（生成物，不入库）。 */
 export function harnessHtml(hasCss) {
   return `<!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="light">
   <head>
     <meta charset="utf-8" />
-    <title>R14 AMLL 浏览器守卫</title>
+    <title>AMLL 完整舞台浏览器守卫</title>
     <link rel="stylesheet" href="./app.css" />
     ${hasCss ? "" : "<!-- 渲染层样式缺失：面板量不出尺寸，守卫会判失败 -->"}
-    <style>
-      html, body { margin: 0; padding: 0; background: #141018; }
-      #root { padding: 0; }
-    </style>
   </head>
   <body>
     <div id="root"></div>
@@ -177,30 +216,66 @@ function startServer(dir) {
   });
 }
 
-/** 截图裁到元素区域，返回 PNG 缓冲。 */
-async function shot(page, selector) {
-  const box = await page.locator(selector).boundingBox();
-  if (box === null) return null;
-  return page.screenshot({ clip: box, type: "png" });
+/** 裁到文字 Range；与隐藏同一文字后的像素比较，不能把背景/表格误算成歌词。 */
+async function textPixels(page, selector, theme, file) {
+  const box = await page.locator(selector).first().evaluate(async (element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    let previous = "";
+    let stable = 0;
+    let box;
+    for (let frame = 0; frame < 240; frame += 1) {
+      await new Promise(requestAnimationFrame);
+      const rect = range.getBoundingClientRect();
+      const x = Math.max(0, Math.floor(rect.x));
+      const y = Math.max(0, Math.floor(rect.y));
+      box = { x, y, width: Math.min(innerWidth, Math.ceil(rect.right)) - x, height: Math.min(innerHeight, Math.ceil(rect.bottom)) - y };
+      const next = JSON.stringify(box);
+      stable = previous === next ? stable + 1 : 0;
+      if (stable >= 12) break;
+      previous = next;
+    }
+    return box;
+  }).catch(() => null);
+  if (!box || box.width <= 0 || box.height <= 0) return { ink: 0, changed: 0, box };
+  const target = page.locator(selector).first();
+  const visible = await page.screenshot({ clip: box, path: file, type: "png" });
+  let hidden;
+  try {
+    await target.evaluate((element) => { element.style.visibility = "hidden"; });
+    hidden = await page.screenshot({ clip: box, type: "png" });
+  } finally {
+    await target.evaluate((element) => { element.style.removeProperty("visibility"); });
+  }
+  const a = await sharp(visible).removeAlpha().raw().toBuffer();
+  const b = await sharp(hidden).removeAlpha().raw().toBuffer();
+  let ink = 0;
+  let changed = 0;
+  for (let i = 0; i < a.length; i += 3) {
+    if (Math.max(Math.abs(a[i] - b[i]), Math.abs(a[i + 1] - b[i + 1]), Math.abs(a[i + 2] - b[i + 2])) < 40) continue;
+    changed += 1;
+    const luminance = a[i] * 0.299 + a[i + 1] * 0.587 + a[i + 2] * 0.114;
+    if (theme === "light" ? luminance < 95 : luminance > 160) ink += 1;
+  }
+  return { ink, changed, box };
 }
 
-/**
- * 像素特征：熵 + "字迹比例"（与画面主色不同的像素占比）。
- *
- * 为什么两个都要：面板绝大部分是背景，整幅图的熵天然很低（实测约 0.1），单看熵会误判
- * "什么都没画"；字迹比例直接回答"有没有东西被画上去"。
- */
-async function pixelStats(buffer) {
-  const stats = await sharp(buffer).stats();
-  const raw = await sharp(buffer).raw().toBuffer();
-  const histogram = new Map();
-  for (let index = 0; index + 3 < raw.length; index += 4) {
-    const key = (raw[index] << 16) | (raw[index + 1] << 8) | raw[index + 2];
-    histogram.set(key, (histogram.get(key) ?? 0) + 1);
-  }
-  const total = [...histogram.values()].reduce((sum, count) => sum + count, 0);
-  const modal = Math.max(0, ...histogram.values());
-  return { entropy: stats.entropy, inkRatio: total === 0 ? 0 : 1 - modal / total, raw };
+function fixtureAudio() {
+  const samples = 8000 * 12;
+  const wav = Buffer.alloc(44 + samples * 2);
+  wav.write("RIFF");
+  wav.writeUInt32LE(wav.length - 8, 4);
+  wav.write("WAVEfmt ", 8);
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(8000, 24);
+  wav.writeUInt32LE(16000, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write("data", 36);
+  wav.writeUInt32LE(samples * 2, 40);
+  return wav;
 }
 
 /** 两帧像素差异比例（0..1）。 */
@@ -233,7 +308,6 @@ async function launchChromium(candidates, log) {
 /** 跑全部检查，返回 {pass, fail, skipped, checks}。 */
 export async function runGuard({ root = ROOT, log = console.log } = {}) {
   const guardDir = path.join(root, GUARD_DIR);
-  await rm(guardDir, { recursive: true, force: true });
   await mkdir(guardDir, { recursive: true });
 
   // 沙箱只给工作区内的可删范围（R9 实测）：esbuild 的临时文件也得落在仓内
@@ -297,78 +371,155 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
   const add = (id, ok, detail) => checks.push({ id, ok, detail });
 
   try {
-    const page = await browser.newPage({ viewport: { width: 1000, height: 500 } });
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
     const consoleErrors = [];
     const pageErrors = [];
     page.on("console", (message) => {
       if (message.type() === "error") consoleErrors.push(message.text());
     });
     page.on("pageerror", (error) => pageErrors.push(error.message));
+    const audio = fixtureAudio();
+    await page.route("https://music.dbankcdn.cn/guard.wav", (route) => {
+      const range = route.request().headers().range?.match(/bytes=(\d+)-(\d*)/);
+      const start = range ? Number(range[1]) : 0;
+      const end = range?.[2] ? Math.min(Number(range[2]), audio.length - 1) : audio.length - 1;
+      return route.fulfill({
+        status: range ? 206 : 200, contentType: "audio/wav", body: audio.subarray(start, end + 1),
+        headers: { "accept-ranges": "bytes", ...(range ? { "content-range": `bytes ${start}-${end}/${audio.length}` } : {}) },
+      });
+    });
 
-    await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
-    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
-    await page.waitForTimeout(400);
+    const stage = page.getByTestId("playback-stage");
+    const activeLine = '[data-testid="amll-lyrics-panel"] [class*="lyricMainLine"][class*="active"]';
+    const underlay = '[data-slot="sidebar-container"], [data-slot="sidebar-inset"] > header, [data-slot="sidebar-inset"] > .relative, [data-slot="sidebar-inset"] > [data-testid="player-bar"]';
+    for (const theme of ["light", "dark"]) {
+      await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
+      await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+      await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
+      await page.evaluate(() => window.__guard.ready());
+      await page.waitForFunction(() => window.__guard.snapshot().lyrics.status === "ready" && window.__guard.snapshot().durationMs > 0);
+      add(`${theme}-fixture`, await page.evaluate(() => window.__guard.snapshot().lyrics.lines.length === 2), "真 IPC 边界夹具 → useLyricsWindow → 官方解析 → 2 行");
+      await page.getByTestId("sidebar-search-rail").count().then(async (count) => {
+        if (count) await page.getByTestId("sidebar-search-rail").click();
+      });
+      await page.getByRole("textbox", { name: "搜索关键字", exact: true }).fill("保留页面状态");
+      await page.getByTestId("favorites-scroll-root").evaluate((element) => { element.scrollTop = 180; });
+      const scrollTop = await page.getByTestId("favorites-scroll-root").evaluate((element) => element.scrollTop);
+      await page.getByRole("button", { name: "歌词", exact: true }).click();
+      await page.mouse.move(0, 0);
+      await page.waitForTimeout(1000);
+      const box = await stage.boundingBox();
+      const covered = await page.evaluate(() => [[12, 12], [12, 400], [1250, 400], [600, 780]].every(([x, y]) =>
+        document.elementFromPoint(x, y)?.closest('[data-testid="playback-stage"]')));
+      add(`${theme}-full-coverage`, box?.x === 0 && box?.y === 0 && box?.width === 1280 && box?.height === 800 && covered, `舞台 ${JSON.stringify(box)}，四角命中舞台=${covered}`);
+      add(`${theme}-background`, await stage.locator('[data-testid="amll-background"] canvas').count() > 0, "完整舞台内使用官方背景画布");
+      const pixels = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-paused-line.png`));
+      add(`${theme}-paused-text-pixels`, pixels.ink > 60, JSON.stringify(pixels));
+      await page.screenshot({ path: path.join(guardDir, `${theme}-stage.png`) });
 
-    // 1. 夹具：真适配器把 LRC 解析成了两行
-    const fixture = await page.evaluate(() => ({ lines: window.__guard.lineCount, texts: window.__guard.lineTexts }));
-    add("fixture-parsed", fixture.lines === 2, `parseAmllLyrics 解析出 ${fixture.lines} 行：${JSON.stringify(fixture.texts)}`);
+      const before = await page.screenshot();
+      await page.locator(underlay).evaluateAll((elements) => elements.forEach((element) => { element.style.filter = "invert(1)"; }));
+      const inverted = await page.screenshot();
+      await page.locator(underlay).evaluateAll((elements) => elements.forEach((element) => { element.style.removeProperty("filter"); }));
+      const diff = pixelDiffRatio(await sharp(before).raw().toBuffer(), await sharp(inverted).raw().toBuffer());
+      add(`${theme}-opaque-underlay`, diff < 0.0001, `反转侧栏/header/列表/原底栏后整窗像素差异 ${(diff * 100).toFixed(4)}%（必须≈0）`);
 
-    // 2. DOM：面板宿主与背景宿主都挂上了，且尺寸非零
-    const panelBox = await page.locator('[data-testid="amll-lyrics-panel"]').boundingBox();
-    const backgroundBox = await page.locator('[data-testid="amll-background"]').boundingBox();
-    add(
-      "hosts-mounted",
-      panelBox !== null && panelBox.width > 0 && panelBox.height > 0 && backgroundBox !== null && backgroundBox.width > 0,
-      `面板 ${JSON.stringify(panelBox)}；背景 ${JSON.stringify(backgroundBox)}`,
-    );
+      await stage.getByRole("button", { name: "关闭歌词", exact: true }).click();
+      const retained = await page.getByRole("textbox", { name: "搜索关键字", exact: true }).inputValue() === "保留页面状态"
+        && await page.getByTestId("favorites-scroll-root").evaluate((element) => element.scrollTop) === scrollTop;
+      add(`${theme}-page-retained`, retained, "关闭后搜索输入与收藏滚动位置未丢失");
+      await page.getByRole("button", { name: "打开歌词", exact: true }).click();
+      await page.mouse.move(0, 0);
+      await page.waitForTimeout(800);
+      const reopened = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-reopened-line.png`));
+      add(`${theme}-paused-reopen`, reopened.ink > 60, JSON.stringify(reopened));
 
-    // 3. DOM：AMLL 把歌词文本渲进了 DOM（不是空壳宿主）
-    const panelText = (await page.locator('[data-testid="amll-lyrics-panel"]').textContent()) ?? "";
-    add(
-      "lyric-text-rendered",
-      panelText.includes("第一行歌词守卫"),
-      `面板 textContent 长度 ${panelText.length}，含首行歌词：${panelText.includes("第一行歌词守卫")}`,
-    );
+      await stage.getByRole("button", { name: "播放", exact: true }).click();
+      await page.waitForFunction(() => window.__guard.snapshot().status === "playing");
+      await page.waitForTimeout(300);
+      const playingPixels = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-playing-line.png`));
+      add(`${theme}-playing-text-pixels`, playingPixels.ink > 60, JSON.stringify(playingPixels));
+      await stage.getByRole("button", { name: "暂停", exact: true }).click();
+      await page.evaluate(() => window.__guard.setTime(3300));
+      await page.waitForTimeout(800);
+      const progressed = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-seek-line.png`));
+      const secondActive = await page.locator(activeLine).first().textContent().catch(() => "");
+      add(`${theme}-seek-text-pixels`, progressed.ink > 60 && secondActive?.includes("第二行"), `${JSON.stringify(progressed)}，第二行激活=${secondActive?.includes("第二行")}`);
 
-    // 4. DOM：背景宿主里有 AMLL 自建的画布（官方组件真的装了渲染器）
-    const canvasCount = await page.locator('[data-testid="amll-background"] canvas').count();
-    add("background-renderer", canvasCount >= 1, `[data-testid="amll-background"] 里的 canvas 数：${canvasCount}`);
+      await stage.getByRole("button", { name: "下一首", exact: true }).click();
+      await page.waitForFunction(() => window.__guard.snapshot().index === 1 && window.__guard.snapshot().status === "playing");
+      await stage.getByRole("button", { name: "上一首", exact: true }).click();
+      await page.waitForFunction(() => window.__guard.snapshot().index === 0 && window.__guard.snapshot().status === "playing");
+      await stage.getByRole("button", { name: "暂停", exact: true }).click();
+      const slider = stage.locator('[aria-label="播放进度"] [role="slider"]');
+      const oldTime = await page.evaluate(() => window.__guard.snapshot().currentTimeMs);
+      await slider.focus();
+      await slider.press("ArrowRight");
+      add(`${theme}-player-controls`, await page.evaluate((old) => window.__guard.snapshot().currentTimeMs > old, oldTime), "舞台内播放/暂停/前后切歌/进度 Slider 真交互成功");
+      await stage.getByRole("button", { name: /^播放模式：/ }).click();
+      await page.getByRole("menuitemradio", { name: "列表循环", exact: true }).click();
+      add(`${theme}-menu-stack`, await page.evaluate(() => window.__guard.snapshot().mode === "list-loop"), "PlayerBar 菜单 portal 在舞台上可点");
+      const queueTrigger = page.getByRole("button", { name: "播放队列", exact: true });
+      await queueTrigger.focus();
+      await queueTrigger.press("Enter");
+      await page.locator('[data-slot="sheet-content"]').waitFor();
+      await page.locator('[data-slot="sheet-close"]').click();
+      await page.locator('[data-slot="sheet-content"]').waitFor({ state: "detached" });
+      const logoutTrigger = page.getByRole("button", { name: "退出登录", exact: true });
+      await logoutTrigger.focus();
+      await logoutTrigger.press("Enter");
+      await page.getByRole("alertdialog").waitFor();
+      await page.getByRole("button", { name: "取消", exact: true }).click();
+      await page.getByRole("alertdialog").waitFor({ state: "detached" });
+      add(`${theme}-overlapping-overlays`, await stage.isVisible(), "舞台仍打开时键盘激活 Sheet/Dialog，指针可关闭上层，舞台保留");
 
-    // 5. 像素：面板区域真的被画了东西（有字迹才有非主色像素）
-    const before = await shot(page, '[data-testid="amll-lyrics-panel"]');
-    const beforeStats = before === null ? null : await pixelStats(before);
-    add(
-      "panel-pixels",
-      beforeStats !== null && beforeStats.inkRatio > 0.002 && beforeStats.entropy > 0.03,
-      beforeStats === null
-        ? "面板截不出来"
-        : `面板区域字迹比例 ${(beforeStats.inkRatio * 100).toFixed(2)}%、熵 ${beforeStats.entropy.toFixed(3)}（空白面板两项都≈0）`,
-    );
-
-    // 6. 像素：推进进度后画面必须变（受控组件 + rAF 进度泵真的在跑）
-    await page.evaluate(() => window.__guard.setTime(3300));
-    await page.waitForTimeout(600);
-    const after = await shot(page, '[data-testid="amll-lyrics-panel"]');
-    const afterStats = after === null ? null : await pixelStats(after);
-    const diff = beforeStats && afterStats ? pixelDiffRatio(beforeStats.raw, afterStats.raw) : 0;
-    const afterText = (await page.locator('[data-testid="amll-lyrics-panel"]').textContent()) ?? "";
-    add(
-      "progress-advances",
-      diff > 0.001 && afterText.includes("第二行歌词守卫"),
-      `推进到 3300ms：像素差异 ${(diff * 100).toFixed(2)}%、第二行在 DOM 里=${afterText.includes("第二行歌词守卫")}`,
-    );
-
-    // 7. 运行期干净：console error / pageerror 一条都不许有
-    add(
-      "no-runtime-errors",
-      consoleErrors.length === 0 && pageErrors.length === 0,
-      `console error ${consoleErrors.length} 条、pageerror ${pageErrors.length} 条${[...consoleErrors, ...pageErrors].slice(0, 3).map((text) => `\n      ${text.slice(0, 200)}`).join("")}`,
-    );
-
-    if (process.env.R14_GUARD_DOM_PROBE === "1") {
-      const html = await page.locator('[data-testid="amll-lyrics-panel"]').innerHTML();
-      add("dom-probe", true, html.slice(0, 3000));
+      for (const status of ["empty", "failed", "loading", "unavailable"]) {
+        await page.evaluate((value) => window.__guard.setLyrics(value), status);
+        const notice = stage.getByRole("status");
+        await notice.waitFor();
+        const statusPixels = await textPixels(page, '[data-testid="playback-stage"] [role="status"]', theme, path.join(guardDir, `${theme}-${status}.png`));
+        add(`${theme}-notice-${status}`, statusPixels.changed > 30 && (await notice.textContent())?.length > 0, JSON.stringify(statusPixels));
+      }
+      await stage.getByRole("button", { name: "关闭歌词", exact: true }).click();
+      await page.getByRole("button", { name: "播放队列", exact: true }).click();
+      await page.locator('[data-slot="sheet-content"]').waitFor();
+      await page.locator('[data-slot="sheet-close"]').click();
+      await page.getByRole("button", { name: "退出登录", exact: true }).click();
+      await page.getByRole("alertdialog").waitFor();
+      await page.getByRole("button", { name: "取消", exact: true }).click();
+      await page.getByRole("alertdialog").waitFor({ state: "detached" });
+      add(`${theme}-overlay-stack`, await page.getByRole("alertdialog").count() === 0 && await stage.count() === 0, "关闭舞台后 Sheet 打开/关闭、AlertDialog 打开/取消均可真点测");
     }
+
+    await page.evaluate(() => window.__guard.restoreLyrics());
+    await page.evaluate(() => window.__guard.desktopBeforeMount());
+    await page.getByTestId("lyrics-window").waitFor();
+    await page.waitForTimeout(900);
+    const earlyDocument = await page.getByTestId("lyrics-window").textContent();
+    add("desktop-early-document", earlyDocument?.includes("第一行歌词守卫"), "早于 React 挂载的文档丢失后，就绪握手须补回当前快照");
+    for (const theme of ["light", "dark"]) {
+      await page.evaluate((choice) => window.__guard.setHostTheme(choice), theme);
+      await page.evaluate(() => window.__guard.setDesktop(false));
+      await page.getByTestId("lyrics-window").waitFor({ state: "detached" });
+      await page.evaluate(() => {
+        document.documentElement.className = "light";
+        window.__guard.setDesktop(true);
+      });
+      await page.getByTestId("lyrics-window").waitFor();
+      await page.waitForFunction((choice) => document.documentElement.classList.contains(choice)
+        && document.querySelector('[data-testid="lyrics-window"]')?.textContent.includes("第一行歌词守卫"), theme);
+      await page.waitForTimeout(900);
+      const pixels = await textPixels(page, '[data-testid="lyrics-window"] [class*="lyricMainLine"][class*="active"]', theme, path.join(guardDir, `${theme}-desktop-line.png`));
+      add(`${theme}-desktop-text-pixels`, pixels.ink > 60, JSON.stringify(pixels));
+      for (const status of ["empty", "failed"]) {
+        await page.evaluate((value) => window.__guard.desktopDocument(value), status);
+        await page.getByTestId("lyrics-window").getByRole("status").waitFor();
+        const notice = await textPixels(page, '[data-testid="lyrics-window"] [role="status"]', theme, path.join(guardDir, `${theme}-desktop-${status}.png`));
+        add(`${theme}-desktop-${status}`, notice.changed > 30, JSON.stringify(notice));
+      }
+    }
+    add("no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,
+      `console error ${consoleErrors.length} 条、pageerror ${pageErrors.length} 条${[...consoleErrors, ...pageErrors].slice(0, 3).map((text) => `\n      ${text.slice(0, 200)}`).join("")}`);
   } finally {
     await browser.close();
     server.close();

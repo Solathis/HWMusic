@@ -9,11 +9,11 @@
  * （四条命令）、`subscribeCoreEvent`（广播订阅）、`parseLyrics`（官方解析适配）。
  *
  * 边界（与简报一致）：
- * - 歌词窗**没有**业务频道权限，四条命令全在主窗侧调用；歌词窗只订阅事件；
+ * - 歌词窗**没有**业务频道权限，四条命令全在主窗侧调用；歌词窗订阅完成后只发就绪事件；
  * - 进度节流在这里（`shouldPushProgress`）：rAF 每帧都调 `pushProgress`，只有该推的才出 IPC；
  * - 歌词文本只在**这一次**调用里出现：不写日志、不落盘（与播放地址同一条纪律）。
  */
-import { LYRICS_TOGGLE } from "../../../shared/channels.ts";
+import { LYRICS_STATE, LYRICS_TOGGLE } from "../../../shared/channels.ts";
 import {
   CORE_LYRICS_CONFIGURE,
   CORE_LYRICS_DOCUMENT,
@@ -28,6 +28,7 @@ import {
   coreLyricsToggle,
   coreCall,
   onCoreEvent,
+  syncLyricsTheme,
 } from "../../host-api.ts";
 import { parseAmllLyrics } from "./amll-adapter.ts";
 import { readLyricsFile } from "./lyrics-import.mjs";
@@ -37,6 +38,7 @@ import {
   lyricsDocumentOf,
   lyricsStatusFromFailure,
   normalizeLyricsConfig,
+  progressOf,
   shouldPushProgress,
 } from "./lyrics-window.mjs";
 
@@ -108,12 +110,14 @@ function normalizeProgress(progress) {
  * @param {(command: string, args?: unknown) => Promise<unknown>} [deps.callCommand]
  * @param {(channel: string, handler: (payload: unknown) => void) => Promise<() => void>} [deps.subscribeCoreEvent]
  * @param {(text: unknown) => {lines?: unknown[]}} [deps.parseLyrics] 官方解析适配（默认 amll-adapter）
+ * @param {() => Promise<void>} [deps.syncTheme] 主窗读真实主题并广播，不写配置
  */
 export function createLyricsBridge(deps = {}) {
   const callCore = deps.callCore ?? ((channel, payload) => coreCall(channel, payload));
   const callCommand = deps.callCommand ?? defaultCallCommand;
   const subscribeCoreEvent = deps.subscribeCoreEvent ?? onCoreEvent;
   const parseLyrics = deps.parseLyrics ?? ((text) => parseAmllLyrics(text));
+  const syncTheme = deps.syncTheme ?? syncLyricsTheme;
   const log = deps.log ?? ((...parts) => console.warn("[hwmusic-lyrics]", ...parts));
 
   /** 上一次**推出去**的进度：节流的比较基准（没推的那个不算，否则永远差 20ms）。 */
@@ -250,11 +254,27 @@ export function createLyricsBridge(deps = {}) {
     }
   }
 
+  function subscribeReady(readState) {
+    return subscribeCoreEvent(LYRICS_STATE, async (payload) => {
+      if (payload?.ready !== true) return;
+      try {
+        await syncTheme();
+        const state = readState();
+        await pushDocument(state.lyrics);
+        lastProgress = null;
+        await pushProgress(progressOf(state));
+      } catch (cause) {
+        log("歌词窗就绪后同步失败：", cause);
+      }
+    });
+  }
+
   return {
     readStatus,
     setVisible,
     applyConfig,
     subscribeToggle,
+    subscribeReady,
     loadLyrics,
     importLyrics,
     readCacheInfo,

@@ -58,7 +58,7 @@ export function AmllLyricsPanel({ runtime, lines, playing, seekGeneration }: Aml
   }, [seekGeneration])
 
   return (
-    <div className="amll-lyrics-stage absolute inset-0" data-testid="amll-lyrics-panel">
+    <div className="amll-lyrics-stage absolute inset-0 isolate" data-testid="amll-lyrics-panel">
       <LyricPlayer
         lyricLines={lines}
         currentTime={frame.time}

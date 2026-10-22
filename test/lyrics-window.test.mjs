@@ -552,8 +552,9 @@ test("歌词窗主题（R41）：初值走查询串、变化走广播，且**不
   assert.match(entry, /themeFromSearch\(window\.location\.search\)/, "主题初值从查询串读");
   assert.match(entry, /applyThemeChoice\(document\.documentElement/, "切类只经 theme.mjs 的那一个入口");
   // 变化：订阅 `theme:changed` 广播（订阅不需要权限）
-  assert.match(entry, new RegExp(THEME_CHANGED), "跟随 theme:changed 广播");
-  assert.match(entry, /onCoreEvent</, "订阅走 host-api 的封装");
+  const host = read("src/renderer/LyricsWindow.tsx");
+  assert.match(host, /onCoreEvent<[^\n]+>\(THEME_CHANGED/, "主题订阅与文档/进度一起确认就绪");
+  assert.match(host, /onCoreEvent</, "订阅走 host-api 的封装");
   // 不许为了主题把命令权限放宽（那条命令还能取消登录）
   // 注：只扫**调用形状**——注释里出现 `installThemeSync()` 是在解释"为什么不那么做"，不算调用。
   assert.doesNotMatch(entry, /coreLoginChrome\s*[(<]|coreCall\(/, "歌词窗不许调命令（主题也不例外）");
@@ -567,10 +568,10 @@ test("歌词窗主题（R41）：初值走查询串、变化走广播，且**不
   assert.equal(themeFromSearch(null), null, "坏入参不抛");
 });
 
-test("桌窗文档重发（R41a）：改由 Rust 在页面加载完成时重发，渲染层不再重推", () => {
+test("桌窗文档重发：保留 Rust 加载重发，不在 visible 翻转时盲推", () => {
   const hook = read("src/renderer/use-lyrics-window.ts");
   // R41 曾在渲染层补推一次（visible false→true）；那一次**必然太早**（reload 是异步的，
-  // 主窗拿到回执时新页还在加载），所以删掉——真正的时机只有"页面加载完成"。
+  // 主窗拿到回执时新页还在加载）；实际订阅就绪由新页握手确认。
   assert.doesNotMatch(
     hook,
     /const opened = visible && !wasVisible\.current/,
@@ -686,6 +687,7 @@ function stubBridge(overrides = {}) {
       return () => listeners.delete(channel);
     },
     parseLyrics: overrides.parseLyrics,
+    syncTheme: async () => { calls.push({ themeSynced: true }); },
   });
   return { bridge, calls, listeners };
 }
@@ -719,6 +721,26 @@ test("主窗转发：四条命令各走各的命令名，回执经纯函数归�
   });
   assert.deepEqual((await broken.readStatus()).config, DEFAULT_LYRICS_CONFIG);
   assert.equal((await broken.readStatus()).visible, false);
+});
+
+test("桌面歌词就绪握手：只在订阅回执之后重发最新文档与暂停进度", async () => {
+  const { bridge, calls, listeners } = stubBridge();
+  let current = { lyrics: { status: "empty", lines: [] }, status: "paused", currentTimeMs: 7000, seekGeneration: 3 };
+  const stop = await bridge.subscribeReady(() => current);
+  const onReady = listeners.get(LYRICS_STATE);
+  assert.equal(typeof stop, "function");
+  await onReady({ visible: true, config: DEFAULT_LYRICS_CONFIG });
+  assert.equal(calls.length, 0, "配置变化不是订阅就绪，不重发");
+  current = { ...current, lyrics: { status: "ready", lines: [{ startTime: 0, endTime: 8000, words: [] }] } };
+  await onReady({ ready: true });
+  assert.deepEqual(calls[0], { themeSynced: true }, "重开先同步实际主题，不能停在建窗旧查询串");
+  assert.deepEqual(calls.slice(1).map((call) => call.command), [CORE_LYRICS_DOCUMENT, CORE_LYRICS_PROGRESS]);
+  assert.deepEqual(calls[1].args.document, current.lyrics, "读最新快照，不闭包住初始空文档");
+  assert.deepEqual(calls[2].args.progress, { timeMs: 7000, playing: false, seekGeneration: 3 });
+  calls.length = 0;
+  await onReady({ ready: true });
+  assert.deepEqual(calls[0], { themeSynced: true });
+  assert.deepEqual(calls.slice(1).map((call) => call.command), [CORE_LYRICS_DOCUMENT, CORE_LYRICS_PROGRESS], "同进度重开也必须补发，不能被进度节流吃掉");
 });
 
 test("主窗转发：进度节流在桥里（rAF 每帧调它，只有该推的才出 IPC）", async () => {

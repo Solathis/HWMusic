@@ -13,9 +13,7 @@
  * 失败一律不吵用户：命令失败时宿主已经发了 `app:notice`（并把托盘勾选翻回实际状态），
  * 这里只留一行 warn（渲染层不许有 console.log，见 theme-tokens 的扫描）。
  *
- * **不在这里重推歌词文档**（R41a）：宿主每次显示歌词窗都会重新加载它的页面，而"补一份当前
- * 文档"这件事必须发生在**新页面订阅之后**——那是 Rust 侧的时刻（`on_page_load(Finished)` 的
- * `replay_document`，见 `src-tauri/src/lyrics_window.rs`），这里推的任何一次都太早。见下面第 5 段。
+ * 歌词窗重开后须等它的订阅就绪回执，再补发主题、当前文档与进度；页面加载完成不等于订阅已完成。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
@@ -171,17 +169,18 @@ export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): Lyr
     return () => cancelAnimationFrame(handle)
   }, [bridge, visible])
 
-  // 5. 窗口刚打开时**不**在这里重推文档（R41a 删掉的那一次）。
-  //
-  // R41 曾在这里补过一次推（`visible` 从 false 变 true 时 `pushDocument`），理由是"宿主每次显示
-  // 都会重新加载歌词窗的页面，重载后页面回到初始态"。方向没错，**时机必然太早**：`reload()` 是
-  // 异步的，等这条命令的回执回到主窗时，新页面还在加载——文档落在新页 `listen()` 之前，
-  // 之后再没有任何补发路径，用户看到的是占位文案，直到换歌（R41a 审查的 1/8）。
-  //
-  // 现在这件事由**知道页面何时就绪**的那一侧做：Rust 在 `core_lyrics_document` 里留一份最后
-  // 发出去的文档，页面加载完成（`on_page_load(Finished)`）时重发（`src-tauri/src/lyrics_window.rs`
-  // 的 `replay_document`）。留在这里的那次重推在任何时序下都不落在可用的那一刻，只会让人以为
-  // 它在起作用，所以删掉——**不是**把它挪到别处再来一次。
+  useEffect(() => {
+    let alive = true
+    let stop: (() => void) | null = null
+    void bridge.subscribeReady(() => stateRef.current).then((off: () => void) => {
+      if (alive) stop = off
+      else off()
+    }).catch((cause: unknown) => log("歌词窗就绪订阅失败：", cause))
+    return () => {
+      alive = false
+      stop?.()
+    }
+  }, [bridge])
 
   const setVisible = useCallback(
     (next: boolean) => {

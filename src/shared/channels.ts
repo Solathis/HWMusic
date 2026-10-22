@@ -106,6 +106,7 @@ export const LYRICS_PROGRESS = "lyrics:progress" as const;
  * 配置是**会话内**的（持久化不做，写入已知限制）：Rust 侧握着唯一一份（`LyricsWindowState`），
  * 每次变更广播给两个窗口——歌词窗按它换字号/颜色/模式，主窗设置页按它显示当前档位。
  * 歌词窗建窗时的初值由 URL 查询串带入（渲染层还没订阅事件时也不会丢配置）。
+ * 歌词窗完成文档/配置/进度/主题订阅后发 `{ready: true}`；主窗据此补发主题、当前文档与进度。
  */
 export const LYRICS_STATE = "lyrics:state" as const;
 

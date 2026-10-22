@@ -23,9 +23,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
+import { emit } from "@tauri-apps/api/event";
+import { onCoreEvent, syncLyricsTheme } from "../src/renderer/host-api.ts";
 
 import { CORE_LOGIN_CHROME } from "../src/shared/commands.ts";
-import { BROADCAST_CHANNELS, THEME_CHANGED } from "../src/shared/channels.ts";
+import { BROADCAST_CHANNELS, CORE_EVENT, LYRICS_STATE, THEME_CHANGED } from "../src/shared/channels.ts";
 import {
   LOGIN_CHROME_ENTRY,
   LOGIN_CHROME_KIND,
@@ -269,6 +272,78 @@ test("广播频道：theme:changed 进常量表 + Rust 镜像（两侧逐字相�
   const bridge = rustProduction("bridge.rs");
   assert.ok(bridge.includes(`"${THEME_CHANGED}"`), "Rust 侧广播白名单必须同样含 theme:changed");
   assert.match(bridge, /pub const THEME_CHANGED/, "Rust 侧要有同名常量（镜像副本）");
+});
+
+test("歌词 ready 主题补发：延迟旧读取期间的新主题广播不得回退主窗或歌词窗", async () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = { crypto: globalThis.crypto };
+  const readStarted = Promise.withResolvers();
+  const oldReply = Promise.withResolvers();
+  mockIPC((command, args) => {
+    assert.equal(command, CORE_LOGIN_CHROME);
+    assert.deepEqual(args, { payload: { action: "theme" } });
+    readStarted.resolve();
+    return oldReply.promise;
+  }, { shouldMockEvents: true });
+  const main = fakeRoot(["light"]);
+  const lyrics = fakeRoot(["light"]);
+  const themes = [];
+  const off = await onCoreEvent(THEME_CHANGED, (payload) => {
+    themes.push(payload.theme);
+    applyThemeChoice(main, payload.theme);
+    applyThemeChoice(lyrics, payload.theme);
+  });
+  try {
+    const syncing = syncLyricsTheme();
+    await readStarted.promise;
+    await emit(CORE_EVENT, { channel: THEME_CHANGED, payload: { theme: "dark" } });
+    oldReply.resolve({ theme: "light" });
+    await syncing;
+    assert.deepEqual(themes, ["dark"], "真实新广播之后不得再广播旧的浅色读取回执");
+    assert.deepEqual(main.classes(), ["dark"]);
+    assert.deepEqual(lyrics.classes(), ["dark"]);
+    assert.equal(window.__TAURI_INTERNALS__.callbacks.size, 1, "补发的临时观察必须清理");
+  } finally {
+    off();
+    clearMocks();
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test("歌词 ready 主题补发：未被主题变化打断时保留原载荷并清理成功/失败订阅", async () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = { crypto: globalThis.crypto };
+  const readStarted = Promise.withResolvers();
+  const reply = Promise.withResolvers();
+  let fail = false;
+  mockIPC((command, args) => {
+    assert.equal(command, CORE_LOGIN_CHROME);
+    assert.deepEqual(args, { payload: { action: "theme" } });
+    if (fail) throw { kind: "internal", message: "theme read failed" };
+    readStarted.resolve();
+    return reply.promise;
+  }, { shouldMockEvents: true });
+  const themes = [];
+  const off = await onCoreEvent(THEME_CHANGED, (payload) => themes.push(payload));
+  try {
+    const syncing = syncLyricsTheme();
+    await readStarted.promise;
+    await emit(CORE_EVENT, { channel: LYRICS_STATE, payload: { ready: true } });
+    reply.resolve({ theme: "system" });
+    await syncing;
+    assert.deepEqual(themes, [{ theme: "system" }], "非主题事件不作废读取，也不修改既有主题载荷");
+    assert.equal(window.__TAURI_INTERNALS__.callbacks.size, 1);
+    fail = true;
+    await assert.rejects(syncLyricsTheme(), { kind: "internal", message: "theme read failed" });
+    assert.deepEqual(themes, [{ theme: "system" }]);
+    assert.equal(window.__TAURI_INTERNALS__.callbacks.size, 1, "读取失败同样清理临时观察");
+  } finally {
+    off();
+    clearMocks();
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
 });
 
 test("浮动控件：返回走 core_login_chrome，主题也走同一条命令（单一入口）", () => {

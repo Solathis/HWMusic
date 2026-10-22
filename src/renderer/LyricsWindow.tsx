@@ -1,5 +1,5 @@
 /**
- * 桌面歌词窗（R12）：**只订阅事件**的第三个 AMLL 宿主。
+ * 桌面歌词窗（R12）：**无业务命令**的第三个 AMLL 宿主。
  *
  * 三件事，一件都不多做：
  * 1. **订阅**三条广播（`lyrics:document` 歌词行 / `lyrics:progress` 进度 / `lyrics:state` 配置）。
@@ -18,8 +18,8 @@ import { LyricPlayer } from "@applemusic-like-lyrics/react"
 import type { LyricLine } from "@applemusic-like-lyrics/lyric"
 import { useEffect, useRef, useState } from "react"
 
-import { LYRICS_DOCUMENT, LYRICS_PROGRESS, LYRICS_STATE } from "../shared/channels.ts"
-import { onCoreEvent } from "./host-api"
+import { LYRICS_DOCUMENT, LYRICS_PROGRESS, LYRICS_STATE, THEME_CHANGED } from "../shared/channels.ts"
+import { onCoreEvent, signalLyricsReady } from "./host-api"
 import { LYRICS_SEEK_WINDOW_MS } from "./features/lyrics/lyric-sync.mjs"
 import {
   LYRICS_STATUS,
@@ -31,6 +31,7 @@ import {
   reanchorProgress,
 } from "./features/lyrics/lyrics-window.mjs"
 import { lyricsNoticeText } from "./features/playback/playback-state.mjs"
+import { applyThemeChoice } from "./features/theme/theme.mjs"
 
 /** 广播进来的歌词文档（主窗转发的那一份）。 */
 interface LyricsDocument {
@@ -51,7 +52,6 @@ const INITIAL_DOCUMENT: LyricsDocument = { lines: [], status: LYRICS_STATUS.unav
 export function LyricsWindow() {
   // 初值来自建窗时拼的查询串（Rust 侧按当前配置拼）：渲染层还没订阅事件时也不会丢配置
   const [config, setConfig] = useState(() => lyricsConfigFromSearch(window.location.search))
-  // 名字不叫 `document`：那会遮蔽全局 `document`（visibilitychange 那条监听要的就是它）
   const [lyricDocument, setLyricDocument] = useState<LyricsDocument>(INITIAL_DOCUMENT)
   const [frame, setFrame] = useState({ time: 0, isSeeking: false })
 
@@ -67,35 +67,44 @@ export function LyricsWindow() {
       else off()
     }
 
-    void onCoreEvent<LyricsDocument>(LYRICS_DOCUMENT, (payload) => {
-      setLyricDocument({
-        lines: Array.isArray(payload?.lines) ? payload.lines : [],
-        status: typeof payload?.status === "string" ? payload.status : LYRICS_STATUS.unavailable,
-      })
-    }).then(keep)
-
-    void onCoreEvent<{ config?: unknown }>(LYRICS_STATE, (payload) => {
-      setConfig((current) => normalizeLyricsConfig(payload?.config, current))
-    }).then(keep)
-
-    void onCoreEvent<{ timeMs?: unknown; playing?: unknown; seekGeneration?: unknown }>(
-      LYRICS_PROGRESS,
-      (payload) => {
-        const timeMs = Number(payload?.timeMs)
-        const seekGeneration = Number(payload?.seekGeneration)
-        if (Number.isInteger(seekGeneration) && seekGeneration !== seekSeenRef.current) {
-          seekSeenRef.current = seekGeneration
-          // 跳转：给 AMLL 一段"正在被拖动"的窗口，手停之后自动收（窗口常量在 lyric-sync.mjs）
-          seekDeadlineRef.current = Date.now() + LYRICS_SEEK_WINDOW_MS
-        }
-        progressRef.current = {
-          timeMs: Number.isFinite(timeMs) && timeMs > 0 ? Math.round(timeMs) : 0,
-          playing: payload?.playing === true,
-          seekGeneration: Number.isInteger(seekGeneration) ? seekGeneration : 0,
-          atMs: Date.now(),
-        }
-      },
-    ).then(keep)
+    void Promise.all([
+      onCoreEvent<LyricsDocument>(LYRICS_DOCUMENT, (payload) => {
+        setLyricDocument({
+          lines: Array.isArray(payload?.lines) ? payload.lines : [],
+          status: typeof payload?.status === "string" ? payload.status : LYRICS_STATUS.unavailable,
+        })
+      }).then(keep),
+      onCoreEvent<{ config?: unknown }>(LYRICS_STATE, (payload) => {
+        setConfig((current) => normalizeLyricsConfig(payload?.config, current))
+      }).then(keep),
+      onCoreEvent<{ theme?: string }>(THEME_CHANGED, (payload) => {
+        applyThemeChoice(document.documentElement, payload?.theme)
+      }).then(keep),
+      onCoreEvent<{ timeMs?: unknown; playing?: unknown; seekGeneration?: unknown }>(
+        LYRICS_PROGRESS,
+        (payload) => {
+          const timeMs = Number(payload?.timeMs)
+          const seekGeneration = Number(payload?.seekGeneration)
+          if (Number.isInteger(seekGeneration) && seekGeneration !== seekSeenRef.current) {
+            seekSeenRef.current = seekGeneration
+            seekDeadlineRef.current = Date.now() + LYRICS_SEEK_WINDOW_MS
+          }
+          progressRef.current = {
+            timeMs: Number.isFinite(timeMs) && timeMs > 0 ? Math.round(timeMs) : 0,
+            playing: payload?.playing === true,
+            seekGeneration: Number.isInteger(seekGeneration) ? seekGeneration : 0,
+            atMs: Date.now(),
+          }
+        },
+      ).then(keep),
+    ]).then(() => {
+      if (alive) return signalLyricsReady()
+    }).catch((cause) => {
+      if (alive) {
+        setLyricDocument({ lines: [], status: LYRICS_STATUS.failed })
+        console.warn("[hwmusic-lyrics] 歌词订阅未能就绪：", cause)
+      }
+    })
 
     return () => {
       alive = false
@@ -138,7 +147,7 @@ export function LyricsWindow() {
   return (
     <div
       {...dragAttributes}
-      className="amll-lyrics-stage absolute inset-0 overflow-hidden"
+      className="amll-lyrics-stage absolute inset-0 isolate overflow-hidden"
       data-testid="lyrics-window"
       data-lyrics-mode={config.mode}
       data-lyrics-size={size}

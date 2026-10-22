@@ -594,28 +594,13 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
 
         {/* R40：封面/曲目信息也是"进入播放页（歌词舞台）"的入口，与头部那枚按钮同一个 state */}
         <PlayerBar runtime={runtime} state={playback} onOpenStage={() => setStageOpen(true)} />
-
-        {/*
-          歌词舞台（R41b 起**盖满整个 SidebarInset**）：
-          之前它挂在内容区那一层里，于是沉浸态下还露着头部的 48px 与播放器栏——
-          那不是"沉浸"，只是"内容区沉浸"。现在它是 `inset-0` 的最后一层，盖住 header、内容与
-          播放器栏，窗口整个交给歌词。
-
-          三件刻意的事：
-          - **底下的原渲染一个都不卸载**（覆盖层只是盖住）：页面状态、滚动位置、队列都不丢，
-            关掉舞台就回到原样；
-          - **播放控制必须有**：舞台自己那一层底部放的是**同一个 `PlayerBar` 组件**
-            （见 playback-stage.tsx），不是另写一份控件——沉浸态下不用退出就能暂停/切歌；
-          - 动画用官方 transition（tw-animate-css）+ `motion-safe:`：`prefers-reduced-motion`
-            的用户拿到的是瞬时切换，不是淡入。
-        */}
-        <PlaybackStage
-          open={stageOpen}
-          runtime={runtime}
-          state={playback}
-          onClose={() => setStageOpen(false)}
-        />
       </SidebarInset>
+      <PlaybackStage
+        open={stageOpen}
+        runtime={runtime}
+        state={playback}
+        onClose={() => setStageOpen(false)}
+      />
     </SidebarProvider>
   )
 }

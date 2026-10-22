@@ -108,30 +108,11 @@ test("歌词舞台：定位容器 + 压暗层 + 文案来自纯逻辑模块（�
   assert.match(stage, /from\s*"\.\/components\/ui\/button"/, "关闭按钮走 shadcn 原语");
 });
 
-/**
- * R41b 第 5 项：沉浸歌词**盖满整个程序**（含 header 与 PlayerBar），且播放控制留在舞台里。
- *
- * 三条判据（都能在源码里钉住，真机那半边见报告里的 CDP 取证）：
- * 1. 舞台是 `SidebarInset` 里的**最后一层**（在 `<PlayerBar>` 之后），所以 header、内容区、
- *    播放器栏全被它盖住——此前它挂在内容区那一层里，沉浸态下还露着头尾两栏；
- * 2. 舞台底部那一层放的是**同一个 `PlayerBar` 组件**（不是第二份控件实现）：
- *    沉浸态下不用退出就能暂停/切歌；
- * 3. 打开动画只用官方能力（tw-animate-css 的 `animate-in`/`fade-in`）并挂 `motion-safe:`。
- */
-test("R41b 沉浸舞台：盖满 SidebarInset、复用 PlayerBar、尊重 prefers-reduced-motion", () => {
-  const app = stripComments(read("src/renderer/App.tsx"));
+/** 全应用遮挡与字迹像素由 scripts/test-browser.mjs 的完整组合回归验证。 */
+test("沉浸舞台：复用 PlayerBar、尊重 prefers-reduced-motion", () => {
   const stage = stripComments(read(STAGE));
 
-  // 1. 位置：在 PlayerBar 之后（DOM 顺序即层次），且挂在 SidebarInset 根里
-  const playerBarAt = app.indexOf("<PlayerBar runtime={runtime} state={playback} onOpenStage=");
-  const stageAt = app.indexOf("<PlaybackStage");
-  assert.ok(playerBarAt > -1, "底栏 PlayerBar 还在（它是四区里的底区）");
-  assert.ok(stageAt > -1, "舞台要挂在 SidebarInset 里");
-  assert.ok(playerBarAt < stageAt, "舞台必须在 PlayerBar **之后**（否则盖不住底栏，沉浸就只沉浸了内容区）");
-  const contentAt = app.indexOf('className="relative min-h-0 flex-1 overflow-hidden"');
-  assert.ok(contentAt > -1 && contentAt < stageAt, "内容区在舞台之前（舞台盖在它上面）");
-
-  // 2. 播放控制复用同一个组件（不是复制一份控件）
+  // 播放控制复用同一个组件（不是复制一份控件）
   assert.match(stage, /import \{ PlayerBar \} from "\.\/components"/, "舞台底部复用主界面那个 PlayerBar");
   assert.match(stage, /<PlayerBar runtime=\{runtime\} state=\{state\} \/>/, "舞台里那个不接 onOpenStage（已经在舞台上了）");
   assert.match(

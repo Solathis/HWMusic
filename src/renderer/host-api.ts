@@ -2,10 +2,10 @@
  * 渲染层唯一的宿主桥封装（R3 交付封装与类型；R10 增补开机自启；R11 增补托盘可用性）。
  *
  * 边界：渲染层拿到的是白名单方法，拿不到任何 Token——凭据与业务 HTTP 只在 sidecar/Rust。
- * 这里只做两件事：把 `core_call` 包成带类型的调用、把漏斗事件 `core:event` 包成按频道过滤的订阅。
+ * 命令与事件均在这里封装；歌词窗只能发就绪事件，业务命令仍由主窗执行。
  */
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import {
   CORE_CALL,
@@ -19,7 +19,7 @@ import {
   CORE_RENDERER_READY,
   CORE_SET_AUTOSTART,
 } from "../shared/commands.ts";
-import { CORE_EVENT } from "../shared/channels.ts";
+import { CORE_EVENT, LYRICS_STATE, THEME_CHANGED } from "../shared/channels.ts";
 import { AUTH_LOGOUT } from "../shared/request-channels.ts";
 import type { CoreError } from "../shared/result.ts";
 import type { RequestChannel } from "../shared/request-channels.ts";
@@ -213,6 +213,23 @@ export async function onCoreEvent<T = unknown>(
     if (event.payload?.channel !== channel) return;
     handler(event.payload.payload);
   });
+}
+
+export async function signalLyricsReady(): Promise<void> {
+  await emit<CoreEventEnvelope>(CORE_EVENT, { channel: LYRICS_STATE, payload: { ready: true } });
+}
+
+export async function syncLyricsTheme(): Promise<void> {
+  let superseded = false;
+  const stop = await onCoreEvent(THEME_CHANGED, () => { superseded = true; });
+  try {
+    const answer = await coreLoginChrome<{ theme?: string }>({ action: "theme" });
+    if (!superseded) {
+      await emit<CoreEventEnvelope>(CORE_EVENT, { channel: THEME_CHANGED, payload: { theme: answer?.theme } });
+    }
+  } finally {
+    stop();
+  }
 }
 
 /** 方法路由表：`window.desktop` 的全部能力。 */
