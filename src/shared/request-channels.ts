@@ -87,7 +87,7 @@ export const LIBRARY_HISTORY = "library:history" as const;
  * auditionLikely, signals, warnings}`）。
  *
  * 三条不可协商的边界（R9 简报裁决）：
- * 1. **地址只作当次播放结果**交给渲染层：不写日志、不持久化（队列持久化只存曲目标识 + 索引）；
+ * 1. **音频地址只作当次播放结果**交给渲染层：不写日志、不持久化（队列仅存标识、索引与安全展示快照）；
  * 2. 渲染层拿到后还要**再过一次 safe-media-url**（CSP `media-src` 白名单）才允许装载，
  *    协议层的校验不是"渲染层可以省掉这一步"的理由；
  * 3. 端点未配置时是结构化的 `endpoint_unknown`（不冒充已实现，也不打到一个瞎猜的地址上）。

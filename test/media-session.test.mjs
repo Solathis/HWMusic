@@ -9,8 +9,7 @@
  *    只回"没接上"，播放本身照常；
  * 2. **不支持的动作要跳过但留痕**：`setActionHandler` 对未知动作会抛（规范如此），
  *    一个动作失败不该让其余动作一起失效；
- * 3. **元数据里不放封面**：封面地址字段尚未确认，而 AMLL/系统的取图路径要过 CSP
- *    （`connect-src`/`img-src`）——没有的字段就别编一个 URL 出来。
+ * 3. **元数据封面过闸门**：只用真实安全 coverUrl，没有封面与专辑时不编值。
  *
  * 先写先看红。
  */
@@ -130,13 +129,13 @@ test("不支持的动作：跳过并留痕，其余动作照常接线（一个�
   );
 });
 
-test("update：元数据只有标题/艺人（不编封面、不编专辑），playbackState 跟着状态走", () => {
+test("update：缺封面与专辑时不编值，playbackState 跟着状态走", () => {
   const { session, assigned, state } = fakeSession();
   const lib = createMediaSession({ session, metadataCtor: FakeMetadata, log: () => {} });
 
   assert.equal(lib.update({ track: TRACK, status: PLAYER_STATUS.playing }), true);
   assert.deepEqual(assigned.at(-1).init, { title: "示例曲目", artist: "示例歌手" });
-  assert.equal("artwork" in assigned.at(-1).init, false, "封面地址字段未确认，不许编一个 URL");
+  assert.equal("artwork" in assigned.at(-1).init, false, "没有封面，不编 URL");
   assert.equal(state(), "playing");
 
   lib.update({ track: TRACK, status: PLAYER_STATUS.paused });
@@ -149,6 +148,15 @@ test("update：元数据只有标题/艺人（不编封面、不编专辑），p
   lib.update({ track: null, status: PLAYER_STATUS.idle });
   assert.equal(assigned.at(-1).init.title, "未在播放");
   assert.equal(state(), "none");
+});
+
+test("真实安全封面与专辑进入媒体元数据，危险封面绝不进入 artwork", () => {
+  const { session, assigned } = fakeSession();
+  const lib = createMediaSession({ session, metadataCtor: FakeMetadata });
+  lib.update({ track: { ...TRACK, coverUrl: "https://music.dbankcdn.cn/cover.jpg", albumName: "专辑" } });
+  assert.deepEqual(assigned.at(-1).init, { title: "示例曲目", artist: "示例歌手", album: "专辑", artwork: [{ src: "https://music.dbankcdn.cn/cover.jpg" }] });
+  lib.update({ track: { ...TRACK, coverUrl: "https://evil.invalid/cover.jpg" } });
+  assert.equal("artwork" in assigned.at(-1).init, false);
 });
 
 test("clear：摘掉全部动作、元数据清空、状态回 none（暂停收场时系统控件不该留着一个幽灵）", () => {

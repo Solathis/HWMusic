@@ -430,19 +430,24 @@ test("模式：认不出的模式被拒（invalid_command）且状态不变", ()
   assert.equal(player.snapshot().mode, "shuffle");
 });
 
-test("持久化：只在队列/索引变化时写，写的是 ids + index（没有地址、没有标题）", async () => {
+test("持久化：队列/索引变化时写 ids/index 与安全展示快照，音频地址不写", async () => {
   const { player, persisted } = makePlayer();
   player.setQueue(songs(3), 0);
   assert.equal(persisted.length, 1);
-  assert.deepEqual(persisted[0], { ids: ["1000", "1001", "1002"], index: 0 });
+  const metadata = [
+    { id: "1000", name: "歌0", artists: "歌手", duration: 200, coverUrl: null, albumId: null, albumName: null },
+    { id: "1001", name: "歌1", artists: "歌手", duration: 200, coverUrl: null, albumId: null, albumName: null },
+    { id: "1002", name: "歌2", artists: "歌手", duration: 200, coverUrl: null, albumId: null, albumName: null },
+  ];
+  assert.deepEqual(persisted[0], { ids: ["1000", "1001", "1002"], index: 0, metadata });
 
   await player.playAt(1);
   assert.equal(persisted.length, 2);
-  assert.deepEqual(persisted[1], { ids: ["1000", "1001", "1002"], index: 1 });
+  assert.deepEqual(persisted[1], { ids: ["1000", "1001", "1002"], index: 1, metadata });
   assert.doesNotMatch(JSON.stringify(persisted), /http|dbankcdn/, "地址绝不落盘");
 
   player.setMode("list-loop");
-  assert.equal(persisted.length, 2, "改模式不算队列变化（模式不持久化：裁决只写了标识 + 索引）");
+  assert.equal(persisted.length, 2, "改模式不算队列变化，模式不持久化");
 
   player.seek(1000);
   assert.equal(persisted.length, 2, "拖进度不写盘（那会把磁盘当进度条用）");
@@ -579,7 +584,13 @@ test("R40 enqueue：追加到队尾、**不动正在播的那一首**（与整�
   assert.equal(fake.calls.play, playBefore, "不重新播放");
   assert.deepEqual(resolved, ["1000"], "只取过被点那首的地址");
   assert.equal(persisted.length, 2, "队列变了要写盘（第二次是追加）");
-  assert.deepEqual(persisted.at(-1), { ids: ["1000", "1001", "2000", "2001", "2002"], index: 0 });
+  assert.deepEqual(persisted.at(-1), { ids: ["1000", "1001", "2000", "2001", "2002"], index: 0, metadata: [
+    { id: "1000", name: "歌0", artists: "歌手", duration: 200, coverUrl: null, albumId: null, albumName: null },
+    { id: "1001", name: "歌1", artists: "歌手", duration: 200, coverUrl: null, albumId: null, albumName: null },
+    { id: "2000", name: "歌0", artists: "歌手", duration: 200, coverUrl: null, albumId: null, albumName: null },
+    { id: "2001", name: "歌1", artists: "歌手", duration: 200, coverUrl: null, albumId: null, albumName: null },
+    { id: "2002", name: "歌2", artists: "歌手", duration: 200, coverUrl: null, albumId: null, albumName: null },
+  ] });
 });
 
 test("R40 enqueue：空队列时追加 = 建立队列并停在第一首，但**不自动出声**", async () => {

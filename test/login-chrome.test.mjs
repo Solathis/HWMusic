@@ -266,7 +266,14 @@ test("命令守卫：浮动控件的来源（main / login-return / login-theme�
   assert.match(guardBody, /MAIN_WINDOW_LABEL/, "主窗来源允许（gate 自己那个主题控件也走这条命令）");
 });
 
-test("广播频道：theme:changed 进常量表 + Rust 镜像（两侧逐字相等）", () => {
+test("主题广播保持原载荷；原生标题栏接线仅作用主窗，不接官方登录页", () => {
+  const theme = rustProduction("theme.rs");
+  const set = theme.slice(theme.indexOf("pub fn set_theme<"));
+  assert.match(set, /get_webview_window\(crate::MAIN_WINDOW_LABEL\)/);
+  assert.match(set, /window\.set_theme\(native\)/);
+  assert.doesNotMatch(set, /crate::login::|reapply_login_theme/);
+  assert.match(set, /json!\(\{ "theme": applied\.setting\(\) \}\)/);
+  assert.match(rustProduction("lib.rs"), /\.theme\(theme::current_theme\(app\)\.to_native\(\)\)/);
   assert.equal(THEME_CHANGED, "theme:changed");
   assert.ok(BROADCAST_CHANNELS.includes(THEME_CHANGED), "不在广播白名单里 = Rust 会把这条广播当白名单外帧丢掉");
   const bridge = rustProduction("bridge.rs");

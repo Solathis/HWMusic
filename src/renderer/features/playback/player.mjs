@@ -7,13 +7,13 @@
  * - `resolveUrl(trackId)`：取**当次**播放地址（走 core 的 `playback:resolve-url`）；
  * - `guardUrl(url)`：地址闸门（`features/playback/media-url.mjs` → CSP 的 media-src 白名单）。
  *   **构造时缺它就抛**：闸门不能是可选参数，否则"忘了校验"会变成默认放行；
- * - `persistQueue` / `loadQueue`：队列持久化（只存曲目标识 + 当前索引，见 queue.mjs）；
+ * - `persistQueue` / `loadQueue`：队列持久化（标识 + 索引 + 安全展示快照，见 queue.mjs）；
  * - `log`：只写**不该打扰用户**的失败（落盘失败、恢复失败），**绝不写播放地址**；
  * - `random`：随机的注入点（测试用确定序列）。
  *
  * 四条设计裁决：
- * 1. **状态里没有地址**。地址只活在 `loadedId` 与音频元素之间；快照里只有 `loaded: boolean`。
- *    这样"地址不写日志/不进 UI/不落盘"是结构事实，而不是靠人自觉。
+ * 1. **状态里没有音频地址**。播放地址只在当次应答与音频元素之间流转；快照只记 `loaded`。
+ *    安全封面属于展示快照，与 signed 音频地址分开。
  * 2. **双击不打架**：每次装载领一个令牌，取地址回来后令牌对不上就整包丢掉（网络乱序是常态）。
  * 3. **播完按模式走**：顺序（播完即停）/ 列表循环 / 单曲循环 / 随机；随机走**轮换排列**——
  *    "上一首"在随机模式下才有意义（真随机退不回去），且一轮内不重复。
@@ -94,7 +94,7 @@ function kindOf(cause) {
  * @param {object} options.audio 音频端口（单实例！真实实现见 audio-element.mjs）
  * @param {(trackId: string) => Promise<{ok: true, data: {url?: unknown}} | {ok: false, error: {message?: string, kind?: string}}>} options.resolveUrl
  * @param {(url: string) => (string|null)} options.guardUrl 媒体白名单闸门（放行回归一化地址，否则 null）
- * @param {(record: object|null) => unknown} [options.persistQueue]
+ * @param {(record: import("./queue.mjs").QueueRecord|null) => unknown} [options.persistQueue]
  * @param {() => Promise<unknown>} [options.loadQueue]
  * @param {(...parts: unknown[]) => void} [options.log]
  * @param {() => number} [options.random]
@@ -143,9 +143,9 @@ export function createPlayer(options = {}) {
    * @type {{
    *   status: string,
    *   error: {kind: string, message: string}|null,
-   *   entries: Array<{id: string, name: string|null, artists: string|null, duration: number|null}>,
+   *   entries: Array<import("./queue.mjs").QueueEntry>,
    *   index: number,
-   *   track: {id: string, name: string|null, artists: string|null, duration: number|null}|null,
+   *   track: import("./queue.mjs").QueueEntry|null,
    *   loaded: boolean,
    *   currentTimeMs: number,
    *   durationMs: number,

@@ -282,7 +282,8 @@ impl CoreState {
 
     /// 收尸：幂等。返回是否真的收了一个进程。
     pub fn shutdown(&self, reason: &str) -> bool {
-        match lock(&self.process).take() {
+        let process = lock(&self.process).take();
+        match process {
             Some(process) => {
                 process.terminate(reason);
                 true
@@ -597,7 +598,7 @@ pub fn start_pump(app: &AppHandle, process: &Arc<SidecarProcess>) {
 }
 
 /// 显式收尸：`RunEvent::ExitRequested`/`Exit` 调用。幂等。
-pub fn shutdown_core(app: &AppHandle, reason: &str) {
+pub fn shutdown_core<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
     match app.try_state::<Arc<CoreState>>() {
         Some(state) if state.shutdown(reason) => log::info!("core 已收尸（{reason}）"),
         Some(_) => log::info!("core 收尸跳过（{reason}）：没有活着的进程"),
@@ -772,7 +773,7 @@ pub fn core_get_autostart(webview: Webview) -> Result<bool, CoreError> {
 /// R10 之前渲染层的 `TRAY_AVAILABLE` 是写死的 `false`——那是**如实**（宿主侧当时没有"托盘在不在"
 /// 的口子），但托盘装上之后，那句写死的话就变成假话了。这条命令是那个口子的唯一来源。
 ///
-/// **只认"确实装上了"这一个事实**（`tray::available` 现问 tauri 的托盘表）：
+/// **只认"确实装上了"这一个事实**（Windows 同时检查 Shell 原生注册，不只看 tauri 对象）：
 /// 查不到就回 `false`——保守方向与 `tray::decide_close` 的 fail-safe 一致。
 /// 界面说"不可用"而实际能用，比反过来（界面说能用、关窗却退出了）代价小得多。
 ///
@@ -997,6 +998,37 @@ mod tests {
         let state = CoreState::default();
         assert!(!state.shutdown("应用退出"), "没有进程时收尸是空操作");
         assert!(!state.shutdown("应用退出"), "重复收尸必须幂等且不 panic");
+    }
+
+    #[test]
+    fn shutdown_releases_the_process_slot_before_waiting_for_reap() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp");
+        std::fs::create_dir_all(&dir).expect("测试目录");
+        let marker = dir.join(format!("r44a-exit-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let plan = crate::sidecar::LaunchPlan {
+            program: std::path::PathBuf::from("node"),
+            args: vec!["-e".into(), "process.stdin.resume(); process.stdin.on('end', () => { require('node:fs').writeFileSync(process.argv[1], 'ready'); setTimeout(() => process.exit(0), 800); });".into(), marker.as_os_str().to_owned()],
+            source: crate::sidecar::LaunchSource::OverrideScript,
+        };
+        let process = Arc::new(crate::sidecar::SidecarProcess::spawn(&plan).expect("测试子进程可启动"));
+        let state = Arc::new(CoreState::default());
+        state.install(process);
+        let worker_state = Arc::clone(&state);
+        let worker = std::thread::spawn(move || worker_state.shutdown("测试退出"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !marker.exists() && std::time::Instant::now() < deadline { std::thread::sleep(Duration::from_millis(5)); }
+        let child_waiting = marker.exists();
+        let slot_released = state.process.try_lock().is_ok();
+        let started = std::time::Instant::now();
+        let repeated = state.shutdown("RunEvent 兜底");
+        let fallback_time = started.elapsed();
+        assert!(worker.join().expect("收尸线程结束"));
+        let _ = std::fs::remove_file(marker);
+        assert!(child_waiting, "必须在子进程已收到 EOF 但未退出时取证");
+        assert!(!repeated);
+        assert!(slot_released, "等待子进程期间不得持有 process 锁");
+        assert!(fallback_time < Duration::from_millis(100), "退出事件不得等待后台收尸锁：{fallback_time:?}");
     }
 
     #[test]

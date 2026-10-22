@@ -82,7 +82,7 @@ test("playerStatusText：有错误时优先说错误（接口未配置不会被�
 
 test("标题：只知道标识就显示标识（恢复出来的队列不许显示成「未知歌曲」）", () => {
   assert.equal(trackTitleOf({ id: "1001", name: "晴天" }), "晴天");
-  assert.equal(trackTitleOf({ id: "1001", name: null }), "曲目 1001", "裁决只存了标识：如实显示标识");
+  assert.equal(trackTitleOf({ id: "1001", name: null }), "曲目 1001", "旧记录没有标题：如实显示标识");
   assert.equal(trackTitleOf({ id: "1001", name: "  " }), "曲目 1001");
   assert.equal(trackTitleOf({ name: null }), "未知歌曲");
   assert.equal(trackTitleOf(null), "未在播放");

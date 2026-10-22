@@ -7,7 +7,7 @@
  * - `PlayerBar`：播放/暂停、上下曲、进度（拖动走 200ms isSeeking 窗口）、音量、模式切换。
  *   **它不持有音频、不认识 core**：动作全部转给 `features/playback` 的运行时，
  *   所以 UI 层既拿不到播放地址，也不可能出现第二个 `Audio`；
- * - `QueuePanel`：真实队列（当前项高亮、点击跳播、清空）；恢复出来的条目只有标识，
+ * - `QueuePanel`：真实队列（当前项高亮、点击跳播、清空）；旧记录只有标识时，
  *   标题如实显示"曲目 &lt;id&gt;"（见 playback-state.mjs）；
  * - `EmptyState` / `LoadFailed` / `GridSkeleton` / `ListSkeleton`：空态、失败态与骨架屏，
  *   文案一律由调用方从 features/library 的纯逻辑模块取（这里不造第二套文案）。
@@ -414,26 +414,28 @@ export function PlayerBar({ runtime, state, onOpenStage }: PlayerBarProps) {
         **控件用绝对定位实现真居中**（`left-1/2 -translate-x-1/2`），而不是
         `flex-1 basis-0` 的两侧等分：两侧内容天然不等宽（左边是封面 + 两行文字，右边是空占位），
         等分只能让"剩余空间"相等，控件的实际中点仍会随左侧文字长度漂移。
-        代价是极窄窗宽下中区可能与左区重叠——那时左侧文字先截断，控件本身始终完整可点。
+        左区预留中控的半宽与间距；长文字先截断，不覆盖中控。
       */}
       <div className="relative flex items-center gap-3">
         <div className="flex min-w-0 flex-1 items-center gap-3">
-          {onOpenStage === undefined ? (
-            <div className="flex min-w-0 items-center gap-3" data-testid="player-track-info">
-              {trackInfo}
-            </div>
-          ) : (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="flex h-auto min-w-0 flex-1 items-center justify-start gap-3 px-1 py-1 text-left"
-              aria-label="打开歌词"
-              data-testid="player-track-info"
-              onClick={onOpenStage}
-            >
-              {trackInfo}
-            </Button>
-          )}
+          <div className="min-w-0 max-w-[calc(100%-6rem)]">
+            {onOpenStage === undefined ? (
+              <div className="flex w-fit min-w-0 max-w-full items-center gap-3" data-testid="player-track-info">
+                {trackInfo}
+              </div>
+            ) : (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="flex h-auto w-fit min-w-0 max-w-full items-center justify-start gap-3 px-1 py-1 text-left"
+                aria-label="打开歌词"
+                data-testid="player-track-info"
+                onClick={onOpenStage}
+              >
+                {trackInfo}
+              </Button>
+            )}
+          </div>
         </div>
 
         <div
@@ -566,21 +568,20 @@ export function QueuePanel({ entries, index, onSelect, onClear }: QueuePanelProp
           清空
         </Button>
       </div>
-      <ScrollArea className="min-h-0 flex-1">
-        <ul className="flex flex-col gap-1">
+      <ScrollArea className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:!block">
+        <ul className="flex min-w-0 flex-col gap-1 [&>li]:min-w-0">
           {entries.map((entry, position) => (
             <li key={`${entry.id}-${position}`}>
               <Button
                 variant={position === index ? "secondary" : "ghost"}
                 size="sm"
-                className="w-full justify-start"
+                className="w-full min-w-0 max-w-full justify-start"
                 aria-current={position === index ? "true" : undefined}
                 onClick={() => onSelect?.(position)}
               >
-                {/* R38：队列行的小封面（恢复出来的条目只有标识，占位是常态） */}
                 <CoverArt coverUrl={trackCoverUrlOf(entry)} className="size-6 rounded-sm" iconClassName="size-3.5" />
-                <span className="truncate">{trackTitleOf(entry)}</span>
-                <span className="ml-auto shrink-0 text-xs text-muted-foreground">{trackArtistOf(entry)}</span>
+                <span className="min-w-0 flex-1 truncate text-left">{trackTitleOf(entry)}</span>
+                <span className="ml-auto min-w-0 max-w-1/3 truncate text-xs text-muted-foreground">{trackArtistOf(entry)}</span>
               </Button>
             </li>
           ))}

@@ -281,6 +281,10 @@ core_login_chrome {action:"theme", theme:"light"|...}     → {theme: ...}      
   （`{theme}` 目标态）——主窗与两个浮动控件各自把类落到 `<html>` 上（`features/theme/theme.mjs`）。
   写盘只动 `theme` 一个键、原子替换、**认不出的文件绝不覆盖**（与 `settings.mjs` 同一条纪律）；
   文件不存在时造出来的那份**自带 `closeBehavior` 的默认值**（否则会把它悄悄读成保守值）。
+  R44a：建主窗时 `builder.theme(current_theme.to_native())` 恢复原生标题栏；light/dark 分别为
+  `Some(Theme::Light/Dark)`，system 为 `None`（无 Theme::System，不强制为浅色）。改主题落盘后调用
+  主窗 `window.set_theme(...)` 再广播网页，不重建或注入官方登录页。原生调用失败返回结构化 `internal`，
+  明确说明主题已保存并广播、原生应用失败；不回滚已写值，下次建窗重试。
 
 **渲染层 ← sidecar 的登录状态广播（R7 增补的广播频道）**
 
@@ -1192,27 +1196,31 @@ AMLL 自己 `fetch` 而撞 `connect-src`；接它得先命令式建 `Image()` �
 2. 渲染层拿到后**还要再过一次** `safe-media-url`（渲染层唯一允许引用协议层的地方是
    `features/playback/media-url.mjs`），不放行就不装载；状态机的 `guardUrl` 是**必填参数**，
    缺了直接抛——"忘了校验"不是一种可能的写法；
-3. 地址**不进状态**：状态机快照里只有 `loaded: boolean`（测试断言快照序列化后不含 `http`/CDN 域），
-   所以 UI 与日志都拿不到它；
+3. **音频地址不进状态**：状态机只记 `loaded: boolean`，UI 与持久化拿不到 signed 音频 URL；
+   R44a 展示快照可以带安全封面 URL，它不是任意网络 URL 的通行证；
 4. 失败文案不回显整段地址（协议层只给域名），且失败类别原样透传
    （`endpoint_unknown` 就是"接口没配"，不会被改写成"这首歌放不了"）。
 
-**队列持久化**（R9 裁决：只存曲目标识 + 当前索引）：
+**队列持久化**（R44a：兼容 R9 的 ids/index，新增可选安全展示快照）：
 
 ```json
-{ "schemaVersion": 1, "data": { "queue": { "ids": ["1001", "1002"], "index": 1 } } }
+{ "schemaVersion": 1, "data": { "queue": { "ids": ["1001", "1002"], "index": 1, "metadata": [{ "id": "1001", "name": "曲名", "artists": "艺人", "duration": 215, "coverUrl": "https://music.dbankcdn.cn/cover.jpg", "albumId": "a1", "albumName": "专辑" }, null] } } }
 ```
 
-- 键名 `QUEUE_SETTING_KEY = "queue"`（`src/renderer/features/playback/queue.mjs`），
-  写入走 `settings:set` 的 `{patch: {queue: …}}`；`queue: null` = **删除该键**（§2.5 的既有语义）；
-- 记录**结构上只有 `ids` 与 `index` 两个键**：不存播放地址（纪律 1）、不存标题/模式
-  （裁决没让存；恢复出来的队列只有标识，界面如实显示"曲目 &lt;id&gt;"）；
-- 反向同样严格：任何输入都洗不出第三个键（手工改坏的 `settings.json` 带 `url` 也进不来）；
-- 恢复**不自动播放**：只还原队列与索引（没有用户手势的自动出声既打扰又会被浏览器拒绝）。
+- 键名 `QUEUE_SETTING_KEY = "queue"`，写入仍走 `settings:set` 的 `{patch: {queue: …}}`；
+  `queue: null` = 删除该键，IPC 与 schemaVersion 不变；
+- `metadata?: Array<QueueEntry|null>` 按 `ids` 原始位置对应；每条只允许
+  `id/name/artists/duration/coverUrl/albumId/albumName`。`duration` 为非负有限秒数，文本取不到为 null；
+  全部元信息为空时省略 `metadata`，条数不超过当前有效队列长度；
+- `coverUrl` 必须经现有 renderer `media-url.mjs`：HTTPS、CDN 后缀白名单、无 userinfo、无显式端口；
+  **安全元信息不等于任意网络 URL**。音频 `url/audioURL`、token、头像、raw 对象与任意其他键不保存；
+- 读取仅认自有数据字段，不执行访问器；metadata 的 id 不匹配对应 ids 时丢弃该快照。
+  旧 ids/index 记录正常恢复，缺元信息时仍显示标识；
+- 恢复只还原条目与索引，当前条目与 entries 共用快照，**不自动播放、不 resolve 音频**。
 
-**Media Session**：浏览层能力（`features/playback/media-session.mjs`），不涉新权限、不起新窗口。
-元数据只有标题/艺人（**不放封面**：字段未确认），状态映射 `playing→playing`、
-`paused/loading→paused`、其余 `none`；环境没有这个 API 时静默降级（不报错）。
+**Media Session**：浏览层能力，不涉新权限、不起新窗口。标题/艺人、可选专辑与安全 artwork
+来自队列快照；同 id 内容变化也更新，进度与音量帧不更新。歌词仅在 id/标题/艺人/时长变化时重匹配。
+状态映射 `playing→playing`、`paused/loading→paused`、其余 `none`；环境没有这个 API 时静默降级。
 
 **尚未接线（如实登记）**：
 
@@ -1220,10 +1228,9 @@ AMLL 自己 `fetch` 而撞 `connect-src`；接它得先命令式建 `Image()` �
    进度同步（`features/lyrics/lyric-sync.mjs`）与 AMLL 面板宿主在本任务交付；
    **歌词文本通道由 R12 接上**（`playback:lyrics`，见 §2.9），**R32 起文本来源真的存在了**
    （从播放响应推导，见 §2.3.2）。这不是改文案了事：五档状态与两句失败文案的区分见 §2.9。
-2. **封面/背景图**：R32 起曲目归一化里**已经有** `coverUrl`（白名单内的 CDN 地址），
-   但渲染层还没有消费者——且 AMLL 对**字符串**地址会自己 `fetch` 成 blob
-   （`connect-src` 只有 `'self' ipc:`，会被 CSP 拦）。要接通得先用 `<img>`（`img-src` 白名单）
-   加载再把 `HTMLImageElement` 传进 `BackgroundRender`。
+2. **封面/背景图**：R44a 底栏与 QueuePanel 已消费安全 `coverUrl`，并通过可选快照支持重启恢复。
+   舞台背景沿用既有 `<img>` 加载再交给 `BackgroundRender` 的路径，本阶段不改沉浸布局；
+   不把字符串 URL 直接交给 AMLL 发 `fetch`（`connect-src` 仍只有 `'self' ipc:`）。
 3. **音质/试听标注**：`actualQuality` 与 `auditionLikely` 已在协议层算出，UI 本任务不显示
    （不虚标音质）。
 
@@ -1253,13 +1260,12 @@ commands 或 `src-tauri/permissions` 非空时才写入 `__app-acl__`，`src/acl
 本应用三者皆不成立，所以 `core_call`/`core_renderer_ready` 一直如此，新命令同理。
 **前置条件由 `test/autostart.test.mjs` 钉住**：将来谁加了 app 级 manifest，那条用例会先红。
 
-**主题裁决（R10）**：**不做手动切换**，亮暗只跟系统的 `prefers-color-scheme`——
-`src/renderer/styles.css` 里把 `.dark` 那套令牌照原样接到 `@media (prefers-color-scheme: dark)` 的
-`:root` 上，并让 `dark:` 变体也认系统偏好；不引 next-themes（它的防闪烁内联脚本会被 CSP 拦）、
-不写 JS、不引入第二套配色。两份令牌**逐条一致**由 `test/theme-tokens.test.mjs` 钉住
-（漏一条 = 暗色下有一处颜色留在亮色）。渲染层不得写 `dark` 类或存主题偏好（同文件扫描）。
+**主题裁决**：R25 起支持浅色/深色/跟随系统，Rust 持有状态，渲染层只经 `applyThemeChoice`
+切类，不在本地缓存第二份偏好。系统档沿用 `prefers-color-scheme`，两份设计令牌仍由
+`test/theme-tokens.test.mjs` 钉住。R44a 同步主窗原生标题栏，system 映射 `None`，建窗恢复与
+失败后的已保存策略见 §1.7；官方登录页仍按默认渲染，不重开、不注入。
 
-**关窗行为**：`settings:set` 的 `{patch:{closeBehavior}}`（有序枚举 `[tray,minimize,quit]`，默认 `tray`）。文案分别为「最小化到托盘」「最小化到任务栏」「退出应用」；`minimize` 保留任务栏按钮、后台继续播放，不依赖托盘。保存中禁用选择，成功按回执重建当前值，失败回滚。设置中的关窗/外观/歌词 Select 均使用官方 `SelectGroup` + `position="popper" align="start" sideOffset={4}`，不改生成原语或选中语义。
+**关窗行为**：`settings:set` 的 `{patch:{closeBehavior}}`（有序枚举 `[tray,quit]`，默认 `tray`）。文案为「最小化到托盘」「退出应用」。精确历史值 `minimize` 在 Node/UI/Rust 读路径迁移为 `tray`，下一次设置保存会写为 `tray`；新写 `minimize` 与其他非法值结构化拒绝。Rust 对其他未知值仍保守退出，不 trim、不忽略大小写。保存中禁用选择，成功按回执重建当前值，失败回滚。设置中的关窗/外观/歌词 Select 均使用官方 `SelectGroup` + `position="popper" align="start" sideOffset={4}`，不改生成原语或选中语义。
 R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_tray_available`；
 渲染层的 `TRAY_AVAILABLE = false` 退化成"宿主没答上来"时的兜底（方向保守，见 §2.8）。
 
@@ -1292,14 +1298,15 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 
 | 命令 | 载荷 | 回执 | 说明 |
 |---|---|---|---|
-| `core_get_tray_available` | 无 | `boolean` | 托盘是否**真的**可用（Rust 侧现问 tauri 的托盘表 `tray_by_id`，不维护第二份镜像）。过主窗来源守卫；渲染层用 `trayAvailabilityFromAnswer` **只认 `true`**，其余一律按"不可用"处理 |
+| `core_get_tray_available` | 无 | `boolean` | 托盘是否**真的**可用：现问 tauri 托盘表，Windows 还须查到原生 Shell 注册位置，不能仅以内部对象存在判成功。安装后用原生图标更新检查 OS 错误，失败清掉内部注册并排队提示；运行权限/完整性级别阻止注册时按不可用处理，不提升权限或绕过系统安全标签。过主窗来源守卫；渲染层只认 `true` |
 
-**关窗三态与 fail-safe**：`decide_close(behavior: CloseBehavior, tray_available)` 是唯一决策。
-`tray` 且托盘可用 → `prevent_close + hide`，托盘不可用仍保守退出；`minimize` 无论托盘是否可用 →
-`prevent_close + window.minimize()`，主窗显式 `skip_taskbar(false)`，不 hide/close/destroy。
-`quit` 拦住单窗关闭，在线程中经既有 `shutdown_core` 收 sidecar 后 `app.exit(0)` 退出整个应用，
-避免歌词/登录辅助窗让进程残留；RunEvent 的幂等收尾保留。最小化/隐藏/退出线程创建失败时保留应用、
-记录结论日志并恢复主窗，不静默退出。新原生行为需控制器统一重启后复验，来源守卫与 IPC 权限不变。
+**关窗两态与 fail-safe**：`decide_close(behavior: CloseBehavior, tray_available)` 是唯一决策。
+`tray` 且托盘可用 → `prevent_close + hide`，托盘不可用仍保守退出；`quit` 拦住单窗关闭，
+与托盘 Quit 共用 `request_app_exit`。托管 `ExitState` 的 AtomicBool 先 CAS，成功者只起一个后台线程，
+经 `shutdown_core` 收 sidecar 后 `app.exit(0)` 退出所有本应用窗口；重复请求不 spawn。
+线程创建失败复位门禁并恢复主窗，隐藏失败同样保留应用。RunEvent 幂等收尾保留，CoreState 取走进程后
+先释放槽位锁再等待子进程，避免主线程退出事件等待后台锁。主窗仍显式 `skip_taskbar(false)`。
+原生行为须控制器统一重启后复验，来源守卫、Sidecar/core 白名单与 IPC 权限不变。
 
 **关窗行为从哪来（读盘这侧在 Rust）**：`close_behavior.rs` 读的是**同一份** `settings.json`
 （与 `webview_proxy` 共用文件名与 schemaVersion 闸门），分三档：
@@ -1545,7 +1552,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | 层级 | 口径 | 为什么 |
 |---|---|---|
 | **字段级宽容** | 代理的 `host`/`port` 不合法 → 归成「没填」 | 用户可能正在半填表单 |
-| **枚举级严格** | `closeBehavior` 不在枚举（`tray`/`minimize`/`quit`）里 → 直接报错 | 枚举值是代码写的，错了就是 bug |
+| **枚举级严格** | 新写 `closeBehavior` 只接受 `tray`/`quit`，精确历史 `minimize` 只在读路径迁移 `tray` | 写非法值直接报错，不悄悄改成关窗退出 |
 | **结构级严格** | `patch.proxy` 不是对象也不是 `null` → `invalid_payload` | 形状错了不该猜 |
 
 另：`patch` 里某个键给 `null` = **删除该键**（§2.6 的队列清理依赖这条语义）。
@@ -1629,7 +1636,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `THEME_KEY` | `"theme"` | `src-tauri/src/theme.rs` | R25：`settings.json` 的 `data.theme`。Rust 读+写这一个键（原子替换、认不出的文件绝不覆盖）；sidecar 的 `settings:get/set` 对它透传（`data` 层未知键原样保留） |
 | 两条期限文案 | 见 §1.7 | `src-tauri/src/login.rs` ↔ `src/main/huawei.ts` | 两侧逐字一致，parity 互钉 |
 | `LYRICS_SEEK_WINDOW_MS` | `200` | `src/renderer/features/lyrics/lyric-sync.mjs` | R9：歌词的 `isSeeking` 窗口（拖动时歌词跟着手走、手停 200ms 后自动收窗）；组件里不许再写这个数字（扫描钉住） |
-| `QUEUE_SETTING_KEY` | `"queue"` | `src/renderer/features/playback/queue.mjs` | R9：播放队列的持久化键（`data.queue`，只存曲目标识 + 索引） |
+| `QUEUE_SETTING_KEY` | `"queue"` | `src/renderer/features/playback/queue.mjs` | R44a：队列持久化键（`data.queue = {ids,index,metadata?}`，兼容旧记录，仅安全展示快照） |
 | `PROXY_TEST_URL` | `https://oauth-login1.cloud.huawei.com/` | `src/host/proxy-handlers.mjs` | R10：`settings:test-proxy` 的唯一目标（不接受调用方指定；业务端点仍待联调） |
 | `CORE_SET_AUTOSTART` / `CORE_GET_AUTOSTART` | `"core_set_autostart"` / `"core_get_autostart"` | `src/shared/commands.ts` | R10：命令名的唯一真源（渲染层只用常量；Rust 侧为镜像副本，由 `test/autostart.test.mjs` 钉住） |
 | `CORE_GET_TRAY_AVAILABLE` | `"core_get_tray_available"` | `src/shared/commands.ts` | R11：托盘可用性的唯一来源（Rust 侧镜像由 `test/tray.test.mjs` 与 lib.rs 的注册扫描钉住） |

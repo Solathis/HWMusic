@@ -202,6 +202,7 @@ pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std
     .inner_size(MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT)
     .min_inner_size(MAIN_WINDOW_MIN_WIDTH, MAIN_WINDOW_MIN_HEIGHT)
     .skip_taskbar(false)
+    .theme(theme::current_theme(app).to_native())
     .data_directory(webview_data.clone());
 
     // 没配代理/配置不可用 → None → 直连（绝不猜一个代理出来）。
@@ -235,10 +236,6 @@ pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std
                 let window = window.as_ref().ok_or_else(|| "找不到主窗".to_string())?;
                 window.hide().map_err(|error| error.to_string())
             },
-            || {
-                let window = window.as_ref().ok_or_else(|| "找不到主窗".to_string())?;
-                window.minimize().map_err(|error| error.to_string())
-            },
             || request_app_exit(&close_app),
         );
         match result {
@@ -259,27 +256,51 @@ fn apply_close_action<E>(
     action: tray::CloseAction,
     prevent_close: impl FnOnce(),
     hide: impl FnOnce() -> Result<(), E>,
-    minimize: impl FnOnce() -> Result<(), E>,
     quit: impl FnOnce() -> Result<(), E>,
 ) -> Result<(), E> {
     prevent_close();
     match action {
         tray::CloseAction::PreventAndHide => hide(),
-        tray::CloseAction::PreventAndMinimize => minimize(),
         tray::CloseAction::Quit => quit(),
     }
 }
 
-fn request_app_exit(app: &tauri::AppHandle) -> Result<(), String> {
-    let app = app.clone();
-    std::thread::Builder::new()
-        .name("close-exit".into())
-        .spawn(move || {
-            commands::shutdown_core(&app, "关窗退出");
-            app.exit(0);
-        })
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+#[derive(Default)]
+struct ExitState(std::sync::atomic::AtomicBool);
+
+impl ExitState {
+    fn request<E>(&self, spawn: impl FnOnce() -> Result<(), E>, focus: impl FnOnce()) -> Result<(), E> {
+        use std::sync::atomic::Ordering;
+        if self.0.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return Ok(());
+        }
+        if let Err(error) = spawn() {
+            self.0.store(false, Ordering::Release);
+            focus();
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+fn finish_app_exit(shutdown: impl FnOnce(), exit: impl FnOnce()) {
+    shutdown();
+    exit();
+}
+
+pub(crate) fn request_app_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<(), String> {
+    let state = app.try_state::<ExitState>().ok_or_else(|| "退出状态未登记".to_string())?;
+    state.request(|| {
+        let app = app.clone();
+        std::thread::Builder::new()
+            .name("app-exit".into())
+            .spawn(move || finish_app_exit(
+                || commands::shutdown_core(&app, "请求退出"),
+                || app.exit(0),
+            ))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }, || focus_main(app))
 }
 
 /// 建窗用的代理 URL 参数：取值链的**最后一道闸**。
@@ -362,6 +383,7 @@ pub fn run() {
             //（主窗 + 两个浮动控件）都要在挂载时读到它，而浮动控件是登录那一刻才建的
             // ——早一步登记，就不存在"第一个读它的人比登记早"的窗口。
             app.manage(theme::ThemeState::restore(&data_root));
+            app.manage(ExitState::default());
 
             let data_root = create_main_window(handle)?;
             app.manage(WebviewDataRoot(data_root.clone()));
@@ -385,7 +407,7 @@ pub fn run() {
 
             // 托盘（R11）：建窗**之后**安装（建窗失败就没必要装）。装不上不拦启动——
             // 启动提示（`app:notice`）经上面登记好的队列扣到渲染层就绪再冲刷，
-            // 仅 tray 档关窗回退退出，minimize 不依赖托盘。
+            // 托盘不可用时关窗回退退出。
             match tray::install(handle) {
                 tray::TrayInstall::Installed(_) => log::info!("托盘已装上（id={TRAY_ID}）"),
                 tray::TrayInstall::Unavailable { reason } => {
@@ -1092,7 +1114,7 @@ mod tests {
         );
     }
 
-    /// 关窗回调消费唯一三态决策，原生操作失败时不能意外销毁主窗。
+    /// 关窗回调消费唯一两态决策，原生操作失败时不能意外销毁主窗。
     #[test]
     fn close_requested_fails_safe_through_decide_close() {
         let source = lib_source();
@@ -1113,7 +1135,7 @@ mod tests {
             "可用性要现问托盘表（fail-safe 的第二半）"
         );
         assert!(production.contains("tray::CloseAction::PreventAndHide"));
-        assert!(production.contains("tray::CloseAction::PreventAndMinimize"));
+        assert!(!production.contains("tray::CloseAction::PreventAndMinimize"));
         assert!(production.contains("tray::CloseAction::Quit"));
         let callback = production
             .split("window.on_window_event(move |event| {")
@@ -1123,14 +1145,56 @@ mod tests {
             .next()
             .expect("回调收口");
         let callback: String = callback.lines().filter(|line| !line.trim_start().starts_with("//")).collect();
-        assert!(callback.contains("window.minimize()"), "原生边界必须真的调用 minimize（不能 hide）");
+        assert!(!callback.contains("window.minimize()"), "撤销最小化到任务栏分支");
         assert!(callback.contains("request_app_exit("), "quit 必须退出整个应用，不能只关主窗留下歌词/登录辅助窗");
         assert!(!callback.contains("shutdown_core(") && !callback.contains("app.exit("), "退出收尾不能阻塞关窗回调");
         assert!(callback.contains("focus_main(&close_app)"), "执行失败必须保留可恢复窗口");
-        let exit = production.split("fn request_app_exit(").nth(1).expect("退出工作线程").split("/// 建窗用的代理").next().expect("退出函数收口");
-        assert!(exit.contains(".spawn(move || {"));
+        let exit = production.split("fn request_app_exit<").nth(1).expect("退出工作线程").split("/// 建窗用的代理").next().expect("退出函数收口");
+        assert!(exit.contains(".spawn(move || finish_app_exit("));
         assert!(exit.find("commands::shutdown_core(").expect("既有 sidecar 收尾") < exit.find("app.exit(0)").expect("整个应用退出"));
         assert!(production.contains(".skip_taskbar(false)"), "任务栏按钮不能被主窗策略隐藏");
+    }
+
+    #[test]
+    fn repeated_exit_requests_spawn_once_and_clean_before_exit() {
+        use std::cell::RefCell;
+        let state = ExitState::default();
+        let effects = RefCell::new(Vec::new());
+        for _ in 0..8 {
+            state.request(|| {
+                effects.borrow_mut().push("spawn");
+                finish_app_exit(
+                    || effects.borrow_mut().push("shutdown"),
+                    || effects.borrow_mut().push("exit"),
+                );
+                Ok::<(), &str>(())
+            }, || effects.borrow_mut().push("focus")).expect("请求成功");
+        }
+        assert_eq!(*effects.borrow(), vec!["spawn", "shutdown", "exit"]);
+    }
+
+    #[test]
+    fn failed_exit_spawn_resets_the_gate_and_restores_the_window() {
+        use std::cell::RefCell;
+        let state = ExitState::default();
+        let effects = RefCell::new(Vec::new());
+        assert_eq!(state.request(|| { effects.borrow_mut().push("failed spawn"); Err("spawn failed") }, || effects.borrow_mut().push("focus")), Err("spawn failed"));
+        state.request(|| { effects.borrow_mut().push("retry"); Ok::<(), &str>(()) }, || effects.borrow_mut().push("focus")).expect("可以重试");
+        assert_eq!(*effects.borrow(), vec!["failed spawn", "focus", "retry"]);
+    }
+
+    #[test]
+    fn concurrent_exit_requests_share_one_gate() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let state = Arc::new(ExitState::default());
+        let spawned = Arc::new(AtomicUsize::new(0));
+        let workers: Vec<_> = (0..32).map(|_| {
+            let state = Arc::clone(&state);
+            let spawned = Arc::clone(&spawned);
+            std::thread::spawn(move || state.request(|| { spawned.fetch_add(1, Ordering::SeqCst); Ok::<(), &str>(()) }, || {}).expect("请求成功"))
+        }).collect();
+        for worker in workers { worker.join().expect("线程结束"); }
+        assert_eq!(spawned.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1138,7 +1202,6 @@ mod tests {
         use std::cell::RefCell;
         for (action, expected) in [
             (tray::CloseAction::PreventAndHide, vec!["prevent", "hide"]),
-            (tray::CloseAction::PreventAndMinimize, vec!["prevent", "minimize"]),
             (tray::CloseAction::Quit, vec!["prevent", "exit"]),
         ] {
             let effects = RefCell::new(Vec::new());
@@ -1146,7 +1209,6 @@ mod tests {
                 action,
                 || effects.borrow_mut().push("prevent"),
                 || { effects.borrow_mut().push("hide"); Ok::<(), &str>(()) },
-                || { effects.borrow_mut().push("minimize"); Ok(()) },
                 || { effects.borrow_mut().push("exit"); Ok(()) },
             );
             assert_eq!(result, Ok(()));
@@ -1157,18 +1219,16 @@ mod tests {
     #[test]
     fn failed_close_effects_keep_the_close_prevented_and_never_fall_through_to_exit() {
         use std::cell::RefCell;
-        for action in [tray::CloseAction::PreventAndHide, tray::CloseAction::PreventAndMinimize, tray::CloseAction::Quit] {
+        for action in [tray::CloseAction::PreventAndHide, tray::CloseAction::Quit] {
             let effects = RefCell::new(Vec::new());
             let result = apply_close_action(
                 action,
                 || effects.borrow_mut().push("prevent"),
                 || { effects.borrow_mut().push("hide"); Err("hide failed") },
-                || { effects.borrow_mut().push("minimize"); Err("minimize failed") },
                 || { effects.borrow_mut().push("exit"); Err("exit worker failed") },
             );
             let (effect, error) = match action {
                 tray::CloseAction::PreventAndHide => ("hide", "hide failed"),
-                tray::CloseAction::PreventAndMinimize => ("minimize", "minimize failed"),
                 tray::CloseAction::Quit => ("exit", "exit worker failed"),
             };
             assert_eq!(result, Err(error));

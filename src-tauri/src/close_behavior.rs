@@ -1,4 +1,4 @@
-//! 关窗行为（`tray` / `minimize` / `quit`）：`settings.json` 的读盘与启动恢复。
+//! 关窗行为（`tray` / `quit`）：读盘时将精确旧值 `minimize` 迁移为 `tray`。
 //!
 //! 为什么读盘这侧在 Rust：关窗回调在 Rust 里（窗口是 Rust 建的），它要在**用户关窗的那一刻**
 //! 知道设置里选的是什么。写盘的是 core（设置页 → `settings:set` → `settings.json`），
@@ -24,22 +24,19 @@ use crate::webview_proxy::{SETTINGS_FILE_NAME, SETTINGS_SCHEMA_VERSION};
 
 /// 磁盘字面量（渲染层 CLOSE_BEHAVIORS / core 同源）。
 pub const CLOSE_BEHAVIOR_TRAY: &str = "tray";
-pub const CLOSE_BEHAVIOR_MINIMIZE: &str = "minimize";
 pub const CLOSE_BEHAVIOR_QUIT: &str = "quit";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseBehavior {
     Tray,
-    Minimize,
     Quit,
 }
 
 impl CloseBehavior {
-    /// 只认精确字面量，不 Trim、不忽略大小写。
+    /// 精确旧值 minimize 迁移 tray，不 Trim、不忽略大小写。
     pub fn from_setting(raw: Option<&str>) -> Option<Self> {
         match raw {
-            Some(CLOSE_BEHAVIOR_TRAY) => Some(CloseBehavior::Tray),
-            Some(CLOSE_BEHAVIOR_MINIMIZE) => Some(CloseBehavior::Minimize),
+            Some(CLOSE_BEHAVIOR_TRAY) | Some("minimize") => Some(CloseBehavior::Tray),
             Some(CLOSE_BEHAVIOR_QUIT) => Some(CloseBehavior::Quit),
             _ => None,
         }
@@ -48,7 +45,6 @@ impl CloseBehavior {
     pub fn setting(self) -> &'static str {
         match self {
             CloseBehavior::Tray => CLOSE_BEHAVIOR_TRAY,
-            CloseBehavior::Minimize => CLOSE_BEHAVIOR_MINIMIZE,
             CloseBehavior::Quit => CLOSE_BEHAVIOR_QUIT,
         }
     }
@@ -60,7 +56,6 @@ impl CloseBehavior {
     pub fn describe(self) -> &'static str {
         match self {
             CloseBehavior::Tray => "最小化到托盘",
-            CloseBehavior::Minimize => "最小化到任务栏",
             CloseBehavior::Quit => "退出应用",
         }
     }
@@ -184,33 +179,33 @@ mod tests {
     /// 枚举 → 磁盘 → 枚举 往返不失真（两边各写一份字面量时，这条先红）。
     #[test]
     fn setting_and_from_setting_are_a_round_trip() {
-        for behavior in [CloseBehavior::Tray, CloseBehavior::Minimize, CloseBehavior::Quit] {
+        for behavior in [CloseBehavior::Tray, CloseBehavior::Quit] {
             assert_eq!(CloseBehavior::from_setting(Some(behavior.setting())), Some(behavior));
         }
         assert_eq!(CloseBehavior::Tray.setting(), "tray");
-        assert_eq!(CloseBehavior::Minimize.setting(), "minimize");
         assert_eq!(CloseBehavior::Quit.setting(), "quit");
         assert_eq!(CLOSE_BEHAVIOR_TRAY, "tray");
-        assert_eq!(CLOSE_BEHAVIOR_MINIMIZE, "minimize");
         assert_eq!(CLOSE_BEHAVIOR_QUIT, "quit");
     }
 
     #[test]
-    fn minimize_round_trips_through_setting_document_disk_and_refresh() {
-        assert_eq!(CloseBehavior::from_setting(Some("minimize")).map(CloseBehavior::setting), Some("minimize"));
+    fn exact_legacy_minimize_migrates_to_tray_on_disk_and_refresh() {
+        assert_eq!(CloseBehavior::from_setting(Some("minimize")), Some(CloseBehavior::Tray));
         let raw = json!({ "schemaVersion": 1, "data": { "closeBehavior": "minimize" } }).to_string();
-        assert_eq!(parse_close_behavior(Some(&raw)).setting(), "minimize");
-        let dir = test_dir("minimize-round-trip");
+        assert_eq!(parse_close_behavior(Some(&raw)), CloseBehavior::Tray);
+        let dir = test_dir("minimize-migration");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("测试目录必须能建");
         let state = CloseBehaviorState::restore(&dir);
         write_behavior(&dir, "minimize");
-        assert_eq!(read_close_behavior(&dir).setting(), "minimize");
-        assert_eq!(state.refresh().setting(), "minimize");
-        assert_eq!(state.current().setting(), "minimize");
-        assert_eq!(CloseBehaviorState::restore(&dir).current().setting(), "minimize");
-        write_behavior(&dir, "MINIMIZE");
-        assert_eq!(state.refresh(), CloseBehavior::Quit);
+        assert_eq!(read_close_behavior(&dir), CloseBehavior::Tray);
+        assert_eq!(state.refresh(), CloseBehavior::Tray);
+        assert_eq!(state.current(), CloseBehavior::Tray);
+        assert_eq!(CloseBehaviorState::restore(&dir).current(), CloseBehavior::Tray);
+        for bad in ["MINIMIZE", " minimize", "minimize ", "explode"] {
+            write_behavior(&dir, bad);
+            assert_eq!(state.refresh(), CloseBehavior::Quit);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -306,8 +301,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_close_behavior_reads_all_three_valid_documents() {
-        for (text, expected) in [("tray", CloseBehavior::Tray), ("minimize", CloseBehavior::Minimize), ("quit", CloseBehavior::Quit)] {
+    fn parse_close_behavior_reads_two_choices_and_migrates_the_legacy_value() {
+        for (text, expected) in [("tray", CloseBehavior::Tray), ("minimize", CloseBehavior::Tray), ("quit", CloseBehavior::Quit)] {
             let raw = json!({ "schemaVersion": 1, "data": { "closeBehavior": text } }).to_string();
             assert_eq!(parse_close_behavior(Some(&raw)), expected, "{text} 必须照读");
         }

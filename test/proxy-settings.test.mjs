@@ -209,15 +209,20 @@ test("文档归一：合法文档字段保留，未知顶层键原样带过（R1
       playQueue: { ids: ["a"] },
     },
   });
-  assert.deepEqual(CLOSE_BEHAVIORS, ["tray", "minimize", "quit"]);
+  assert.deepEqual(CLOSE_BEHAVIORS, ["tray", "quit"]);
 });
 
-test("settings:set 三态从表单经处理器落盘并读回；非法值失败保留前值", async (t) => {
+test("settings:set 两态落盘读回；拒绝新写 minimize，历史精确值读迁移且下次保存为 tray", async (t) => {
   const { closeBehaviorFromSettings, closeBehaviorPatch } = await import("../src/renderer/features/settings/settings-form.mjs");
   const dir = await tempDir("close-round-trip");
   t.after(() => rm(dir, { recursive: true, force: true }));
   const handlers = createSettingsHandlers({ store: storeAt(dir) });
-  for (const behavior of ["tray", "minimize", "quit"]) {
+  await writeFile(join(dir, SETTINGS_FILE_NAME), JSON.stringify({ schemaVersion: 1, data: { closeBehavior: "minimize" } }));
+  const legacy = await handlers.get();
+  assert.equal(legacy.data.settings.data.closeBehavior, "tray");
+  await handlers.set({ payload: { patch: { future: true } } });
+  assert.equal(JSON.parse(await readFile(join(dir, SETTINGS_FILE_NAME), "utf8")).data.closeBehavior, "tray");
+  for (const behavior of ["tray", "quit"]) {
     const saved = await handlers.set({ payload: { patch: closeBehaviorPatch(behavior) } });
     assert.equal(saved.ok, true, behavior);
     assert.equal(saved.data.restartRequired, false);
@@ -226,12 +231,14 @@ test("settings:set 三态从表单经处理器落盘并读回；非法值失败�
     assert.equal(disk.data.closeBehavior, behavior);
     const loaded = await handlers.get();
     assert.equal(closeBehaviorFromSettings(loaded.data.settings), behavior);
-    const before = await readFile(join(dir, SETTINGS_FILE_NAME), "utf8");
-    const rejected = await handlers.set({ payload: { patch: { closeBehavior: "MINIMIZE" } } });
-    assert.equal(rejected.ok, false);
-    assert.equal(rejected.error.kind, "invalid_payload");
-    assert.match(rejected.error.message, /tray \/ minimize \/ quit/);
-    assert.equal(await readFile(join(dir, SETTINGS_FILE_NAME), "utf8"), before);
+    for (const invalid of ["minimize", "MINIMIZE", " minimize", "minimize ", "explode"]) {
+      const before = await readFile(join(dir, SETTINGS_FILE_NAME), "utf8");
+      const rejected = await handlers.set({ payload: { patch: { closeBehavior: invalid } } });
+      assert.equal(rejected.ok, false);
+      assert.equal(rejected.error.kind, "invalid_payload");
+      assert.match(rejected.error.message, /tray \/ quit/);
+      assert.equal(await readFile(join(dir, SETTINGS_FILE_NAME), "utf8"), before);
+    }
   }
 });
 

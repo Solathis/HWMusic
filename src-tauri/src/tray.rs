@@ -7,10 +7,9 @@
 //!    槽位写成**数据表**（[`MENU_SLOTS`]）而不是一长串构造调用：表能被单测逐项钉住，
 //!    构造调用只能靠人眼看。认不出的 id **不猜、不 panic**（只记一行日志）。
 //! 2. **关窗 fail-safe**：[`decide_close`] —— 只有"设置里选了托盘"**且**"托盘真的装上"才
-//!    `prevent_close + hide`；minimize 独立于托盘并保留任务栏入口，其余退出应用。旧仓缺陷：托盘没装上却把窗口藏了，
+//!    `prevent_close + hide`；其余退出应用。旧仓缺陷：托盘没装上却把窗口藏了，
 //!    用户看到"窗口没了、托盘里也没有"，只能去任务管理器找进程。
-//! 3. **可用性**：[`available`] 现问 tauri 的托盘表（`tray_by_id`），**不维护第二份内存镜像**
-//!    （镜像与事实之间只会有漂移：装失败之后两边的说法就对不上了）。
+//! 3. **可用性**：[`available`] 现问托盘表，Windows 同时查原生 Shell 注册位置，**不维护第二份镜像**。
 //!
 //! 两条纪律：
 //!
@@ -59,7 +58,7 @@ pub const ID_NEXT: &str = "tray:next";
 pub const ID_LYRICS: &str = "tray:lyrics";
 /// 设置…（广播 `app:open-settings`，渲染层切到设置页）。
 pub const ID_SETTINGS: &str = "tray:settings";
-/// 退出程序（`app.exit(0)`，走 RunEvent 收尸）。
+/// 退出程序（与关窗共用一次性后台收尾入口）。
 pub const ID_QUIT: &str = "tray:quit";
 
 /// 一个菜单槽位：要么是一个可点的项，要么是一条分隔线。
@@ -205,24 +204,20 @@ pub fn revert_lyrics_checked<R: Runtime>(app: &AppHandle<R>, checked: bool) -> b
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseAction {
     PreventAndHide,
-    PreventAndMinimize,
     Quit,
 }
 
-/// tray 仅在托盘可用时隐藏；minimize 保留任务栏入口，不依赖托盘。
+/// tray 仅在托盘可用时隐藏，其余退出。
 pub fn decide_close(behavior: CloseBehavior, tray_available: bool) -> CloseAction {
     match behavior {
         CloseBehavior::Tray if tray_available => CloseAction::PreventAndHide,
-        CloseBehavior::Minimize => CloseAction::PreventAndMinimize,
         CloseBehavior::Tray | CloseBehavior::Quit => CloseAction::Quit,
     }
 }
 
-/// 托盘装不上时的启动提示文案（**唯一出口**：文案在这里造，`install` 只负责投递）。
-///
-/// 仅 tray 档回退退出，minimize 仍然保留任务栏入口。
+/// 托盘装不上时必须如实说明关窗回退。
 pub fn tray_notice(reason: &str) -> String {
-    format!("托盘未能启用（{reason}）：选「最小化到托盘」时关窗会直接退出应用，托盘菜单也不可用；「最小化到任务栏」不受影响。")
+    format!("托盘未能启用（{reason}）：选「最小化到托盘」时关窗会直接退出应用，托盘菜单也不可用。")
 }
 
 /// Windows 用多尺寸 ico（高 DPI 不糊），其余平台用 32×32 png。`include_bytes!` 嵌进二进制：
@@ -237,12 +232,22 @@ pub fn icon() -> Result<Image<'static>, String> {
     Image::from_bytes(TRAY_ICON_BYTES).map_err(|error| format!("托盘图标无法解码：{error}"))
 }
 
-/// 托盘真的装上了吗：**现问 tauri 的托盘表**（`tray_by_id`），不维护第二份内存镜像。
-///
-/// 关窗回调与 `core_get_tray_available` 都走这一个事实来源：装失败之后，
-/// "界面上说的"和"关窗时实际做的"必然是同一句话。
+/// Windows 还须确认 Shell 注册，内部句柄存活不能保证用户能找到托盘。
 pub fn available<R: Runtime>(app: &AppHandle<R>) -> bool {
-    app.tray_by_id(crate::TRAY_ID).is_some()
+    let Some(tray) = app.tray_by_id(crate::TRAY_ID) else { return false; };
+    #[cfg(windows)]
+    return check_registration(tray.rect().map_err(|error| error.to_string())).is_ok();
+    #[cfg(not(windows))]
+    { let _ = tray; true }
+}
+
+#[cfg(windows)]
+fn check_registration(rect: Result<Option<tauri::Rect>, String>) -> Result<(), String> {
+    match rect {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err("系统托盘未注册图标：检查 Shell 与应用运行权限/完整性级别".to_string()),
+        Err(error) => Err(format!("系统托盘注册检查失败（{error}）")),
+    }
 }
 
 /// 托盘的托管状态：握着托盘与"桌面歌词"勾选项的句柄。
@@ -350,7 +355,19 @@ fn build<R: Runtime>(app: &AppHandle<R>) -> Result<TrayState<R>, String> {
         .on_menu_event(move |app, event| dispatch(app, &lyrics_handler, event.id().as_ref()))
         .build(app)
         .map_err(|error| format!("托盘创建失败：{error}"))
-        .map(|tray| TrayState { tray, lyrics_item })
+        .and_then(|tray| {
+            #[cfg(windows)]
+            {
+                let registration = tray.set_icon(Some(self::icon()?))
+                    .map_err(|error| format!("系统托盘图标更新失败（{error}）；检查应用运行权限/完整性级别"))
+                    .and_then(|_| check_registration(tray.rect().map_err(|error| error.to_string())));
+                if let Err(error) = registration {
+                    app.remove_tray_by_id(crate::TRAY_ID);
+                    return Err(error);
+                }
+            }
+            Ok(TrayState { tray, lyrics_item })
+        })
 }
 
 /// 平台图标口径：macOS 用模板图标（跟着系统亮暗自动反色），其余平台原样。
@@ -452,10 +469,11 @@ fn dispatch<R: Runtime>(app: &AppHandle<R>, lyrics_item: &CheckMenuItem<R>, id: 
             }
         }
         TrayAction::Quit => {
-            // 走 `app.exit` → RunEvent（ExitRequested/Exit）收尸：lib.rs 在那里关 sidecar 的 stdin。
-            // `std::process::exit` 会跳过收尸，sidecar 变成孤儿进程。
             log::info!("托盘菜单：退出程序");
-            app.exit(0);
+            if let Err(error) = crate::request_app_exit(app) {
+                log::warn!("退出请求失败（{error}）：保留应用并恢复主窗");
+                crate::focus_main(app);
+            }
         }
     }
 }
@@ -624,22 +642,17 @@ mod tests {
     }
 
     #[test]
-    fn minimize_is_independent_of_tray_availability() {
-        let behavior = CloseBehavior::from_setting(Some("minimize"))
-            .expect("必须能解析最小化到任务栏（不能回落 quit）");
-        assert!(!behavior.hides_on_close(), "minimize 不是托盘 hide");
-        for available in [false, true] {
-            assert_eq!(decide_close(behavior, available), CloseAction::PreventAndMinimize);
-        }
+    fn legacy_minimize_uses_the_tray_fail_safe() {
+        let behavior = CloseBehavior::from_setting(Some("minimize")).expect("精确旧值必须迁移");
+        assert_eq!(decide_close(behavior, true), CloseAction::PreventAndHide);
+        assert_eq!(decide_close(behavior, false), CloseAction::Quit);
     }
 
     #[test]
-    fn decide_close_is_fail_safe_on_all_six_branches() {
+    fn decide_close_is_fail_safe_on_all_four_branches() {
         for (behavior, available, expected) in [
             (CloseBehavior::Tray, true, CloseAction::PreventAndHide),
             (CloseBehavior::Tray, false, CloseAction::Quit),
-            (CloseBehavior::Minimize, true, CloseAction::PreventAndMinimize),
-            (CloseBehavior::Minimize, false, CloseAction::PreventAndMinimize),
             (CloseBehavior::Quit, true, CloseAction::Quit),
             (CloseBehavior::Quit, false, CloseAction::Quit),
         ] {
@@ -686,6 +699,37 @@ mod tests {
     fn the_embedded_icon_decodes() {
         let image = icon().expect("内嵌图标必须能解码（image-ico / image-png 特性已开）");
         assert!(image.width() > 0 && image.height() > 0, "解码出来的图不能是 0 尺寸");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn registration_requires_a_real_shell_rect_and_preserves_os_errors() {
+        assert!(check_registration(Ok(Some(tauri::Rect::default()))).is_ok());
+        let missing = check_registration(Ok(None)).expect_err("内部对象不可冒充系统注册成功");
+        assert!(missing.contains("系统托盘未注册"));
+        let denied = check_registration(Err("拒绝访问 (os error 5)".to_string())).expect_err("系统失败不可假成功");
+        assert!(denied.contains("os error 5"));
+        assert_eq!(decide_close(CloseBehavior::Tray, false), CloseAction::Quit);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn embedded_image_converts_to_a_native_windows_icon() {
+        #[link(name = "user32")]
+        extern "system" {
+            fn CreateIcon(instance: *mut std::ffi::c_void, width: i32, height: i32, planes: u8, bits: u8, mask: *const u8, color: *const u8) -> *mut std::ffi::c_void;
+            fn DestroyIcon(icon: *mut std::ffi::c_void) -> i32;
+        }
+        let image = icon().expect("图标解码");
+        let mut bgra = image.rgba().to_vec();
+        let mut mask = Vec::with_capacity(bgra.len() / 4);
+        for pixel in bgra.chunks_exact_mut(4) {
+            mask.push(pixel[3].wrapping_sub(u8::MAX));
+            pixel.swap(0, 2);
+        }
+        let handle = unsafe { CreateIcon(std::ptr::null_mut(), image.width() as i32, image.height() as i32, 1, 32, mask.as_ptr(), bgra.as_ptr()) };
+        assert!(!handle.is_null(), "原生图标转换失败：{}×{}，{}", image.width(), image.height(), std::io::Error::last_os_error());
+        unsafe { DestroyIcon(handle); }
     }
 
     /// 源码扫描一：本模块**不自己发事件信封**——广播只能经 `commands::emit_core_event`

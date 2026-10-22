@@ -14,8 +14,7 @@
  *    落盘 `settings.json`、更新内存里的档位、广播 `theme:changed` 三件事在同一处完成。
  *    **不走 `settings:set`**：那条路只写盘（`mergeSettings` 把未知键原样透传），
  *    Rust 内存里的档位与那条广播都不会跟着动——界面会亮、重启就变回去；
- * 3. 高亮跟着**回执**走而不是跟着点击走：写盘失败时界面不该显示一个不存在的结果
- *    （"设置页说改了、实际没改"正是这类缺陷的形状）。
+ * 3. 高亮跟着回执与宿主广播走，不做乐观切换；写盘失败保持原样，原生部分失败保留已保存主题并报告错误。
  *
  * 每个用到它的组件各自订阅一次（左下角那枚、设置页那张卡、门禁那个控件各有自己的生命周期，
  * 挂载/卸载互不相干）；状态的**真源**始终是 Rust 的那一份 + `theme:changed` 广播，
@@ -31,7 +30,7 @@ import { THEME_DEFAULT } from "./theme.mjs"
 export interface ThemeChoiceBinding {
   /** 当前档位：来自 Rust 的回执与广播，认不出的档位按系统档（见 theme.mjs） */
   choice: string
-  /** 选一档：走唯一写入口，界面按**回执**更新（写失败就保持原样） */
+  /** 选一档：走唯一写入口，以回执与宿主广播为准；部分失败仍保留诊断。 */
   select: (next: string) => void
 }
 
@@ -74,7 +73,7 @@ export function useThemeChoice(): ThemeChoiceBinding {
         const answer = await coreLoginChrome<{ theme?: string }>({ action: "theme", theme: next })
         setChoice(applyTheme(answer?.theme))
       } catch (failure) {
-        console.warn("主题档位没能改（保持原档位）", failure)
+        console.warn("主题切换未全部完成（以宿主广播为准，详情见错误）", failure)
       }
     })()
   }, [])

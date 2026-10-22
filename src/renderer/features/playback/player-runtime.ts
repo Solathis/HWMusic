@@ -7,7 +7,7 @@
  * - `resolveUrl`：`coreCall(PLAYBACK_RESOLVE_URL, {trackId})`——通道名来自共享常量；
  *   地址只在这条调用里出现，**不进状态、不写日志、不落盘**；
  * - `guardUrl`：`media-url.mjs`（CSP `media-src` 同源的白名单）；
- * - `persistQueue` / `loadQueue`：`settings:set` 的 `patch.queue`（只存曲目标识 + 索引）
+ * - `persistQueue` / `loadQueue`：`settings:set` 的 `patch.queue`（标识 + 索引 + 安全展示快照）
  *   与 `settings:get` 的同一键（`null` = 删除，语义在 `src/main/settings.mjs`）；
  * - 媒体会话：只在该更新的时候更新（曲目或播放状态变化），避免每帧都去写系统控件；
  * - `player:command`：R11 托盘用的播放控制广播（预登记），认不出的命令只留痕。
@@ -79,7 +79,7 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
     // coreCall 成功时直接给 data；失败时**抛出** core 错误（kind/message 会被状态机原样保留）
     resolveUrl: async (trackId: string) => ({ ok: true as const, data: (await callCore(PLAYBACK_RESOLVE_URL, { trackId })) as never }),
     guardUrl: deps.guardUrl ?? guardMediaUrl,
-    persistQueue: async (record: unknown) => {
+    persistQueue: async (record: import("./queue.mjs").QueueRecord | null) => {
       await callCore(SETTINGS_SET, { patch: { [QUEUE_SETTING_KEY]: record } });
     },
     loadQueue: async () => {
@@ -98,8 +98,9 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
 
   // 媒体会话只在"曲目或播放状态"真的变了的时候更新：每帧都写系统控件是白烧 CPU 与日志
   let lastMediaKey = "";
-  const unsubscribeState = player.subscribe((state: { track: { id?: string } | null; status: string }) => {
-    const key = `${state.track?.id ?? ""}|${state.status}`;
+  const unsubscribeState = player.subscribe((state: ReturnType<typeof player.snapshot>) => {
+    const track = state.track;
+    const key = JSON.stringify([state.status, track?.id, track?.name, track?.artists, track?.albumName, track?.coverUrl]);
     if (key === lastMediaKey) return;
     lastMediaKey = key;
     mediaSession.update({ track: state.track, status: state.status });

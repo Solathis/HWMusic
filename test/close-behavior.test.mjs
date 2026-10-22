@@ -1,5 +1,5 @@
 /**
- * 设置页 · 关窗行为（tray / minimize / quit）：载荷、越界值、托盘可用性、页面接线。
+ * 设置页 · 关窗行为（tray / quit，精确旧 minimize 读迁移 tray）。
  *
  * 与 `test/proxy-settings-form.test.mjs` 第 6 节的分工：那边钉**纯函数**的文案与形状，
  * 这里钉**这条链真的接得上**——UI 造的载荷经 core 的 merge 落到文档里，且落下去的就是
@@ -50,7 +50,7 @@ const settingsPageSource = () => {
 
 test("枚举只有一份：UI 的关窗行为与 core 的逐条相等（各写一份就会漂移）", () => {
   assert.deepEqual([...CLOSE_BEHAVIORS], [...CORE_CLOSE_BEHAVIORS]);
-  assert.deepEqual([...CLOSE_BEHAVIORS], ["tray", "minimize", "quit"]);
+  assert.deepEqual([...CLOSE_BEHAVIORS], ["tray", "quit"]);
   assert.ok(
     CLOSE_BEHAVIORS.includes(DEFAULT_CLOSE_BEHAVIOR),
     "core 的默认值必须在枚举里（否则归一后的文档自己就不合法）",
@@ -67,17 +67,17 @@ test("往返：UI 选哪一项，落进文档的就是哪一项（经 core 的�
   }
 });
 
-test("minimize：不依赖托盘，说明保留任务栏按钮并后台继续播放", () => {
-  assert.deepEqual(closeBehaviorPatch("minimize"), { closeBehavior: "minimize" });
-  assert.equal(closeBehaviorFromSettings({ data: { closeBehavior: "minimize" } }), "minimize");
+test("精确历史 minimize 读迁移 tray，新写 minimize 拒绝，其他坏值不误迁移", () => {
+  const legacy = normalizeSettingsDocument({ schemaVersion: 1, data: { closeBehavior: "minimize" } });
+  assert.equal(legacy.data.closeBehavior, "tray");
+  assert.equal(closeBehaviorFromSettings({ data: { closeBehavior: "minimize" } }), "tray");
+  assert.throws(() => mergeSettings(legacy, { closeBehavior: "minimize" }), (error) => error.kind === "invalid_payload");
+  assert.deepEqual(closeBehaviorPatch("minimize"), { closeBehavior: "quit" }, "UI 不再提供旧选项");
   assert.equal(closeBehaviorLabel("tray"), "最小化到托盘");
-  assert.equal(closeBehaviorLabel("minimize"), "最小化到任务栏");
   assert.equal(closeBehaviorLabel("quit"), "退出应用");
-  const unavailable = closeBehaviorNotice("minimize", { trayAvailable: false });
-  assert.equal(closeBehaviorNotice("minimize", { trayAvailable: true }), unavailable);
-  assert.match(unavailable, /保留任务栏按钮/);
-  assert.match(unavailable, /后台继续播放/);
-  assert.doesNotMatch(unavailable, /退出|托盘/);
+  for (const bad of ["MINIMIZE", " minimize", "minimize "]) {
+    assert.throws(() => mergeSettings(legacy, { closeBehavior: bad }), (error) => error.kind === "invalid_payload");
+  }
 });
 
 test("越界值：UI 回落到 quit（能退出的那个），core 结构化报错——都不猜", () => {

@@ -172,11 +172,11 @@ export function proxyTestResultText(result) {
 }
 
 // ---------------------------------------------------------------------------
-// 关窗行为（tray / minimize / quit）
+// 关窗行为（tray / quit）
 // ---------------------------------------------------------------------------
 
 /** 关窗行为枚举（与 core 的同名常量逐条相等，由测试钉住）。 */
-export const CLOSE_BEHAVIORS = ["tray", "minimize", "quit"];
+export const CLOSE_BEHAVIORS = ["tray", "quit"];
 
 /** 宿主还没答/答不上来时保守按托盘不可用；仅 tray 受此 fail-safe 约束。 */
 export const TRAY_AVAILABLE = false;
@@ -188,7 +188,6 @@ export function trayAvailabilityFromAnswer(answer) {
 
 export const CLOSE_BEHAVIOR_LABELS = {
   tray: "最小化到托盘",
-  minimize: "最小化到任务栏",
   quit: "退出应用",
 };
 
@@ -202,15 +201,15 @@ export function closeBehaviorPatch(value) {
   return { closeBehavior: CLOSE_BEHAVIORS.includes(value) ? value : "quit" };
 }
 
-/** 文档读回与 core 默认 tray 一致，不把 UI 写入兜底冒充用户选择。 */
+/** 精确旧 minimize 读迁移 tray；其余坏值与 core 默认一致。 */
 export function closeBehaviorFromSettings(document) {
   const stored = isPlainObject(document?.data) ? document.data.closeBehavior : null;
+  if (stored === "minimize") return "tray";
   return CLOSE_BEHAVIORS.includes(stored) ? stored : CLOSE_BEHAVIORS[0];
 }
 
-/** tray 必须如实说明托盘不可用时会退出；minimize 独立于托盘。 */
+/** tray 必须如实说明托盘不可用时会退出。 */
 export function closeBehaviorNotice(behavior, options = {}) {
-  if (behavior === "minimize") return "关窗后最小化到任务栏，保留任务栏按钮，音乐在后台继续播放。";
   if (behavior !== "tray") return "关窗即退出应用（正在播放的音乐会停止）。";
   return options?.trayAvailable === true
     ? "关窗后应用继续在托盘运行：托盘菜单里可以退出。"
@@ -225,7 +224,7 @@ export function closeBehaviorNotice(behavior, options = {}) {
  * 播放状态 → 只读摘要 `{count, current}`（设置页只显示，不做任何队列管理）。
  *
  * 没有播放状态就是空队列（不抛）；当前曲的显示规则复用 `trackTitleOf`：
- * 恢复出来的队列只有标识，那时显示"曲目 1003"才是实话（"未知歌曲"会让人以为队列坏了）。
+ * 旧队列只有标识时显示"曲目 1003"（"未知歌曲"会让人以为队列坏了）。
  */
 export function queueSummary(state) {
   const source = isPlainObject(state) ? state : {};

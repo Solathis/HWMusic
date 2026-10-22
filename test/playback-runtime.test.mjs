@@ -9,8 +9,8 @@
  * 2. **地址闸门**：`guardMediaUrl` 与协议层 `safeMediaUrl` 同结论（CSP media-src 同源），
  *    渲染层放行地址只走它；
  * 3. **装配**：取地址走 `playback:resolve-url`（通道名来自共享常量）、队列持久化只写
- *    `settings:set` 的 `patch.queue`（且不含地址）、`player:command` 广播接到状态机上；
- * 4. **地址不外泄**：日志里不出现地址，持久化里不出现地址。
+ *    `settings:set` 的 `patch.queue`（可含安全展示快照）、`player:command` 广播接到状态机上；
+ * 4. **音频地址不外泄**：日志与持久化不含音频地址。
  *
  * 先写先看红。
  */
@@ -226,7 +226,7 @@ test("取地址失败：core 的结构化错误原样落到状态里（UI 才说
   assert.equal(audio.created[0].src, "", "没拿到地址就什么都不装载");
 });
 
-test("队列持久化：只写 settings:set 的 patch.queue（只有 ids + index，绝不含地址）", async () => {
+test("队列持久化：仍只写 settings:set 的 patch.queue，可选安全 metadata 不含音频地址", async () => {
   const { runtime, core } = makeRuntime();
   await runtime.player.playQueue(
     [
@@ -242,7 +242,10 @@ test("队列持久化：只写 settings:set 的 patch.queue（只有 ids + index
   const patch = writes.at(-1).payload;
   assert.deepEqual(Object.keys(patch), ["patch"], "settings:set 的载荷形状是 {patch}");
   assert.deepEqual(Object.keys(patch.patch), [QUEUE_SETTING_KEY]);
-  assert.deepEqual(patch.patch.queue, { ids: ["1001", "1002"], index: 0 });
+  assert.deepEqual(patch.patch.queue, { ids: ["1001", "1002"], index: 0, metadata: [
+    { id: "1001", name: "第一首", artists: null, duration: null, coverUrl: null, albumId: null, albumName: null },
+    { id: "1002", name: "第二首", artists: null, duration: null, coverUrl: null, albumId: null, albumName: null },
+  ] });
   assert.doesNotMatch(JSON.stringify(writes), /http|dbankcdn/, "地址绝不落盘");
 
   // 清空 = 删除该键（null 语义由 settings.mjs 承担）
@@ -323,6 +326,39 @@ test("媒体会话：曲目/状态变化才更新系统控件；进度与音量�
   assert.equal(typeof session.handlers.get("play"), "function");
   session.handlers.get("pause")();
   assert.equal(runtime.player.snapshot().status, PLAYER_STATUS.paused);
+});
+
+test("同 id 同状态的新元信息刷新媒体标题与安全 artwork，进度不重复刷新", () => {
+  const { runtime, session } = makeRuntime();
+  runtime.player.setQueue([{ id: "same", name: "旧标题", artists: "旧艺人" }]);
+  const before = session.metadata.length;
+  runtime.player.setQueue([{ id: "same", name: "新标题", artists: "新艺人", albumName: "新专辑", coverUrl: "https://music.dbankcdn.cn/cover/new.jpg" }]);
+  assert.equal(session.metadata.length, before + 1);
+  assert.deepEqual(session.metadata.at(-1).init, { title: "新标题", artist: "新艺人", album: "新专辑", artwork: [{ src: "https://music.dbankcdn.cn/cover/new.jpg" }] });
+  runtime.player.setQueue([{ id: "same", name: "新标题", artists: "新艺人", albumName: "新专辑", coverUrl: "https://music.dbankcdn.cn/cover/changed.jpg" }]);
+  assert.equal(session.metadata.at(-1).init.artwork[0].src, "https://music.dbankcdn.cn/cover/changed.jpg", "只变封面也更新");
+  const after = session.metadata.length;
+  runtime.player.setQueue([{ id: "same", name: "新标题", artists: "新艺人", albumName: "新专辑", coverUrl: "https://music.dbankcdn.cn/cover/changed.jpg" }]);
+  runtime.player.seek(1000);
+  runtime.player.setVolume(0.4);
+  runtime.player.setLyrics([], "empty");
+  assert.equal(session.metadata.length, after, "相同字段和无关帧不写媒体会话");
+  runtime.dispose();
+});
+
+test("初始化恢复 metadata 与当前条目一致，不 resolve 音频也不自动播放", async () => {
+  const metadata = { id: "1", name: "恢复标题", artists: "艺人", duration: 123, coverUrl: "https://music.dbankcdn.cn/cover/1.jpg", albumId: "a", albumName: "专辑" };
+  const { runtime, core, audio, session } = makeRuntime({ core: fakeCore({ settings: { queue: { ids: ["1"], index: 0, metadata: [metadata] } } }) });
+  await runtime.initialize();
+  const state = runtime.player.snapshot();
+  assert.deepEqual(state.track, metadata);
+  assert.equal(state.track, state.entries[0]);
+  assert.equal(state.status, "idle");
+  assert.equal(core.of(PLAYBACK_RESOLVE_URL).length, 0);
+  assert.equal(audio.created[0].playCalls, 0);
+  assert.equal(core.of(SETTINGS_SET).length, 0);
+  assert.equal(session.metadata.at(-1).init.artwork[0].src, metadata.coverUrl);
+  runtime.dispose();
 });
 
 test("dispose：退订广播、摘掉媒体会话（不留幽灵）", async () => {

@@ -74,6 +74,14 @@ impl ThemeChoice {
         }
     }
 
+    pub fn to_native(self) -> Option<tauri::Theme> {
+        match self {
+            ThemeChoice::Light => Some(tauri::Theme::Light),
+            ThemeChoice::Dark => Some(tauri::Theme::Dark),
+            ThemeChoice::System => None,
+        }
+    }
+
     /// 一行给人看的说法（日志用）。
     pub fn describe(self) -> &'static str {
         match self {
@@ -268,16 +276,35 @@ pub fn set_theme<R: tauri::Runtime>(
     let state = app.try_state::<ThemeState>().ok_or_else(|| {
         CoreError::new("internal", "主题状态未登记（setup 未完成）：主题改不了")
     })?;
+    let applied = apply_theme(&state, choice, |native| {
+        let window = app.get_webview_window(crate::MAIN_WINDOW_LABEL)
+            .ok_or_else(|| "找不到主窗".to_string())?;
+        window.set_theme(native).map_err(|error| error.to_string())
+    }, |applied| {
+        crate::commands::emit_core_event(
+            app,
+            crate::bridge::THEME_CHANGED,
+            json!({ "theme": applied.setting() }),
+        );
+    })?;
+    Ok(applied)
+}
+
+fn apply_theme(
+    state: &ThemeState,
+    choice: ThemeChoice,
+    native: impl FnOnce(Option<tauri::Theme>) -> Result<(), String>,
+    broadcast: impl FnOnce(ThemeChoice),
+) -> Result<ThemeChoice, CoreError> {
     let applied = state.set(choice)?;
-    crate::commands::emit_core_event(
-        app,
-        crate::bridge::THEME_CHANGED,
-        json!({ "theme": applied.setting() }),
-    );
-    // R28（用户指令 2026-10-20，**推翻 R26/R27 裁决**）：改主题**不再碰官方登录页**。
-    // R26 起这里会把已经开着的官方页按新主题重来一次（R27 改成"关掉重开一份"），现在整条通路撤了：
-    // 官方页按它自己的默认渲染，应用主题只影响自家 UI（主窗 + 两个浮动控件——上面那条广播就是
-    // 它们全部的依据）。所以这个函数到广播为止，后面**刻意**什么都不做。
+    let result = native(applied.to_native());
+    // 原生失败仍保持已保存的网页主题；下次建窗会重试原生主题。
+    broadcast(applied);
+    result.map_err(|error| {
+        let message = format!("主题 {} 已保存并广播，但原生标题栏应用失败（{error}）；下次启动将重试", applied.setting());
+        log::warn!("{message}");
+        CoreError::new("internal", message)
+    })?;
     Ok(applied)
 }
 
@@ -289,6 +316,36 @@ mod tests {
         format!(
             "{{\n  \"schemaVersion\": 1,\n  \"data\": {{\n    \"closeBehavior\": \"quit\",\n    \"theme\": \"{theme}\",\n    \"proxy\": {{\"enabled\": true}}\n  }}\n}}\n"
         )
+    }
+
+    #[test]
+    fn native_theme_keeps_system_unforced() {
+        assert_eq!(ThemeChoice::Light.to_native(), Some(tauri::Theme::Light));
+        assert_eq!(ThemeChoice::Dark.to_native(), Some(tauri::Theme::Dark));
+        assert_eq!(ThemeChoice::System.to_native(), None);
+    }
+
+    #[test]
+    fn native_failure_reports_saved_theme_and_still_broadcasts_it() {
+        use std::cell::RefCell;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join(format!("theme-native-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = ThemeState::restore(&dir);
+        let effects = RefCell::new(Vec::new());
+        let error = apply_theme(&state, ThemeChoice::Dark,
+            |native| { assert_eq!(native, Some(tauri::Theme::Dark)); effects.borrow_mut().push("native"); Err("native failure".to_string()) },
+            |choice| { assert_eq!(choice, ThemeChoice::Dark); effects.borrow_mut().push("broadcast"); },
+        ).expect_err("原生失败不可假成功");
+        assert_eq!(error.kind.as_deref(), Some("internal"));
+        assert!(error.message.contains("已保存") && error.message.contains("native failure"));
+        assert_eq!(*effects.borrow(), vec!["native", "broadcast"]);
+        assert_eq!(state.current(), ThemeChoice::Dark);
+        assert_eq!(read_theme(&dir), ThemeChoice::Dark);
+        assert_eq!(apply_theme(&state, ThemeChoice::System, |native| { assert_eq!(native, None); Ok(()) }, |_| {}).expect("系统主题成功"), ThemeChoice::System);
+        std::fs::write(dir.join(SETTINGS_FILE_NAME), "坏文件").expect("测试文件");
+        let failed = apply_theme(&state, ThemeChoice::Light, |_| panic!("落盘失败不调用 native"), |_| panic!("落盘失败不广播"));
+        assert!(failed.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 枚举 → 磁盘 → 枚举 往返不失真；只认三个精确字面量。

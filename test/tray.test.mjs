@@ -165,10 +165,13 @@ test("菜单契约：9 槽位 / 7 项 / 2 分隔线，id 前缀 tray:，认不�
   assert.match(tray, /_ => None,/, "认不出的 id 走 None（不猜不 panic）");
 
   const decision = tray.slice(tray.indexOf("pub fn decide_close("), tray.indexOf("pub fn tray_notice("));
-  assert.match(decision, /behavior: CloseBehavior/, "决策必须接收三态，不再压成二态 bool");
+  assert.match(decision, /behavior: CloseBehavior/, "决策使用关窗枚举");
   assert.match(decision, /CloseBehavior::Tray if tray_available => CloseAction::PreventAndHide/);
-  assert.match(decision, /CloseBehavior::Minimize => CloseAction::PreventAndMinimize/, "minimize 不受托盘条件约束");
+  assert.doesNotMatch(decision, /PreventAndMinimize|CloseBehavior::Minimize/, "旧值应在读盘时迁移 tray");
   assert.match(decision, /CloseBehavior::Tray \| CloseBehavior::Quit => CloseAction::Quit/);
+  const dispatch = tray.slice(tray.indexOf("fn dispatch<"));
+  assert.match(dispatch, /crate::request_app_exit\(app\)/, "托盘 Quit 与关窗共用一次性入口");
+  assert.doesNotMatch(dispatch, /app\.exit\(/, "不在托盘事件中同步退出");
 });
 
 test("播放命令词：托盘发出的三个词必须是渲染层命令表里的词（认不出就拒绝，不会猜）", () => {
@@ -202,8 +205,8 @@ test("关窗行为（Rust 读盘）：schema 闸门与渲染层/core 枚举同�
     "形状认不出时落 quit：猜 tray 而托盘装不上 = 用户关一次窗再也找不回应用",
   );
   const rustLiterals = [...close.matchAll(/pub const CLOSE_BEHAVIOR_[A-Z]+\s*:\s*&str\s*=\s*"([a-z]+)"/g)].map((match) => match[1]);
-  assert.deepEqual(rustLiterals, ["tray", "minimize", "quit"]);
-  assert.deepEqual([...CLOSE_BEHAVIORS], rustLiterals, "core/UI/Rust 枚举三态逐条同源");
+  assert.deepEqual(rustLiterals, ["tray", "quit"]);
+  assert.deepEqual([...CLOSE_BEHAVIORS], rustLiterals, "core/UI/Rust 正常枚举两态逐条同源");
 });
 
 test("关窗行为：设置里还没有这一项时，Rust 必须跟 core 的默认说同一句话", () => {

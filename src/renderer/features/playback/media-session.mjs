@@ -9,10 +9,10 @@
  *    播放照常，只是系统控件里没有这一项；
  * 2. **不支持的动作跳过但留痕**：规范允许 `setActionHandler` 对未知动作抛错，
  *    一个动作失败不该带走其余动作（"没有快进"要能在日志里查到）；
- * 3. **不编元数据**：只有确知标题/艺人时才写进去；封面地址字段尚未确认（且取图要过 CSP），
- *    所以 `artwork` 一个都不放——编一个 URL 出来只会让系统控件显示碎图。
+ * 3. **不编元数据**：标题/艺人/专辑来自队列快照，封面再次过媒体白名单。
  */
 import { PLAYER_STATUS } from "./player.mjs";
+import { guardMediaUrl } from "./media-url.mjs";
 import { trackArtistOf, trackTitleOf } from "./playback-state.mjs";
 
 /** 接线的动作（唯一真源：测试与运行时都从这里取）。 */
@@ -87,14 +87,20 @@ export function createMediaSession(options = {}) {
   /**
    * 更新系统控件（曲目 / 状态）。返回是否真的写进去了（环境没有这个能力时 false）。
    *
-   * @param {{track?: {id?: string, name?: string|null, artists?: string|null}|null, status?: string}} [options]
+   * @param {{track?: {id?: string, name?: string|null, artists?: string|null, albumName?: string|null, coverUrl?: string|null}|null, status?: string}} [options]
    */
   function update({ track = null, status = PLAYER_STATUS.idle } = {}) {
     if (session === null) return false;
 
     if (typeof session.metadata !== "undefined" || MetadataCtor !== null) {
       if (MetadataCtor !== null) {
-        const init = { title: trackTitleOf(track), artist: trackArtistOf(track) };
+        const coverUrl = guardMediaUrl(track?.coverUrl);
+        const init = {
+          title: trackTitleOf(track),
+          artist: trackArtistOf(track),
+          ...(track?.albumName ? { album: track.albumName } : {}),
+          ...(coverUrl === null ? {} : { artwork: [{ src: coverUrl }] }),
+        };
         try {
           session.metadata = new MetadataCtor(init);
         } catch (cause) {

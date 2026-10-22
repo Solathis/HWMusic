@@ -54,27 +54,18 @@ export interface LyricsWindowBinding {
 
 const log = (...parts: unknown[]) => console.warn("[hwmusic-lyrics]", ...parts)
 
-/**
- * 曲目 + id → `playback:lyrics` 的查询形状（R41）。
- *
- * 元信息一律走 `track-fields.mjs` 的 **`…OrNull`** 那几个（**取不到就是 null**）：
- * 界面上的兜底文案（"未知歌曲"/"未知歌手"）**绝不能进匹配器**——把"未知歌手"当成艺人去匹配，
- * 等于给第三方库一个假信号，而匹配器是"宁可不显示"的那一侧。
- */
-function trackQueryOf(trackId: string, track: unknown) {
-  return {
-    trackId,
-    title: trackNameOrNull(track),
-    artist: trackArtistsOrNull(track),
-    durationSeconds: trackDurationOf(track),
-  }
-}
-
 export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): LyricsWindowBinding {
   const bridge = getLyricsBridge()
   const [config, setConfig] = useState(() => DEFAULT_LYRICS_CONFIG)
   const [visible, setVisibleState] = useState(false)
   const trackId = state.track?.id ?? null
+  const title = trackNameOrNull(state.track)
+  const artist = trackArtistsOrNull(state.track)
+  const durationSeconds = trackDurationOf(state.track)
+  const trackQuery = useMemo(
+    () => trackId === null ? null : { trackId, title, artist, durationSeconds },
+    [trackId, title, artist, durationSeconds],
+  )
 
   /** 播放状态的最新值：rAF 进度泵读它（不把状态放进 effect 依赖，否则每帧重订阅）。 */
   const stateRef = useRef(state)
@@ -131,27 +122,28 @@ export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): Lyr
   useEffect(() => {
     let alive = true
     void (async () => {
-      if (trackId === null) {
+      if (trackQuery === null) {
         runtime.player.setLyrics([], LYRICS_STATUS.unavailable)
         await bridge.pushDocument({ lines: [], status: LYRICS_STATUS.unavailable })
         return
       }
-      // 先落"正在取"（并把上一首的行清掉：换歌时留着上一首的歌词只会显示错的人名）
+      // 同 id 元信息更新也清掉旧匹配，进度帧不参与请求依赖。
       runtime.player.setLyrics([], LYRICS_STATUS.loading)
       await bridge.pushDocument({ lines: [], status: LYRICS_STATUS.loading })
+      if (!alive) return
 
-      const result = await bridge.loadLyrics(trackQueryOf(trackId, stateRef.current.track))
+      const result = await bridge.loadLyrics(trackQuery)
       if (!alive) return
       runtime.player.setLyrics(result.lines, result.status)
       await bridge.pushDocument({ lines: result.lines, status: result.status })
       if (result.status === LYRICS_STATUS.unavailable || result.status === LYRICS_STATUS.failed) {
-        log(`歌词未能取得（${result.status}）：曲目 ${trackId}`)
+        log(`歌词未能取得（${result.status}）：曲目 ${trackQuery.trackId}`)
       }
     })().catch((cause) => log("歌词数据链失败（不影响播放）：", cause))
     return () => {
       alive = false
     }
-  }, [bridge, runtime, trackId])
+  }, [bridge, runtime, trackQuery])
 
   // 4. 进度泵：rAF 每帧读状态机；该不该出 IPC 由桥里的纯函数决定
   //    （推失败在桥里吞掉并留一行 warn：进度是"下一帧还会再来"的东西，不该打断用户）

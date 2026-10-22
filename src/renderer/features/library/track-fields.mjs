@@ -44,8 +44,8 @@ export function trackNameOf(item) {
 /**
  * 曲名（**取不到就是 null**，不造文案）。
  *
- * R9 增补：播放队列的持久化只存曲目标识，内存里的队列条目需要区分"标题未知"与"标题是
- * 未知歌曲"——前者是数据层的事实，后者是界面上的说法。文案只该出现在 UI 层，
+ * 队列快照需要区分"标题未知"与"标题是未知歌曲"——前者是数据层的事实，后者是界面上的说法。
+ * 文案只该出现在 UI 层，
  * 所以把"可空"的读取单独暴露出来，键候选表仍然只有这一份（`trackNameOf` 也走它）。
  */
 export function trackNameOrNull(item) {
@@ -99,13 +99,17 @@ export function trackArtistsOf(item) {
 }
 
 export function trackAlbumOf(item) {
-  if (!isObject(item)) return "未知专辑";
+  return trackAlbumOrNull(item) ?? "未知专辑";
+}
+
+export function trackAlbumOrNull(item) {
+  if (!isObject(item)) return null;
   for (const key of ALBUM_NAME_KEYS) {
     const value = item[key];
     const name = isObject(value) ? textOf(value.name) ?? textOf(value.albumName) : textOf(value);
     if (name !== null) return name;
   }
-  return "未知专辑";
+  return null;
 }
 
 /** 专辑 id：只有名字时回 null——专辑页打不开，就不在界面上装作能打开。 */
