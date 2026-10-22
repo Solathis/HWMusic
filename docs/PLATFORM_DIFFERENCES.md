@@ -31,27 +31,15 @@
 
 ## 1. capability 权限清单（三端共用，权限是窗口级而非平台级）
 
-`src-tauri/capabilities/main.json` —— 全部权限就这 5 条，作用于 `main` 与 `lyrics` **两个**窗口：
-
-```json
-{
-  "identifier": "main",
-  "windows": ["main", "lyrics"],
-  "permissions": [
-    "core:event:default",
-    "core:window:allow-start-dragging",
-    "global-shortcut:allow-register",
-    "global-shortcut:allow-unregister",
-    "global-shortcut:allow-is-registered"
-  ]
-}
-```
+`src-tauri/capabilities/main.json` 只作用于 main：event、start-dragging、三项 global-shortcut。
+`src-tauri/capabilities/lyrics.json` 只给 lyrics **event + start-dragging**，不授快捷键/HTTP/fs/login。
+配置与媒体专命令按 webview label 只放行 main/lyrics；core_call、document/progress/toggle 仍 main-only。
 
 | 权限 | 为什么需要 | 被谁消费 |
 |---|---|---|
-| `core:event:default` | 监听后端广播（`core:event` → 各频道） | 两个窗口的事件订阅 |
-| `core:window:allow-start-dragging` | 无边框歌词窗拖动（`data-tauri-drag-region`） | 歌词窗（锁定配置下渲染层不挂该属性） |
-| `global-shortcut:allow-register` / `-unregister` / `-is-registered` | 渲染层侧（若有）查询/注册快捷键 | R2 计划要求；**当前注册全部在 Rust `setup` 里做**，所以这三条是**冗余**的（R13 如实记档，未删） |
+| `core:event:default` | core:event 频道广播与 ready 握手 | 两窗 |
+| `core:window:allow-start-dragging` | 官方自窗 startDragging | 歌词拖柄与非交互宿主，锁定/点透时禁用 |
+| `global-shortcut:allow-register` / `-unregister` / `-is-registered` | 主窗原有注册权限 | main 保留，lyrics 不再授予；当前实际注册仍在 Rust setup |
 
 三条不能忘的事实：
 
@@ -116,7 +104,7 @@ webview 仍走代理——这是两套网络栈的行为不一致，如实记（
 | 项 | 三端口径 | 状态 |
 |---|---|---|
 | 主窗 | 1280×800，最小 960×640，标题 = `productName` = `src/shared/app-name.mjs` 的显示名 | verified（代码级）；真窗未验 |
-| 窗口状态持久化 | `StateFlags = SIZE \| POSITION \| MAXIMIZED`，`with_filter` **只记 `main`/`lyrics`** | verified（代码级） |
+| 窗口状态持久化 | `StateFlags = SIZE \| POSITION \| MAXIMIZED`，只记录 main/lyrics；lyrics 跳过自动恢复，避免覆盖配置几何 | verified（代码级），R44c Windows 首开几何已验 |
 | 登录子窗 | 无边框、不进任务栏、独立数据目录、独立 partition、不共享会话 | verified（代码级）；真窗未验 |
 | 歌词窗 | 无边框 / 透明 / 无阴影 / 置顶 / 不进任务栏 / 不可缩放 / 不抢焦点 / 先建后 `show` | verified（代码级）；真窗未验 |
 | webview 数据目录 | `<数据根>/webview2/{main,login/<partition>,lyrics}` | verified（代码级） |

@@ -132,7 +132,7 @@ test("关窗行为下拉：受控值 + 自绘标签（radix 在内容没展开�
 test("设置 Select 调用点：popper/start/4 + SelectGroup，触发器响应式，不改选中语义", () => {
   const source = settingsPageSource();
   const contents = [...source.matchAll(/<SelectContent\b([^>]*)>([\s\S]*?)<\/SelectContent>/g)];
-  assert.equal(contents.length, 5, "关窗、主题、歌词位置/字号/颜色均覆盖");
+  assert.equal(contents.length, 7, "关窗、主题、歌词位置/字号/颜色/方向/样式均覆盖");
   for (const [, props, body] of contents) {
     assert.match(props, /position="popper"/, "弹层不能 item-aligned 盖住 trigger");
     assert.match(props, /align="start"/);
@@ -140,7 +140,7 @@ test("设置 Select 调用点：popper/start/4 + SelectGroup，触发器响应�
     assert.match(body, /^\s*<SelectGroup>[\s\S]*<SelectItem[\s\S]*<\/SelectGroup>\s*$/);
   }
   const triggers = [...source.matchAll(/<SelectTrigger\b[^>]*className="([^"]+)"/g)];
-  assert.equal(triggers.length, 5);
+  assert.equal(triggers.length, 7);
   for (const [, classes] of triggers) assert.match(classes, /\bw-full max-w-xs\b/);
   assert.doesNotMatch(source, /aria-selected|data-state=\{/, "选中态交给 Radix，不根据焦点伪造 aria");
 });

@@ -29,6 +29,7 @@ import {
 } from "../src/shared/channels.ts";
 import {
   CORE_LYRICS_CONFIGURE,
+  CORE_LYRICS_CONTROL,
   CORE_LYRICS_DOCUMENT,
   CORE_LYRICS_PROGRESS,
   CORE_LYRICS_TOGGLE,
@@ -64,6 +65,306 @@ import { createLyricsBridge } from "../src/renderer/features/lyrics/lyrics-bridg
 import { createPlayer } from "../src/renderer/features/playback/player.mjs";
 import { createPlaybackHandlers } from "../src/host/playback-handlers.mjs";
 import { createMusicApi } from "../src/protocols/music.mjs";
+
+const flushBridge = () => new Promise((resolve) => setTimeout(resolve, 0));
+const deferredBridge = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
+
+function revisionBridge({ disk = {}, settingsGate = null, configureGate = null, saveGate = null } = {}) {
+  const listeners = new Map();
+  const commands = [];
+  const writes = [];
+  let config = { ...DEFAULT_LYRICS_CONFIG };
+  let revision = 0;
+  let stored = disk;
+  const bridge = createLyricsBridge({
+    callCore: async (channel, payload) => {
+      if (channel === "settings:get") {
+        if (settingsGate) await settingsGate.promise;
+        return { settings: { schemaVersion: 1, data: { lyricsWindow: stored } } };
+      }
+      if (channel === "settings:set") {
+        writes.push(payload.patch);
+        if (saveGate && writes.length === 1) await saveGate.promise;
+        stored = payload.patch.lyricsWindow;
+        return { settings: { schemaVersion: 1, data: { lyricsWindow: disk } } };
+      }
+      throw new Error(`Unexpected ${channel}`);
+    },
+    callCommand: async (command, args) => {
+      commands.push({ command, args });
+      if (command === CORE_LYRICS_CONFIGURE) {
+        if (!args.restoreIfPristine || revision === 0) {
+          const next = normalizeLyricsConfig(args.config, config);
+          if (JSON.stringify(next) !== JSON.stringify(config) || args.restoreIfPristine) revision += 1;
+          config = next;
+        }
+        const answer = { config, revision, visible: false };
+        if (configureGate && args.config.color === "primary") await configureGate.promise;
+        return answer;
+      }
+      return { config, revision, visible: true };
+    },
+    subscribeCoreEvent: async (channel, handler) => {
+      const handlers = listeners.get(channel) ?? new Set();
+      handlers.add(handler); listeners.set(channel, handlers);
+      return () => handlers.delete(handler);
+    },
+    syncTheme: async () => {}, log: () => {},
+  });
+  const emit = async (payload) => { for (const handler of listeners.get(LYRICS_STATE) ?? []) await handler(payload); };
+  return { bridge, commands, writes, emit, stored: () => stored, listeners };
+}
+
+test("R44c 配置 JSON/query 保留布局样式与 AMLL 开关，点透不等于锁定", () => {
+  const config = normalizeLyricsConfig({ layout: "vertical", style: "panel", enableBlur: false, enableScale: false, enableSpring: false, showControls: false });
+  assert.equal(config.layout, "vertical");
+  assert.equal(config.style, "panel");
+  assert.equal(config.enableBlur, false);
+  assert.equal(config.enableScale, false);
+  assert.equal(config.enableSpring, false);
+  assert.equal(config.showControls, false);
+  assert.deepEqual(lyricsConfigFromSearch("?layout=vertical&style=panel&enableBlur=0&enableScale=0&enableSpring=0&showControls=0"), config);
+  assert.deepEqual(normalizeLyricsConfig(JSON.parse(JSON.stringify(config))), config);
+  assert.equal(dragRegionEnabled({ ...DEFAULT_LYRICS_CONFIG, clickThrough: true }), false);
+  assert.equal(clickThroughEnabled({ ...DEFAULT_LYRICS_CONFIG, locked: true }), false);
+});
+
+test("R44c bootstrap 只恢复一次，盘读取前不写默认，动作等恢复且只存配置", async () => {
+  const settingsGate = deferredBridge();
+  const saved = { style: "panel", layout: "vertical", bogus: "drop" };
+  const env = revisionBridge({ disk: saved, settingsGate });
+  const first = env.bridge.initialize();
+  const second = env.bridge.initialize();
+  const change = env.bridge.applyConfig({ locked: true });
+  await flushBridge();
+  assert.equal(env.writes.length, 0);
+  assert.equal(env.commands.length, 0);
+  settingsGate.resolve();
+  await Promise.all([first, second, change]);
+  await flushBridge();
+  assert.equal(env.commands.filter((call) => call.args.restoreIfPristine).length, 1);
+  assert.equal(env.bridge.snapshot().config.style, "panel");
+  assert.equal(env.bridge.snapshot().config.layout, "vertical");
+  assert.equal(env.stored().locked, true);
+  assert.deepEqual(Object.keys(env.writes.at(-1)), ["lyricsWindow"]);
+  assert.equal("revision" in env.stored(), false);
+  assert.equal("bogus" in env.stored(), false);
+  env.bridge.dispose();
+});
+
+test("R44c 新广播先于旧 configure/settings 回执到达：UI 与最后磁盘不回退，保存仅一 inflight", async () => {
+  const configureGate = deferredBridge();
+  const saveGate = deferredBridge();
+  const env = revisionBridge({ configureGate, saveGate });
+  await env.bridge.initialize();
+  const old = env.bridge.applyConfig({ color: "primary" });
+  await flushBridge();
+  await env.emit({ revision: 5, visible: true, config: { ...DEFAULT_LYRICS_CONFIG, layout: "vertical", style: "panel" } });
+  await env.emit({ revision: 6, visible: true, config: { ...DEFAULT_LYRICS_CONFIG, layout: "vertical", style: "panel", locked: true } });
+  await flushBridge();
+  assert.equal(env.writes.length, 1, "后续状态合并到 latestPending，不并行写盘");
+  configureGate.resolve(); await old;
+  assert.equal(env.bridge.snapshot().revision, 6);
+  assert.equal(env.bridge.snapshot().config.color, "foreground");
+  saveGate.resolve();
+  await flushBridge(); await flushBridge();
+  assert.equal(env.writes.length, 2);
+  assert.equal(env.stored().style, "panel");
+  assert.equal(env.stored().locked, true);
+  assert.equal(env.bridge.snapshot().revision, 6, "settings 回执不是配置来源");
+  env.bridge.dispose();
+});
+
+test("R44c 保存失败保运行配置、标出未保存并可手动重试，不自动重试", async () => {
+  const gate = deferredBridge();
+  const env = revisionBridge({ saveGate: gate });
+  await env.bridge.initialize();
+  await env.bridge.applyConfig({ locked: true });
+  gate.reject(new Error("disk unavailable"));
+  await flushBridge();
+  assert.equal(env.bridge.snapshot().config.locked, true);
+  assert.match(env.bridge.snapshot().saveError, /未保存/);
+  await flushBridge(); assert.equal(env.writes.length, 1);
+  await env.bridge.retrySave();
+  assert.equal(env.writes.length, 2);
+  assert.equal(env.bridge.snapshot().saveError, null);
+  env.bridge.dispose();
+});
+
+test("R44c 取消初始化时迟到监听立即退订，重新挂载只有一套状态订阅", async () => {
+  const gate = deferredBridge();
+  let active = 0;
+  let disposed = false;
+  const bridge = createLyricsBridge({
+    callCore: async () => ({ settings: { data: {} } }),
+    callCommand: async () => ({ revision: 1, config: DEFAULT_LYRICS_CONFIG, visible: false }),
+    subscribeCoreEvent: async () => { active += 1; await gate.promise; return () => { active -= 1; }; },
+    syncTheme: async () => {}, log: () => {},
+  });
+  const initializing = bridge.initialize();
+  await flushBridge(); bridge.dispose(); disposed = true;
+  gate.resolve(); await initializing;
+  assert.equal(disposed, true);
+  assert.equal(active, 0, "旧 generation 不能留下 listener");
+});
+
+test("R44c 旧 generation configure 回执与失败初始化的迟到 listener 不得复活", async () => {
+  const gate = deferredBridge();
+  const env = revisionBridge({ configureGate: gate });
+  await env.bridge.initialize();
+  const old = env.bridge.applyConfig({ color: "primary" });
+  await flushBridge();
+  env.bridge.dispose();
+  gate.resolve(); await old;
+  assert.equal(env.bridge.snapshot().config.color, "foreground", "dispose 之后的旧回执不能改投影");
+
+  const late = deferredBridge();
+  let active = 0;
+  let first = true;
+  const bridge = createLyricsBridge({
+    callCore: async () => ({ settings: { data: {} } }),
+    callCommand: async () => ({ revision: 1, config: DEFAULT_LYRICS_CONFIG, visible: false }),
+    subscribeCoreEvent: async () => {
+      if (first) { first = false; throw new Error("listen failed"); }
+      active += 1; await late.promise; return () => { active -= 1; };
+    }, log: () => {},
+  });
+  await assert.rejects(bridge.initialize(), /listen failed/);
+  late.resolve(); await flushBridge();
+  assert.equal(active, 0);
+});
+
+test("R44c StrictMode 观察取消重挂只一套系统订阅，lyrics 广播实时更新设置投影", async () => {
+  const env = revisionBridge();
+  const previous = [];
+  const current = [];
+  const off = env.bridge.observe((status) => previous.push(status));
+  off();
+  const stop = env.bridge.observe((status) => current.push(status));
+  await env.bridge.initialize();
+  assert.equal(env.listeners.get(LYRICS_STATE).size, 1);
+  assert.equal(env.listeners.get("lyrics:toggle").size, 1);
+  await env.emit({ revision: 3, config: { ...DEFAULT_LYRICS_CONFIG, locked: true, layout: "vertical" }, visible: true });
+  assert.equal(current.at(-1).config.layout, "vertical");
+  assert.equal(current.at(-1).config.locked, true);
+  assert.equal(previous.length, 1, "取消观察不收迟到状态");
+  stop(); env.bridge.dispose();
+  assert.equal(env.listeners.get(LYRICS_STATE).size, 0);
+});
+
+test("R44c 恢复回执无权威 revision 时不开保存门，不把默认覆盖旧盘", async () => {
+  const writes = [];
+  const bridge = createLyricsBridge({
+    callCore: async (channel, payload) => {
+      if (channel === "settings:get") return { settings: { data: { lyricsWindow: { style: "panel" } } } };
+      writes.push(payload); return {};
+    },
+    callCommand: async () => null, subscribeCoreEvent: async () => () => {}, log: () => {},
+  });
+  await assert.rejects(bridge.initialize());
+  assert.equal(writes.length, 0);
+  assert.match(bridge.snapshot().saveError, /未能恢复/);
+  bridge.dispose();
+});
+
+test("R44c 最后主窗观察卸载后清理系统订阅，StrictMode 同步重挂不重复", async () => {
+  const env = revisionBridge();
+  const stop = env.bridge.observe(() => {});
+  await env.bridge.initialize();
+  stop(); await flushBridge();
+  assert.equal(env.listeners.get(LYRICS_STATE).size, 0);
+  assert.equal(env.listeners.get("lyrics:toggle").size, 0);
+});
+
+test("R44c 保存完成与 finally 之间来的新 revision 仍会排入下一次写盘", async () => {
+  let listener;
+  let disk = null;
+  let writes = 0;
+  let revision = 1;
+  let config = { ...DEFAULT_LYRICS_CONFIG };
+  const bridge = createLyricsBridge({
+    callCore: async (channel, payload) => {
+      if (channel === "settings:get") return { settings: { data: {} } };
+      disk = payload.patch.lyricsWindow; writes += 1;
+      if (writes === 1) queueMicrotask(() => queueMicrotask(() => listener({ config: { ...DEFAULT_LYRICS_CONFIG, layout: "vertical" }, revision: 3, visible: false })));
+      return {};
+    },
+    callCommand: async (_command, args) => {
+      config = normalizeLyricsConfig(args.config, config);
+      if (!args.restoreIfPristine) revision += 1;
+      return { config, revision, visible: false };
+    },
+    subscribeCoreEvent: async (channel, callback) => { if (channel === LYRICS_STATE) listener = callback; return () => {}; },
+    log: () => {},
+  });
+  await bridge.initialize();
+  await bridge.applyConfig({ style: "panel" });
+  await flushBridge(); await flushBridge();
+  assert.equal(bridge.snapshot().revision, 3);
+  assert.equal(disk.layout, "vertical");
+  assert.equal(writes, 2);
+  bridge.dispose();
+});
+
+test("R44c review 卸载最后观察者仍收尾已接受的 pending，不遗失最终竖版", async () => {
+  const gate = deferredBridge();
+  const env = revisionBridge({ saveGate: gate });
+  const stop = env.bridge.observe(() => {});
+  await env.bridge.initialize();
+  await env.bridge.applyConfig({ style: "panel" });
+  await env.bridge.applyConfig({ layout: "vertical" });
+  stop(); await flushBridge();
+  assert.equal(env.listeners.get(LYRICS_STATE).size, 0, "卸载系统监听，不留幽灵回调");
+  assert.equal(env.writes.length, 1, "仍只有第一笔保存 inflight");
+  gate.resolve(); await flushBridge(); await flushBridge();
+  assert.equal(env.bridge.snapshot().config.layout, "vertical");
+  assert.equal(env.stored().layout, "vertical", "已接受配置不能在 logout/LibraryShell 卸载时丢盘");
+  assert.equal(env.stored().style, "panel");
+  assert.equal(env.writes.length, 2);
+  assert.equal(env.bridge.snapshot().saveError, null);
+  env.bridge.dispose();
+});
+
+test("R44c review 保存未完成时重挂只重接监听，不重复 bootstrap 或并发新写者", async () => {
+  const gate = deferredBridge();
+  const env = revisionBridge({ saveGate: gate });
+  const off = env.bridge.observe(() => {});
+  await env.bridge.initialize();
+  await env.bridge.applyConfig({ style: "panel" });
+  await env.bridge.applyConfig({ layout: "vertical" });
+  const oldListeners = [...env.listeners.get(LYRICS_STATE)];
+  off(); await flushBridge();
+  const stop = env.bridge.observe(() => {});
+  await env.bridge.initialize();
+  for (const callback of oldListeners) await callback({ revision: 999, config: DEFAULT_LYRICS_CONFIG, visible: true });
+  assert.equal(env.bridge.snapshot().revision, 3, "卸载的旧监听不能以高 revision 复活覆盖当前态");
+  assert.equal(env.commands.filter((call) => call.args.restoreIfPristine).length, 1, "不以延迟的旧盘重新 bootstrap");
+  assert.equal(env.writes.length, 1);
+  assert.equal(env.listeners.get(LYRICS_STATE).size, 1);
+  assert.equal(env.bridge.snapshot().config.layout, "vertical");
+  gate.resolve(); await flushBridge(); await flushBridge();
+  assert.equal(env.writes.length, 2);
+  assert.equal(env.stored().layout, "vertical");
+  stop(); env.bridge.dispose();
+});
+
+test("R44c review 卸载后的保存失败可见且重挂手动重试，不假称保存成功", async () => {
+  const gate = deferredBridge();
+  const env = revisionBridge({ saveGate: gate });
+  const off = env.bridge.observe(() => {});
+  await env.bridge.initialize();
+  await env.bridge.applyConfig({ style: "panel" });
+  await env.bridge.applyConfig({ layout: "vertical" });
+  off(); await flushBridge();
+  gate.reject(new Error("disk locked")); await flushBridge();
+  assert.match(env.bridge.snapshot().saveError ?? "", /未保存/);
+  const stop = env.bridge.observe(() => {});
+  await env.bridge.initialize();
+  await env.bridge.retrySave();
+  assert.equal(env.stored().layout, "vertical");
+  assert.equal(env.bridge.snapshot().saveError, null);
+  stop(); env.bridge.dispose();
+});
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const read = (relative) => readFileSync(`${repoRoot}${relative}`, "utf8");
@@ -126,51 +427,43 @@ test("频道：三条 lyrics:* 广播进白名单，且与 Rust 镜像逐字相�
 // 2. 命令面
 // ---------------------------------------------------------------------------
 
-test("命令名：四条命令一份真源，host-api 只用常量、不写字面量", () => {
+test("命令名：五条具名命令共享真源、注册与最小 capability 一致", () => {
   assert.equal(CORE_LYRICS_TOGGLE, "core_lyrics_toggle");
   assert.equal(CORE_LYRICS_CONFIGURE, "core_lyrics_configure");
+  assert.equal(CORE_LYRICS_CONTROL, "core_lyrics_control");
   assert.equal(CORE_LYRICS_DOCUMENT, "core_lyrics_document");
   assert.equal(CORE_LYRICS_PROGRESS, "core_lyrics_progress");
-
   const hostApi = read("src/renderer/host-api.ts");
-  assert.match(hostApi, /from\s+"\.\.\/shared\/commands\.ts"/, "命令名必须从共享真源导入");
-  for (const name of [
-    "core_lyrics_toggle",
-    "core_lyrics_configure",
-    "core_lyrics_document",
-    "core_lyrics_progress",
-  ]) {
-    assert.doesNotMatch(hostApi, new RegExp(`["']${name}["']`), `host-api 里不许出现 ${name} 字面量`);
-    assert.match(
-      hostApi,
-      new RegExp(`CORE_LYRICS_|\\b${name}\\b`),
-      `host-api 要用上 ${name}（常量或具名封装，二者之一）`,
-    );
+  for (const [constant, wrapper] of [["TOGGLE","Toggle"], ["CONFIGURE","Configure"], ["CONTROL","Control"], ["DOCUMENT","Document"], ["PROGRESS","Progress"]]) {
+    assert.match(hostApi, new RegExp(`invokeLyrics\\(CORE_LYRICS_${constant}`));
+    assert.match(hostApi, new RegExp(`export async function coreLyrics${wrapper}\\(`));
   }
-  // 四条命令都要有具名封装（页面/桥不直接 invoke）
-  for (const wrapper of ["coreLyricsToggle", "coreLyricsConfigure", "coreLyricsDocument", "coreLyricsProgress"]) {
-    assert.match(hostApi, new RegExp(`export async function ${wrapper}\\(`), `渲染层要有具名封装 ${wrapper}`);
+  assert.doesNotMatch(hostApi, /["']core_lyrics_[a-z]+["']/);
+  const permission = JSON.parse(read("src-tauri/capabilities/lyrics.json"));
+  assert.deepEqual(permission.windows, ["lyrics"]);
+  assert.deepEqual(permission.permissions, ["core:event:default", "core:window:allow-start-dragging"]);
+  assert.deepEqual(JSON.parse(read("src-tauri/capabilities/main.json")).windows, ["main"]);
+  const rust = rustProduction(rustSource("lyrics_window.rs"));
+  for (const [name, values] of [["LYRICS_LAYOUTS", ["horizontal","vertical"]], ["LYRICS_STYLES", ["clean","panel"]], ["LYRICS_CONTROL_ACTIONS", ["toggle","previous","next"]]]) {
+    const body = rust.match(new RegExp(`${name}[^=]*=\\s*&\\[([^\\]]+)\\]`))[1];
+    assert.deepEqual([...body.matchAll(/"([^"]+)"/g)].map((match) => match[1]), values);
   }
 });
 
-test("Rust：四条命令都是 async、都过主窗来源守卫、都进了 generate_handler!", () => {
+test("Rust：五条具名命令都 async、正确来源守卫且注册", () => {
   const rust = rustProduction(rustSource("lyrics_window.rs"));
   const lib = read("src-tauri/src/lib.rs");
-
-  for (const name of ["core_lyrics_toggle", "core_lyrics_configure", "core_lyrics_document", "core_lyrics_progress"]) {
-    assert.match(
-      rust,
-      new RegExp(`#\\[tauri::command\\][\\s\\S]{0,200}?pub async fn ${name}\\(`),
-      `${name} 必须是 async 命令：WebviewWindowBuilder 的 build 要走主线程往返，同步命令会死锁`,
-    );
-    // 主窗来源守卫（R23：判 webview label —— 歌词窗/托盘/主窗里的登录页一律拒绝）
+  for (const [name, guard] of [
+    ["core_lyrics_toggle", "require_main_webview(webview.label())"],
+    ["core_lyrics_document", "require_main_webview(webview.label())"],
+    ["core_lyrics_progress", "require_main_webview(webview.label())"],
+    ["core_lyrics_configure", "validate_configure(webview.label()"],
+    ["core_lyrics_control", "control_payload(webview.label()"],
+  ]) {
+    assert.match(rust, new RegExp(`pub async fn ${name}\\(`));
     const body = rust.slice(rust.indexOf(`pub async fn ${name}(`));
-    const guardAt = body.indexOf("require_main_webview(webview.label())");
-    assert.ok(
-      guardAt !== -1 && guardAt < 900,
-      `${name} 必须过 require_main_webview（守卫要在最前面，且判的是 webview label）`,
-    );
-    assert.match(lib, new RegExp(`lyrics_window::${name}\\b`), `${name} 必须进 generate_handler!`);
+    assert.ok(body.indexOf(guard) >= 0 && body.indexOf(guard) < 900);
+    assert.match(lib, new RegExp(`lyrics_window::${name}\\b`));
   }
 });
 
@@ -350,7 +643,7 @@ test("配置纯逻辑：认不出的值一律不猜（落回上一个合法值�
   assert.deepEqual(normalizeLyricsConfig("nope", base), base);
 
   const patch = normalizeLyricsConfig({ mode: "taskbar", size: "md", color: "muted", locked: false, clickThrough: false }, base);
-  assert.deepEqual(patch, { mode: "taskbar", size: "md", color: "muted", locked: false, clickThrough: false });
+  assert.deepEqual(patch, { ...DEFAULT_LYRICS_CONFIG, mode: "taskbar", size: "md", color: "muted", locked: false, clickThrough: false });
 
   const bogus = normalizeLyricsConfig({ mode: "floating", size: "999", color: "#fff", locked: "yes", clickThrough: 1 }, base);
   assert.deepEqual(bogus, base, "认不出的模式/档位/颜色/布尔都不许猜（尤其不许把字符串当真）");
@@ -398,7 +691,7 @@ test("配置纯逻辑：查询串解析（歌词窗的初值；认不出的值�
   assert.deepEqual(lyricsConfigFromSearch(null), DEFAULT_LYRICS_CONFIG);
   assert.deepEqual(
     lyricsConfigFromSearch("?mode=taskbar&size=md&color=primary&locked=1&clickThrough=1"),
-    { mode: "taskbar", size: "md", color: "primary", locked: true, clickThrough: true },
+    { ...DEFAULT_LYRICS_CONFIG, mode: "taskbar", size: "md", color: "primary", locked: true, clickThrough: true },
   );
   assert.deepEqual(
     lyricsConfigFromSearch("?mode=taskbar&locked=0&clickThrough=0"),
@@ -472,13 +765,8 @@ test("进度重锚：窗从隐藏变可见时把锚点挪到当下（不许一�
   assert.equal(reanchorProgress(push, Number.NaN).atMs, 1000, "坏时钟保持原锚点");
 });
 
-test("文案：会话内说明如实（不持久化这件事必须写在设置项旁边）", () => {
-  assert.match(LYRICS_SESSION_NOTICE, /本次运行|这一次|重启/, `要说清"只在本次运行内生效"：${LYRICS_SESSION_NOTICE}`);
-  assert.match(
-    LYRICS_SESSION_NOTICE,
-    /不会保存|不会写入|不写进|不落盘|不记忆/,
-    `也要说清"不写进设置文件"：${LYRICS_SESSION_NOTICE}`,
-  );
+test("配置提示与档位标签可读", () => {
+  assert.ok(LYRICS_SESSION_NOTICE.trim());
   assert.ok(!/敬请期待|即将上线/.test(LYRICS_SESSION_NOTICE), "禁画饼");
   for (const step of LYRICS_FONT_STEPS) assert.ok(fontStepLabel(step.id).trim() !== "");
   for (const token of LYRICS_COLOR_TOKENS) assert.ok(colorTokenLabel(token.id).trim() !== "");
@@ -490,7 +778,7 @@ test("文案：会话内说明如实（不持久化这件事必须写在设置�
 // 7. 歌词窗渲染层
 // ---------------------------------------------------------------------------
 
-test("歌词窗：逐行渲染来自 AMLL 官方组件；只订阅事件、不调任何业务命令", () => {
+test("歌词窗：官方 AMLL 渲染与受限命令，不调任意业务请求", () => {
   const source = read("src/renderer/LyricsWindow.tsx");
   const code = stripComments(source);
 
@@ -505,12 +793,11 @@ test("歌词窗：逐行渲染来自 AMLL 官方组件；只订阅事件、不�
   assert.doesNotMatch(code, /\.words\b|words\.map/, "不得自己渲染歌词文本");
   assert.doesNotMatch(code, /\\d\{2\}:\\d\{2\}/, "不得出现手写时间戳正则");
 
-  // 只订阅：不调 core_call、不 invoke 命令（歌词窗没有业务频道权限）
-  assert.doesNotMatch(code, /coreCall\(|invoke\(|CORE_LYRICS_|CORE_CALL/, "歌词窗只订阅事件（数据由主窗转发）");
+  assert.doesNotMatch(code, /coreCall\(|invoke\(|CORE_LYRICS_|CORE_CALL/, "歌词窗不直接 invoke 或任意 coreCall，仅用具名受限封装");
   assert.match(source, /from\s+"\.\/host-api"/, "订阅走 host-api 的封装");
   assert.match(code, /onCoreEvent/, "数据经 core:event 漏斗事件进来");
-  for (const channel of [LYRICS_DOCUMENT, LYRICS_PROGRESS, LYRICS_STATE]) {
-    assert.match(source, new RegExp(channel), `歌词窗要订阅 ${channel}`);
+  for (const channel of ["LYRICS_DOCUMENT", "LYRICS_PROGRESS", "LYRICS_STATE"]) {
+    assert.match(code, new RegExp(`onCoreEvent(?:<[\\s\\S]*?>)?\\(\\s*${channel}\\b`), `歌词窗要订阅 ${channel}`);
   }
   assert.doesNotMatch(code, /fetch\s*\(|XMLHttpRequest|WebSocket/, "歌词窗不发请求");
 
@@ -528,7 +815,7 @@ test("歌词窗：data 属性全部来自纯逻辑模块（字号/颜色/模式/
   assert.match(source, /data-lyrics-size=/, "字号档位经 data 属性交给 CSS（内联样式禁令的必然结果）");
   assert.match(source, /data-lyrics-color=/, "颜色令牌同理");
   assert.match(source, /data-lyrics-mode=/, "模式（桌面/任务栏）同理");
-  assert.match(source, /data-tauri-drag-region/, "拖动靠 tauri 的拖动区属性（capabilities 已给 allow-start-dragging）");
+  assert.match(source, /startDragging\(/, "官方 startDragging 由明确拖柄与非交互宿主调用");
   assert.match(source, /lyricsNoticeText/, "占位文案来自 playback-state.mjs（不在这里另写一份）");
 });
 
@@ -682,7 +969,7 @@ function stubBridge(overrides = {}) {
     callCommand: async (command, args) => {
       calls.push({ command, args });
       if (overrides.callCommand) return overrides.callCommand(command, args);
-      return { config: DEFAULT_LYRICS_CONFIG, visible: true };
+      return { config: DEFAULT_LYRICS_CONFIG, visible: true, revision: 1 };
     },
     subscribeCoreEvent: async (channel, handler) => {
       listeners.set(channel, handler);
@@ -696,7 +983,8 @@ function stubBridge(overrides = {}) {
 
 test("主窗转发：四条命令各走各的命令名，回执经纯函数归一", async () => {
   const { bridge, calls } = stubBridge();
-
+  await bridge.initialize();
+  calls.length = 0;
   const status = await bridge.readStatus();
   assert.deepEqual(calls[0], { command: CORE_LYRICS_CONFIGURE, args: { config: {} } }, "读配置 = 空 patch 的 configure");
   assert.equal(status.visible, true);
@@ -721,8 +1009,9 @@ test("主窗转发：四条命令各走各的命令名，回执经纯函数归�
     callCommand: async () => null,
     subscribeCoreEvent: async () => () => {},
   });
-  assert.deepEqual((await broken.readStatus()).config, DEFAULT_LYRICS_CONFIG);
-  assert.equal((await broken.readStatus()).visible, false);
+  await assert.rejects(broken.readStatus(), (error) => error.kind === "invalid_response");
+  assert.equal(broken.snapshot().visible, false);
+  assert.deepEqual(broken.snapshot().config, DEFAULT_LYRICS_CONFIG);
 });
 
 test("桌面歌词就绪握手：只在订阅回执之后重发最新文档与暂停进度", async () => {
@@ -731,18 +1020,19 @@ test("桌面歌词就绪握手：只在订阅回执之后重发最新文档与�
   const stop = await bridge.subscribeReady(() => current);
   const onReady = listeners.get(LYRICS_STATE);
   assert.equal(typeof stop, "function");
-  await onReady({ visible: true, config: DEFAULT_LYRICS_CONFIG });
+  calls.length = 0;
+  await onReady({ visible: true, config: DEFAULT_LYRICS_CONFIG, revision: 1 });
   assert.equal(calls.length, 0, "配置变化不是订阅就绪，不重发");
   current = { ...current, lyrics: { status: "ready", lines: [{ startTime: 0, endTime: 8000, words: [] }] } };
   await onReady({ ready: true });
-  assert.deepEqual(calls[0], { themeSynced: true }, "重开先同步实际主题，不能停在建窗旧查询串");
-  assert.deepEqual(calls.slice(1).map((call) => call.command), [CORE_LYRICS_DOCUMENT, CORE_LYRICS_PROGRESS]);
-  assert.deepEqual(calls[1].args.document, current.lyrics, "读最新快照，不闭包住初始空文档");
+  assert.deepEqual(calls.slice(0, 3).map((call) => call.command), [CORE_LYRICS_CONFIGURE, CORE_LYRICS_DOCUMENT, CORE_LYRICS_PROGRESS]);
+  assert.deepEqual(calls[1].args.document, current.lyrics);
   assert.deepEqual(calls[2].args.progress, { timeMs: 7000, playing: false, seekGeneration: 3 });
+  assert.deepEqual(calls[3], { themeSynced: true });
   calls.length = 0;
   await onReady({ ready: true });
-  assert.deepEqual(calls[0], { themeSynced: true });
-  assert.deepEqual(calls.slice(1).map((call) => call.command), [CORE_LYRICS_DOCUMENT, CORE_LYRICS_PROGRESS], "同进度重开也必须补发，不能被进度节流吃掉");
+  assert.deepEqual(calls.slice(0, 3).map((call) => call.command), [CORE_LYRICS_CONFIGURE, CORE_LYRICS_DOCUMENT, CORE_LYRICS_PROGRESS]);
+  stop(); bridge.dispose();
 });
 
 test("主窗转发：进度节流在桥里（rAF 每帧调它，只有该推的才出 IPC）", async () => {
@@ -792,17 +1082,13 @@ test("主窗转发：歌词文本链路——playback:lyrics 取文本、官方 
 
 test("主窗转发：托盘 lyrics:toggle 的订阅把目标态翻成 core_lyrics_toggle", async () => {
   const { bridge, calls, listeners } = stubBridge();
-  const off = await bridge.subscribeToggle(() => {});
+  await bridge.initialize();
   const handler = listeners.get("lyrics:toggle");
-  assert.ok(handler, "必须订阅 lyrics:toggle（没人订阅 = 托盘那个勾选项点了没反应）");
-  assert.equal(typeof off, "function", "订阅要能退订（组件卸载时）");
-
-  // 目标态语义：勾上 = 要开，取消 = 要关（不做"切换一下"）
-  const seen = [];
-  const off2 = await bridge.subscribeToggle((checked) => seen.push(checked));
-  assert.equal(typeof off2, "function");
-  await bridge.setVisible(true);
-  await bridge.setVisible(false);
+  assert.equal(typeof handler, "function");
+  handler({ checked: true });
+  await flushBridge();
+  handler({ checked: false });
+  await flushBridge();
   assert.deepEqual(
     calls.filter((call) => call.command === CORE_LYRICS_TOGGLE).map((call) => call.args.checked),
     [true, false],

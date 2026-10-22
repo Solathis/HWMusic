@@ -116,13 +116,16 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
 
   // `player:command`（R11 托盘的预登记频道）：广播是别人发来的，任何坏载荷都不许把播放器打崩
   let unlisten: (() => void) | null = null;
+  let disposed = false;
   const subscription = subscribeCoreEvent(PLAYER_COMMAND, (payload: unknown) => {
+    if (disposed) return;
     void applyPlayerCommand(player, payload).then((answer: { ok: boolean; error?: { message: string } }) => {
-      if (!answer.ok) log(`托盘播放命令未受理：${answer.error?.message ?? "未知原因"}`);
+      if (!answer.ok) log(`媒体播放命令未受理：${answer.error?.message ?? "未知原因"}`);
     });
   });
   void subscription.then((off) => {
-    unlisten = off;
+    if (disposed) off();
+    else unlisten = off;
   });
 
   let initialized = false;
@@ -134,8 +137,10 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
   }
 
   function dispose(): void {
+    disposed = true;
     unsubscribeState();
     if (unlisten !== null) unlisten();
+    player.pause();
     player.dispose();
     mediaSession.clear();
   }
@@ -154,3 +159,5 @@ export function getPlayerRuntime(): PlayerRuntime {
   }
   return runtime;
 }
+
+if (import.meta.hot) import.meta.hot.dispose(() => { runtime?.dispose(); runtime = null; });

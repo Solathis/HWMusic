@@ -73,7 +73,7 @@ export function chromiumCandidates({ env = process.env } = {}) {
 export function harnessSource() {
   return `import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { mockIPC } from "@tauri-apps/api/mocks";
+import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 
 import { LibraryShell } from "../../src/renderer/App.tsx";
@@ -88,22 +88,40 @@ const songs = Array.from({ length: 36 }, (_, index) => ({
   id: String(index + 1), name: "浏览器守卫曲目 " + (index + 1), artists: "守卫艺人", album: "守卫专辑", duration: 12,
   coverUrl: "https://music.dbankcdn.cn/guard-cover-" + (index % 2 === 0 ? "warm" : "cool") + ".png",
 }));
-mockIPC((command, args) => {
+let desktopConfig = { ...DEFAULT_LYRICS_CONFIG };
+let desktopRevision = 0;
+let settingsData = {};
+let dragCalls = 0;
+const mediaActions = [];
+mockWindows("main");
+mockIPC(async (command, args) => {
   if (command === "core_call") {
     switch (args.channel) {
-      case "settings:get": return { settings: { schemaVersion: 1, data: {} } };
-      case "settings:set": return { settings: { schemaVersion: 1, data: args.payload.patch } };
+      case "settings:get": return { settings: { schemaVersion: 1, data: settingsData } };
+      case "settings:set": settingsData = { ...settingsData, ...args.payload.patch }; return { settings: { schemaVersion: 1, data: settingsData } };
       case "library:favorites": return { songs, hasMore: false, skipped: 0, reportedTotal: songs.length };
       case "playback:resolve-url": return { url: "https://music.dbankcdn.cn/guard.wav" };
       case "playback:lyrics": return { text: LRC };
       default: throw new Error("未提供守卫 IPC：" + args.channel);
     }
   }
+  if (command === "plugin:window|start_dragging") { dragCalls += 1; return; }
   if (command === "core_get_tray_available") return true;
   if (command === "core_login_chrome") return { theme: currentTheme };
   if (command === "core_lyrics_document") return emit("core:event", { channel: "lyrics:document", payload: args.document });
   if (command === "core_lyrics_progress") return emit("core:event", { channel: "lyrics:progress", payload: args.progress });
-  if (command.startsWith("core_lyrics_")) return { config: DEFAULT_LYRICS_CONFIG, visible: false };
+  if (command === "core_lyrics_control") {
+    mediaActions.push(args.payload.action);
+    return emit("core:event", { channel: "player:command", payload: { command: args.payload.action } });
+  }
+  if (command === "core_lyrics_configure") {
+    if ((!args.restoreIfPristine || desktopRevision === 0) && Object.keys(args.config).length) {
+      desktopConfig = { ...desktopConfig, ...args.config }; desktopRevision += 1;
+      await emit("core:event", { channel: "lyrics:state", payload: { config: desktopConfig, revision: desktopRevision, visible: false } });
+    }
+    return { config: desktopConfig, revision: desktopRevision, visible: false };
+  }
+  if (command === "core_lyrics_toggle") return { config: desktopConfig, revision: desktopRevision, visible: args.checked };
   throw new Error("未提供守卫命令：" + command);
 }, { shouldMockEvents: true });
 const runtime = getPlayerRuntime();
@@ -129,6 +147,13 @@ function Guard() {
         runtime.player.setLyrics(parseAmllLyrics(LRC).lines, "ready");
       },
       setDesktop,
+      dragCount: () => dragCalls,
+      mediaActions: () => mediaActions.slice(),
+      desktopConfig: () => desktopConfig,
+      async configureDesktop(patch) {
+        const { coreLyricsConfigure } = await import("../../src/renderer/host-api.ts");
+        return coreLyricsConfigure(patch);
+      },
       setHostTheme(choice) { currentTheme = choice; },
       async desktopBeforeMount() {
         const { getLyricsBridge } = await import("../../src/renderer/features/lyrics/lyrics-bridge.mjs");
@@ -145,6 +170,9 @@ function Guard() {
         await emit("core:event", { channel: "lyrics:progress", payload: {
           timeMs: state.currentTimeMs, playing: false, seekGeneration: state.seekGeneration,
         }});
+      },
+      async desktopPlaying(playing) {
+        await emit("core:event", { channel: "lyrics:progress", payload: { timeMs: 700, playing, seekGeneration: 100 } });
       },
       async ready() {
         await runtime.initialize();
@@ -268,6 +296,35 @@ async function textPixels(page, selector, theme, file) {
     if (theme === "light" ? luminance < 95 : luminance > 160) ink += 1;
   }
   return { ink, changed, box };
+}
+
+export async function checkDesktopSurface(page, guardDir, add) {
+  const desktop = page.getByTestId("lyrics-window");
+  await page.evaluate(() => window.__guard.desktopDocument());
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate((choice) => {
+      window.__guard.setHostTheme(choice);
+      document.documentElement.className = choice;
+    }, theme);
+    await page.setViewportSize({ width: 960, height: 160 });
+    await page.evaluate(() => window.__guard.configureDesktop({ mode: "desktop", style: "panel", color: "contrast", locked: false }));
+    await page.waitForTimeout(700);
+    const pixels = await textPixels(page, '[data-testid="lyrics-window"] [class*="lyricMainLine"][class*="active"]', theme, path.join(guardDir, `${theme}-panel-contrast.png`));
+    const rawColor = await page.evaluate(() => window.__guard.desktopConfig().color);
+    add(`${theme}-panel-contrast-ink`, pixels.ink > 60 && pixels.changed > 60 && rawColor === "contrast", JSON.stringify({ ...pixels, rawColor }));
+    await page.setViewportSize({ width: 960, height: 44 });
+    for (const style of ["clean", "panel"]) {
+      for (const showControls of [true, false]) {
+        await page.evaluate((config) => window.__guard.configureDesktop(config), { mode: "taskbar", style, showControls, color: "foreground" });
+        await page.waitForTimeout(120);
+        const box = await desktop.locator(".amll-lyric-player").boundingBox();
+        add(`${theme}-taskbar-${style}-${showControls}`, await desktop.locator("button").count() === 0 && box?.height === 44,
+          JSON.stringify({ box, buttons: await desktop.locator("button").count() }));
+      }
+    }
+  }
+  await page.setViewportSize({ width: 960, height: 160 });
+  await page.evaluate(() => window.__guard.configureDesktop({ mode: "desktop", style: "clean", color: "foreground", showControls: true }));
 }
 
 function fixtureAudio() {
@@ -693,6 +750,66 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     await page.waitForTimeout(900);
     const earlyDocument = await page.getByTestId("lyrics-window").textContent();
     add("desktop-early-document", earlyDocument?.includes("第一行歌词守卫"), "早于 React 挂载的文档丢失后，就绪握手须补回当前快照");
+    const desktop = page.getByTestId("lyrics-window");
+    const grip = page.getByRole("button", { name: "拖动桌面歌词", exact: true });
+    add("desktop-explicit-grip", await grip.count() === 1, "AMLL 子树之外有官方 startDragging 拖柄");
+    if (await grip.count()) {
+      const before = await page.evaluate(() => window.__guard.dragCount());
+      await grip.click();
+      const line = desktop.locator('[class*="lyricMainLine"]').first();
+      await line.click();
+      const after = await page.evaluate(() => window.__guard.dragCount());
+      await page.getByRole("button", { name: "锁定桌面歌词", exact: true }).click();
+      const lockedCount = await page.evaluate(() => window.__guard.dragCount());
+      await line.click();
+      add("desktop-child-drag-and-button-exclusion", after === before + 2 && lockedCount === after, JSON.stringify({ before, after, lockedCount }));
+      add("desktop-lock-stops-drag", await grip.isDisabled() && await page.evaluate((count) => window.__guard.dragCount() === count, after), "锁仅禁拖，非整窗点透");
+      const actionsBefore = await page.evaluate(() => window.__guard.mediaActions().length);
+      await page.getByRole("button", { name: "播放", exact: true }).click();
+      await page.waitForFunction(() => window.__guard.snapshot().status === "playing");
+      await page.evaluate(() => window.__guard.desktopDocument());
+      const actionsAfter = await page.evaluate(() => window.__guard.mediaActions());
+      add("desktop-locked-media-once", actionsAfter.length === actionsBefore + 1 && actionsAfter.at(-1) === "toggle", JSON.stringify(actionsAfter));
+      await page.getByRole("button", { name: "解锁桌面歌词", exact: true }).click();
+      await page.getByRole("button", { name: "桌面歌词外观", exact: true }).click();
+      await page.getByRole("menuitemradio", { name: "面板", exact: true }).click();
+      await page.getByRole("button", { name: "桌面歌词外观", exact: true }).click();
+      await page.getByRole("menuitemradio", { name: "竖版", exact: true }).click();
+      await page.setViewportSize({ width: 320, height: 620 });
+      await page.waitForTimeout(700);
+      const verticalInk = await textPixels(page, '[data-testid="lyrics-window"] [class*="lyricMainLine"][class*="active"]', "dark", path.join(guardDir, "desktop-vertical.png"));
+      const verticalContent = await desktop.locator(".amll-lyric-player").boundingBox();
+      add("desktop-panel-vertical", await desktop.locator('[data-slot="card"]').count() === 1 && await desktop.getAttribute("data-lyrics-layout") === "vertical" && verticalContent?.height > 400 && verticalInk.changed > 60, JSON.stringify({ verticalContent, verticalInk }));
+      await page.evaluate(() => window.__guard.configureDesktop({ enableBlur: false, enableScale: false, enableSpring: false }));
+      await page.evaluate(() => window.__guard.desktopPlaying(true));
+      await page.waitForTimeout(900);
+      const official = await desktop.locator(".amll-lyric-player").evaluate((element) => ({
+        noSpring: element.className.includes("disableSpring"),
+        transformed: [...element.querySelectorAll('[class*="lyricLine"]')].filter((node) => node.querySelector('[class*="lyricMainLine"]')).every((node) => {
+          const transform = getComputedStyle(node).transform;
+          return transform === "none" || Math.abs(new DOMMatrixReadOnly(transform).a - 1) < .001;
+        }),
+        noBlur: [...element.querySelectorAll('[class*="lyricLineWrapper"]')].filter((node) => node.textContent.trim()).every((node) => !getComputedStyle(node).filter.includes("blur")),
+      }));
+      await page.evaluate(() => window.__guard.configureDesktop({ enableScale: true }));
+      await page.waitForTimeout(1200);
+      const scaled = await desktop.locator('.amll-lyric-player [class*="lyricLine"]').evaluateAll((nodes) => nodes.filter((node) => node.querySelector('[class*="lyricMainLine"]')).some((node) => new DOMMatrixReadOnly(getComputedStyle(node).transform).a < .995));
+      add("desktop-official-performance", official.noSpring && official.transformed && official.noBlur && scaled, JSON.stringify({ ...official, scaled }));
+      await page.evaluate(() => window.__guard.desktopPlaying(false));
+      await page.evaluate(() => window.__guard.setDesktop(false));
+      await desktop.waitFor({ state: "detached" });
+      await page.evaluate(() => window.__guard.setDesktop(true));
+      await desktop.waitFor();
+      await page.waitForTimeout(500);
+      add("desktop-old-query-authoritative-ready", await desktop.getAttribute("data-lyrics-layout") === "vertical" && await desktop.locator('[data-slot="card"]').count() === 1, "重挂载旧 query，受限 configure 回读最新 config");
+      await page.evaluate(() => window.__guard.configureDesktop({ ...window.__guard.desktopConfig(), layout: "horizontal", style: "clean", enableBlur: true, enableScale: true, enableSpring: true }));
+      await page.evaluate(() => window.__guard.desktopDocument("empty"));
+      const emptyCount = await page.evaluate(() => window.__guard.dragCount());
+      await desktop.getByRole("status").click();
+      add("desktop-empty-drag", await page.evaluate((count) => window.__guard.dragCount() === count + 1, emptyCount), "空态宿主同样可拖");
+      await page.evaluate(() => window.__guard.desktopDocument());
+    }
+    await page.setViewportSize({ width: 960, height: 160 });
     for (const theme of ["light", "dark"]) {
       await page.evaluate((choice) => window.__guard.setHostTheme(choice), theme);
       await page.evaluate(() => window.__guard.setDesktop(false));
@@ -714,6 +831,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
         add(`${theme}-desktop-${status}`, notice.changed > 30, JSON.stringify(notice));
       }
     }
+    await checkDesktopSurface(page, guardDir, add);
     add("no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,
       `console error ${consoleErrors.length} 条、pageerror ${pageErrors.length} 条${[...consoleErrors, ...pageErrors].slice(0, 3).map((text) => `\n      ${text.slice(0, 200)}`).join("")}`);
   } finally {

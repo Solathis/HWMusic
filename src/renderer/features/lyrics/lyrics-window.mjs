@@ -32,7 +32,7 @@ const MODE_LABELS = {
 /**
  * 字号档位表（唯一真源）。
  *
- * 上限 56px 不是省事：桌面歌词窗是一条约 120px 高的横条，再大就只能显示半行字。
+ * 上限 56px 保留横条内多行上下文；竖版沿用同一档位表。
  * px 值必须与 `amll-theme.css` 里的 rem 规则一致（16px = 1rem，测试钉住）。
  */
 export const LYRICS_FONT_STEPS = [
@@ -59,13 +59,22 @@ export const LYRICS_COLOR_TOKENS = [
   { id: "contrast", label: "反差" },
 ];
 
-/** 默认配置（会话内；每次启动都是它，持久化不做——设置项旁边如实写明）。 */
+export const LYRICS_LAYOUTS = ["horizontal", "vertical"];
+export const LYRICS_STYLES = ["clean", "panel"];
+export const LYRICS_SETTING_KEY = "lyricsWindow";
+
 export const DEFAULT_LYRICS_CONFIG = {
   mode: "desktop",
+  layout: "horizontal",
+  style: "clean",
   size: "lg",
   color: "foreground",
   locked: false,
   clickThrough: false,
+  enableBlur: true,
+  enableScale: true,
+  enableSpring: true,
+  showControls: true,
 };
 
 /** 进度节流窗口：rAF 每帧都可能调，但只有该推的才出 IPC（≥100ms 或播放/跳转变化）。 */
@@ -83,9 +92,8 @@ export const LYRICS_STATUS = {
   failed: "failed",
 };
 
-/** 设置项旁边的如实说明：会话内配置这件事必须写出来，不能让用户以为存下来了。 */
 export const LYRICS_SESSION_NOTICE =
-  "桌面歌词的设置只在本次运行内生效（不会写入设置文件），下次启动恢复默认。";
+  "桌面歌词配置会保存并在重启后恢复。锁定只禁拖动，媒体按钮和解锁仍可用；点透后请从主窗设置关闭点透。竖版为窄高滚动窗，并非中文竖排。";
 
 function stepOf(id) {
   return LYRICS_FONT_STEPS.find((step) => step.id === id) ?? null;
@@ -119,31 +127,14 @@ export function modeLabel(id) {
 export function normalizeLyricsConfig(patch, base = DEFAULT_LYRICS_CONFIG) {
   const current = base !== null && typeof base === "object" ? base : DEFAULT_LYRICS_CONFIG;
   const source = patch !== null && typeof patch === "object" ? patch : {};
-
-  const mode = LYRICS_MODES.includes(source.mode)
-    ? source.mode
-    : LYRICS_MODES.includes(current.mode)
-      ? current.mode
-      : DEFAULT_LYRICS_CONFIG.mode;
-  const size = stepOf(source.size) !== null
-    ? source.size
-    : stepOf(current.size) !== null
-      ? current.size
-      : DEFAULT_LYRICS_CONFIG.size;
-  const color = tokenOf(source.color) !== null
-    ? source.color
-    : tokenOf(current.color) !== null
-      ? current.color
-      : DEFAULT_LYRICS_CONFIG.color;
-
-  return {
-    mode,
-    size,
-    color,
-    locked: typeof source.locked === "boolean" ? source.locked : current.locked === true,
-    clickThrough:
-      typeof source.clickThrough === "boolean" ? source.clickThrough : current.clickThrough === true,
-  };
+  const next = { ...DEFAULT_LYRICS_CONFIG };
+  const enums = { mode: LYRICS_MODES, layout: LYRICS_LAYOUTS, style: LYRICS_STYLES,
+    size: LYRICS_FONT_STEPS.map((step) => step.id), color: LYRICS_COLOR_TOKENS.map((token) => token.id) };
+  for (const [key, fallback] of Object.entries(DEFAULT_LYRICS_CONFIG)) {
+    const valid = (value) => typeof fallback === "boolean" ? typeof value === "boolean" : enums[key].includes(value);
+    next[key] = valid(source[key]) ? source[key] : valid(current[key]) ? current[key] : fallback;
+  }
+  return next;
 }
 
 /**
@@ -161,10 +152,10 @@ export function effectiveSizeId(config) {
   return allowed[allowed.length - 1].id;
 }
 
-/** 拖动区开关：桌面模式且未锁定才挂 `data-tauri-drag-region`（任务栏模式贴在边上，不给拖）。 */
+/** 官方拖动调用的资格：仅 desktop 未锁且未点透。 */
 export function dragRegionEnabled(config) {
   const normalized = normalizeLyricsConfig({}, config);
-  return normalized.mode === "desktop" && !normalized.locked;
+  return normalized.mode === "desktop" && !normalized.locked && !normalized.clickThrough;
 }
 
 /** 点透开关：用户显式开了就点透；任务栏模式一律点透（贴边的一条显示带不该抢点击）。 */
@@ -183,12 +174,12 @@ export function clickThroughEnabled(config) {
 export function lyricsConfigFromSearch(search) {
   const params = new URLSearchParams(typeof search === "string" ? search : "");
   const patch = {};
-  if (params.has("mode")) patch.mode = params.get("mode");
-  if (params.has("size")) patch.size = params.get("size");
-  if (params.has("color")) patch.color = params.get("color");
-  // 0/1 才是布尔（Rust 侧就写这两个值）：别的写法不算，落回默认
-  if (params.has("locked")) patch.locked = params.get("locked") === "1";
-  if (params.has("clickThrough")) patch.clickThrough = params.get("clickThrough") === "1";
+  for (const [key, fallback] of Object.entries(DEFAULT_LYRICS_CONFIG)) {
+    if (!params.has(key)) continue;
+    const value = params.get(key);
+    if (typeof fallback !== "boolean") patch[key] = value;
+    else if (value === "1" || value === "0") patch[key] = value === "1";
+  }
   return normalizeLyricsConfig(patch);
 }
 

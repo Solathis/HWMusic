@@ -32,7 +32,7 @@ use tauri_plugin_window_state::StateFlags;
 /// 主窗 label。窗口由代码创建（`tauri.conf.json` 的 `app.windows` 故意留空）。
 pub const MAIN_WINDOW_LABEL: &str = "main";
 /// 桌面歌词窗 label。窗口由 R12 的 `lyrics_window.rs` 起（无边框/透明/置顶/点透），
-/// 这里定义常量以固定 window-state 的过滤白名单与四条歌词命令的来源守卫。
+/// window-state、歌词专命令来源守卫与几何接管都按同一 label。
 pub const LYRICS_WINDOW_LABEL: &str = "lyrics";
 /// 托盘**图标** id（菜单项 id 的前缀是 `tray:`，见 `tray::MENU_ID_PREFIX`；两件事别混）。
 pub const TRAY_ID: &str = "tray";
@@ -344,6 +344,7 @@ pub fn run() {
                 .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
                 // 只记 main/lyrics：其它窗口（如登录子窗）的位置不该被持久化
                 .with_filter(|label| label == MAIN_WINDOW_LABEL || label == LYRICS_WINDOW_LABEL)
+                .skip_initial_state(LYRICS_WINDOW_LABEL)
                 .build(),
         )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -388,9 +389,7 @@ pub fn run() {
             let data_root = create_main_window(handle)?;
             app.manage(WebviewDataRoot(data_root.clone()));
 
-            // 歌词窗的会话内配置（R12）：**登记在这里**而不是懒初始化——四条命令都可能
-            // 是用户第一次点托盘时来的，而那时才"发现没状态"要多写一段 fallback。
-            // 它不在任何广播路径上（顺序无契约）：只有四条歌词命令与设置页读它。
+            // 先登记运行配置与 revision，主窗随后通过条件恢复接入保存快照。
             app.manage(lyrics_window::LyricsWindowState::default());
 
             // core（sidecar）的托管状态**先于托盘安装**登记（R11 修复轮 1/5）：
@@ -466,11 +465,9 @@ pub fn run() {
             commands::core_get_autostart,
             // R11：托盘可用性（R10 写死的 TRAY_AVAILABLE 占位改真查询的唯一来源）
             commands::core_get_tray_available,
-            // R12：桌面歌词窗的四条命令（全部 async + 全部主窗来源守卫；歌词窗只订阅事件）。
-            // async 不是风格问题：`WebviewWindowBuilder::build` 要走一趟主线程往返，
-            // 同步命令自己就站在主线程上，等那一趟 = 死锁（见 lyrics_window.rs 的模块头）。
             lyrics_window::core_lyrics_toggle,
             lyrics_window::core_lyrics_configure,
+            lyrics_window::core_lyrics_control,
             lyrics_window::core_lyrics_document,
             lyrics_window::core_lyrics_progress,
             // R25：登录体验的浮动控件（返回 / 主题）。**另开一条命令**而不是放宽 core_call 的
@@ -842,9 +839,7 @@ mod tests {
         );
     }
 
-    /// R12：桌面歌词窗的四条命令必须进 `generate_handler!`——只定义不注册，用户点托盘那个
-    /// "桌面歌词"勾选项就完全没有反应（而错误要到运行时才知道）。**四条都要**：少一条的后果
-    /// 各不一样（少 toggle = 开关不动；少 document = 窗永远空白；少 progress = 歌词不动）。
+    /// 五条具名命令都必须注册，防止仅定义却运行时 command not found。
     #[test]
     fn lyrics_window_commands_are_registered_in_the_invoke_handler() {
         let source = lib_source();
@@ -852,6 +847,7 @@ mod tests {
         for name in [
             "lyrics_window::core_lyrics_toggle",
             "lyrics_window::core_lyrics_configure",
+            "lyrics_window::core_lyrics_control",
             "lyrics_window::core_lyrics_document",
             "lyrics_window::core_lyrics_progress",
         ] {
@@ -1095,6 +1091,8 @@ mod tests {
                 && plugins.contains("LYRICS_WINDOW_LABEL"),
             "只记 main 与 lyrics 两个窗口的位置与尺寸：{plugins}"
         );
+
+        assert!(plugins.contains("skip_initial_state(LYRICS_WINDOW_LABEL)"), "歌词几何由配置接管，插件不能在窗口 ready 时异步盖回旧尺寸/任务栏位置");
 
         // 3. notification 照常注册（host:notify 的落地口，R3 已接）
         assert!(plugins.contains("tauri_plugin_notification::init()"), "系统通知插件");

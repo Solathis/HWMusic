@@ -387,6 +387,29 @@ test("写：重置把已知键打回默认，未知键保留", async (t) => {
   assert.deepEqual(doc.data.future, { keep: 1 }, "回默认不碰未知键");
 });
 
+test("并发 settings:set 歌词与队列的 load/merge/rename 串行，不丢任一键", async (t) => {
+  const dir = await tempDir("lyrics-queue-concurrent");
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const realFs = await import("node:fs/promises");
+  let writing = 0;
+  let concurrent = false;
+  const store = storeAt(dir, { fs: { ...realFs, async writeFile(...args) {
+    writing += 1;
+    concurrent ||= writing > 1;
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    try { return await realFs.writeFile(...args); } finally { writing -= 1; }
+  } } });
+  await Promise.all([
+    store.save({ lyricsWindow: { style: "panel", layout: "vertical" } }),
+    store.save({ queue: { ids: ["a", "b"], index: 1 } }),
+    store.reset(),
+  ]);
+  const restarted = await storeAt(dir).read();
+  assert.deepEqual(restarted.data.lyricsWindow, { style: "panel", layout: "vertical" });
+  assert.deepEqual(restarted.data.queue, { ids: ["a", "b"], index: 1 });
+  assert.equal(concurrent, false);
+});
+
 // ---------------------------------------------------------------------------
 // 凭据卫生：不进日志、不进错误文案
 // ---------------------------------------------------------------------------

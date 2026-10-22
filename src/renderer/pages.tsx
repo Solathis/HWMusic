@@ -28,6 +28,7 @@ import {
   SETTINGS_TEST_PROXY,
   type RequestChannel,
 } from "../shared/request-channels.ts"
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "./components/ui/alert"
 import { Button } from "./components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card"
 import { Input } from "./components/ui/input"
@@ -443,8 +444,7 @@ export interface SettingsPageProps {
   /**
    * 桌面歌词窗的绑定（R12）：由外壳的 `useLyricsWindow` 交下来。
    *
-   * 页面**不自己问宿主**（与 `trayAvailable` 同一条纪律）：配置的唯一真源在 Rust 侧
-   * （会话内），外壳读回来之后交下来，页面只负责把值渲染出来、把改动交回去。
+   * 页面不自己问宿主：Rust 为运行配置权威，单例桥代理恢复/保存；页面只渲染并提交意图。
    * 缺省 `null` = 外壳还没挂上（设置页不该因为少一个 prop 就崩）。
    */
   lyrics?: LyricsWindowBinding | null
@@ -995,10 +995,38 @@ export function SettingsPage({
                 </div>
               </div>
 
-              <p className="text-xs text-muted-foreground">
-                {/* 会话内这件事必须写在设置项旁边（已知限制，见 docs/API_CONTRACT.md §2.9） */}
-                {LYRICS_SESSION_NOTICE}
-              </p>
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="flex flex-col gap-1">
+                  <Label htmlFor="lyrics-layout">方向</Label>
+                  <Select value={lyrics?.config.layout ?? "horizontal"} disabled={lyrics === null || lyrics.config.mode === "taskbar"}
+                    onValueChange={(layout) => lyrics?.updateConfig({ layout })}>
+                    <SelectTrigger id="lyrics-layout" className="w-full max-w-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent position="popper" align="start" sideOffset={4}><SelectGroup><SelectItem value="horizontal">横版</SelectItem><SelectItem value="vertical">竖版（窄高滚动）</SelectItem></SelectGroup></SelectContent>
+                  </Select>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <Label htmlFor="lyrics-style">样式</Label>
+                  <Select value={lyrics?.config.style ?? "clean"} disabled={lyrics === null} onValueChange={(style) => lyrics?.updateConfig({ style })}>
+                    <SelectTrigger id="lyrics-style" className="w-full max-w-xs"><SelectValue /></SelectTrigger>
+                    <SelectContent position="popper" align="start" sideOffset={4}><SelectGroup><SelectItem value="clean">透明</SelectItem><SelectItem value="panel">面板</SelectItem></SelectGroup></SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-3">
+                {([['enableBlur', '模糊'], ['enableScale', '缩放'], ['enableSpring', '弹簧动画'], ['showControls', '媒体按钮']] as const).map(([key, label]) => (
+                  <div key={key} className="flex items-center gap-2">
+                    <Switch id={`lyrics-${key}`} checked={lyrics?.config[key] !== false} disabled={lyrics === null}
+                      onCheckedChange={(checked) => lyrics?.updateConfig({ [key]: checked })} />
+                    <Label htmlFor={`lyrics-${key}`}>{label}</Label>
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground">{LYRICS_SESSION_NOTICE}</p>
+              {lyrics?.saveError ? <Alert>
+                <AlertTitle>桌面歌词配置未保存</AlertTitle>
+                <AlertDescription>{lyrics.saveError}</AlertDescription>
+                <AlertAction><Button variant="outline" size="sm" onClick={lyrics.retrySave}>重试保存</Button></AlertAction>
+              </Alert> : null}
             </CardContent>
           </Card>
 

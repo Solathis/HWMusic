@@ -417,7 +417,7 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
       case VIEW.settings:
         // 设置页只读地显示队列状态（管理队列在播放队列面板里）：状态由外壳交下去，页面不自己取；
         // 托盘可用性同理（R11：查一次、交下去，页面不自己问宿主）；
-        // 桌面歌词的配置与开关同理（R12：宿主握着会话内那一份，外壳读回来交下去）；
+        // 桌面歌词配置同理（Rust 权威，单例桥代理恢复/保存）；
         // 运行日志同理（R39：订阅在外壳——广播没人接就丢了，页面只渲染，见 useNoticeLog 的注释）
         return (
           <SettingsPage

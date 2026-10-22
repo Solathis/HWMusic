@@ -55,7 +55,7 @@ pub const APP_OPEN_SETTINGS: &str = "app:open-settings";
 pub const LYRICS_DOCUMENT: &str = "lyrics:document";
 /// 歌词进度广播频道（R12）：`{timeMs, playing, seekGeneration}`（主窗 rAF 节流后推）。
 pub const LYRICS_PROGRESS: &str = "lyrics:progress";
-/// 歌词窗配置广播频道（R12）：`{config, visible}` —— 字号/颜色/模式/锁定/点透（会话内）。
+/// 歌词配置权威广播：`{config, visible, revision}`；`{ready:true}` 是单独的就绪握手。
 pub const LYRICS_STATE: &str = "lyrics:state";
 /// 主题变化广播频道（R25）：`{theme: "light"|"dark"|"system"}` —— **目标态**。
 ///

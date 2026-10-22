@@ -373,6 +373,64 @@ test("dispose：退订广播、摘掉媒体会话（不留幽灵）", async () =
   assert.equal(session.state(), "none", "媒体会话清空");
 });
 
+test("R44c review HMR dispose 必须停止旧音频，替代 runtime 只一份出声", async () => {
+  const device = fakeAudioClass();
+  class DeviceAudio extends device.FakeAudio {
+    paused = true;
+    play() { this.paused = false; return super.play(); }
+    pause() { this.paused = true; }
+  }
+  const audio = { FakeAudio: DeviceAudio, created: device.created };
+  const first = makeRuntime({ audio });
+  await first.runtime.player.playQueue([{ id: "old" }], 0);
+  assert.equal(audio.created.filter((element) => !element.paused).length, 1);
+  first.runtime.dispose();
+  const replacement = makeRuntime({ audio });
+  try {
+    await replacement.runtime.player.playQueue([{ id: "new" }], 0);
+    assert.equal(audio.created.filter((element) => !element.paused).length, 1, "监听摘除不等于停止音频，旧设备不能与替代设备同时出声");
+    assert.equal(audio.created[0].paused, true);
+    assert.equal(audio.created[1].paused, false);
+  } finally { replacement.runtime.dispose(); }
+});
+
+test("R44c 媒体订阅迟到于 dispose 立即退订，旧 listener 不能执行命令", async () => {
+  const { FakeAudio } = fakeAudioClass();
+  let resolveListen;
+  let handler;
+  let active = 0;
+  const ready = new Promise((resolve) => { resolveListen = resolve; });
+  const runtime = createPlayerRuntime({
+    callCore: fakeCore().callCore,
+    createAudio: () => createAudioElementPort({ AudioCtor: FakeAudio, log: () => {} }),
+    subscribeCoreEvent: async (_channel, listener) => { handler = listener; active += 1; await ready; return () => { active -= 1; }; },
+    mediaSession: null, log: () => {},
+  });
+  runtime.player.setQueue([{ id: "one" }, { id: "two" }], 0);
+  runtime.dispose();
+  resolveListen(); await flush();
+  assert.equal(active, 0);
+  await handler({ command: "next" }); await flush();
+  assert.equal(runtime.player.snapshot().index, 0);
+});
+
+test("R44c 三种桌面媒体意图仍一份 runtime，next/previous/toggle 每次只执行一次", async () => {
+  const { runtime, audio, subscribed, core } = makeRuntime();
+  await runtime.initialize(); await runtime.initialize();
+  runtime.player.setQueue([{ id: "one" }, { id: "two" }, { id: "three" }], 0);
+  const handler = subscribed[0].handler;
+  await handler({ command: "next" }); await flush();
+  assert.equal(runtime.player.snapshot().index, 1);
+  assert.equal(core.of(PLAYBACK_RESOLVE_URL).length, 1);
+  await handler({ command: "previous" }); await flush();
+  assert.equal(runtime.player.snapshot().index, 0);
+  assert.equal(core.of(PLAYBACK_RESOLVE_URL).length, 2);
+  await handler({ command: "toggle" }); await flush();
+  assert.equal(runtime.player.snapshot().status, "paused");
+  assert.equal(audio.created.length, 1);
+  runtime.dispose();
+});
+
 test("源码扫描：单 Audio 实例（只有 audio-element.mjs 里 new Audio）", () => {
   const files = [];
   const walk = (relative) => {

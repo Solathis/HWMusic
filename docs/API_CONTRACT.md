@@ -248,15 +248,12 @@ DNS  api-drcn.music.dbankcloud.cn                  → 2407:c080:1400:61:40a0:d5
 - 两条期限**文案不同**（处置方式不同）：打不开官方页 vs 扫码超时。文案两侧逐字一致，parity 互钉。
 - **双来源**（旧仓缺陷 C1）：Rust 侧"导航拦截"与"登录页消失（每 tick 现问 `app.get_webview`）"
   两条路都能把结论交给等待方；结论槽是 take-once 的（先到者胜、后到者不改写）。只接一条 = "扫码成功却等超时"。
-- **登录页零命令权限**：`capabilities/main.json` 的 `windows` 只有 `main`/`lyrics`（不含 `login`），
-  且不给登录页注入任何脚本（不订阅 `initialization_script`/`eval`）：白名单与回调**只靠导航事件**观测。
-- **来源守卫判 webview label**（R23 的安全性前提）：同窗之后 `window.label()` 对登录页**恒为 `main`**，
-  按窗口 label 判来源等于把守卫让给官方页。命令面因此一律取 `tauri::Webview` 并判 `webview.label()`。
-  两档守卫：
-  1. `commands::require_main_webview`——**只放主窗**，管 `core_call` 与其余 8 条命令（共 9 条）；
-  2. `commands::require_login_chrome_source`（R25 增补）——**只放 `main` / `login-return` / `login-theme`**，
-     管 `core_login_chrome` 这一条（两个动作：取消登录 / 改主题）。**官方登录页（`login`）不在里面**，
-     歌词窗与托盘也不在——放宽 `core_call` 那条守卫等于把全部业务频道交给登录体验的浮动控件。
+- **登录页零命令权限**：main capability 只含 main，lyrics capability 只含 lyrics（事件/自窗拖动）；均不含 login。
+  不给登录页注入任何脚本（不订阅 `initialization_script`/`eval`）：白名单与回调**只靠导航事件**观测。
+- **来源守卫判 webview label**：同窗之后 `window.label()` 对登录页恒为 main，命令面必须取 `tauri::Webview` 并判 `webview.label()`。
+  1. `commands::require_main_webview`——只放 main，core_call 与歌词 toggle/document/progress 不放宽；
+  2. `commands::require_login_chrome_source`——只放 main/login-return/login-theme；官方 login、lyrics、tray 均拒绝；
+  3. `lyrics_window::require_lyrics_source`——仅 configure/control 专命令放 main/lyrics，载荷字段白名单，lyrics 不可恢复盘上快照。
   第三层：官方页是**远程来源**，`Webview::on_message` 对远程来源一律要求 ACL 条目
   （tauri-2.12.4 `src/webview/mod.rs:2080`），而本应用没有 app 级 ACL manifest、`main.json` 也没有
   `remote` 字段 → 远程来源连自定义命令都到不了（`src/ipc/authority.rs:57-67` 的 `Origin::matches`）。
@@ -1367,28 +1364,24 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 |---|---|---|---|
 | `lyrics:document` | 主窗 → 歌词窗 | `{lines, status}` | 歌词文档。歌词窗**没有业务频道权限**（`core_call` 只收主窗），所以广播是它唯一的数据来源；主窗面板与歌词窗共用**同一份行数组**，两处不可能显示两首歌 |
 | `lyrics:progress` | 主窗 → 歌词窗 | `{timeMs, playing, seekGeneration}` | 进度。歌词窗里没有音频元素，进度只能由主窗推；**节流在桥里**（`shouldPushProgress`：≥100ms 或播放/跳转变化才发），且只在窗真的开着时跑 |
-| `lyrics:state` | 宿主 → 两窗 | `{config, visible}` | 歌词窗配置（会话内）：`{mode, size, color, locked, clickThrough, effectiveSize}` + 窗可见性 |
+| `lyrics:state` | 宿主 → 两窗 | `{config, visible, revision}` | Rust 同一 Mutex 原子更新配置与 revision；另有 `{ready:true}` 握手，不当作配置消费 |
 
-**tauri 命令增补四条**（名字唯一真源 `src/shared/commands.ts`；Rust 侧镜像由
-`test/lyrics-window.test.mjs` 与 `lib.rs` 的注册扫描钉住）：
+**Tauri 歌词专命令**（名字唯一真源 `src/shared/commands.ts`，均 async，按 webview label 守卫）：
 
-| 命令 | 载荷 | 回执 | 说明 |
+| 命令 | 载荷 | 回执 | 来源及说明 |
 |---|---|---|---|
-| `core_lyrics_toggle` | `{checked}` | `{config, visible}` | 开/关歌词窗。`checked` 是**目标态**（托盘 `lyrics:toggle` 给的就是它）；开 = 建（没有就建）/摆好/显示，关 = **隐藏不销毁**（保住 webview 与进度） |
-| `core_lyrics_configure` | `{config}` 补丁 | `{config, visible}` | 改配置。**空补丁 = 读回当前配置**（设置页挂载时用，所以不需要第五条命令，且读操作无副作用）。认不出的值一律不猜（落回上一个合法值） |
-| `core_lyrics_document` | `{lines, status}` | `null` | 转发歌词文档（歌词窗只订阅，数据由主窗转发） |
-| `core_lyrics_progress` | `{timeMs, playing, seekGeneration}` | `null` | 推进度（主窗侧已按 ≥100ms / 播放或跳转变化节流） |
+| `core_lyrics_toggle` | `{checked}` | `{config, visible, revision}` | **main-only**；显示已有窗前 reload，关闭只隐藏 |
+| `core_lyrics_configure` | `{config, restoreIfPristine?}` | `{config, visible, revision}` | **main/lyrics**；只收合同配置字段，未知字段/非法值拒绝；空补丁纯读。恢复标志仅 main 可带，且只在 revision=0 接受盘上快照并推进至 1 |
+| `core_lyrics_control` | `{payload:{action:'toggle'|'previous'|'next'}}` | `null` | **main/lyrics**；非法动作/extra 字段拒绝；转既有 `player:command {command}`，只在唯一主窗播放器执行 |
+| `core_lyrics_document` | `{document:{lines,status}}` | `null` | **main-only**；归一、缓存并广播文档 |
+| `core_lyrics_progress` | `{progress:{timeMs,playing,seekGeneration}}` | `null` | **main-only**；主窗 ≥100ms / 播放或 seek 变化节流 |
 
-**四条命令都是 `async`，且都过主窗来源守卫**（`require_main_window`）。async 不是风格问题：
-`WebviewWindowBuilder::build` 内部要走一趟主线程往返（窗口只能在事件循环线程上创建），
-同步命令自己就站在主线程上，等那一趟 = 死锁（旧仓结论，沿用）。**歌词窗自己只订阅事件、
-不调任何命令**（`test/lyrics-window.test.mjs` 扫描钉住：那个文件里没有 `coreCall`/`invoke`）。
+`core_call` 与 `core_login_chrome` 的既有来源守卫不放宽。歌词窗没有任意业务 HTTP、登录、文档写入或进度写入权限。
+歌词页先订阅 document/config/progress/theme，再 `configure({})` 回读权威配置，最后 signalReady；主窗补读最新配置、补文档/进度/主题。
 
-**几何（纯函数，含矩阵单测）**：`taskbar_position`（水平居中、贴 `work_area` 下沿）与
-`desktop_position`（再上抬 `DESKTOP_LIFT = 120px`，**夹回工作区顶部**）。尺寸按模式取
-`TASKBAR_SIZE`（1200×44，单行）或 `DESKTOP_SIZE`（960×120），并**夹进工作区**（小屏上窗口
-不该比屏幕还宽）。显示器口径：**优先主窗 `current_monitor()`，取不到退主屏**（桌面歌词是给
-正在用主窗的人看的；摆到另一块屏上用户会以为它没开）。
+**几何**：desktop 横版约 **960×160 DIP**，竖版约 **320×620 DIP**（仍由 AMLL 官方纵向滚动，非中文 writing-mode 竖排）；taskbar 保留 **1200×44 DIP** 横条降级。
+只 mode/layout 变化重新计算 size/position，颜色、字号、锁、点透、演出选项不重定位。已有用户位置保留并夹入当前歌词窗显示器工作区；首次优先主窗显示器，退主屏。
+window-state 不自动恢复 lyrics 的旧尺寸/坐标，避免异步覆盖配置几何或 Taskbar。拖柄与非交互歌词宿主通过官方 `startDragging()` 拖动，排除按钮/输入/滑块等交互节点。
 
 > **"负偏移钳 0"的准确含义**：钳的是**偏移**（居中量 / 贴底量），不是最终坐标。
 > 副屏摆在主屏左边时工作区原点就是负的（-1920），把最终坐标钳到 0 会把窗口从左侧副屏
@@ -1396,14 +1389,14 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 > 由 `a_monitor_left_of_the_primary_keeps_its_negative_origin` 与
 > `every_monitor_keeps_the_window_inside_its_own_work_area` 两条用例钉住。
 
-**配置（会话内，持久化不做）**：字号是**档位**（`LYRICS_FONT_STEPS`：16/20/28/40/56px）而不是
-连续值——渲染层的视觉一律走工具类/令牌，内联样式只允许几何契约与 AMLL 的 100% 尺寸那两处，
-所以连续字号这条 CSS 路本来就不存在；档位与 CSS 的 rem 规则由测试钉住一致。
-颜色只认设计令牌（`LYRICS_COLOR_TOKENS`：`foreground`/`muted`/`primary`/`contrast`），
-映射在 `amll-theme.css`（AMLL 变量的唯一接线点）。**任务栏模式的有效字号 ≤ 20px**
-（`TASKBAR_MAX_FONT_PX`，简报裁决）：配置值本身保留，切回桌面模式时用户的选择还在。
-**任务栏模式一律点透**（贴边的一条显示带不该抢底下窗口的点击），桌面模式默认可点（要能接手拖动）；
-锁定（`locked`）时渲染层不挂 `data-tauri-drag-region`。
+**配置**：`{mode:'desktop'|'taskbar', layout:'horizontal'|'vertical', style:'clean'|'panel', size, color, locked, clickThrough, enableBlur, enableScale, enableSpring, showControls}`。
+默认 desktop/horizontal/clean/lg/foreground，locked/clickThrough=false，四个演出/控件布尔=true。AMLL 官方 props 控制模糊/缩放/弹簧，panel 使用 shadcn Card 语义 surface；宿主隔离 AMLL 合成以保证浅暗文字可见。panel+contrast 的有效字色使用既有 foreground 令牌，配置仍保留 contrast，切回 clean 还原。
+字号档位为 16/20/28/40/56px；颜色只认 foreground/muted/primary/contrast 令牌。任务栏模式有效字号 ≤20px 且强制横条点透，保留用户原档位；clean/panel 均不渲染任何控件带，showControls 不改变 44px 歌词可用高度。
+锁定仅禁拖，解锁/媒体仍可点击；点透整窗不接鼠标，须在主窗设置恢复。
+
+**恢复/保存**：Rust 为本次运行唯一权威。主窗单例桥先订阅 status，关闭保存门，读 `settings:get` 的 `data.lyricsWindow`，白名单归一后 `configure(..., restoreIfPristine:true)`；建立权威 baseline 才开门。
+同一 status 订阅按 revision 接收，旧回执不倒退，不乐观覆盖。保存只有一个 inflight + latestPending，经现 settings:set 代理写配置字段，不存 visible/effectiveSize/revision；settings 回执不是新配置。sidecar 的 load→merge→rename 在同一保存尾链串行，防歌词与队列互删。
+失败保留运行态，设置页明确显示未保存/重试，不自动重试或反复 toast。最后主窗观察卸载只清监听/命令 generation，已接受配置的 inflight/pending 继续收尾；重挂只重接订阅并回读 Rust，不重新读盘 bootstrap。迟到 unlisten 与 HMR dispose 清理避免双监听，旧播放 runtime dispose 同时 pause 音频，避免替代实例双声。
 
 **歌词数据流**：主窗在曲目变化时调 `playback:lyrics` → 官方 `parseLrc` 适配
 （`features/lyrics/amll-adapter.ts`）→ `player.setLyrics(lines, status)`（主窗面板）
@@ -1424,9 +1417,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 
 **如实登记的未验证项（本任务）**：
 
-1. **真窗的透明/置顶/拖动/点透未实测**（本任务环境起不了真窗）：建窗属性、几何、
-   `data-tauri-drag-region` 的挂法、点透开关都有单测与源码扫描，但"屏幕上看起来什么样、
-   鼠标点下去发生什么"没有实机证据。多显示器矩阵也只是纯函数层面的（没在多屏机器上跑过）；
+1. **R44c Windows 已真验**：拖柄 rect 变化、锁后不动/解锁恢复、锁中媒体一次、横竖几何、样式/颜色/锁/点透不回跳、hide/reopen 最新配置、配置保存及重启恢复；证据 `.tmp/r44c-native-evidence.json` / `.tmp/r44c-restart-evidence.json`。多显示器/高 DPI 和 Linux/macOS 未实机验；
 2. **任务栏模式与真实任务栏的视觉关系未实测**：窗口贴 `work_area` 下沿（= 任务栏上沿），
    理论上不重叠；不同 DPI/自动隐藏任务栏的机器上要看一眼（R14 的验收路径）；
 3. **歌词端点未联调**：`playback:lyrics` 的**响应形状**是宽容读取的（候选键见上），
@@ -1434,8 +1425,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 
 **已知限制**：
 
-1. **配置不持久化**（裁决：明确不做）：字号/颜色/模式/锁定/点透只在本次运行内生效，
-   下次启动回默认；设置项旁边如实写着这句话（`LYRICS_SESSION_NOTICE`）；
+1. **位置不作为配置写入 settings**：window-state 仍可记录位置，但不自动覆盖歌词配置几何；重启后按 mode/layout 与工作区摆放；
 2. **登录门禁期间托盘的"桌面歌词"没有消费方**：订阅在 `LibraryShell` 里，而未登录时它不挂载
    ——那一刻勾选会翻转（托盘侧镜像）但不会建窗。与 R11 的"设置…"是同一档（不是丢事件，
    是那一刻本来就没有消费者）；
@@ -1644,14 +1634,14 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `TRAY_ID` | `"tray"` | `src-tauri/src/lib.rs` | R11：托盘**图标** id（菜单项 id 前缀是 `tray:`，见 `tray::MENU_ID_PREFIX`）；`core_get_tray_available` 与关窗回调都按它现问托盘表 |
 | `MENU_SLOTS`（9 槽位/7 项/2 分隔线） | 见 `src-tauri/src/tray.rs` | `src-tauri/src/tray.rs` | R11：托盘菜单的唯一真源（顺序与文案由 Rust 内联单测 + `test/tray.test.mjs` 双向钉住） |
 | `PLAYBACK_LYRICS` | `"playback:lyrics"` | `src/shared/request-channels.ts` | R12：歌词文本来源（Rust 镜像由 `test/channel-parity.test.mjs` 钉住） |
-| `LYRICS_DOCUMENT` / `LYRICS_PROGRESS` / `LYRICS_STATE` | `"lyrics:document"` / `"lyrics:progress"` / `"lyrics:state"` | `src/shared/channels.ts` | R12：主窗 → 歌词窗的三条广播（歌词窗只订阅事件，这是它唯一的输入） |
-| `CORE_LYRICS_TOGGLE` / `_CONFIGURE` / `_DOCUMENT` / `_PROGRESS` | `"core_lyrics_toggle"` / `"core_lyrics_configure"` / `"core_lyrics_document"` / `"core_lyrics_progress"` | `src/shared/commands.ts` | R12：四条命令名的唯一真源（Rust 侧为镜像副本，由 `test/lyrics-window.test.mjs` 与 `lib.rs` 注册扫描钉住） |
-| `LYRICS_WINDOW_LABEL` | `"lyrics"` | `src-tauri/src/lib.rs` | R12：歌词窗 label（window-state 过滤白名单、四条命令的来源守卫、`current_monitor()` 的窗口都按它认） |
-| `TASKBAR_SIZE` / `DESKTOP_SIZE` / `DESKTOP_LIFT` | `1200×44` / `960×120` / `120` | `src-tauri/src/lyrics_window.rs` | R12：两种模式的窗口尺寸与桌面上抬量（夹进工作区；几何矩阵有内联单测） |
+| `LYRICS_DOCUMENT` / `LYRICS_PROGRESS` / `LYRICS_STATE` | `"lyrics:document"` / `"lyrics:progress"` / `"lyrics:state"` | `src/shared/channels.ts` | 文档/进度只由主窗转发，配置由 Rust 广播并携 revision |
+| `CORE_LYRICS_TOGGLE` / `_CONFIGURE` / `_CONTROL` / `_DOCUMENT` / `_PROGRESS` | `core_lyrics_*` 五条具名命令 | `src/shared/commands.ts` | 名字、Rust 注册、来源守卫与最小 capability 一次补齐 |
+| `LYRICS_WINDOW_LABEL` | `"lyrics"` | `src-tauri/src/lib.rs` | 歌词窗 label、来源守卫、window-state 与几何接管 |
+| `TASKBAR_SIZE` / `DESKTOP_SIZE` / `DESKTOP_LIFT` | `1200×44` / `960×160` / `120` DIP | `src-tauri/src/lyrics_window.rs` | desktop vertical=320×620 DIP，按 scale 与工作区夹限 |
 | `LYRICS_FONT_STEPS` / `TASKBAR_MAX_FONT_PX` | `sm16/md20/lg28/xl40/xxl56` / `20` | `src/renderer/features/lyrics/lyrics-window.mjs` ↔ `src-tauri/src/lyrics_window.rs` | R12：字号档位与任务栏模式上限（两侧一张表，由 `test/lyrics-window.test.mjs` 逐条钉住；CSS 的 rem 规则在 `amll-theme.css`） |
 | `LYRICS_COLOR_TOKENS` | `foreground`/`muted`/`primary`/`contrast` | 同上（TS 为真源、Rust 为镜像） | R12：歌词颜色的令牌档位（只认设计令牌，绝不接受任意色值） |
 | `MIN_PROGRESS_INTERVAL_MS` | `100` | `src/renderer/features/lyrics/lyrics-window.mjs` | R12：进度节流窗口（rAF 每帧调 `pushProgress`，只有该推的才出 IPC） |
-| `LYRICS_SESSION_NOTICE` | 会话内说明文案 | `src/renderer/features/lyrics/lyrics-window.mjs` | R12：设置项旁边如实写"只在本次运行内生效、不写入设置文件" |
+| `LYRICS_SESSION_NOTICE` | 配置保存/锁与点透说明 | `src/renderer/features/lyrics/lyrics-window.mjs` | R44c：重启恢复、锁不禁媒体、点透从主窗恢复、竖版非中文竖排 |
 | `SHORTCUT_BINDINGS` | 5 动作 / 主组合 + 备选链 | `src-tauri/src/shortcuts.rs` | R13：全局快捷键的唯一真源（媒体三键无备选；两条提示型组合各有 2 条备选）。每个组合都必须能被 `global-hotkey` 解析、且不许两个动作抢同一个组合（内联单测钉住） |
 | `ShortcutState` | 生效组合快照 | `src-tauri/src/shortcuts.rs` | R13：`setup` 里登记成托管状态（设置页后续可读；本任务只记 + 提示，不做 UI） |
 | `HUAWEI_QR_ENDPOINTS` | 见 §1.8（建单/轮询/CAS 换码三条 + **R31 的两条**：`deviceFingerPath`、`portalLoginPath`） | `src/main/qr-login.mjs` | R16 立、**R31 增补两条**：二维码登录的端点表（探针确认值；协议层 `src/protocols/qr-login.mjs` 仍只收注入，不写死 URL）。R31 增补的两条来自新探针：`/CAS/IDM_W/ajaxHandler/dev`（指纹换 `sid` = deviceID 的来源）与 `/CAS/portal/loginAuth.html`（画着二维码的那张页，也是建单/轮询的 Referer） |

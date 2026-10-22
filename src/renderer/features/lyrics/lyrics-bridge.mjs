@@ -1,18 +1,4 @@
-/**
- * 桌面歌词窗的**主窗侧接线**（R12）：四条命令的转发 + 歌词文本链路 + 进度节流。
- *
- * 为什么单独一个模块（而不是全塞进 `use-lyrics-window.ts`）：这里每一件事都能用注入桩跑完
- * ——"托盘勾上去了，主窗到底发了哪条命令""歌词文本取回来有没有过官方解析器""rAF 每帧调它，
- * 是不是每帧都出 IPC"。放进 React hook 里这些就只能靠人眼。
- *
- * 端口全部注入（同 `player-runtime.ts` 的做法）：`callCore`（请求频道）、`callCommand`
- * （四条命令）、`subscribeCoreEvent`（广播订阅）、`parseLyrics`（官方解析适配）。
- *
- * 边界（与简报一致）：
- * - 歌词窗**没有**业务频道权限，四条命令全在主窗侧调用；歌词窗订阅完成后只发就绪事件；
- * - 进度节流在这里（`shouldPushProgress`）：rAF 每帧都调 `pushProgress`，只有该推的才出 IPC；
- * - 歌词文本只在**这一次**调用里出现：不写日志、不落盘（与播放地址同一条纪律）。
- */
+/** 主窗配置代理：先订阅/恢复，按 Rust revision 接收状态，单写者保存配置；歌词不落此桥存储。 */
 import { LYRICS_STATE, LYRICS_TOGGLE } from "../../../shared/channels.ts";
 import {
   CORE_LYRICS_CONFIGURE,
@@ -20,7 +6,7 @@ import {
   CORE_LYRICS_PROGRESS,
   CORE_LYRICS_TOGGLE,
 } from "../../../shared/commands.ts";
-import { LYRICS_CACHE_CLEAR, LYRICS_CACHE_INFO, LYRICS_IMPORT, PLAYBACK_LYRICS } from "../../../shared/request-channels.ts";
+import { LYRICS_CACHE_CLEAR, LYRICS_CACHE_INFO, LYRICS_IMPORT, PLAYBACK_LYRICS, SETTINGS_GET, SETTINGS_SET } from "../../../shared/request-channels.ts";
 import {
   coreLyricsConfigure,
   coreLyricsDocument,
@@ -33,7 +19,7 @@ import {
 import { parseAmllLyrics } from "./amll-adapter.ts";
 import { readLyricsFile } from "./lyrics-import.mjs";
 import {
-  DEFAULT_LYRICS_CONFIG,
+  LYRICS_SETTING_KEY,
   LYRICS_STATUS,
   lyricsDocumentOf,
   lyricsStatusFromFailure,
@@ -49,7 +35,7 @@ async function defaultCallCommand(command, args) {
     case CORE_LYRICS_TOGGLE:
       return coreLyricsToggle(payload.checked === true);
     case CORE_LYRICS_CONFIGURE:
-      return coreLyricsConfigure(payload.config ?? {});
+      return coreLyricsConfigure(payload.config ?? {}, payload.restoreIfPristine);
     case CORE_LYRICS_DOCUMENT:
       return coreLyricsDocument(payload.document ?? {});
     case CORE_LYRICS_PROGRESS:
@@ -58,15 +44,6 @@ async function defaultCallCommand(command, args) {
       // 认不出的命令不猜（抛结构化错误：调用方会记一行，用户侧不会看到假的成功）
       throw { kind: "internal", message: `认不出的歌词窗命令：${String(command)}` };
   }
-}
-
-/** 宿主回执 → 状态（形状不认识就落默认 + `visible=false`：保守，与托盘可用性同一方向）。 */
-export function lyricsStatusFromAnswer(answer) {
-  const source = answer !== null && typeof answer === "object" ? answer : {};
-  return {
-    config: normalizeLyricsConfig(source.config, DEFAULT_LYRICS_CONFIG),
-    visible: source.visible === true,
-  };
 }
 
 /**
@@ -123,27 +100,142 @@ export function createLyricsBridge(deps = {}) {
   /** 上一次**推出去**的进度：节流的比较基准（没推的那个不算，否则永远差 20ms）。 */
   let lastProgress = null;
 
-  /** 读回当前状态（四条命令里没有第五条"读配置"：空补丁的 configure 就是它）。 */
-  async function readStatus() {
-    return lyricsStatusFromAnswer(await callCommand(CORE_LYRICS_CONFIGURE, { config: {} }));
+  let status = { config: normalizeLyricsConfig({}), visible: false, revision: -1, initialized: false, saveError: null };
+  let initialization = null;
+  let generation = 0;
+  let saveEnabled = false;
+  let savedConfig = null;
+  let latestPending = null;
+  let saving = null;
+  let readyReader = null;
+  const observers = new Map();
+  const stops = [];
+  const notify = () => { for (const handler of observers.keys()) handler(status); };
+  const publish = (patch) => { status = { ...status, ...patch }; notify(); };
+  const keyOf = (config) => JSON.stringify(config);
+
+  function acceptStatus(answer) {
+    if (answer?.ready === true || !answer?.config || !Number.isSafeInteger(answer.revision) || answer.revision < status.revision) return status;
+    const config = normalizeLyricsConfig(answer.config);
+    const changed = keyOf(config) !== keyOf(status.config);
+    publish({ config, visible: answer.visible === true, revision: answer.revision });
+    if (saveEnabled && changed) queueSave(config);
+    return status;
   }
 
-  /** 开关歌词窗（**目标态**：托盘的 `lyrics:toggle` 给的就是它）。 */
-  async function setVisible(checked) {
-    return lyricsStatusFromAnswer(await callCommand(CORE_LYRICS_TOGGLE, { checked: checked === true }));
-  }
-
-  /** 改配置（补丁；钳制与合并的最终判定在 Rust 侧，这里原样交上去）。 */
-  async function applyConfig(patch) {
-    return lyricsStatusFromAnswer(await callCommand(CORE_LYRICS_CONFIGURE, { config: patch ?? {} }));
-  }
-
-  /** 订阅托盘的 `lyrics:toggle`（目标态度，不做"切换一下"）。 */
-  function subscribeToggle(handler) {
-    return subscribeCoreEvent(LYRICS_TOGGLE, (payload) => {
-      const checked = payload !== null && typeof payload === "object" ? payload.checked : null;
-      handler(checked === true);
+  function queueSave(config) {
+    latestPending = normalizeLyricsConfig(config);
+    if (saving || !saveEnabled || status.saveError) return saving;
+    saving = (async () => {
+      while (latestPending) {
+        const next = latestPending;
+        latestPending = null;
+        if (keyOf(next) === savedConfig) continue;
+        try {
+          await callCore(SETTINGS_SET, { patch: { [LYRICS_SETTING_KEY]: next } });
+          savedConfig = keyOf(next);
+        } catch {
+          latestPending = status.config;
+          publish({ saveError: "桌面歌词配置未保存，本次运行仍生效。请检查数据目录后点击重试保存。" });
+          return;
+        }
+      }
+    })().finally(() => {
+      saving = null;
+      if (latestPending && !status.saveError) queueSave(latestPending);
     });
+    return saving;
+  }
+
+  function initialize() {
+    if (initialization) return initialization;
+    const mine = generation;
+    const keep = (off) => { if (mine === generation) stops.push(off); else off(); };
+    initialization = (async () => {
+      await Promise.all([
+        subscribeCoreEvent(LYRICS_STATE, (payload) => {
+          if (mine !== generation) return;
+          if (payload?.ready === true) return replayReady();
+          acceptStatus(payload);
+        }).then(keep),
+        subscribeCoreEvent(LYRICS_TOGGLE, (payload) => {
+          if (mine === generation) void setVisible(payload?.checked === true).catch((cause) => log("桌面歌词开关失败：", cause));
+        }).then(keep),
+      ]);
+      if (mine !== generation) return status;
+      if (status.initialized) {
+        const current = await callCommand(CORE_LYRICS_CONFIGURE, { config: {} });
+        return mine === generation ? acceptStatus(current) : status;
+      }
+      const answer = await callCore(SETTINGS_GET, null);
+      if (mine !== generation) return status;
+      const disk = normalizeLyricsConfig(answer?.settings?.data?.[LYRICS_SETTING_KEY]);
+      savedConfig = keyOf(disk);
+      const restored = await callCommand(CORE_LYRICS_CONFIGURE, { config: disk, restoreIfPristine: true });
+      if (mine !== generation) return status;
+      if (!restored?.config || !Number.isSafeInteger(restored.revision) || restored.revision < 0) {
+        throw { kind: "invalid_response", message: "歌词配置缺少权威 revision" };
+      }
+      acceptStatus(restored);
+      saveEnabled = true;
+      publish({ initialized: true });
+      if (keyOf(status.config) !== savedConfig) queueSave(status.config);
+      return status;
+    })().catch((cause) => {
+      if (mine === generation) {
+        publish({ saveError: "桌面歌词配置未能恢复，未覆盖原设置。请检查数据目录并重试。" });
+        generation += 1;
+        for (const stop of stops.splice(0)) stop();
+        initialization = null;
+      }
+      throw cause;
+    });
+    return initialization;
+  }
+
+  function observe(handler, readState) {
+    observers.set(handler, readState);
+    handler(status);
+    void initialize().catch((cause) => log("歌词配置初始化失败：", cause));
+    return () => {
+      observers.delete(handler);
+      queueMicrotask(() => { if (observers.size === 0 && !readyReader) dispose(); });
+    };
+  }
+
+  async function statusCommand(command, args) {
+    const mine = generation;
+    await initialize();
+    if (mine !== generation) return status;
+    const answer = await callCommand(command, args);
+    return mine === generation ? acceptStatus(answer) : status;
+  }
+
+  function readStatus() {
+    return statusCommand(CORE_LYRICS_CONFIGURE, { config: {} });
+  }
+
+  function setVisible(checked) {
+    return statusCommand(CORE_LYRICS_TOGGLE, { checked: checked === true });
+  }
+
+  function applyConfig(patch) {
+    return statusCommand(CORE_LYRICS_CONFIGURE, { config: patch ?? {} });
+  }
+
+  async function retrySave() {
+    await initialize();
+    if (saving) await saving;
+    publish({ saveError: null });
+    return queueSave(status.config);
+  }
+
+  function dispose() {
+    generation += 1;
+    for (const stop of stops.splice(0)) stop();
+    observers.clear();
+    initialization = null;
+    readyReader = null;
   }
 
   /**
@@ -254,26 +346,39 @@ export function createLyricsBridge(deps = {}) {
     }
   }
 
-  function subscribeReady(readState) {
-    return subscribeCoreEvent(LYRICS_STATE, async (payload) => {
-      if (payload?.ready !== true) return;
-      try {
-        await syncTheme();
-        const state = readState();
+  async function replayReady() {
+    const mine = generation;
+    try {
+      await readStatus();
+      if (mine !== generation) return;
+      const reader = [...observers.values()].at(-1) ?? readyReader;
+      if (reader) {
+        const state = reader();
         await pushDocument(state.lyrics);
         lastProgress = null;
         await pushProgress(progressOf(state));
-      } catch (cause) {
-        log("歌词窗就绪后同步失败：", cause);
       }
-    });
+      await syncTheme();
+    } catch (cause) {
+      log("歌词窗就绪后同步失败：", cause);
+    }
+  }
+
+  async function subscribeReady(readState) {
+    readyReader = readState;
+    await initialize();
+    return () => { if (readyReader === readState) readyReader = null; };
   }
 
   return {
+    initialize,
+    snapshot: () => status,
+    observe,
+    dispose,
+    retrySave,
     readStatus,
     setVisible,
     applyConfig,
-    subscribeToggle,
     subscribeReady,
     loadLyrics,
     importLyrics,
@@ -291,3 +396,5 @@ export function getLyricsBridge() {
   if (bridge === null) bridge = createLyricsBridge();
   return bridge;
 }
+
+if (import.meta.hot) import.meta.hot.dispose(() => { bridge?.dispose(); bridge = null; });

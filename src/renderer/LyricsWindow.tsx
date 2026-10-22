@@ -1,25 +1,16 @@
-/**
- * 桌面歌词窗（R12）：**无业务命令**的第三个 AMLL 宿主。
- *
- * 三件事，一件都不多做：
- * 1. **订阅**三条广播（`lyrics:document` 歌词行 / `lyrics:progress` 进度 / `lyrics:state` 配置）。
- *    歌词窗**没有业务频道权限**（`core_call` 只收主窗来源），也不该有——它不需要知道内核、端点、
- *    凭据的任何东西，只需要"现在该显示哪一行、多大、什么颜色"；
- * 2. **交给官方组件**：逐行滚动、逐字渐变、弹簧动画全部由 `@applemusic-like-lyrics/react` 的
- *    `LyricPlayer` 负责（禁自绘）；这里只提供定位容器与逐帧的 `currentTime`；
- * 3. **进度自己平滑一下**：广播是节流的（≥100ms 一条），直接把它当 `currentTime` 会让逐字渐变
- *    每 100ms 跳一格。所以本地按"上次推送 + 经过的真实时间"估计当前时间（纯函数
- *    `estimateTimeMs`，`playing` 为假时停住不动）——这只是把同一条进度插值，不是第二份时钟。
- *
- * 视觉约束（与主窗一致）：颜色/字号经 `data-lyrics-*` 属性交给 `amll-theme.css` 的 AMLL 变量
- * 映射（不写内联样式、不写 AMLL 的歌词变量名），拖动靠 `data-tauri-drag-region`（锁定/任务栏模式不挂）。
- */
+/** AMLL 只消费主窗文档/进度；配置与媒体入口走受限专命令，不创建播放器或音频。 */
 import { LyricPlayer } from "@applemusic-like-lyrics/react"
 import type { LyricLine } from "@applemusic-like-lyrics/lyric"
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react"
+import { getCurrentWindow } from "@tauri-apps/api/window"
+import { GripHorizontal, Lock, Unlock, Pause, Play, SkipBack, SkipForward, Settings2 } from "lucide-react"
 
 import { LYRICS_DOCUMENT, LYRICS_PROGRESS, LYRICS_STATE, THEME_CHANGED } from "../shared/channels.ts"
-import { onCoreEvent, signalLyricsReady } from "./host-api"
+import { coreLyricsConfigure, coreLyricsControl, onCoreEvent, signalLyricsReady } from "./host-api"
+import { Button } from "./components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "./components/ui/dropdown-menu"
 import { LYRICS_SEEK_WINDOW_MS } from "./features/lyrics/lyric-sync.mjs"
 import {
   LYRICS_STATUS,
@@ -58,6 +49,14 @@ export function LyricsWindow() {
   const progressRef = useRef<LyricsProgress | null>(null)
   const seekDeadlineRef = useRef(0)
   const seekSeenRef = useRef(0)
+  const revisionRef = useRef(-1)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const acceptConfig = useCallback((payload: unknown) => {
+    const next = payload as { ready?: boolean; config?: unknown; revision?: number } | null
+    if (next?.ready || !next?.config || !Number.isSafeInteger(next.revision) || next.revision! < revisionRef.current) return
+    revisionRef.current = next.revision!
+    setConfig(normalizeLyricsConfig(next.config))
+  }, [])
 
   useEffect(() => {
     let alive = true
@@ -74,9 +73,7 @@ export function LyricsWindow() {
           status: typeof payload?.status === "string" ? payload.status : LYRICS_STATUS.unavailable,
         })
       }).then(keep),
-      onCoreEvent<{ config?: unknown }>(LYRICS_STATE, (payload) => {
-        setConfig((current) => normalizeLyricsConfig(payload?.config, current))
-      }).then(keep),
+      onCoreEvent<unknown>(LYRICS_STATE, (payload) => { if (alive) acceptConfig(payload) }).then(keep),
       onCoreEvent<{ theme?: string }>(THEME_CHANGED, (payload) => {
         applyThemeChoice(document.documentElement, payload?.theme)
       }).then(keep),
@@ -97,8 +94,12 @@ export function LyricsWindow() {
           }
         },
       ).then(keep),
-    ]).then(() => {
-      if (alive) return signalLyricsReady()
+    ]).then(async () => {
+      if (!alive) return
+      const authoritative = await coreLyricsConfigure({})
+      if (!alive) return
+      acceptConfig(authoritative)
+      await signalLyricsReady()
     }).catch((cause) => {
       if (alive) {
         setLyricDocument({ lines: [], status: LYRICS_STATUS.failed })
@@ -139,40 +140,98 @@ export function LyricsWindow() {
   const size = effectiveSizeId(config)
   const hasLyric = lyricDocument.lines.length > 0
   const notice = lyricsNoticeText(lyricDocument)
-  // 拖动区只在桌面模式且未锁定时挂（任务栏模式下这条显示带贴在屏幕边上，不给拖）
-  const dragAttributes: Record<string, string> = dragRegionEnabled(config)
-    ? { "data-tauri-drag-region": "" }
-    : {}
-
-  return (
-    <div
-      {...dragAttributes}
-      className="amll-lyrics-stage absolute inset-0 isolate overflow-hidden"
-      data-testid="lyrics-window"
-      data-lyrics-mode={config.mode}
-      data-lyrics-size={size}
-      data-lyrics-color={config.color}
-      data-lyrics-locked={config.locked ? "on" : "off"}
-    >
-      {hasLyric ? (
-        <LyricPlayer
-          className="h-full w-full"
-          lyricLines={lyricDocument.lines}
-          currentTime={frame.time}
-          isSeeking={frame.isSeeking}
-          playing={progressRef.current?.playing === true}
-          alignAnchor="center"
-          alignPosition={0.5}
-        />
-      ) : null}
-
-      {notice === null ? null : (
-        <div className="absolute inset-0 flex items-center justify-center p-2">
-          <p role="status" className="text-center text-sm text-muted-foreground">
-            {notice}
-          </p>
-        </div>
-      )}
+  const canDrag = dragRegionEnabled(config)
+  const startDrag = (event: MouseEvent, grip = false) => {
+    if (!canDrag || event.button !== 0) return
+    if (!grip && (event.target as Element).closest('button, input, select, textarea, a, [role="button"], [role="slider"], [role="menu"], [role="switch"]')) return
+    event.preventDefault()
+    void getCurrentWindow().startDragging().catch(() => setActionError("拖动未能开始，请解锁后重试。"))
+  }
+  const configure = (patch: Partial<typeof config>) => {
+    setActionError(null)
+    void coreLyricsConfigure(patch).then(acceptConfig).catch(() => setActionError("配置未能应用，请从主窗设置重试。"))
+  }
+  const control = (action: "toggle" | "previous" | "next") => {
+    setActionError(null)
+    void coreLyricsControl(action).catch(() => setActionError("媒体动作未能发出，请从主窗重试。"))
+  }
+  const controls = (
+    <div className="flex shrink-0 items-center justify-center gap-1" data-testid="lyrics-controls">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span>
+            <Button variant="ghost" size="icon-sm" aria-label="拖动桌面歌词" disabled={!canDrag}
+              onMouseDown={(event) => startDrag(event, true)}><GripHorizontal /></Button>
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="bottom">{canDrag ? "拖动桌面歌词" : "锁定或点透时不可拖动"}</TooltipContent>
+      </Tooltip>
+      {config.showControls ? <>
+        <Button variant="ghost" size="icon-sm" aria-label="上一首" onClick={() => control("previous")}><SkipBack /></Button>
+        <Button variant="ghost" size="icon-sm" aria-label={progressRef.current?.playing ? "暂停" : "播放"} onClick={() => control("toggle")}>
+          {progressRef.current?.playing ? <Pause /> : <Play />}
+        </Button>
+        <Button variant="ghost" size="icon-sm" aria-label="下一首" onClick={() => control("next")}><SkipForward /></Button>
+      </> : null}
+      <Button variant="ghost" size="icon-sm" aria-label={config.locked ? "解锁桌面歌词" : "锁定桌面歌词"}
+        aria-pressed={config.locked} onClick={() => configure({ locked: !config.locked })}>{config.locked ? <Unlock /> : <Lock />}</Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="桌面歌词外观"><Settings2 /></Button></DropdownMenuTrigger>
+        <DropdownMenuContent align="end" side="bottom">
+          <DropdownMenuGroup>
+            <DropdownMenuLabel>样式</DropdownMenuLabel>
+            <DropdownMenuRadioGroup value={config.style} onValueChange={(style) => configure({ style })}>
+              <DropdownMenuRadioItem value="clean">透明</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="panel">面板</DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
+          </DropdownMenuGroup>
+          <DropdownMenuSeparator />
+          <DropdownMenuGroup>
+            <DropdownMenuLabel>方向（竖版为窄高滚动窗）</DropdownMenuLabel>
+            <DropdownMenuRadioGroup value={config.layout} onValueChange={(layout) => configure({ layout })}>
+              <DropdownMenuRadioItem value="horizontal">横版</DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="vertical" disabled={config.mode === "taskbar"}>竖版</DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
+          </DropdownMenuGroup>
+          <DropdownMenuSeparator />
+          <DropdownMenuGroup>
+            <DropdownMenuCheckboxItem checked={config.enableBlur} onCheckedChange={(enableBlur) => configure({ enableBlur })}>模糊</DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem checked={config.enableScale} onCheckedChange={(enableScale) => configure({ enableScale })}>缩放</DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem checked={config.enableSpring} onCheckedChange={(enableSpring) => configure({ enableSpring })}>弹簧动画</DropdownMenuCheckboxItem>
+            <DropdownMenuCheckboxItem checked={config.showControls} onCheckedChange={(showControls) => configure({ showControls })}>媒体按钮</DropdownMenuCheckboxItem>
+          </DropdownMenuGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   )
+  const content = (
+    <div className="relative isolate min-h-0 flex-1" onMouseDownCapture={startDrag}>
+      {hasLyric ? <LyricPlayer className="h-full w-full" lyricLines={lyricDocument.lines}
+        currentTime={frame.time} isSeeking={frame.isSeeking} playing={progressRef.current?.playing === true}
+        enableBlur={config.enableBlur} enableScale={config.enableScale} enableSpring={config.enableSpring}
+        alignAnchor="center" alignPosition={0.5} /> : null}
+      {notice === null ? null : <div className="absolute inset-0 flex items-center justify-center p-2">
+        <p role="status" className="text-center text-sm text-muted-foreground">{notice}</p>
+      </div>}
+    </div>
+  )
+
+  return <TooltipProvider>
+    <div className="amll-lyrics-stage absolute inset-0 isolate flex flex-col overflow-hidden"
+      data-testid="lyrics-window" data-lyrics-mode={config.mode}
+      data-lyrics-layout={config.mode === "taskbar" ? "horizontal" : config.layout}
+      data-lyrics-style={config.style} data-lyrics-size={size}
+      data-lyrics-color={config.style === "panel" && config.color === "contrast" ? "foreground" : config.color}
+      data-lyrics-locked={config.locked ? "on" : "off"}>
+      {config.style === "panel" ? <Card size="sm" className="h-full min-h-0 gap-0 py-0">
+        {config.mode === "desktop" ? <CardHeader className="shrink-0 px-2 py-1">
+          <CardTitle className="sr-only">桌面歌词</CardTitle>
+          <CardDescription className="sr-only">媒体控制与窄高歌词滚动窗</CardDescription>
+          {controls}
+        </CardHeader> : null}
+        <CardContent className="flex min-h-0 flex-1 flex-col px-0">{content}</CardContent>
+      </Card> : <>{config.mode === "desktop" ? <div className="shrink-0 p-1">{controls}</div> : null}{content}</>}
+      {actionError ? <p role="alert" className="shrink-0 text-sm text-muted-foreground">{actionError}</p> : null}
+    </div>
+  </TooltipProvider>
 }

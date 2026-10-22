@@ -33,6 +33,26 @@ test("真实 PlayerBar 与 QueuePanel 渲染安全封面，信息按钮不再吃
   assert.match(button, /\bmax-w-full\b/);
 });
 
+test("R44c review taskbar 无论 clean/panel 与 showControls 都不渲染控件带", async () => {
+  const prior = { window: globalThis.window, MouseEvent: globalThis.MouseEvent };
+  globalThis.MouseEvent ??= class extends Event {};
+  try {
+    const { renderLyricsWindow } = await bundle("desktop-window", `
+      import { renderToStaticMarkup } from "react-dom/server";
+      import { LyricsWindow } from "./src/renderer/LyricsWindow.tsx";
+      export function renderLyricsWindow() { return renderToStaticMarkup(<LyricsWindow />); }
+    `);
+    for (const style of ["clean", "panel"]) {
+      for (const showControls of ["1", "0"]) {
+        globalThis.window = { location: { search: "?mode=taskbar&style=" + style + "&showControls=" + showControls } };
+        const html = renderLyricsWindow();
+        assert.doesNotMatch(html, /data-testid="lyrics-controls"|<button\b|data-slot="card-header"/, `${style}/${showControls} 不应挤占 44px 单行窗口`);
+        assert.match(html, /data-lyrics-layout="horizontal"/);
+      }
+    }
+  } finally { Object.assign(globalThis, prior); }
+});
+
 test("同 id 的歌词匹配元信息变化重新请求，进度/音量/封面变化不重复请求", async () => {
   const calls = [];
   const slots = [];
@@ -41,7 +61,7 @@ test("同 id 的歌词匹配元信息变化重新请求，进度/音量/封面�
   const equalDeps = (a, b) => a && b && a.length === b.length && a.every((value, index) => Object.is(value, b[index]));
   globalThis.__r44aHooks = {
     bridge: {
-      readStatus: async () => ({ config: {}, visible: false }), subscribeToggle: async () => () => {}, subscribeReady: async () => () => {},
+      snapshot: () => ({ config: {}, visible: false, saveError: null }), observe: () => () => {},
       pushDocument: async () => {}, loadLyrics: async (query) => { calls.push(query); return { lines: [], status: "empty" }; },
     },
     useRef: (value) => { const i = cursor++; return slots[i] ??= { current: value }; },

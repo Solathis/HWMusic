@@ -101,12 +101,8 @@ export const LYRICS_DOCUMENT = "lyrics:document" as const;
 export const LYRICS_PROGRESS = "lyrics:progress" as const;
 
 /**
- * 歌词窗配置广播（R12 增补）：`{config: {...}, visible: boolean}`。
- *
- * 配置是**会话内**的（持久化不做，写入已知限制）：Rust 侧握着唯一一份（`LyricsWindowState`），
- * 每次变更广播给两个窗口——歌词窗按它换字号/颜色/模式，主窗设置页按它显示当前档位。
- * 歌词窗建窗时的初值由 URL 查询串带入（渲染层还没订阅事件时也不会丢配置）。
- * 歌词窗完成文档/配置/进度/主题订阅后发 `{ready: true}`；主窗据此补发主题、当前文档与进度。
+ * Rust 配置权威广播：`{config, visible, revision}`；主窗代理 settings 保存并同步设置页。
+ * URL 只供初值，歌词窗订阅后 configure({}) 回读再发 `{ready:true}`，主窗补最新文档/进度/主题。
  */
 export const LYRICS_STATE = "lyrics:state" as const;
 
@@ -137,7 +133,7 @@ export const AUTH_QR = "auth:qr" as const;
  * 但 `amll-theme.css` 里那几档颜色映射的是**主题令牌**（`--foreground`/`--muted`/`--primary`/
  * `--background`）——不给歌词窗一个档位，它就永远停在 `:root` 的浅色令牌上（深色主题下用近黑的字
  * 浮在深色桌面上="有歌词但看不见"）。初值走建窗时的查询串（它调不动读主题的那条命令），
- * 之后由这条广播跟上；歌词窗仍然不调任何命令。
+ * 之后由这条广播跟上；歌词窗不获登录/主题命令权限。
  */
 export const THEME_CHANGED = "theme:changed" as const;
 

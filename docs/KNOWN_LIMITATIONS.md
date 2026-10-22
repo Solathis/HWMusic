@@ -173,7 +173,7 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
 | D2 | **每日推荐 / 移动端 / 云同步 / 自动更新服务 / 其它平台音源** | pending（范围外） | 计划 Global Constraints 明确排除 |
 | D3 | **音频解密 / 绕过付费或 DRM** | pending（范围外） | 只播官方接口给出的地址 |
 | D4 | **主题手动切换** | pending（**裁决非目标**） | 亮暗**只跟系统 `prefers-color-scheme`**。两份令牌（媒体查询 + `.dark`）逐条一致由测试钉住；渲染层不得写 `dark` 类或存主题偏好（同文件扫描）。**不引 next-themes**（它的防闪烁内联脚本会被 CSP `script-src 'self'` 拦） |
-| D5 | **歌词窗配置持久化** | pending（**裁决明确不做**） | 字号/颜色/模式/锁定/点透只在**本次运行内**生效，下次启动回默认；设置项旁边如实写着这句话（`LYRICS_SESSION_NOTICE`，由用例钉住必须说清"只在本次运行内"与"不写入设置文件"） |
+| D5 | **歌词窗配置持久化** | R44c 已提供 | Rust 持有运行配置与 revision，主窗通过既有 settings:get/set 保存 `data.lyricsWindow`。失败保留运行配置，设置页显示未保存及重试；不持久化 visible/revision/effectiveSize。桌面横/竖、锁定、媒体控制与重启恢复已有 Windows 证据，其他平台/多屏高 DPI 仍待验 |
 | D6 | **任务栏歌词不是真任务栏写入** | verified（**降级实现**） | 三端都没有「往任务栏里写文字」的公开 API，只有「独立透明窗 + 贴 `work_area` 下沿」这一种做法。**绝不注入系统进程、不装系统钩子、不做 shell 扩展**（全源码扫描 0 命中：`SetWindowsHookEx`/`SetWinEventHook`/`Shell_TrayWnd`/`FindWindow`/`SetParent`/`explorer.exe`…） |
 | D7 | **设置页不显示当前生效的快捷键** | pending（范围外） | 生效组合记在 `ShortcutState`（托管状态），只在启动提示说一次 |
 | D8 | **队列面板没有「移除单曲 / 拖动排序」** | pending（范围外） | 只有点击跳播与清空。「移除当前项时的播放语义」（停还是接着播下一首）需要裁决，没自己拍 |

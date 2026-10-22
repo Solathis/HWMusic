@@ -2,7 +2,7 @@
  * 渲染层唯一的宿主桥封装（R3 交付封装与类型；R10 增补开机自启；R11 增补托盘可用性）。
  *
  * 边界：渲染层拿到的是白名单方法，拿不到任何 Token——凭据与业务 HTTP 只在 sidecar/Rust。
- * 命令与事件均在这里封装；歌词窗只能发就绪事件，业务命令仍由主窗执行。
+ * 歌词窗仅获配置与三种媒体动作的专命令；任意业务请求仍只在主窗执行。
  */
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -13,6 +13,7 @@ import {
   CORE_GET_TRAY_AVAILABLE,
   CORE_LOGIN_CHROME,
   CORE_LYRICS_CONFIGURE,
+  CORE_LYRICS_CONTROL,
   CORE_LYRICS_DOCUMENT,
   CORE_LYRICS_PROGRESS,
   CORE_LYRICS_TOGGLE,
@@ -135,16 +136,7 @@ export async function getTrayAvailable(): Promise<boolean> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 桌面歌词窗（R12）：四条命令的具名封装
-// ---------------------------------------------------------------------------
-//
-// 为什么是四条具名函数而不是一个通用的 `invokeLyrics(command, args)`：命令名是跨语言契约
-// （写错一个字母 → 运行时 "command not found"），具名封装让"渲染层到底会发哪几条命令"
-// 在源码里可数（test/lyrics-window.test.mjs 扫的就是这个）。
-//
-// 回执形状统一是 `{config, visible}`（`lyricsStatusFromAnswer` 折成状态）：每条命令都回整个状态，
-// 免得调用方拿着半份状态去猜另一半。歌词窗自己**不调**这四条——它只订阅事件。
+// 歌词 configure/control 限 main/lyrics，其余命令仍 main-only。状态回执携带 revision。
 
 async function invokeLyrics<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
@@ -160,8 +152,12 @@ export async function coreLyricsToggle(checked: boolean): Promise<unknown> {
 }
 
 /** 改歌词窗配置（**空对象 = 读回当前配置**，设置页挂载时用）。 */
-export async function coreLyricsConfigure(config: unknown): Promise<unknown> {
-  return invokeLyrics(CORE_LYRICS_CONFIGURE, { config });
+export async function coreLyricsConfigure(config: unknown, restoreIfPristine?: boolean): Promise<unknown> {
+  return invokeLyrics(CORE_LYRICS_CONFIGURE, restoreIfPristine === undefined ? { config } : { config, restoreIfPristine });
+}
+
+export async function coreLyricsControl(action: "toggle" | "previous" | "next"): Promise<unknown> {
+  return invokeLyrics(CORE_LYRICS_CONTROL, { payload: { action } });
 }
 
 /** 把歌词文档转发给歌词窗（行数组来自官方 `parseLrc` 的适配层）。 */

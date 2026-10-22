@@ -153,7 +153,7 @@ test("禁止 <style> 与内联视觉样式：内联 style 只允许几何契约�
         `${relative} 的内联 style 只能是几何契约（高度=共享常量）或 AMLL 的 100% 尺寸：${match[0]}`,
       );
     }
-    assert.doesNotMatch(source, /\bstyle=\{(?!\{)/, `${relative} 不得内联 style={表达式}（视觉一律走工具类）`);
+    assert.doesNotMatch(source, /(?:^|\s)style=\{(?!\{)/, `${relative} 不得内联 style={表达式}（视觉一律走工具类）`);
   }
 
   // 例外只有两处（旧仓同款）：一处给背景、一处给歌词组件，多一处就是规则被悄悄放宽

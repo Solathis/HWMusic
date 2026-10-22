@@ -117,11 +117,12 @@ test("组合原语：每个界面文件都从 components/ui 引入 shadcn 原语
       `${relative} 必须组合 components/ui 下的 shadcn 原语（不许拿 div 拼视觉组件）`,
     );
   }
-  // AMLL 宿主的视觉来自官方包：它们不许组合 shadcn（也不许自绘），但要真的在挂官方组件
+  // 歌词始终来自官方包；桌面控制与 surface 允许组合 shadcn。
   for (const relative of AMLL_HOSTS) {
     const source = read(relative);
     assert.match(source, /@applemusic-like-lyrics\/react/, `${relative} 必须用 AMLL 官方组件`);
-    assert.doesNotMatch(source, /components\/ui\//, `${relative} 不掺 shadcn 原语（视觉全交官方组件）`);
+    if (relative === "src/renderer/LyricsWindow.tsx") assert.match(source, /components\/ui\//, "桌面控件/surface 使用 shadcn，歌词仍由 AMLL 渲染");
+    else assert.doesNotMatch(source, /components\/ui\//, `${relative} 不掺 shadcn 原语（视觉全交官方组件）`);
   }
 });
 

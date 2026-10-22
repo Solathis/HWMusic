@@ -1,27 +1,6 @@
-//! 桌面歌词窗与任务栏歌词降级（R12）。
-//!
-//! 这个模块只有三件事，件件都刻意做成"可单测的形状"：
-//!
-//! 1. **几何是纯函数**（[`taskbar_position`] / [`desktop_position`]）：贴 `work_area` 下沿、
-//!    水平居中、偏移负值钳 0、桌面模式再上抬一段并夹回工作区顶部。窗口坐标这种东西，
-//!    靠"跑起来看一眼"是验不完的（多显示器、小屏、副屏在主屏左边时坐标是负的），
-//!    所以判定全在纯函数里，由内联单测覆盖矩阵。
-//! 2. **配置是纯函数 + 会话内状态**（[`LyricsConfig`]）：字号档位、颜色令牌、模式、锁定、点透。
-//!    认不出的值一律不猜（落回上一个合法值）；任务栏模式的有效字号 ≤ 20px。
-//!    **持久化不做**（简报裁决）：配置只活在 [`LyricsWindowState`] 里，下次启动回默认——
-//!    设置项旁边如实写着这件事（`LYRICS_SESSION_NOTICE`）。
-//! 3. **命令只在主窗侧**（四个 `core_lyrics_*`）：歌词窗自己**只订阅事件、不调命令**
-//!    （`core_call` 的来源守卫本来就把它挡在外面）。建窗**只在 async 命令里做**：
-//!    `WebviewWindowBuilder::build` 内部要走一趟主线程往返，同步命令自己就站在主线程上，
-//!    等那一趟 = 死锁（旧仓结论）。
-//!
-//! 任务栏歌词是**降级实现**：三端都没有"往任务栏里写文字"的公开 API，所以本模块只做
-//! "独立透明窗 + 贴 work_area 下沿"。**绝不注入系统进程、不装系统钩子、不做 shell 扩展**
-//! ——`test/lyrics-window.test.mjs` 有一条全源码扫描把这件事钉死（那类 API 名字 0 命中）。
-//!
-//! 与托盘的关系：勾选态由托盘自己镜像并翻转（R11），所以**窗命令失败时"把勾选翻回"也只能
-//! 由托盘做**（[`crate::tray::revert_lyrics_checked`]）。这里不建"勾选态 ↔ 窗存在性"的第二条
-//! 同步链——那两条链迟早会给出两个不同的答案。
+//! 桌面歌词的运行配置与 revision 由 Rust 原子持有，主窗代理 settings 持久化。
+//! 配置/媒体专命令限 main/lyrics；开关、文档、进度与 core_call 仍限主窗。
+//! 几何只随 mode/layout 变化；任务栏模式暂保留独立贴边窗口，后续附着独立实现。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -75,7 +54,7 @@ pub const TASKBAR_SIZE: Size = Size {
 /// 桌面模式的窗口尺寸：比任务栏那条高一点，让上下行各露一部分（AMLL 自己排版）。
 pub const DESKTOP_SIZE: Size = Size {
     width: 960.0,
-    height: 120.0,
+    height: 160.0,
 };
 
 /// 桌面模式在任务栏位置之上再抬多少（正好让开任务栏那一条）。
@@ -169,184 +148,175 @@ pub const DEFAULT_LYRICS_SIZE: &str = "lg";
 /// 默认颜色令牌。
 pub const DEFAULT_LYRICS_COLOR: &str = "foreground";
 
-/// 歌词窗配置（会话内）。
+pub const LYRICS_LAYOUTS: &[&str] = &["horizontal", "vertical"];
+pub const LYRICS_STYLES: &[&str] = &["clean", "panel"];
+pub const LYRICS_CONTROL_ACTIONS: &[&str] = &["toggle", "previous", "next"];
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LyricsConfig {
     pub mode: LyricsMode,
-    /// 用户选的档位 id（**不是**生效值：任务栏模式下经 [`LyricsConfig::effective_size`] 压到 ≤20px，
-    /// 切回桌面模式时用户的选择还在）。
+    pub layout: String,
+    pub style: String,
     pub size: String,
     pub color: String,
     pub locked: bool,
     pub click_through: bool,
+    pub enable_blur: bool,
+    pub enable_scale: bool,
+    pub enable_spring: bool,
+    pub show_controls: bool,
 }
 
 impl Default for LyricsConfig {
     fn default() -> Self {
         Self {
             mode: LyricsMode::Desktop,
+            layout: "horizontal".into(),
+            style: "clean".into(),
             size: DEFAULT_LYRICS_SIZE.to_string(),
             color: DEFAULT_LYRICS_COLOR.to_string(),
             locked: false,
             click_through: false,
+            enable_blur: true,
+            enable_scale: true,
+            enable_spring: true,
+            show_controls: true,
         }
     }
 }
 
 impl LyricsConfig {
-    /// 生效的字号档位：任务栏模式压到 ≤ [`TASKBAR_MAX_FONT_PX`] 的最大档位；其余模式原样。
     pub fn effective_size(&self) -> &str {
         if self.mode != LyricsMode::Taskbar {
             return self.size.as_str();
         }
         let chosen = LYRICS_FONT_STEPS.iter().find(|(id, _)| *id == self.size);
         if let Some((id, px)) = chosen {
-            if *px <= TASKBAR_MAX_FONT_PX {
-                return id;
-            }
+            if *px <= TASKBAR_MAX_FONT_PX { return id; }
         }
-        LYRICS_FONT_STEPS
-            .iter()
-            .filter(|(_, px)| *px <= TASKBAR_MAX_FONT_PX)
-            .next_back()
-            .map(|(id, _)| *id)
-            .unwrap_or(DEFAULT_LYRICS_SIZE)
+        LYRICS_FONT_STEPS.iter().filter(|(_, px)| *px <= TASKBAR_MAX_FONT_PX)
+            .next_back().map(|(id, _)| *id).unwrap_or(DEFAULT_LYRICS_SIZE)
     }
 
-    /// 配置补丁（纯函数）：**认不出的值一律不猜**，落回当前值。
-    ///
-    /// 与渲染层 `normalizeLyricsConfig` 是同一条语义（两侧各有一份实现，测试钉住词表与上限）。
-    /// 空补丁 = 原样返回（设置页挂载时用它读回当前配置，不该有任何副作用）。
     pub fn apply_patch(&self, patch: &Value) -> LyricsConfig {
-        let Some(patch) = patch.as_object() else {
-            return self.clone();
-        };
-        let mode = patch
-            .get("mode")
-            .and_then(Value::as_str)
-            .and_then(LyricsMode::parse)
-            .unwrap_or(self.mode);
-        let size = patch
-            .get("size")
-            .and_then(Value::as_str)
-            .filter(|raw| LYRICS_FONT_STEPS.iter().any(|(id, _)| id == raw))
-            .map(str::to_string)
-            .unwrap_or_else(|| self.size.clone());
-        let color = patch
-            .get("color")
-            .and_then(Value::as_str)
-            .filter(|raw| LYRICS_COLOR_TOKENS.contains(raw))
-            .map(str::to_string)
-            .unwrap_or_else(|| self.color.clone());
-        let locked = patch
-            .get("locked")
-            .and_then(Value::as_bool)
-            .unwrap_or(self.locked);
-        let click_through = patch
-            .get("clickThrough")
-            .and_then(Value::as_bool)
-            .unwrap_or(self.click_through);
-        LyricsConfig {
-            mode,
-            size,
-            color,
-            locked,
-            click_through,
+        let Some(patch) = patch.as_object() else { return self.clone(); };
+        let mut next = self.clone();
+        if let Some(mode) = patch.get("mode").and_then(Value::as_str).and_then(LyricsMode::parse) { next.mode = mode; }
+        for (key, target, allowed) in [
+            ("layout", &mut next.layout, LYRICS_LAYOUTS),
+            ("style", &mut next.style, LYRICS_STYLES),
+            ("color", &mut next.color, LYRICS_COLOR_TOKENS),
+        ] {
+            if let Some(value) = patch.get(key).and_then(Value::as_str).filter(|v| allowed.contains(v)) { *target = value.into(); }
         }
+        if let Some(value) = patch.get("size").and_then(Value::as_str).filter(|v| LYRICS_FONT_STEPS.iter().any(|(id, _)| id == v)) { next.size = value.into(); }
+        for (key, target) in [
+            ("locked", &mut next.locked), ("clickThrough", &mut next.click_through),
+            ("enableBlur", &mut next.enable_blur), ("enableScale", &mut next.enable_scale),
+            ("enableSpring", &mut next.enable_spring), ("showControls", &mut next.show_controls),
+        ] { if let Some(value) = patch.get(key).and_then(Value::as_bool) { *target = value; } }
+        next
     }
 
-    /// 广播/回执里的配置形状（`{mode, size, color, locked, clickThrough, effectiveSize}`）。
     pub fn payload(&self) -> Value {
         json!({
-            "mode": self.mode.as_str(),
-            "size": self.size,
-            "color": self.color,
-            "locked": self.locked,
-            "clickThrough": self.click_through,
-            "effectiveSize": self.effective_size(),
+            "mode": self.mode.as_str(), "layout": self.layout, "style": self.style,
+            "size": self.size, "color": self.color, "locked": self.locked,
+            "clickThrough": self.click_through, "enableBlur": self.enable_blur,
+            "enableScale": self.enable_scale, "enableSpring": self.enable_spring,
+            "showControls": self.show_controls, "effectiveSize": self.effective_size(),
         })
     }
 
-    /// 建窗用的查询串：渲染层的**初值**。
-    ///
-    /// 为什么不"建完再发一条广播"：渲染层订阅事件是异步的，建窗那一刻它可能还没 `listen`——
-    /// 事件发进空气，歌词窗会用默认档位显示，而用户明明选过。查询串是同步到位的。
     pub fn query(&self) -> String {
         format!(
-            "mode={}&size={}&color={}&locked={}&clickThrough={}",
-            self.mode.as_str(),
-            self.effective_size(),
-            self.color,
-            if self.locked { 1 } else { 0 },
-            if self.click_through { 1 } else { 0 }
+            "mode={}&size={}&color={}&locked={}&clickThrough={}&layout={}&style={}&enableBlur={}&enableScale={}&enableSpring={}&showControls={}",
+            self.mode.as_str(), self.size, self.color, u8::from(self.locked), u8::from(self.click_through),
+            self.layout, self.style, u8::from(self.enable_blur), u8::from(self.enable_scale),
+            u8::from(self.enable_spring), u8::from(self.show_controls),
         )
     }
 }
 
-/// 点透：用户显式开了就点透；**任务栏模式一律点透**（贴边的一条显示带不该抢底下窗口的点击）。
 pub fn click_through_enabled(config: &LyricsConfig) -> bool {
     config.click_through || config.mode == LyricsMode::Taskbar
 }
 
-/// 状态回执（`{config, visible}`）：每条命令都回整个状态，免得调用方拿半份状态去猜另一半。
-pub fn status_payload(config: &LyricsConfig, visible: bool) -> Value {
-    json!({ "config": config.payload(), "visible": visible })
+pub fn status_payload(config: &LyricsConfig, visible: bool, revision: u64) -> Value {
+    json!({ "config": config.payload(), "visible": visible, "revision": revision })
 }
 
-/// 歌词窗的**会话内**状态：配置 + 最后一份发出去的歌词文档（唯一真源；持久化不做，见模块头）。
-///
-/// 登记成托管状态（`lib.rs` 的 setup）：主窗的设置页读它、四条命令改它。
-/// 直接用 `Mutex` 而不是 `RwLock`：读也只是一次 clone，省一种锁的心智负担。
-///
-/// 为什么还要留一份**最后文档**（R41a）：歌词窗每显示一次都会重新加载页面（[`apply_toggle`]），
-/// 而"主窗推文档"与"新页面订阅事件"是两条不同步的异步链——主窗推得再快也在新页 `listen()`
-/// 之前。缓存 + 加载完成时重发（[`replay_document`]）把这条链的**顺序**钉在唯一知道
-/// "页面什么时候就绪"的那一侧（webview 的加载回调），而不是靠"希望它已经订阅了"。
+#[derive(Default, Clone)]
+pub struct LyricsSnapshot {
+    config: LyricsConfig,
+    revision: u64,
+}
+
 #[derive(Default)]
 pub struct LyricsWindowState {
-    config: Mutex<LyricsConfig>,
+    config: Mutex<LyricsSnapshot>,
     document: Mutex<Option<Value>>,
+    operations: tauri::async_runtime::Mutex<()>,
 }
 
 impl LyricsWindowState {
-    pub fn config(&self) -> LyricsConfig {
-        lock(&self.config).clone()
+    pub fn snapshot(&self) -> LyricsSnapshot { lock(&self.config).clone() }
+    pub fn config(&self) -> LyricsConfig { self.snapshot().config }
+
+    fn configure(&self, patch: &Value, restore: bool) -> (LyricsConfig, LyricsSnapshot, bool) {
+        let mut state = lock(&self.config);
+        let current = state.config.clone();
+        if restore && state.revision != 0 { return (current, state.clone(), false); }
+        let next = current.apply_patch(patch);
+        let changed = next != current || restore;
+        if changed { state.config = next; state.revision += 1; }
+        (current, state.clone(), changed)
     }
 
-    fn store(&self, config: LyricsConfig) {
-        *lock(&self.config) = config;
-    }
-
-    /// 最后一份**真的发出去过**的歌词文档（`None` = 这次会话还没有歌词可重发）。
-    pub fn document(&self) -> Option<Value> {
-        lock(&self.document).clone()
-    }
-
-    fn store_document(&self, document: Value) {
-        *lock(&self.document) = Some(document);
-    }
+    pub fn document(&self) -> Option<Value> { lock(&self.document).clone() }
+    fn store_document(&self, document: Value) { *lock(&self.document) = Some(document); }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// 当前配置：托管状态没登记（理论上不会发生）时用默认值——命令里绝不 panic。
-fn config_of<R: Runtime>(app: &AppHandle<R>) -> LyricsConfig {
-    match app.try_state::<LyricsWindowState>() {
-        Some(state) => state.config(),
-        None => {
-            log::warn!("歌词窗配置状态未登记：本次按默认配置处理");
-            LyricsConfig::default()
-        }
-    }
+pub fn require_lyrics_source(label: &str) -> Result<(), CoreError> {
+    if [MAIN_WINDOW_LABEL, LYRICS_WINDOW_LABEL].contains(&label) { return Ok(()); }
+    Err(CoreError::new("forbidden_source", "歌词配置与媒体控制仅接受主窗或歌词窗调用"))
 }
 
-fn store_config<R: Runtime>(app: &AppHandle<R>, config: LyricsConfig) {
-    match app.try_state::<LyricsWindowState>() {
-        Some(state) => state.store(config),
-        None => log::warn!("歌词窗配置状态未登记：配置只在这一次里生效"),
+pub fn validate_configure(label: &str, patch: &Value, restore: Option<bool>) -> Result<(), CoreError> {
+    require_lyrics_source(label)?;
+    if label != MAIN_WINDOW_LABEL && restore.is_some() {
+        return Err(CoreError::new("forbidden_source", "仅主窗可以恢复歌词配置"));
     }
+    let Some(object) = patch.as_object() else { return Err(CoreError::new("invalid_payload", "歌词配置必须是对象")); };
+    for (key, value) in object {
+        let valid = match key.as_str() {
+            "mode" => value.as_str().and_then(LyricsMode::parse).is_some(),
+            "layout" => value.as_str().is_some_and(|v| LYRICS_LAYOUTS.contains(&v)),
+            "style" => value.as_str().is_some_and(|v| LYRICS_STYLES.contains(&v)),
+            "color" => value.as_str().is_some_and(|v| LYRICS_COLOR_TOKENS.contains(&v)),
+            "size" => value.as_str().is_some_and(|v| LYRICS_FONT_STEPS.iter().any(|(id, _)| *id == v)),
+            "locked" | "clickThrough" | "enableBlur" | "enableScale" | "enableSpring" | "showControls" => value.is_boolean(),
+            _ => false,
+        };
+        if !valid { return Err(CoreError::new("invalid_payload", "歌词配置含未知字段或非法值")); }
+    }
+    Ok(())
+}
+
+pub fn control_payload(label: &str, payload: &Value) -> Result<Value, CoreError> {
+    require_lyrics_source(label)?;
+    if let Some(object) = payload.as_object() {
+        if object.len() == 1 {
+            if let Some(action) = object.get("action").and_then(Value::as_str).filter(|v| LYRICS_CONTROL_ACTIONS.contains(v)) {
+                return Ok(json!({"command": action}));
+            }
+        }
+    }
+    Err(CoreError::new("invalid_payload", "歌词媒体控制仅接受 {action: toggle|previous|next}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -447,16 +417,12 @@ pub fn is_open<R: Runtime>(app: &AppHandle<R>) -> bool {
     }
 }
 
-/// 取窗口该摆放的工作区：**优先主窗所在显示器**，取不到退主屏。
-///
-/// 为什么优先主窗所在的那块屏：桌面歌词是"给正在用主窗的人看的"——摆到另一块屏上，
-/// 用户会以为它没开。两者都取不到才如实报错（由调用方降级成"留在默认位置"，绝不猜一个坐标）。
-fn work_area<R: Runtime>(app: &AppHandle<R>) -> Result<Rect, CoreError> {
-    let monitor = app
-        .get_webview_window(MAIN_WINDOW_LABEL)
-        .and_then(|main| main.current_monitor().ok().flatten())
+fn work_area<R: Runtime>(app: &AppHandle<R>, preserve_position: bool) -> Result<Rect, CoreError> {
+    let current = preserve_position.then(|| app.get_webview_window(LYRICS_WINDOW_LABEL)
+        .and_then(|window| window.current_monitor().ok().flatten())).flatten();
+    let monitor = current.or_else(|| app.get_webview_window(MAIN_WINDOW_LABEL)
+        .and_then(|main| main.current_monitor().ok().flatten()))
         .or_else(|| app.primary_monitor().ok().flatten())
-        .or_else(|| app.get_webview_window(LYRICS_WINDOW_LABEL).and_then(|w| w.current_monitor().ok().flatten()))
         .ok_or_else(|| CoreError::new("internal", "取不到显示器的工作区：歌词窗按默认位置显示"))?;
 
     let area = monitor.work_area();
@@ -540,37 +506,48 @@ fn build_lyrics_window<R: Runtime>(
         .map_err(|source| CoreError::new("internal", format!("歌词窗建不起来：{source}")))
 }
 
-/// 把配置落到窗口上：尺寸、位置、点透。
-///
-/// 失败只记日志不上报：**配置（字号/颜色）与窗存在性是两件事**——摆不到理想位置时，
-/// 用户至少还能看到歌词（"因为摆不下所以什么都不显示"是更差的降级）。
-fn apply_config<R: Runtime>(
-    app: &AppHandle<R>,
-    window: &WebviewWindow<R>,
-    config: &LyricsConfig,
-) -> Result<(), CoreError> {
-    let area = work_area(app)?;
-    let size = window_size(area, config.mode);
-    let point = position_for(area, config.mode, size);
+#[derive(Debug, PartialEq)]
+pub enum WindowEffect {
+    Geometry(Size, Point),
+    ClickThrough(bool),
+}
 
-    window
-        .set_size(PhysicalSize::new(
-            size.width.round().max(1.0) as u32,
-            size.height.round().max(1.0) as u32,
-        ))
-        .map_err(|source| CoreError::new("internal", format!("歌词窗尺寸设置失败：{source}")))?;
-    window
-        .set_position(PhysicalPosition::new(
-            point.x.round() as i32,
-            point.y.round() as i32,
-        ))
-        .map_err(|source| CoreError::new("internal", format!("歌词窗位置设置失败：{source}")))?;
-    // 点透：任务栏模式一律点透（见 click_through_enabled）。失败不是致命的——
-    // 最坏情况是"点得着它"，比"窗口不见了"轻。
-    if let Err(source) = window.set_ignore_cursor_events(click_through_enabled(config)) {
-        log::warn!("歌词窗点透设置失败（{source}）：这一条可能挡住鼠标点击");
+pub fn geometry_plan(area: Rect, config: &LyricsConfig, scale: f64, current: Option<Point>) -> (Size, Point) {
+    let wanted = if config.mode == LyricsMode::Taskbar { TASKBAR_SIZE }
+        else if config.layout == "vertical" { Size { width: 320.0, height: 620.0 } }
+        else { DESKTOP_SIZE };
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    let size = Size { width: (wanted.width * scale).min(area.width).max(1.0), height: (wanted.height * scale).min(area.height).max(1.0) };
+    let point = if config.mode == LyricsMode::Desktop { current.unwrap_or_else(|| desktop_position(area, size)) }
+        else { taskbar_position(area, size) };
+    (size, Point { x: point.x.clamp(area.x, area.x + (area.width - size.width).max(0.0)),
+        y: point.y.clamp(area.y, area.y + (area.height - size.height).max(0.0)) })
+}
+
+pub fn apply_window_effects(previous: Option<&LyricsConfig>, config: &LyricsConfig, area: Rect, scale: f64, current: Option<Point>, mut apply: impl FnMut(WindowEffect)) {
+    if previous.is_none_or(|old| old.mode != config.mode || old.layout != config.layout) {
+        let (size, point) = geometry_plan(area, config, scale, current);
+        apply(WindowEffect::Geometry(size, point));
     }
-    Ok(())
+    if previous.is_none_or(|old| click_through_enabled(old) != click_through_enabled(config)) {
+        apply(WindowEffect::ClickThrough(click_through_enabled(config)));
+    }
+}
+
+fn apply_config<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<R>, previous: Option<&LyricsConfig>, config: &LyricsConfig) -> Result<(), CoreError> {
+    let geometry = previous.is_none_or(|old| old.mode != config.mode || old.layout != config.layout);
+    let area = if geometry { work_area(app, previous.is_some() && config.mode == LyricsMode::Desktop)? } else { Rect { x:0.0, y:0.0, width:1.0, height:1.0 } };
+    let current = window.outer_position().ok().map(|p| Point {x: p.x.into(), y: p.y.into()});
+    let mut result = Ok(());
+    apply_window_effects(previous, config, area, window.scale_factor().unwrap_or(1.0), if previous.is_some() { current } else { None }, |effect| {
+        let applied = match effect {
+            WindowEffect::Geometry(size, point) => window.set_size(PhysicalSize::new(size.width.round() as u32, size.height.round() as u32))
+                .and_then(|_| window.set_position(PhysicalPosition::new(point.x.round() as i32, point.y.round() as i32))),
+            WindowEffect::ClickThrough(through) => window.set_ignore_cursor_events(through),
+        };
+        if let Err(source) = applied { result = Err(CoreError::new("internal", format!("歌词窗属性更新失败：{source}"))); }
+    });
+    result
 }
 
 /// 开关落地：开 = 建（没有就建）/摆好/**重新加载**/显示；关 = **隐藏**（不销毁，webview 与进度都留着）。
@@ -631,7 +608,7 @@ fn apply_toggle<R: Runtime>(
         }
         None => {
             let window = build_lyrics_window(app, config)?;
-            if let Err(error) = apply_config(app, &window, config) {
+            if let Err(error) = apply_config(app, &window, None, config) {
                 log::warn!("歌词窗没能摆到目标位置（按默认位置显示）：{error}");
             }
             window
@@ -666,7 +643,7 @@ pub fn toggle_failure_plan(requested_open: bool, window_visible: bool, reason: &
 }
 
 // ---------------------------------------------------------------------------
-// 命令面（四条，全部 async + 全部过主窗来源守卫）
+// 命令面（主窗数据转发与 main/lyrics 窄配置/媒体）
 // ---------------------------------------------------------------------------
 
 /// 开/关桌面歌词窗。`checked` 是**目标态**（托盘的 `lyrics:toggle` 给的就是它，不做"切换一下"）。
@@ -678,16 +655,16 @@ pub async fn core_lyrics_toggle(
 ) -> Result<Value, CoreError> {
     require_main_webview(webview.label())?;
 
-    let config = config_of(&app);
-    match apply_toggle(&app, &config, checked) {
+    let state = app.state::<LyricsWindowState>();
+    let _operation = state.operations.lock().await;
+    let snapshot = state.snapshot();
+    match apply_toggle(&app, &snapshot.config, checked) {
         Ok(visible) => {
-            // 窗回来时把配置再对齐一次（幂等）：会话内改过档位的窗口被藏起来再显示，
-            // 设置页与窗里的字号必须是同一个。
-            emit_core_event(&app, LYRICS_STATE, status_payload(&config, visible));
-            Ok(status_payload(&config, visible))
+            let payload = status_payload(&snapshot.config, visible, snapshot.revision);
+            emit_core_event(&app, LYRICS_STATE, payload.clone());
+            Ok(payload)
         }
         Err(error) => {
-            // 失败收口：勾选翻回实际状态 + 一条给用户看的提示（托盘的勾选只有托盘能改）
             let plan = toggle_failure_plan(checked, is_open(&app), &error.message);
             crate::tray::revert_lyrics_checked(&app, plan.tray_checked);
             emit_core_event(&app, APP_NOTICE, json!({ "text": plan.notice }));
@@ -696,35 +673,34 @@ pub async fn core_lyrics_toggle(
     }
 }
 
-/// 改配置（字号/颜色/模式/锁定/点透）。
-///
-/// **空补丁 = 读回当前配置**：设置页挂载时用它（所以不需要第五条"读配置"命令），
-/// 而且空补丁不广播、不动窗口——读操作不该有副作用。
 #[tauri::command]
 pub async fn core_lyrics_configure(
     app: AppHandle,
     webview: tauri::Webview,
-    config: Option<Value>,
+    config: Value,
+    restore_if_pristine: Option<bool>,
 ) -> Result<Value, CoreError> {
-    require_main_webview(webview.label())?;
-
-    let current = config_of(&app);
-    let next = current.apply_patch(&config.unwrap_or(Value::Null));
-    if next != current {
-        store_config(&app, next.clone());
+    validate_configure(webview.label(), &config, restore_if_pristine)?;
+    let state = app.state::<LyricsWindowState>();
+    let _operation = state.operations.lock().await;
+    let (previous, snapshot, changed) = state.configure(&config, restore_if_pristine == Some(true));
+    if changed {
         if let Some(window) = app.get_webview_window(LYRICS_WINDOW_LABEL) {
-            // 只有**几何或点透**真的变了才重摆：换字号/颜色不该把用户拖到的位置拽回来
-            let moved = next.mode != current.mode;
-            let clicks = click_through_enabled(&next) != click_through_enabled(&current);
-            if moved || clicks {
-                if let Err(error) = apply_config(&app, &window, &next) {
-                    log::warn!("歌词窗配置已更新，但没能重新摆位（{error}）");
-                }
+            if let Err(error) = apply_config(&app, &window, Some(&previous), &snapshot.config) {
+                log::warn!("歌词窗配置已更新，但窗口属性未完全应用（{error}）");
             }
         }
-        emit_core_event(&app, LYRICS_STATE, status_payload(&next, is_open(&app)));
     }
-    Ok(status_payload(&next, is_open(&app)))
+    let payload = status_payload(&snapshot.config, is_open(&app), snapshot.revision);
+    if changed { emit_core_event(&app, LYRICS_STATE, payload.clone()); }
+    Ok(payload)
+}
+
+#[tauri::command]
+pub async fn core_lyrics_control(app: AppHandle, webview: tauri::Webview, payload: Value) -> Result<Value, CoreError> {
+    let command = control_payload(webview.label(), &payload)?;
+    emit_core_event(&app, crate::bridge::PLAYER_COMMAND, command);
+    Ok(Value::Null)
 }
 
 /// 把歌词文档转发给歌词窗（歌词窗没有业务频道权限，数据只能由主窗转发）。
@@ -794,6 +770,86 @@ pub async fn core_lyrics_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r44c_pristine_restore_and_atomic_revision_reject_stale_disk() {
+        let state = LyricsWindowState::default();
+        let (_, restored, changed) = state.configure(&json!({"layout":"vertical", "style":"panel"}), true);
+        assert!(changed);
+        assert_eq!(restored.revision, 1);
+        assert_eq!(restored.config.payload()["layout"], "vertical");
+        let (_, next, _) = state.configure(&json!({"locked":true}), false);
+        assert_eq!(next.revision, 2);
+        let (_, reread, changed) = state.configure(&json!({"layout":"horizontal"}), true);
+        assert!(!changed);
+        assert_eq!(reread.revision, 2);
+        assert_eq!(reread.config.payload()["layout"], "vertical");
+        assert_eq!(state.configure(&json!({}), false).1.revision, 2);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..20).map(|i| { let state = &state; scope.spawn(move || {
+                let (_, snapshot, changed) = state.configure(&json!({"size": if i % 2 == 0 {"sm"} else {"xl"}}), false);
+                changed.then_some(snapshot.revision)
+            }) }).collect();
+            let mut revisions: Vec<_> = handles.into_iter().filter_map(|handle| handle.join().unwrap()).collect();
+            revisions.sort_unstable();
+            assert_eq!(revisions, (3..3 + revisions.len() as u64).collect::<Vec<_>>());
+        });
+        let snap = state.snapshot();
+        assert!(snap.revision >= 3);
+        assert_eq!(status_payload(&snap.config, true, snap.revision)["revision"], snap.revision);
+    }
+
+    #[test]
+    fn r44c_sources_and_strict_narrow_payloads_never_open_core_or_login() {
+        for source in ["main", "lyrics"] {
+            assert!(require_lyrics_source(source).is_ok());
+            for action in ["toggle", "previous", "next"] {
+                assert_eq!(control_payload(source, &json!({"action": action})).unwrap(), json!({"command":action}));
+            }
+            for bad in [json!({"action":"play"}), json!({"action":"next","url":"bad"}), json!("next"), json!({})] {
+                assert!(control_payload(source, &bad).is_err());
+            }
+            assert!(validate_configure(source, &json!({"locked":true}), None).is_ok());
+            assert!(validate_configure(source, &json!({"document":[]}), None).is_err());
+            assert!(validate_configure(source, &json!({"enableBlur":"yes"}), None).is_err());
+        }
+        for source in ["login", "login-theme", "login-return", "tray", ""] {
+            assert!(control_payload(source, &json!({"action":"next"})).is_err());
+            assert!(validate_configure(source, &json!({}), None).is_err());
+        }
+        assert!(validate_configure("lyrics", &json!({}), Some(false)).is_err());
+        assert!(validate_configure("main", &json!({}), Some(true)).is_ok());
+        assert!(require_main_webview("lyrics").is_err());
+        assert!(crate::commands::require_login_chrome_source("lyrics").is_err());
+    }
+
+    #[test]
+    fn r44c_visual_changes_never_emit_geometry_but_layout_is_scaled_and_clamped() {
+        let current = LyricsConfig::default();
+        let area = Rect { x: -1920.0, y: -200.0, width: 1920.0, height: 1040.0 };
+        let mut effects = Vec::new();
+        let visual = current.apply_patch(&json!({"locked":true,"color":"primary","clickThrough":true,"style":"panel","enableBlur":false,"enableScale":false,"enableSpring":false}));
+        apply_window_effects(Some(&current), &visual, area, 1.25, Some(Point {x:-800.0,y:150.0}), |effect| effects.push(effect));
+        assert_eq!(effects, vec![WindowEffect::ClickThrough(true)]);
+        effects.clear();
+        let vertical = visual.apply_patch(&json!({"layout":"vertical"}));
+        apply_window_effects(Some(&visual), &vertical, area, 1.25, Some(Point {x:-200.0,y:700.0}), |effect| effects.push(effect));
+        assert_eq!(effects[0], WindowEffect::Geometry(Size {width:400.0,height:775.0}, Point {x:-400.0,y:65.0}));
+        let taskbar = vertical.apply_patch(&json!({"mode":"taskbar"}));
+        let (size, _) = geometry_plan(area, &taskbar, 1.0, None);
+        assert_eq!(size, TASKBAR_SIZE);
+        for area in [Rect{x:-1280.0,y:-100.0,width:1280.0,height:760.0}, Rect{x:1920.0,y:0.0,width:200.0,height:200.0}] {
+            for layout in ["horizontal", "vertical"] {
+                for scale in [1.0, 1.5, 2.0] {
+                    let config = current.apply_patch(&json!({"layout": layout}));
+                    let (size, point) = geometry_plan(area, &config, scale, Some(Point{x:area.x+area.width-1.0,y:area.y-50.0}));
+                    assert!(point.x >= area.x && point.y >= area.y);
+                    assert!(point.x + size.width <= area.x + area.width);
+                    assert!(point.y + size.height <= area.y + area.height);
+                }
+            }
+        }
+    }
 
     fn area(x: f64, y: f64, width: f64, height: f64) -> Rect {
         Rect {
@@ -911,6 +967,7 @@ mod tests {
             color: "primary".to_string(),
             locked: true,
             click_through: true,
+            ..LyricsConfig::default()
         };
 
         // 空补丁 / 坏补丁 = 原样（设置页挂载时用它读回当前配置）
@@ -1009,11 +1066,12 @@ mod tests {
             color: "contrast".to_string(),
             locked: true,
             click_through: false,
+            ..LyricsConfig::default()
         };
         let url = lyrics_window_url(&config, crate::theme::ThemeChoice::Dark);
         assert!(url.starts_with("lyrics.html?"), "加载的是 R1 建好的那个入口：{url}");
         assert!(url.contains("mode=taskbar"), "{url}");
-        assert!(url.contains("size=md"), "查询串里带的是**生效**档位（任务栏 ≤20px）：{url}");
+        assert!(url.contains("size=xxl"), "查询串保留用户档位，渲染时再限有效字号：{url}");
         assert!(url.contains("color=contrast"), "{url}");
         assert!(url.contains("locked=1"), "布尔写成 0/1（渲染层只认这两个值）：{url}");
         assert!(url.contains("clickThrough=0"), "{url}");
@@ -1095,10 +1153,7 @@ mod tests {
         assert_eq!(state.document(), Some(json!({ "lines": [], "status": "unavailable" })));
 
         // 文档与配置各占一把锁：改配置不会把文档弄丢（两件事互不干扰）
-        state.store(LyricsConfig {
-            mode: LyricsMode::Taskbar,
-            ..LyricsConfig::default()
-        });
+        state.configure(&json!({"mode": "taskbar"}), false);
         assert_eq!(state.config().mode, LyricsMode::Taskbar);
         assert_eq!(state.document(), Some(json!({ "lines": [], "status": "unavailable" })));
     }
@@ -1193,16 +1248,12 @@ mod tests {
 
     #[test]
     fn status_payload_has_the_shape_the_renderer_projects() {
-        let payload = status_payload(&LyricsConfig::default(), true);
+        let payload = status_payload(&LyricsConfig::default(), true, 7);
         assert_eq!(payload["visible"], json!(true));
-        let config = payload["config"].as_object().expect("config 必须是对象");
-        let mut keys: Vec<&str> = config.keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        assert_eq!(
-            keys,
-            vec!["clickThrough", "color", "effectiveSize", "locked", "mode", "size"],
-            "形状是契约（渲染层的 lyricsStatusFromAnswer 按它投影）"
-        );
+        assert_eq!(payload["revision"], 7);
+        assert_eq!(payload["config"]["style"], "clean");
+        assert_eq!(payload["config"]["layout"], "horizontal");
+        assert_eq!(payload["config"]["enableBlur"], true);
     }
 
     #[test]
@@ -1279,32 +1330,20 @@ mod tests {
         assert!(production.contains("emit_core_event("));
     }
 
-    /// 四个命令都必须是 async 且过主窗来源守卫（同步建窗会死锁；守卫是权限收口）。
     #[test]
-    fn every_command_is_async_and_guarded_by_the_main_window() {
-        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs"))
-            .expect("要能读到自己的源码");
-        let production = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
-
-        for name in [
-            "core_lyrics_toggle",
-            "core_lyrics_configure",
-            "core_lyrics_document",
-            "core_lyrics_progress",
+    fn every_command_is_async_with_its_narrow_guard() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs")).unwrap();
+        let production = &source[..source.find("#[cfg(test)]").unwrap()];
+        for (name, guard) in [
+            ("core_lyrics_toggle", "require_main_webview("),
+            ("core_lyrics_document", "require_main_webview("),
+            ("core_lyrics_progress", "require_main_webview("),
+            ("core_lyrics_configure", "validate_configure("),
+            ("core_lyrics_control", "control_payload("),
         ] {
-            let start = production
-                .find(&format!("pub async fn {name}("))
-                .unwrap_or_else(|| panic!("{name} 必须是 async 命令"));
-            let body = &production[start..];
-            let guard = body
-                .find("require_main_webview(")
-                .unwrap_or_else(|| panic!("{name} 必须过主窗来源守卫"));
-            assert!(guard < 900, "{name} 的守卫要在最前面（守卫={guard}）");
+            let body = &production[production.find(&format!("pub async fn {name}(")).unwrap()..];
+            assert!(body.find(guard).unwrap() < 900);
         }
-        assert_eq!(
-            production.matches("#[tauri::command]").count(),
-            4,
-            "命令面恰好四条（多一条就是白名单悄悄放宽）"
-        );
+        assert_eq!(production.matches("#[tauri::command]").count(), 5);
     }
 }

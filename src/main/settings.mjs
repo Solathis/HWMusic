@@ -344,15 +344,20 @@ export function createSettingsStore({ dir = null, fs = nodeFs, log = defaultLog 
    *
    * @throws {SettingsStoreError} 没有数据目录 / 原文件认不出或读不了 / patch 不合法
    */
-  async function save(patch) {
-    if (!persistent) {
-      fail(CORE_ERROR_KINDS.internal, "没有数据目录：设置无法落盘（宿主必须把 --data-dir 交给 sidecar）");
-    }
-    const { document, blocked } = await load();
-    if (blocked !== null) fail(blocked.kind, blocked.message);
-    const next = mergeSettings(document, patch);
-    await writeDocument(next);
-    return next;
+  let writeTail = Promise.resolve();
+  function save(patch) {
+    const operation = writeTail.then(async () => {
+      if (!persistent) {
+        fail(CORE_ERROR_KINDS.internal, "没有数据目录：设置无法落盘（宿主必须把 --data-dir 交给 sidecar）");
+      }
+      const { document, blocked } = await load();
+      if (blocked !== null) fail(blocked.kind, blocked.message);
+      const next = mergeSettings(document, patch);
+      await writeDocument(next);
+      return next;
+    });
+    writeTail = operation.catch(() => {});
+    return operation;
   }
 
   /** 恢复默认：已知键回默认，未知键保留。 */
