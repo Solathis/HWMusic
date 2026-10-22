@@ -312,28 +312,33 @@ function coverUrlOf(item, isSafeUrl) {
  */
 const TRACK_DURATION_SECONDS_LIMIT = 24 * 3600;
 
-/**
- * `times` 的毫秒判别线：真机实测列表条目**没有 `duration` 键、时长在 `times` 上**（R42，
- * 原始键全表见 task-42-brief）。`times` 的单位没有文档，量级双解——值小于这条线按秒
- * （音乐曲目 30 秒～8.3 小时的秒区间），否则按毫秒除 1000（4 分钟曲目的毫秒值 240000
- * 落在秒区间外，两类取值无交集，量级即单位）。
- *
- * 盲区（如实登记）：超过 8.3 小时的"秒"值（超长串烧/有声书）会被当毫秒缩成几十秒——
- * 音乐场景罕见，宁可见占位符也不显示一个错得看不出来的时长。
- */
-const TIMES_MILLISECONDS_THRESHOLD = 30_000;
+function durationSeconds(value) {
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds > 0 && seconds < TRACK_DURATION_SECONDS_LIMIT ? seconds : null;
+}
 
-/**
- * 条目时长读数（秒）：`duration`（播放响应/既有契约）优先，回落 `times`（列表条目）。
- * 两条路都取不到或超出上限 → null（调用方不写 `duration` 字段，界面显示占位符）。
- */
+function standardResourceDuration(resource) {
+  if (!isObject(resource) || resource.quality !== MUSIC_QUALITY_TYPES.standard) return null;
+  const formats = [resource.format, resource.mediaFileType].filter((value) => value !== undefined && value !== null && value !== "");
+  if (formats.length === 0 || formats.some((value) => typeof value !== "string" || value.trim().toUpperCase() !== "MP3")) return null;
+  return durationSeconds(resource.duration);
+}
+
+/** 条目时长（秒）：顶层 duration 优先；再取 contentExInfo 的标准 MP3 资源，绝不读 times。 */
 export function durationOfEntry(item) {
-  const duration = numberOrNull(item.duration);
-  if (duration !== null && duration > 0 && duration < TRACK_DURATION_SECONDS_LIMIT) return duration;
-  const times = numberOrNull(item.times);
-  if (times === null || times <= 0) return null;
-  const seconds = times < TIMES_MILLISECONDS_THRESHOLD ? times : times / 1000;
-  return seconds > 0 && seconds < TRACK_DURATION_SECONDS_LIMIT ? seconds : null;
+  const duration = durationSeconds(item?.duration);
+  if (duration !== null) return duration;
+  const extra = contentExInfoOf(item);
+  const complete = extra?.completeFileInfos;
+  const resources = Array.isArray(complete) ? [...complete] : [complete?.[MUSIC_QUALITY_TYPES.standard]];
+  const files = extra?.fileInfos;
+  resources.push(...(Array.isArray(files) ? files : isObject(files) ? Object.values(files) : []));
+  for (const resource of resources) {
+    const seconds = standardResourceDuration(resource);
+    if (seconds !== null) return seconds;
+  }
+  return null;
 }
 
 /**
@@ -341,7 +346,7 @@ export function durationOfEntry(item) {
  *
  * 字段映射逐条来自参考的 `trackFrom`（`docs/API_CONTRACT.md` §5"曲目归一化"）：
  * `contentID → id`、`contentName → title/name`、`artistNamePairs|artistName → singer`、
- * `albumID/albumName → albumId/albumName`、`picture.* → coverUrl`、`duration|times → duration`。
+ * `albumID/albumName → albumId/albumName`、`picture.* → coverUrl`、顶层或标准 MP3 资源时长 → duration。
  *
  * **没有 id 的条目一律返回 null**（调用方如实丢弃并计数，绝不编一个 id——
  * 列表里出现删不掉的幽灵行比少一行糟得多）。

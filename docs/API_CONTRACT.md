@@ -1050,7 +1050,7 @@ nonce=…, created=…[, token=…]`，见 §1.5.1 ②）；`snsUserID`（收藏
 | 歌单发现**必须翻页** | 歌曲与歌单混在一个列表里，首页很可能整页都是歌。判停条件照参考：短页、**这一页没带来任何新条目**（`fresh === 0`，新条目含歌曲）、或触到保守上限（10 页 × 200 条）。触到上限 → `hasMore: true`（如实说"没扫完"） |
 | **`contentID` 等线上字段名** | 归一化成内部形状：`contentID→id`、`contentName→name`、`artistNamePairs/artistName→singer`、`albumID/albumName→albumId/albumName`、`picture.*→coverUrl`、`duration→duration`、`totalCount→count`、`contentType→kind`（4/5/7）。**渲染层一行都不用改**（它的读取兜底表认的就是 `id`/`name`/…） |
 | 无 ID 的条目 | 如实丢弃并计数（`skipped`），**绝不编 ID**（列表里出现删不掉的幽灵行比少一行糟得多） |
-| 时长单位 | 真接口的 `duration` 是**秒**（`auditionTime/Begin/End` 才是毫秒，两者不许混用）；取不到就显示"—"，不显示 `0:00` |
+| 时长单位与固定选源 | `durationOfEntry` 优先可信顶层 `duration` 秒数，再用 `contentExInfoOf` 解 JSON/对象：先 `completeFileInfos["1"]`（数组按显式 `resource.quality === "1"` 选），再回落 `fileInfos` 对象/数组中显式 `quality === "1"` 的资源；资源必须声明 MP3（`format`/`mediaFileType`，存在的格式字段均须相符）。仅收有限正数字/数字串且 `<86400` 秒，不按枚举首项选、不取 15/17 的 MKV 视频时长。2026-10-22 真机样本为 240/195/203 秒（第三首视频为 204 秒）；`times="32894214"` 且重复读取会变化，**绝不能作为时长**。所有列表共用归一化，不新增逐曲请求；无可信标准资源显示 "—" |
 | 自建歌单删除必须 `playlist/delete` | `favorite/delete` 对 type=5 曾返回 `000000` **但没有删掉歌单**——`deletePlaylist` 只打那一个端点，且测试断言"绝不走收藏端点" |
 
 **单页收藏读取**（`readFavoritesPage`，R8 的滚动加载走这条）应答
@@ -1259,7 +1259,7 @@ commands 或 `src-tauri/permissions` 非空时才写入 `__app-acl__`，`src/acl
 不写 JS、不引入第二套配色。两份令牌**逐条一致**由 `test/theme-tokens.test.mjs` 钉住
 （漏一条 = 暗色下有一处颜色留在亮色）。渲染层不得写 `dark` 类或存主题偏好（同文件扫描）。
 
-**关窗行为**：`settings:set` 的 `{patch:{closeBehavior}}`（枚举 `tray`/`quit`，§2.5 既有语义）。
+**关窗行为**：`settings:set` 的 `{patch:{closeBehavior}}`（有序枚举 `[tray,minimize,quit]`，默认 `tray`）。文案分别为「最小化到托盘」「最小化到任务栏」「退出应用」；`minimize` 保留任务栏按钮、后台继续播放，不依赖托盘。保存中禁用选择，成功按回执重建当前值，失败回滚。设置中的关窗/外观/歌词 Select 均使用官方 `SelectGroup` + `position="popper" align="start" sideOffset={4}`，不改生成原语或选中语义。
 R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_tray_available`；
 渲染层的 `TRAY_AVAILABLE = false` 退化成"宿主没答上来"时的兜底（方向保守，见 §2.8）。
 
@@ -1294,10 +1294,12 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 |---|---|---|---|
 | `core_get_tray_available` | 无 | `boolean` | 托盘是否**真的**可用（Rust 侧现问 tauri 的托盘表 `tray_by_id`，不维护第二份镜像）。过主窗来源守卫；渲染层用 `trayAvailabilityFromAnswer` **只认 `true`**，其余一律按"不可用"处理 |
 
-**关窗 fail-safe（本任务的核心）**：`decide_close(hide_on_close, tray_available)` —— 只有
-"设置里选了托盘" **且** "托盘真的装上"才 `prevent_close + hide`，否则放行（真退出）。
-反过来的后果是旧仓那类缺陷：托盘没装上却把窗口藏了，用户看到"窗口没了、托盘里也没有"，
-只能去任务管理器找进程。**退化方向刻意保守**。
+**关窗三态与 fail-safe**：`decide_close(behavior: CloseBehavior, tray_available)` 是唯一决策。
+`tray` 且托盘可用 → `prevent_close + hide`，托盘不可用仍保守退出；`minimize` 无论托盘是否可用 →
+`prevent_close + window.minimize()`，主窗显式 `skip_taskbar(false)`，不 hide/close/destroy。
+`quit` 拦住单窗关闭，在线程中经既有 `shutdown_core` 收 sidecar 后 `app.exit(0)` 退出整个应用，
+避免歌词/登录辅助窗让进程残留；RunEvent 的幂等收尾保留。最小化/隐藏/退出线程创建失败时保留应用、
+记录结论日志并恢复主窗，不静默退出。新原生行为需控制器统一重启后复验，来源守卫与 IPC 权限不变。
 
 **关窗行为从哪来（读盘这侧在 Rust）**：`close_behavior.rs` 读的是**同一份** `settings.json`
 （与 `webview_proxy` 共用文件名与 schemaVersion 闸门），分三档：
@@ -1543,7 +1545,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | 层级 | 口径 | 为什么 |
 |---|---|---|
 | **字段级宽容** | 代理的 `host`/`port` 不合法 → 归成「没填」 | 用户可能正在半填表单 |
-| **枚举级严格** | `closeBehavior` 不在枚举（`tray`/`quit`）里 → 直接报错 | 枚举值是代码写的，错了就是 bug |
+| **枚举级严格** | `closeBehavior` 不在枚举（`tray`/`minimize`/`quit`）里 → 直接报错 | 枚举值是代码写的，错了就是 bug |
 | **结构级严格** | `patch.proxy` 不是对象也不是 `null` → `invalid_payload` | 形状错了不该猜 |
 
 另：`patch` 里某个键给 `null` = **删除该键**（§2.6 的队列清理依赖这条语义）。

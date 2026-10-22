@@ -1,4 +1,4 @@
-//! 关窗行为（`tray` / `quit`）：`settings.json` 的读盘与启动恢复（R11）。
+//! 关窗行为（`tray` / `minimize` / `quit`）：`settings.json` 的读盘与启动恢复。
 //!
 //! 为什么读盘这侧在 Rust：关窗回调在 Rust 里（窗口是 Rust 建的），它要在**用户关窗的那一刻**
 //! 知道设置里选的是什么。写盘的是 core（设置页 → `settings:set` → `settings.json`），
@@ -22,49 +22,46 @@ use tauri::{AppHandle, Manager};
 
 use crate::webview_proxy::{SETTINGS_FILE_NAME, SETTINGS_SCHEMA_VERSION};
 
-/// 磁盘上的两个字面量（渲染层 `CLOSE_BEHAVIORS` / core `src/main/settings.mjs` 同源）。
+/// 磁盘字面量（渲染层 CLOSE_BEHAVIORS / core 同源）。
 pub const CLOSE_BEHAVIOR_TRAY: &str = "tray";
+pub const CLOSE_BEHAVIOR_MINIMIZE: &str = "minimize";
 pub const CLOSE_BEHAVIOR_QUIT: &str = "quit";
 
-/// 关窗行为（磁盘 `data.closeBehavior` 的两种取值）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseBehavior {
-    /// 关窗只藏窗口，应用继续在托盘里跑（需要托盘真的装上，见 `tray::decide_close`）
     Tray,
-    /// 关窗就是退出应用
+    Minimize,
     Quit,
 }
 
 impl CloseBehavior {
-    /// 磁盘字面量 → 枚举。**只认枚举里的两个字面量**，其余（大小写不同、空白、
-    /// 别的词、非字符串）一律 `None` —— 不猜、不 Trim、不忽略大小写。
+    /// 只认精确字面量，不 Trim、不忽略大小写。
     pub fn from_setting(raw: Option<&str>) -> Option<Self> {
         match raw {
             Some(CLOSE_BEHAVIOR_TRAY) => Some(CloseBehavior::Tray),
+            Some(CLOSE_BEHAVIOR_MINIMIZE) => Some(CloseBehavior::Minimize),
             Some(CLOSE_BEHAVIOR_QUIT) => Some(CloseBehavior::Quit),
             _ => None,
         }
     }
 
-    /// 枚举 → 磁盘字面量（与 `from_setting` 是一对，往返不失真）。
     pub fn setting(self) -> &'static str {
         match self {
             CloseBehavior::Tray => CLOSE_BEHAVIOR_TRAY,
+            CloseBehavior::Minimize => CLOSE_BEHAVIOR_MINIMIZE,
             CloseBehavior::Quit => CLOSE_BEHAVIOR_QUIT,
         }
     }
 
-    /// 关窗要不要藏起来（= 选的是托盘那一档）。
-    /// 注意它只说"用户选了什么"，**能不能藏**还得看托盘在不在（`tray::decide_close`）。
     pub fn hides_on_close(self) -> bool {
         matches!(self, CloseBehavior::Tray)
     }
 
-    /// 一行给人看的说法（日志与提示用）。
     pub fn describe(self) -> &'static str {
         match self {
-            CloseBehavior::Tray => "最小化到托盘（后台继续）",
-            CloseBehavior::Quit => "直接退出应用",
+            CloseBehavior::Tray => "最小化到托盘",
+            CloseBehavior::Minimize => "最小化到任务栏",
+            CloseBehavior::Quit => "退出应用",
         }
     }
 }
@@ -187,19 +184,39 @@ mod tests {
     /// 枚举 → 磁盘 → 枚举 往返不失真（两边各写一份字面量时，这条先红）。
     #[test]
     fn setting_and_from_setting_are_a_round_trip() {
-        for behavior in [CloseBehavior::Tray, CloseBehavior::Quit] {
+        for behavior in [CloseBehavior::Tray, CloseBehavior::Minimize, CloseBehavior::Quit] {
             assert_eq!(CloseBehavior::from_setting(Some(behavior.setting())), Some(behavior));
         }
         assert_eq!(CloseBehavior::Tray.setting(), "tray");
+        assert_eq!(CloseBehavior::Minimize.setting(), "minimize");
         assert_eq!(CloseBehavior::Quit.setting(), "quit");
-        // 与渲染层枚举逐条对齐（`CLOSE_BEHAVIORS = ["tray", "quit"]`，由 Node 侧测试钉住同源）
         assert_eq!(CLOSE_BEHAVIOR_TRAY, "tray");
+        assert_eq!(CLOSE_BEHAVIOR_MINIMIZE, "minimize");
         assert_eq!(CLOSE_BEHAVIOR_QUIT, "quit");
     }
 
-    /// 只认两个精确字面量：大小写、空白、别的词、非字符串都不猜。
     #[test]
-    fn only_the_two_exact_literals_are_recognized() {
+    fn minimize_round_trips_through_setting_document_disk_and_refresh() {
+        assert_eq!(CloseBehavior::from_setting(Some("minimize")).map(CloseBehavior::setting), Some("minimize"));
+        let raw = json!({ "schemaVersion": 1, "data": { "closeBehavior": "minimize" } }).to_string();
+        assert_eq!(parse_close_behavior(Some(&raw)).setting(), "minimize");
+        let dir = test_dir("minimize-round-trip");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("测试目录必须能建");
+        let state = CloseBehaviorState::restore(&dir);
+        write_behavior(&dir, "minimize");
+        assert_eq!(read_close_behavior(&dir).setting(), "minimize");
+        assert_eq!(state.refresh().setting(), "minimize");
+        assert_eq!(state.current().setting(), "minimize");
+        assert_eq!(CloseBehaviorState::restore(&dir).current().setting(), "minimize");
+        write_behavior(&dir, "MINIMIZE");
+        assert_eq!(state.refresh(), CloseBehavior::Quit);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 只认精确字面量：大小写、空白、别的词、非字符串都不猜。
+    #[test]
+    fn only_the_exact_literals_are_recognized() {
         assert_eq!(CloseBehavior::from_setting(Some("tray")), Some(CloseBehavior::Tray));
         assert_eq!(CloseBehavior::from_setting(Some("quit")), Some(CloseBehavior::Quit));
         for raw in [
@@ -208,7 +225,9 @@ mod tests {
             Some(" tray"),
             Some("tray "),
             Some(""),
-            Some("minimize"),
+            Some("MINIMIZE"),
+            Some(" minimize"),
+            Some("minimize "),
             Some("explode"),
             None,
         ] {
@@ -286,10 +305,9 @@ mod tests {
         }
     }
 
-    /// 好形状照读：`tray` 与 `quit` 都要认（只认 quit 等于托盘那档永远不生效）。
     #[test]
-    fn parse_close_behavior_reads_the_two_valid_documents() {
-        for (text, expected) in [("tray", CloseBehavior::Tray), ("quit", CloseBehavior::Quit)] {
+    fn parse_close_behavior_reads_all_three_valid_documents() {
+        for (text, expected) in [("tray", CloseBehavior::Tray), ("minimize", CloseBehavior::Minimize), ("quit", CloseBehavior::Quit)] {
             let raw = json!({ "schemaVersion": 1, "data": { "closeBehavior": text } }).to_string();
             assert_eq!(parse_close_behavior(Some(&raw)), expected, "{text} 必须照读");
         }

@@ -200,13 +200,12 @@ export interface TrackTableProps {
  * 用户必须右滑才能看完（这正是用户报的那件事）。固定布局下**列宽由这张表说了算**，
  * 内容再长也只在列内截断。
  *
- * 配比：`#`／时长／收藏是固定小列，艺人/专辑按百分比（长名字在两列里截断），
- * 标题列不给宽度 → 吃掉剩下的全部空间（固定布局的规则：只此一列自动分配余量）。
+ * 配比：`#`／时长／收藏是固定小列，标题 32%、艺人 24%，专辑是唯一的余量列。
  */
 const TRACK_COLUMN_WIDTHS = {
   index: "w-10",
-  artist: "w-[18%]",
-  album: "w-[22%]",
+  title: "w-[32%]",
+  artist: "w-[24%]",
   duration: "w-16",
   favorite: "w-12",
 }
@@ -256,9 +255,9 @@ export function TrackTable({
         <TableHeader className="sticky top-0 z-10 bg-background">
           <TableRow>
             <TableHead className={`${TRACK_COLUMN_WIDTHS.index} text-center`}>#</TableHead>
-            <TableHead>标题</TableHead>
+            <TableHead className={TRACK_COLUMN_WIDTHS.title}>标题</TableHead>
             <TableHead className={TRACK_COLUMN_WIDTHS.artist}>艺人</TableHead>
-            <TableHead className={TRACK_COLUMN_WIDTHS.album}>专辑</TableHead>
+            <TableHead>专辑</TableHead>
             <TableHead className={`${TRACK_COLUMN_WIDTHS.duration} text-right`}>时长</TableHead>
             <TableHead className={TRACK_COLUMN_WIDTHS.favorite} />
           </TableRow>

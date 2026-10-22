@@ -77,9 +77,11 @@
 
 - **安装失败绝不 panic**：落一条启动提示（`app:notice`）+ 一句日志，应用照常起来。
   一个装不上的托盘不该把应用带走——代价应当是「关窗即退出」，而不是「起不来」。
-- **关窗 fail-safe 与平台无关**：`closeBehavior` 选了 `tray` **且**托盘真的装上（现场查
-  `tray_by_id(TRAY_ID)`）才 `prevent_close + hide`；否则真退出。
-  这条正是为了 Linux 上「缺 appindicator 导致托盘装不上」的情形写的：没有它，用户关一次窗就再也找不回应用。
+- **关窗三态与 fail-safe**：`closeBehavior` 选了 `tray` **且**托盘真的装上（现场查
+  `tray_by_id(TRAY_ID)`）才 `prevent_close + hide`，托盘不可用仍回退退出；`minimize` 则是
+  `prevent_close + window.minimize()`，不依赖托盘，主窗 `skip_taskbar=false` 保留任务栏入口。
+  `quit` 异步收 sidecar 后退出整个应用（包含歌词与登录辅助窗），不只关闭主窗。失败保留可恢复主窗。
+  新 minimize/quit 原生行为需控制器重启复验；Linux/macOS 仍未经真机验证。
 - **菜单 id 前缀 `tray:` 与图标 id `"tray"` 是两件事**：前者是跨模块契约（判据 `action_for`），后者只是一个句柄名。
 - **图标清晰度**：只验证了内嵌字节是合法多尺寸 ico 且能被 `Image::from_bytes` 解码
   （用例 `the_embedded_icon_decodes`）；**Windows 高 DPI 下的实际缩放表现未实测**。

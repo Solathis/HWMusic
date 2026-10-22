@@ -292,12 +292,13 @@ test("测试连接：认不出的失败类别也要有一句话，且不带凭�
 });
 
 // ---------------------------------------------------------------------------
-// 6. 关窗行为：tray/quit 载荷 + 托盘可用性提示
+// 6. 关窗行为：tray/minimize/quit 载荷 + 托盘可用性提示
 // ---------------------------------------------------------------------------
 
-test("关窗行为：载荷只有枚举里的两项，越界值一律不写", () => {
-  assert.deepEqual(CLOSE_BEHAVIORS, ["tray", "quit"]);
+test("关窗行为：载荷只有枚举里的三项，越界值一律不写", () => {
+  assert.deepEqual(CLOSE_BEHAVIORS, ["tray", "minimize", "quit"]);
   assert.deepEqual(closeBehaviorPatch("tray"), { closeBehavior: "tray" });
+  assert.deepEqual(closeBehaviorPatch("minimize"), { closeBehavior: "minimize" });
   assert.deepEqual(closeBehaviorPatch("quit"), { closeBehavior: "quit" });
   assert.deepEqual(closeBehaviorPatch("explode"), { closeBehavior: "quit" }, "认不出的值回落到退出（能退出的那个）");
   assert.deepEqual(closeBehaviorPatch(null), { closeBehavior: "quit" });

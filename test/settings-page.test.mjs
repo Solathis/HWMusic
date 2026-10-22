@@ -83,6 +83,16 @@ test("保存：{patch} 由纯函数造；恢复默认只回默认代理", () => 
   );
 });
 
+test("关窗选择保存：写入期间禁用并按真实回执重建选择，失败回滚", () => {
+  const source = settingsPageSource();
+  const handler = source.slice(source.indexOf("async function chooseCloseBehavior("), source.indexOf("async function applyAutostart("));
+  assert.match(handler, /setSaving\(true\)/);
+  assert.match(handler, /const answer = await coreCall<SettingsAnswer>\(SETTINGS_SET/);
+  assert.match(handler, /setCloseBehavior\(closeBehaviorFromSettings\(answer.settings\)\)/);
+  assert.match(handler, /catch[\s\S]*setCloseBehavior\(previous\)/);
+  assert.match(handler, /finally\s*\{\s*setSaving\(false\)/);
+});
+
 test("测试连接：载荷是表单当前的草稿（不是已保存的旧值），结果显示克制且不回显凭据", () => {
   const source = settingsPageSource();
   assert.match(source, /coreCall<[^>]*>\(\s*SETTINGS_TEST_PROXY/, "测试连接走 settings:test-proxy");
@@ -117,6 +127,22 @@ test("关窗行为下拉：受控值 + 自绘标签（radix 在内容没展开�
     /<SelectValue>\{[^}]*closeBehaviorLabel\(/,
     "SelectValue 必须自带标签（空着会在没展开过下拉时显示空白）",
   );
+});
+
+test("设置 Select 调用点：popper/start/4 + SelectGroup，触发器响应式，不改选中语义", () => {
+  const source = settingsPageSource();
+  const contents = [...source.matchAll(/<SelectContent\b([^>]*)>([\s\S]*?)<\/SelectContent>/g)];
+  assert.equal(contents.length, 5, "关窗、主题、歌词位置/字号/颜色均覆盖");
+  for (const [, props, body] of contents) {
+    assert.match(props, /position="popper"/, "弹层不能 item-aligned 盖住 trigger");
+    assert.match(props, /align="start"/);
+    assert.match(props, /sideOffset=\{4\}/);
+    assert.match(body, /^\s*<SelectGroup>[\s\S]*<SelectItem[\s\S]*<\/SelectGroup>\s*$/);
+  }
+  const triggers = [...source.matchAll(/<SelectTrigger\b[^>]*className="([^"]+)"/g)];
+  assert.equal(triggers.length, 5);
+  for (const [, classes] of triggers) assert.match(classes, /\bw-full max-w-xs\b/);
+  assert.doesNotMatch(source, /aria-selected|data-state=\{/, "选中态交给 Radix，不根据焦点伪造 aria");
 });
 
 test("保存中禁用：写盘期间按钮不可重复点（一次点击 = 一次写入）", () => {

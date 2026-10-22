@@ -204,13 +204,18 @@ test("组件契约：TrackTable / PlayerBar / QueuePanel / GridSkeleton 都在 c
    *
    * 真机取证（`.tmp/r40-table-baseline.json`）说明默认的 `auto` 布局就是根因：列宽由内容决定，
    * 表格在 1024 宽的内容区里长到 1361 px。所以这里钉三件事：
-   * ① `table-fixed`（列宽由这张表说了算）；② 列宽配比写在一处常量里、艺人/专辑是百分比
-   * （内容再长也只在列内截断）；③ 每一列都从那个常量取宽度（不许有人偷偷写回 `w-40`）。
+   * ① table-fixed；② 标题/艺人百分比宽度只有一处真源，专辑吃余量；③ 固定小列不变、长内容截断。
    */
   assert.match(source, /<Table className="table-fixed"/, "曲目表必须是 table-fixed（auto 布局会被 nowrap 内容撑破）");
   assert.match(source, /const TRACK_COLUMN_WIDTHS = \{/, "列宽配比要有名字（一处真源，不是散落的魔法值）");
-  assert.match(source, /artist: "w-\[18%\]"/, "艺人是百分比列宽（按容器收，不按内容撑）");
-  assert.match(source, /album: "w-\[22%\]"/, "专辑同理");
+  assert.match(source, /title: "w-\[32%\]"/, "标题固定为 32%（不再吃全部余量）");
+  assert.match(source, /artist: "w-\[24%\]"/, "艺人固定为 24%（按容器收，不按内容撑）");
+  assert.match(source, /<TableHead className=\{TRACK_COLUMN_WIDTHS.title\}>标题<\/TableHead>/);
+  assert.match(source, /<TableHead>专辑<\/TableHead>/, "专辑是唯一的余量列");
+  assert.doesNotMatch(source, /album: "w-\[/, "专辑不再有固定百分比");
+  for (const [key, width] of [["index", "w-10"], ["duration", "w-16"], ["favorite", "w-12"]]) {
+    assert.ok(source.includes(`${key}: "${width}"`), `${key} 固定小列不变`);
+  }
   assert.doesNotMatch(
     stripComments(source),
     /w-40/,

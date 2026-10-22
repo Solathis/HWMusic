@@ -201,6 +201,7 @@ pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std
     .title(title)
     .inner_size(MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT)
     .min_inner_size(MAIN_WINDOW_MIN_WIDTH, MAIN_WINDOW_MIN_HEIGHT)
+    .skip_taskbar(false)
     .data_directory(webview_data.clone());
 
     // 没配代理/配置不可用 → None → 直连（绝不猜一个代理出来）。
@@ -213,30 +214,38 @@ pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std
     }
     let window = builder.build()?;
 
-    // 关窗 fail-safe（R11）：`closeBehavior = tray` **且托盘真的装上**才藏窗口，否则放行（真退出）。
-    //
-    // 回调里每件事都现读事实，不缓存：关窗行为现读盘（设置页改完立刻生效）、托盘可用性现问
-    // tauri 的托盘表——**没有第二份内存镜像可以漂移**。窗口藏起来之后，用户从托盘菜单
-    // "显示窗口"回来（`focus_main`）。藏不了（窗口都找不到了）就放行，绝不拦着不让走。
     let close_app = app.clone();
     window.on_window_event(move |event| {
         let tauri::WindowEvent::CloseRequested { api, .. } = event else {
             return;
         };
         let behavior = close_behavior::close_behavior_now(&close_app);
-        let action = tray::decide_close(behavior.hides_on_close(), tray::available(&close_app));
-        match (action, close_app.get_webview_window(MAIN_WINDOW_LABEL)) {
-            (tray::CloseAction::PreventAndHide, Some(window)) => {
-                api.prevent_close();
-                if let Err(error) = window.hide() {
-                    log::warn!("关窗：窗口没能藏起来（{error}）：应用仍在托盘里运行");
-                }
-            }
-            (tray::CloseAction::PreventAndHide, None) => {
-                log::warn!("关窗：托盘可用但找不到主窗，这次关闭按退出放行");
-            }
-            (tray::CloseAction::Quit, _) => {
-                log::info!("关窗即退出（行为={behavior}，托盘可用={}）", tray::available(&close_app));
+        let action = tray::decide_close(behavior, tray::available(&close_app));
+        let window = close_app.get_webview_window(MAIN_WINDOW_LABEL);
+        let action = if action == tray::CloseAction::PreventAndHide && window.is_none() {
+            log::warn!("关窗：托盘可用但找不到主窗，这次按退出处理");
+            tray::CloseAction::Quit
+        } else {
+            action
+        };
+        let result = apply_close_action(
+            action,
+            || api.prevent_close(),
+            || {
+                let window = window.as_ref().ok_or_else(|| "找不到主窗".to_string())?;
+                window.hide().map_err(|error| error.to_string())
+            },
+            || {
+                let window = window.as_ref().ok_or_else(|| "找不到主窗".to_string())?;
+                window.minimize().map_err(|error| error.to_string())
+            },
+            || request_app_exit(&close_app),
+        );
+        match result {
+            Ok(()) => log::info!("关窗已处理：{action:?}（行为={behavior}）"),
+            Err(error) => {
+                log::warn!("关窗操作 {action:?} 失败（{error}）：已拦住关闭，保留应用并恢复主窗");
+                focus_main(&close_app);
             }
         }
     });
@@ -244,6 +253,33 @@ pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std
     // 显式聚焦：Windows 下窗口刚建好时不保证在前台
     window.set_focus()?;
     Ok(webview_data)
+}
+
+fn apply_close_action<E>(
+    action: tray::CloseAction,
+    prevent_close: impl FnOnce(),
+    hide: impl FnOnce() -> Result<(), E>,
+    minimize: impl FnOnce() -> Result<(), E>,
+    quit: impl FnOnce() -> Result<(), E>,
+) -> Result<(), E> {
+    prevent_close();
+    match action {
+        tray::CloseAction::PreventAndHide => hide(),
+        tray::CloseAction::PreventAndMinimize => minimize(),
+        tray::CloseAction::Quit => quit(),
+    }
+}
+
+fn request_app_exit(app: &tauri::AppHandle) -> Result<(), String> {
+    let app = app.clone();
+    std::thread::Builder::new()
+        .name("close-exit".into())
+        .spawn(move || {
+            commands::shutdown_core(&app, "关窗退出");
+            app.exit(0);
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// 建窗用的代理 URL 参数：取值链的**最后一道闸**。
@@ -349,11 +385,11 @@ pub fn run() {
 
             // 托盘（R11）：建窗**之后**安装（建窗失败就没必要装）。装不上不拦启动——
             // 启动提示（`app:notice`）经上面登记好的队列扣到渲染层就绪再冲刷，
-            // 关窗行为同时退回"真退出"（`tray::decide_close` 的 fail-safe）。
+            // 仅 tray 档关窗回退退出，minimize 不依赖托盘。
             match tray::install(handle) {
                 tray::TrayInstall::Installed(_) => log::info!("托盘已装上（id={TRAY_ID}）"),
                 tray::TrayInstall::Unavailable { reason } => {
-                    log::warn!("托盘未能启用（{reason}）：关窗一律直接退出")
+                    log::warn!("{}", tray::tray_notice(&reason))
                 }
             }
 
@@ -1056,8 +1092,7 @@ mod tests {
         );
     }
 
-    /// R11 的关窗回调：`CloseRequested` → `tray::decide_close`（fail-safe 的唯一判据）
-    /// → 要么 `api.prevent_close()` + 藏窗口，要么放行（真退出）。回调里不许另写一份判断。
+    /// 关窗回调消费唯一三态决策，原生操作失败时不能意外销毁主窗。
     #[test]
     fn close_requested_fails_safe_through_decide_close() {
         let source = lib_source();
@@ -1077,8 +1112,67 @@ mod tests {
             production.contains("tray::available("),
             "可用性要现问托盘表（fail-safe 的第二半）"
         );
-        // 两个分支都要写出来：只写 PreventAndHide 那一支，另一支就成了"忘了处理的默认"
         assert!(production.contains("tray::CloseAction::PreventAndHide"));
+        assert!(production.contains("tray::CloseAction::PreventAndMinimize"));
         assert!(production.contains("tray::CloseAction::Quit"));
+        let callback = production
+            .split("window.on_window_event(move |event| {")
+            .nth(1)
+            .expect("主窗关窗回调")
+            .split("// 显式聚焦")
+            .next()
+            .expect("回调收口");
+        let callback: String = callback.lines().filter(|line| !line.trim_start().starts_with("//")).collect();
+        assert!(callback.contains("window.minimize()"), "原生边界必须真的调用 minimize（不能 hide）");
+        assert!(callback.contains("request_app_exit("), "quit 必须退出整个应用，不能只关主窗留下歌词/登录辅助窗");
+        assert!(!callback.contains("shutdown_core(") && !callback.contains("app.exit("), "退出收尾不能阻塞关窗回调");
+        assert!(callback.contains("focus_main(&close_app)"), "执行失败必须保留可恢复窗口");
+        let exit = production.split("fn request_app_exit(").nth(1).expect("退出工作线程").split("/// 建窗用的代理").next().expect("退出函数收口");
+        assert!(exit.contains(".spawn(move || {"));
+        assert!(exit.find("commands::shutdown_core(").expect("既有 sidecar 收尾") < exit.find("app.exit(0)").expect("整个应用退出"));
+        assert!(production.contains(".skip_taskbar(false)"), "任务栏按钮不能被主窗策略隐藏");
+    }
+
+    #[test]
+    fn close_actions_prevent_destruction_and_call_only_the_requested_effect() {
+        use std::cell::RefCell;
+        for (action, expected) in [
+            (tray::CloseAction::PreventAndHide, vec!["prevent", "hide"]),
+            (tray::CloseAction::PreventAndMinimize, vec!["prevent", "minimize"]),
+            (tray::CloseAction::Quit, vec!["prevent", "exit"]),
+        ] {
+            let effects = RefCell::new(Vec::new());
+            let result = apply_close_action(
+                action,
+                || effects.borrow_mut().push("prevent"),
+                || { effects.borrow_mut().push("hide"); Ok::<(), &str>(()) },
+                || { effects.borrow_mut().push("minimize"); Ok(()) },
+                || { effects.borrow_mut().push("exit"); Ok(()) },
+            );
+            assert_eq!(result, Ok(()));
+            assert_eq!(*effects.borrow(), expected);
+        }
+    }
+
+    #[test]
+    fn failed_close_effects_keep_the_close_prevented_and_never_fall_through_to_exit() {
+        use std::cell::RefCell;
+        for action in [tray::CloseAction::PreventAndHide, tray::CloseAction::PreventAndMinimize, tray::CloseAction::Quit] {
+            let effects = RefCell::new(Vec::new());
+            let result = apply_close_action(
+                action,
+                || effects.borrow_mut().push("prevent"),
+                || { effects.borrow_mut().push("hide"); Err("hide failed") },
+                || { effects.borrow_mut().push("minimize"); Err("minimize failed") },
+                || { effects.borrow_mut().push("exit"); Err("exit worker failed") },
+            );
+            let (effect, error) = match action {
+                tray::CloseAction::PreventAndHide => ("hide", "hide failed"),
+                tray::CloseAction::PreventAndMinimize => ("minimize", "minimize failed"),
+                tray::CloseAction::Quit => ("exit", "exit worker failed"),
+            };
+            assert_eq!(result, Err(error));
+            assert_eq!(*effects.borrow(), vec!["prevent", effect]);
+        }
     }
 }

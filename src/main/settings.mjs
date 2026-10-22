@@ -5,7 +5,7 @@
  *
  * ```json
  * { "schemaVersion": 1, "data": { "proxy": { "enabled", "host", "port", "username", "password", "bypass" },
- *                                 "closeBehavior": "tray" | "quit", ... } }
+ *                                 "closeBehavior": "tray" | "minimize" | "quit", ... } }
  * ```
  *
  * 三条不猜的规矩：
@@ -34,7 +34,7 @@ export const SETTINGS_FILE_MODE = 0o600;
 /** 数据目录权限（`mkdir` 时用；已存在则不改）。 */
 export const SETTINGS_DIR_MODE = 0o700;
 /** 关窗行为枚举（R11 消费）；第一个是默认值。 */
-export const CLOSE_BEHAVIORS = ["tray", "quit"];
+export const CLOSE_BEHAVIORS = ["tray", "minimize", "quit"];
 export const DEFAULT_CLOSE_BEHAVIOR = CLOSE_BEHAVIORS[0];
 /** 代理默认值 = "没配"：`enabled:false`、端口 `null`、例外列表空。 */
 export const DEFAULT_PROXY = Object.freeze({

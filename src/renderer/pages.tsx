@@ -35,6 +35,7 @@ import { Label } from "./components/ui/label"
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
@@ -626,15 +627,20 @@ export function SettingsPage({
   async function chooseCloseBehavior(value: string) {
     const previous = closeBehavior
     const next = closeBehaviorPatch(value).closeBehavior
+    setSaving(true)
     setCloseBehavior(next)
     setFailure(null)
+    setNotice(null)
     try {
       const answer = await coreCall<SettingsAnswer>(SETTINGS_SET, { patch: closeBehaviorPatch(next) })
+      setCloseBehavior(closeBehaviorFromSettings(answer.settings))
       setNotice(proxySaveNotice(answer.settings, answer.restartRequired === true))
     } catch (error) {
       // 没写成就把选择拨回去：界面上停在一个"没保存的值"，跟撒谎只差一步
       setCloseBehavior(previous)
       setFailure(settingsFailureText(error))
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -689,17 +695,19 @@ export function SettingsPage({
                 disabled={!loaded || saving}
                 onValueChange={(value) => void chooseCloseBehavior(value)}
               >
-                <SelectTrigger aria-label="关窗行为" className="w-64">
+                <SelectTrigger aria-label="关窗行为" className="w-full max-w-xs">
                   {/* 直接把标签写进 SelectValue：radix 在没有展开过内容时拿不到选项文案
                       （选项文本要等它挂载），触发器就会是空的——受控值 + 自绘标签才稳定 */}
                   <SelectValue>{closeBehaviorLabel(closeBehavior)}</SelectValue>
                 </SelectTrigger>
-                <SelectContent>
-                  {CLOSE_BEHAVIORS.map((behavior) => (
-                    <SelectItem key={behavior} value={behavior}>
-                      {closeBehaviorLabel(behavior)}
-                    </SelectItem>
-                  ))}
+                <SelectContent position="popper" align="start" sideOffset={4}>
+                  <SelectGroup>
+                    {CLOSE_BEHAVIORS.map((behavior) => (
+                      <SelectItem key={behavior} value={behavior}>
+                        {closeBehaviorLabel(behavior)}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
@@ -749,16 +757,18 @@ export function SettingsPage({
                   写入口是 Rust 侧唯一的 core_login_chrome 的 theme 动作）。
                 */}
                 <Select value={themeChoice} onValueChange={selectTheme}>
-                  <SelectTrigger id="theme-choice" aria-label="主题" className="w-64">
+                  <SelectTrigger id="theme-choice" aria-label="主题" className="w-full max-w-xs">
                     {/* 标签直接写进 SelectValue：radix 在没展开过内容时拿不到选项文案（R10 的同一个坑） */}
                     <SelectValue>{themeLabel(themeChoice)}</SelectValue>
                   </SelectTrigger>
-                  <SelectContent>
-                    {THEME_CHOICES.map((choice) => (
-                      <SelectItem key={choice} value={choice}>
-                        {themeLabel(choice)}
-                      </SelectItem>
-                    ))}
+                  <SelectContent position="popper" align="start" sideOffset={4}>
+                    <SelectGroup>
+                      {THEME_CHOICES.map((choice) => (
+                        <SelectItem key={choice} value={choice}>
+                          {themeLabel(choice)}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
                   </SelectContent>
                 </Select>
               </div>
@@ -903,16 +913,18 @@ export function SettingsPage({
                     disabled={lyrics === null}
                     onValueChange={(value) => lyrics?.updateConfig({ mode: value })}
                   >
-                    <SelectTrigger id="lyrics-mode" className="w-full">
+                    <SelectTrigger id="lyrics-mode" className="w-full max-w-xs">
                       {/* 标签直接写进 SelectValue：radix 在没展开过内容时拿不到选项文案（R10 的同一个坑） */}
                       <SelectValue>{modeLabel(lyrics?.config.mode)}</SelectValue>
                     </SelectTrigger>
-                    <SelectContent>
-                      {LYRICS_MODES.map((mode) => (
-                        <SelectItem key={mode} value={mode}>
-                          {modeLabel(mode)}
-                        </SelectItem>
-                      ))}
+                    <SelectContent position="popper" align="start" sideOffset={4}>
+                      <SelectGroup>
+                        {LYRICS_MODES.map((mode) => (
+                          <SelectItem key={mode} value={mode}>
+                            {modeLabel(mode)}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
                     </SelectContent>
                   </Select>
                 </div>
@@ -924,15 +936,17 @@ export function SettingsPage({
                     disabled={lyrics === null}
                     onValueChange={(value) => lyrics?.updateConfig({ size: value })}
                   >
-                    <SelectTrigger id="lyrics-size" className="w-full">
+                    <SelectTrigger id="lyrics-size" className="w-full max-w-xs">
                       <SelectValue>{fontStepLabel(lyrics?.config.size)}</SelectValue>
                     </SelectTrigger>
-                    <SelectContent>
-                      {LYRICS_FONT_STEPS.map((step) => (
-                        <SelectItem key={step.id} value={step.id}>
-                          {fontStepLabel(step.id)}
-                        </SelectItem>
-                      ))}
+                    <SelectContent position="popper" align="start" sideOffset={4}>
+                      <SelectGroup>
+                        {LYRICS_FONT_STEPS.map((step) => (
+                          <SelectItem key={step.id} value={step.id}>
+                            {fontStepLabel(step.id)}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
                     </SelectContent>
                   </Select>
                 </div>
@@ -944,15 +958,17 @@ export function SettingsPage({
                     disabled={lyrics === null}
                     onValueChange={(value) => lyrics?.updateConfig({ color: value })}
                   >
-                    <SelectTrigger id="lyrics-color" className="w-full">
+                    <SelectTrigger id="lyrics-color" className="w-full max-w-xs">
                       <SelectValue>{colorTokenLabel(lyrics?.config.color)}</SelectValue>
                     </SelectTrigger>
-                    <SelectContent>
-                      {LYRICS_COLOR_TOKENS.map((token) => (
-                        <SelectItem key={token.id} value={token.id}>
-                          {colorTokenLabel(token.id)}
-                        </SelectItem>
-                      ))}
+                    <SelectContent position="popper" align="start" sideOffset={4}>
+                      <SelectGroup>
+                        {LYRICS_COLOR_TOKENS.map((token) => (
+                          <SelectItem key={token.id} value={token.id}>
+                            {colorTokenLabel(token.id)}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
                     </SelectContent>
                   </Select>
                 </div>

@@ -203,16 +203,6 @@ test("列表提取与归一化：真实容器名（favoriteInfos/songSimpleInfos
   assert.equal(normalizeTrack(wireSong("s3", { picture: { bigImgURL: "https://img.dbankcdn.cn/a.jpg" } })).coverUrl, "https://img.dbankcdn.cn/a.jpg");
   assert.equal(normalizeTrack(wireSong("s4", { picture: { bigImgURL: "https://evil.example.com/a.jpg" } })).coverUrl, undefined);
 
-  // 时长回落 `times`（真机列表条目没有 duration 键）：量级判单位——秒直取，毫秒除 1000
-  assert.equal(normalizeTrack(wireSong("s5", { duration: undefined, times: "245" })).duration, 245);
-  assert.equal(normalizeTrack(wireSong("s6", { duration: undefined, times: 245000 })).duration, 245);
-  // duration 优先；两条路都坏（0 / 超 24h）→ 不写字段，界面显示占位符
-  assert.equal(normalizeTrack(wireSong("s7", { duration: "200", times: "999" })).duration, 200);
-  assert.equal(normalizeTrack(wireSong("s8", { duration: undefined, times: "0" })).duration, undefined);
-  assert.equal(normalizeTrack(wireSong("s9", { duration: undefined, times: String(24.5 * 3600 * 1000) })).duration, undefined);
-  assert.equal(normalizeTrack(wireSong("s10", { duration: "-5", times: null })).duration, undefined);
-  // 已登记的盲区：超过 8.3 小时的"秒"值按量级判成毫秒（src/protocols/music.mjs 的 TIMES_MILLISECONDS_THRESHOLD 注释）
-  assert.equal(normalizeTrack(wireSong("s11", { duration: undefined, times: String(25 * 3600) })).duration, 90);
 
   assert.deepEqual(normalizePlaylist(wirePlaylist("p1")), { id: "p1", name: "歌单p1", kind: "owned", contentType: "5", count: 7 });
   assert.equal(normalizePlaylist(wirePlaylist("p2", "4")).kind, "collected");
@@ -223,6 +213,105 @@ test("列表提取与归一化：真实容器名（favoriteInfos/songSimpleInfos
   assert.equal(trackIdOf({ songId: 2 }), "2");
   assert.equal(trackIdOf({ name: "无 ID" }), null);
   assert.equal(trackIdOf(null), null);
+});
+
+const standardResource = (duration, extra = {}) => ({ quality: "1", format: "MP3", mediaFileType: "MP3", duration, ...extra });
+const videoResources = {
+  "15": { quality: "15", format: "MKV", mediaFileType: "MKV", duration: "204" },
+  "17": { quality: "17", format: "MKV", mediaFileType: "MKV", duration: "204" },
+};
+const durationTrack = (extra) => normalizeTrack(wireSong("duration", { duration: undefined, ...extra }));
+
+test("列表时长：真实 contentExInfo JSON/对象的标准 MP3 资源秒数是 240/195/203，不是 times", () => {
+  const cases = [
+    { times: "32894214", contentExInfo: JSON.stringify({ quality: "3", completeFileInfos: { "1": standardResource("240") } }), want: 240 },
+    { times: "1900445", contentExInfo: { completeFileInfos: { "1": standardResource("195") } }, want: 195 },
+    { times: "7604032", quality: "3", contentExInfo: JSON.stringify({ quality: "3", completeFileInfos: { ...videoResources, "1": standardResource("203") } }), want: 203 },
+  ];
+  for (const { want, ...entry } of cases) assert.equal(durationTrack(entry).duration, want);
+});
+
+test("列表时长：completeFileInfos 数组按显式 quality 选标准 MP3，fileInfos 数组/对象是回落", () => {
+  const standard = standardResource("203");
+  for (const completeFileInfos of [
+    [videoResources["15"], standard, videoResources["17"]],
+    [videoResources["17"], videoResources["15"], standard],
+    { "1": standard, ...videoResources },
+  ]) {
+    assert.equal(durationTrack({ contentExInfo: { completeFileInfos } }).duration, 203);
+  }
+  for (const fileInfos of [[videoResources["15"], standard], { video: videoResources["17"], audio: standard }]) {
+    assert.equal(durationTrack({ contentExInfo: { completeFileInfos: videoResources, fileInfos } }).duration, 203);
+    assert.equal(durationTrack({ contentExInfo: JSON.stringify({ fileInfos }) }).duration, 203);
+  }
+  assert.equal(durationTrack({ contentExInfo: { completeFileInfos: { "1": standardResource("195") }, fileInfos: [standard] } }).duration, 195);
+  assert.equal(durationTrack({ contentExInfo: { fileInfos: [standardResource("240", { format: undefined })] } }).duration, 240);
+  assert.equal(durationTrack({ contentExInfo: { fileInfos: [standardResource("195", { mediaFileType: undefined })] } }).duration, 195);
+});
+
+test("列表时长：可信顶层秒数优先；非法顶层允许回落标准资源，但 times 永远没有时长资格", () => {
+  const contentExInfo = { completeFileInfos: { "1": standardResource("240") } };
+  assert.equal(durationTrack({ duration: "200.5", times: "32894214", contentExInfo }).duration, 200.5);
+  for (const duration of [undefined, null, true, false, "", "bad", [], [200], {}, 0, -1, 86400, Infinity, NaN]) {
+    assert.equal(durationTrack({ duration, contentExInfo }).duration, 240, String(duration));
+  }
+  for (const times of ["245", 245000, "32894214", "32894206", "1900445", "7604032", Number.MAX_VALUE, "0", -1, null]) {
+    assert.equal(durationTrack({ times }).duration, undefined, `times=${times} 不能当时长`);
+  }
+});
+
+test("列表时长：缺标准 MP3、qualityType 冒充、坏 JSON/容器一律未知，不拿 MKV 204 秒替代", () => {
+  const invalidExtras = [
+    "{bad", "null", "[]", null, true, [],
+    { completeFileInfos: videoResources },
+    { completeFileInfos: { "1": { ...videoResources["15"] } } },
+    { completeFileInfos: { "1": { duration: "203", format: "MP3", mediaFileType: "MP3" } } },
+    { completeFileInfos: [standardResource("203", { quality: undefined, qualityType: "1" })] },
+    { completeFileInfos: { wrongKey: standardResource("203") } },
+    { fileInfos: [standardResource("203", { quality: "3" })] },
+    { fileInfos: [standardResource("203", { quality: 1 })] },
+    { fileInfos: [standardResource("203", { format: "MKV" })] },
+    { fileInfos: [standardResource("203", { mediaFileType: "MKV" })] },
+    { fileInfos: [standardResource("203", { format: undefined, mediaFileType: undefined })] },
+    { quality: "1", duration: "240" },
+  ];
+  for (const contentExInfo of invalidExtras) assert.equal(durationTrack({ contentExInfo }).duration, undefined, JSON.stringify(contentExInfo));
+});
+
+test("列表时长：秒数严格为有限正数字/数字串且小于 24h，坏标准资源仍可回落 fileInfos", () => {
+  for (const duration of [0, "0", -1, "-1", 86400, "86400", 86401, Infinity, NaN, null, true, false, "", " ", "bad", [], [203], {}]) {
+    assert.equal(durationTrack({ duration }).duration, undefined, String(duration));
+    assert.equal(durationTrack({ contentExInfo: { completeFileInfos: { "1": standardResource(duration) } } }).duration, undefined, String(duration));
+    assert.equal(durationTrack({ contentExInfo: { completeFileInfos: { "1": standardResource(duration) }, fileInfos: [standardResource("195")] } }).duration, 195);
+  }
+  for (const duration of [0.1, "0.1", 86399.5, "86399.5"]) {
+    assert.equal(durationTrack({ duration }).duration, Number(duration));
+    assert.equal(durationTrack({ contentExInfo: { completeFileInfos: { "1": standardResource(duration) } } }).duration, Number(duration));
+  }
+});
+
+test("列表时长：收藏/歌单/搜索/专辑/歌手/历史共用归一化且不逐曲请求", async () => {
+  const entries = [240, 195, 203].map((duration, index) => wireSong(`s${index}`, {
+    duration: undefined,
+    times: ["32894214", "1900445", "7604032"][index],
+    contentExInfo: JSON.stringify({ completeFileInfos: { ...videoResources, "1": standardResource(String(duration)) } }),
+  }));
+  const cases = [
+    { body: { favoriteInfos: entries }, load: (api) => api.readFavoritesPage({ page: 1 }) },
+    { body: { playListInfoEx: { playListSongInfoList: entries } }, load: (api) => api.getPlaylistDetail("p1", { kind: "owned" }) },
+    { body: { musicListInfoEx: { songSimpleInfos: entries } }, load: (api) => api.getPlaylistDetail("p1", { kind: "collected" }) },
+    { body: { songSimpleInfos: entries }, load: (api) => api.search("时长") },
+    { body: { albumInfoEx: { songSimpleInfos: entries } }, load: (api) => api.getAlbum("a1") },
+    { body: { artistInfoEx: { songSimpleInfos: entries } }, load: (api) => api.getArtist("ar1") },
+    { body: { contentSimpleInfos: entries }, load: (api) => api.getHistory() },
+  ];
+  for (const { body, load } of cases) {
+    const { calls, fetchImpl } = scriptedFetch(() => jsonResponse(okBody(body)));
+    const result = await load(apiOf({ fetchImpl }));
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.data.songs.map((song) => song.duration), [240, 195, 203]);
+    assert.equal(calls.length, 1, "元数据只来自该页响应，没有逐曲补请求");
+  }
 });
 
 test("收藏一页：POST JSON 体带 targetSnsUserID/start/limit/contentTypes；page 换算成 start", async () => {

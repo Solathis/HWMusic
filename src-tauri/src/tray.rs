@@ -7,7 +7,7 @@
 //!    槽位写成**数据表**（[`MENU_SLOTS`]）而不是一长串构造调用：表能被单测逐项钉住，
 //!    构造调用只能靠人眼看。认不出的 id **不猜、不 panic**（只记一行日志）。
 //! 2. **关窗 fail-safe**：[`decide_close`] —— 只有"设置里选了托盘"**且**"托盘真的装上"才
-//!    `prevent_close + hide`，否则放行（真退出）。旧仓缺陷：托盘没装上却把窗口藏了，
+//!    `prevent_close + hide`；minimize 独立于托盘并保留任务栏入口，其余退出应用。旧仓缺陷：托盘没装上却把窗口藏了，
 //!    用户看到"窗口没了、托盘里也没有"，只能去任务管理器找进程。
 //! 3. **可用性**：[`available`] 现问 tauri 的托盘表（`tray_by_id`），**不维护第二份内存镜像**
 //!    （镜像与事实之间只会有漂移：装失败之后两边的说法就对不上了）。
@@ -38,6 +38,7 @@ use tauri::tray::TrayIcon;
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::bridge::{APP_NOTICE, APP_OPEN_SETTINGS, LYRICS_TOGGLE, PLAYER_COMMAND};
+use crate::close_behavior::CloseBehavior;
 use crate::commands;
 
 /// 菜单项 id 前缀（`tray:<动作>`）。
@@ -203,30 +204,25 @@ pub fn revert_lyrics_checked<R: Runtime>(app: &AppHandle<R>, checked: bool) -> b
 /// 关窗决议。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseAction {
-    /// 拦住这次关闭并藏起窗口：应用继续在托盘里跑
     PreventAndHide,
-    /// 放行：进程真的退出（sidecar 由 RunEvent 收尸）
+    PreventAndMinimize,
     Quit,
 }
 
-/// 关窗 fail-safe：**`closeBehavior = tray` 且托盘真的装上**才藏窗口，否则真退出。
-///
-/// 为什么不能只看设置：托盘没装上而窗口藏了，用户看到的是"窗口没了、托盘里也没有"——
-/// 只能去任务管理器找。这个方向（宁可多退出一次）是刻意的：退出最多是多开一次。
-pub fn decide_close(hide_on_close: bool, tray_available: bool) -> CloseAction {
-    if hide_on_close && tray_available {
-        CloseAction::PreventAndHide
-    } else {
-        CloseAction::Quit
+/// tray 仅在托盘可用时隐藏；minimize 保留任务栏入口，不依赖托盘。
+pub fn decide_close(behavior: CloseBehavior, tray_available: bool) -> CloseAction {
+    match behavior {
+        CloseBehavior::Tray if tray_available => CloseAction::PreventAndHide,
+        CloseBehavior::Minimize => CloseAction::PreventAndMinimize,
+        CloseBehavior::Tray | CloseBehavior::Quit => CloseAction::Quit,
     }
 }
 
 /// 托盘装不上时的启动提示文案（**唯一出口**：文案在这里造，`install` 只负责投递）。
 ///
-/// 必须同时说清三件事：托盘没装上（带原因）、**关窗现在等于真退出**、详情在运行日志里。
-/// 只说一句"托盘不可用"，用户会以为"关窗好歹还能藏起来"——而那正是 fail-safe 要防的误解。
+/// 仅 tray 档回退退出，minimize 仍然保留任务栏入口。
 pub fn tray_notice(reason: &str) -> String {
-    format!("托盘未能启用（{reason}）：关窗会直接退出应用，托盘菜单也不可用。")
+    format!("托盘未能启用（{reason}）：选「最小化到托盘」时关窗会直接退出应用，托盘菜单也不可用；「最小化到任务栏」不受影响。")
 }
 
 /// Windows 用多尺寸 ico（高 DPI 不糊），其余平台用 32×32 png。`include_bytes!` 嵌进二进制：
@@ -627,31 +623,27 @@ mod tests {
         assert_eq!(plan_lyrics_toggle(true).payload(), json!({ "checked": false }));
     }
 
-    /// 关窗 fail-safe 的四个分支（简报的矩阵）。
     #[test]
-    fn decide_close_is_fail_safe_on_all_four_branches() {
-        // 选了托盘 + 托盘真的在 → 藏起来（应用继续跑）
-        assert_eq!(decide_close(true, true), CloseAction::PreventAndHide);
-        // 选了托盘但托盘没装上 → 真退出（**这是 fail-safe 的核心一格**）
-        assert_eq!(decide_close(true, false), CloseAction::Quit);
-        // 选的是退出 → 不管托盘在不在都真退出
-        assert_eq!(decide_close(false, true), CloseAction::Quit);
-        assert_eq!(decide_close(false, false), CloseAction::Quit);
+    fn minimize_is_independent_of_tray_availability() {
+        let behavior = CloseBehavior::from_setting(Some("minimize"))
+            .expect("必须能解析最小化到任务栏（不能回落 quit）");
+        assert!(!behavior.hides_on_close(), "minimize 不是托盘 hide");
+        for available in [false, true] {
+            assert_eq!(decide_close(behavior, available), CloseAction::PreventAndMinimize);
+        }
+    }
 
-        // 一句话版本：只有"两个都真"才藏窗口
-        for hide_on_close in [true, false] {
-            for tray_available in [true, false] {
-                let expected = if hide_on_close && tray_available {
-                    CloseAction::PreventAndHide
-                } else {
-                    CloseAction::Quit
-                };
-                assert_eq!(
-                    decide_close(hide_on_close, tray_available),
-                    expected,
-                    "hide_on_close={hide_on_close} tray_available={tray_available}"
-                );
-            }
+    #[test]
+    fn decide_close_is_fail_safe_on_all_six_branches() {
+        for (behavior, available, expected) in [
+            (CloseBehavior::Tray, true, CloseAction::PreventAndHide),
+            (CloseBehavior::Tray, false, CloseAction::Quit),
+            (CloseBehavior::Minimize, true, CloseAction::PreventAndMinimize),
+            (CloseBehavior::Minimize, false, CloseAction::PreventAndMinimize),
+            (CloseBehavior::Quit, true, CloseAction::Quit),
+            (CloseBehavior::Quit, false, CloseAction::Quit),
+        ] {
+            assert_eq!(decide_close(behavior, available), expected, "{behavior:?}, tray={available}");
         }
     }
 

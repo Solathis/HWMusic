@@ -172,78 +172,45 @@ export function proxyTestResultText(result) {
 }
 
 // ---------------------------------------------------------------------------
-// 关窗行为（tray / quit）
+// 关窗行为（tray / minimize / quit）
 // ---------------------------------------------------------------------------
 
 /** 关窗行为枚举（与 core 的同名常量逐条相等，由测试钉住）。 */
-export const CLOSE_BEHAVIORS = ["tray", "quit"];
+export const CLOSE_BEHAVIORS = ["tray", "minimize", "quit"];
 
-/**
- * 托盘可用性的**兜底值**（R11 起它不再是"真相"，只是宿主没答上来时用的那一档）。
- *
- * R10 时它写死 `false` 是**如实**：宿主侧当时没有任何"托盘在不在"的口子，编一个 `true`
- * 就是在界面上承诺一个不存在的托盘。R11 接通了 `core_get_tray_available`——
- * 真值从宿主来，这个常量退化成"还没取到 / 取不到"时的保守回退。
- *
- * 为什么回退方向仍是 `false`：与 Rust 侧 `tray::decide_close` 的 fail-safe 同口径
- * （托盘不可用时关窗就是真退出）。界面说"不可用"而实际能用，代价是用户少用一个便利；
- * 反过来则是"界面说能用、关窗却退出了"，那才是撒谎。
- */
+/** 宿主还没答/答不上来时保守按托盘不可用；仅 tray 受此 fail-safe 约束。 */
 export const TRAY_AVAILABLE = false;
 
-/**
- * 宿主回执 → 可用性（**只认 `true`**）。
- *
- * 认不出的形状（`undefined`、`null`、`"true"`、`1`、对象……）一律按"不可用"处理：
- * 抛异常那条路由页面接住并落同一个兜底值，所以"没答"与"答了假"在这里是同一个结果——
- * 保守方向只需要一个落点。
- */
+/** 宿主回执 → 可用性（只认 true，其余形状一律保守）。 */
 export function trayAvailabilityFromAnswer(answer) {
   return answer === true;
 }
 
 export const CLOSE_BEHAVIOR_LABELS = {
-  tray: "最小化到托盘（后台继续）",
-  quit: "直接退出应用",
+  tray: "最小化到托盘",
+  minimize: "最小化到任务栏",
+  quit: "退出应用",
 };
 
-/** 关窗行为的选项文案（认不出的值给"退出"那一档的文案，与 `closeBehaviorPatch` 同口径）。 */
+/** 关窗行为的选项文案（认不出的值给退出那一档，与 closeBehaviorPatch 同口径）。 */
 export function closeBehaviorLabel(behavior) {
   return CLOSE_BEHAVIOR_LABELS[behavior] ?? CLOSE_BEHAVIOR_LABELS.quit;
 }
 
-/**
- * 关窗行为 → `settings:set` 的 patch。
- *
- * 认不出的值回落到 `quit`（**能真正退出的那一个**）：回落到 tray 会看起来像"应用没退干净"
- * （窗口没了、进程还在，而用户没被告知），那是最糟的一种猜法。core 对越界值是结构化报错，
- * 这里只是"UI 不可能造出越界值"的兜底。
- */
+/** 认不出的 UI 值保守回落 quit；core 写入路径仍结构化拒绝越界值。 */
 export function closeBehaviorPatch(value) {
   return { closeBehavior: CLOSE_BEHAVIORS.includes(value) ? value : "quit" };
 }
 
-/**
- * 文档 → 当前关窗行为（下拉框选中项）。
- *
- * 认不出就跟 **core 的默认**一致（`DEFAULT_CLOSE_BEHAVIOR` = 枚举第一项）：这是"磁盘上等于什么"，
- * 与上面的 `closeBehaviorPatch`（"用户没给合法值时我们写什么"）是两件事，不必同口径——
- * 把前者也落成 `quit`，等于把我们的兜底当成用户的选择显示出来。
- */
+/** 文档读回与 core 默认 tray 一致，不把 UI 写入兜底冒充用户选择。 */
 export function closeBehaviorFromSettings(document) {
   const stored = isPlainObject(document?.data) ? document.data.closeBehavior : null;
   return CLOSE_BEHAVIORS.includes(stored) ? stored : CLOSE_BEHAVIORS[0];
 }
 
-/**
- * 关窗行为的说明文案。
- *
- * `trayAvailable` 由外壳从宿主查来（`core_get_tray_available` → `trayAvailabilityFromAnswer`）。
- * 选了托盘但托盘不可用时**必须当场说清会回退成退出**：Rust 侧的 fail-safe 就是这么做的
- * （`tray::decide_close`：托盘没装上就真退出），界面若含糊其辞，用户会以为"窗口藏起来了"，
- * 然后去找一个不存在的托盘图标。
- */
+/** tray 必须如实说明托盘不可用时会退出；minimize 独立于托盘。 */
 export function closeBehaviorNotice(behavior, options = {}) {
+  if (behavior === "minimize") return "关窗后最小化到任务栏，保留任务栏按钮，音乐在后台继续播放。";
   if (behavior !== "tray") return "关窗即退出应用（正在播放的音乐会停止）。";
   return options?.trayAvailable === true
     ? "关窗后应用继续在托盘运行：托盘菜单里可以退出。"

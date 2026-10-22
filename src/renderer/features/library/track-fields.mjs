@@ -157,8 +157,8 @@ export function trackCoverUrlOf(item) {
 }
 
 /**
- * 时长读数：**只认 `duration`**（归一化后的内部形状；线上条目的 `times` 键
- * 由协议层的 `durationOfEntry` 量级判单位后映射进来，见 src/protocols/music.mjs）。
+ * 时长读数：**只认 `duration` 秒数**（协议层 durationOfEntry 已从可信顶层或标准 MP3 资源归一化）。
+ * `times` 不具时长资格，任何层都不按它的量级猜单位。
  *
  * 这里不再猜别的名字：单位与键名换算都在协议层一处收口，渲染层只认内部形状。
  */
@@ -171,7 +171,7 @@ export function trackDurationOf(item) {
 }
 
 /**
- * 时长格式化：**单位待联调确认**（接口可能给秒也可能给毫秒），这里按秒解读。
+ * 时长格式化：只显示归一化后的秒数，不猜其他单位。
  * 取不到就是占位符——不显示 0:00（那看起来像"这首歌真的 0 秒"）。
  */
 export function formatDuration(value) {
