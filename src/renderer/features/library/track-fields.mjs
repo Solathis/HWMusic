@@ -157,10 +157,10 @@ export function trackCoverUrlOf(item) {
 }
 
 /**
- * 时长读数：**只认 `duration`**。
+ * 时长读数：**只认 `duration`**（归一化后的内部形状；线上条目的 `times` 键
+ * 由协议层的 `durationOfEntry` 量级判单位后映射进来，见 src/protocols/music.mjs）。
  *
- * 为什么不去猜 `durationMs`/`time` 这些别的名字：单位与名字都待联调确认，
- * 猜错的名字会显示一个错得看不出来的时长（比"—"糟得多）。
+ * 这里不再猜别的名字：单位与键名换算都在协议层一处收口，渲染层只认内部形状。
  */
 export function trackDurationOf(item) {
   if (!isObject(item)) return null;

@@ -308,11 +308,40 @@ function coverUrlOf(item, isSafeUrl) {
 }
 
 /**
+ * 时长上限（秒）：超过 24 小时的"时长"一律是坏数据，宁可显示占位符。
+ */
+const TRACK_DURATION_SECONDS_LIMIT = 24 * 3600;
+
+/**
+ * `times` 的毫秒判别线：真机实测列表条目**没有 `duration` 键、时长在 `times` 上**（R42，
+ * 原始键全表见 task-42-brief）。`times` 的单位没有文档，量级双解——值小于这条线按秒
+ * （音乐曲目 30 秒～8.3 小时的秒区间），否则按毫秒除 1000（4 分钟曲目的毫秒值 240000
+ * 落在秒区间外，两类取值无交集，量级即单位）。
+ *
+ * 盲区（如实登记）：超过 8.3 小时的"秒"值（超长串烧/有声书）会被当毫秒缩成几十秒——
+ * 音乐场景罕见，宁可见占位符也不显示一个错得看不出来的时长。
+ */
+const TIMES_MILLISECONDS_THRESHOLD = 30_000;
+
+/**
+ * 条目时长读数（秒）：`duration`（播放响应/既有契约）优先，回落 `times`（列表条目）。
+ * 两条路都取不到或超出上限 → null（调用方不写 `duration` 字段，界面显示占位符）。
+ */
+export function durationOfEntry(item) {
+  const duration = numberOrNull(item.duration);
+  if (duration !== null && duration > 0 && duration < TRACK_DURATION_SECONDS_LIMIT) return duration;
+  const times = numberOrNull(item.times);
+  if (times === null || times <= 0) return null;
+  const seconds = times < TIMES_MILLISECONDS_THRESHOLD ? times : times / 1000;
+  return seconds > 0 && seconds < TRACK_DURATION_SECONDS_LIMIT ? seconds : null;
+}
+
+/**
  * 线上条目 → 内部曲目形状。
  *
  * 字段映射逐条来自参考的 `trackFrom`（`docs/API_CONTRACT.md` §5"曲目归一化"）：
  * `contentID → id`、`contentName → title/name`、`artistNamePairs|artistName → singer`、
- * `albumID/albumName → albumId/albumName`、`picture.* → coverUrl`、`duration → duration`。
+ * `albumID/albumName → albumId/albumName`、`picture.* → coverUrl`、`duration|times → duration`。
  *
  * **没有 id 的条目一律返回 null**（调用方如实丢弃并计数，绝不编一个 id——
  * 列表里出现删不掉的幽灵行比少一行糟得多）。
@@ -342,7 +371,7 @@ export function normalizeTrack(item, options = {}) {
   if (albumId !== null) track.albumId = albumId;
   if (albumName !== null) track.albumName = albumName;
   if (coverUrl !== null) track.coverUrl = coverUrl;
-  const duration = numberOrNull(item.duration);
+  const duration = durationOfEntry(item);
   if (duration !== null) track.duration = duration;
   return track;
 }

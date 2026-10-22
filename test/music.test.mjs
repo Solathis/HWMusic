@@ -203,6 +203,17 @@ test("列表提取与归一化：真实容器名（favoriteInfos/songSimpleInfos
   assert.equal(normalizeTrack(wireSong("s3", { picture: { bigImgURL: "https://img.dbankcdn.cn/a.jpg" } })).coverUrl, "https://img.dbankcdn.cn/a.jpg");
   assert.equal(normalizeTrack(wireSong("s4", { picture: { bigImgURL: "https://evil.example.com/a.jpg" } })).coverUrl, undefined);
 
+  // 时长回落 `times`（真机列表条目没有 duration 键）：量级判单位——秒直取，毫秒除 1000
+  assert.equal(normalizeTrack(wireSong("s5", { duration: undefined, times: "245" })).duration, 245);
+  assert.equal(normalizeTrack(wireSong("s6", { duration: undefined, times: 245000 })).duration, 245);
+  // duration 优先；两条路都坏（0 / 超 24h）→ 不写字段，界面显示占位符
+  assert.equal(normalizeTrack(wireSong("s7", { duration: "200", times: "999" })).duration, 200);
+  assert.equal(normalizeTrack(wireSong("s8", { duration: undefined, times: "0" })).duration, undefined);
+  assert.equal(normalizeTrack(wireSong("s9", { duration: undefined, times: String(24.5 * 3600 * 1000) })).duration, undefined);
+  assert.equal(normalizeTrack(wireSong("s10", { duration: "-5", times: null })).duration, undefined);
+  // 已登记的盲区：超过 8.3 小时的"秒"值按量级判成毫秒（src/protocols/music.mjs 的 TIMES_MILLISECONDS_THRESHOLD 注释）
+  assert.equal(normalizeTrack(wireSong("s11", { duration: undefined, times: String(25 * 3600) })).duration, 90);
+
   assert.deepEqual(normalizePlaylist(wirePlaylist("p1")), { id: "p1", name: "歌单p1", kind: "owned", contentType: "5", count: 7 });
   assert.equal(normalizePlaylist(wirePlaylist("p2", "4")).kind, "collected");
   assert.equal(normalizePlaylist(wirePlaylist("p3", "7")).kind, "chart");
