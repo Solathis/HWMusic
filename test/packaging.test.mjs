@@ -267,6 +267,20 @@ test("acceptance：无注入扫描的 token 表从 R12 的既有测试里读（�
   assert.ok(tokens.length >= 15, `解析出的 token 太少（${tokens.length}），锚点表可能变了`);
   assert.ok(tokens.includes("SetWindowsHookEx"), "canary：解析结果必须含 SetWindowsHookEx，否则扫描等于没扫");
   assert.ok(tokens.includes("explorer.exe"));
+  assert.equal(mod.nativeTokenAllowed("src-tauri/src/taskbar_lyrics.rs", "SetParent"), true);
+  for (const file of ["src-tauri/src/lyrics_window.rs", "src-tauri/src/taskbar_lyrics.rs.bak", "src/renderer/taskbar_lyrics.rs"]) assert.equal(mod.nativeTokenAllowed(file, "SetParent"), false);
+  for (const token of ["SetWindowsHookEx", "SetWinEventHook", "SendInput", "CreateRemoteThread", "WriteProcessMemory"]) assert.equal(mod.nativeTokenAllowed("src-tauri/src/taskbar_lyrics.rs", token), false);
+});
+
+test("R44d native 写扫描只允许以 ensure_own 包裹的显式受核 HWND，不按参数名放行", async () => {
+  const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
+  assert.deepEqual(taskbarWriteViolations("unsafe { SetParent(ensure_own(policy, own)?, Some(parent)); SetWindowPos(ensure_own(policy, own)?, None, 0, 0, 1, 1, flags); }"), []);
+  for (const fn of ["SetParent", "SetWindowPos", "SetWindowLongPtrW", "ShowWindow", "SetWindowSubclass", "EnableWindow"]) {
+    assert.equal(taskbarWriteViolations(`${fn}(parent, None);`).length, 1, `${fn} foreign must be rejected`);
+    assert.equal(taskbarWriteViolations(`${fn}(own, None);`).length, 1, `${fn} 不能靠变量名绕过核验`);
+    assert.equal(taskbarWriteViolations(`${fn}(handle, None);`).length, 1, `${fn} 不能靠通用句柄名绕过核验`);
+    assert.equal(taskbarWriteViolations(`${fn}(ensure_own(token)?, None);`).length, 0, `${fn} 显式 own guard 可通过`);
+  }
 });
 
 test("acceptance：锚点缺失会被点名（不是静默通过），SKIP 不算 PASS", async () => {

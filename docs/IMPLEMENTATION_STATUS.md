@@ -148,7 +148,7 @@
 | 16 | 歌词文本通道（`playback:lyrics`） | **verified（频道）** | untested（端点未配） | `test/lyrics-window.test.mjs`、`test/channel-parity.test.mjs` |
 | 17 | Media Session 系统媒体控件 | **verified（映射逻辑）** | untested | `test/media-session.test.mjs` |
 | 18 | 桌面歌词窗（五条 async 专命令、锁/媒体、横竖/样式、配置持久化） | **verified** | **R44c Windows 已验拖锁、一次媒体、几何与重启配置；其余平台/多屏待验** | `test/lyrics-window.test.mjs`、`playback-runtime`、`proxy-settings`；Rust 原子 revision/来源/几何注入测试；browser 面板像素；`.tmp/r44c-native-evidence.json`、`.tmp/r44c-restart-evidence.json` |
-| 19 | 任务栏歌词（**降级实现**：独立窗贴 `work_area`） | **verified** | untested | `scripts/acceptance.mjs` 的 `taskbar-fallback-no-injection` 路径 + **全源码 token 扫描 0 命中** |
+| 19 | Windows 任务栏歌词（Beta，精确自窗原生内嵌） | **in-progress** | Low 完整性拒绝/停显/回桌面恢复已验；真实附着受外部权限阻断 | `taskbar_lyrics.rs` 的 parent-client/UIA/单在途/代次/退出纯测试；acceptance 仅新模块限定例外，DLL/全局 Hook 仍禁；详 task-44d-report |
 | 20 | 托盘（9 槽位菜单 / 勾选镜像 / 失败提示） | **verified** | untested | `test/tray.test.mjs`；Rust `tray.rs` 内联测试 |
 | 21 | 关窗 fail-safe（托盘真装上才藏窗口） | **verified** | untested | `src-tauri/src/tray.rs` 的 `decide_close` 矩阵；`scripts/acceptance.mjs` 的 `tray` 路径（锚点要求现场查 `tray_by_id`） |
 | 22 | 全局快捷键（5 动作 / 备选链 / 失败提示） | **verified** | untested | `src-tauri/src/shortcuts.rs` 21 内联测试；接线变异校验（2 变异各自被专用用例抓到） |
@@ -171,7 +171,7 @@
 | `proxy` | 代理 | 单一真源 `settings.json` + 三窗接线 + 凭据纪律 | `proxy` / `proxy-settings` / `settings-test-proxy` |
 | `tray` | 托盘 | 托盘 9 槽位 + 关窗 fail-safe（托盘真装上才藏窗口） | `tray` / `close-behavior` |
 | `desktop-lyrics` | 桌面歌词 | 独立透明窗 + 几何纯函数 + 不回写 | `lyrics-window` / `lyrics-panel` |
-| `taskbar-fallback-no-injection` | 任务栏降级 | 贴 `work_area` 下沿；全源码 0 注入 API | `lyrics-window` + token 扫描（15 类 × 110 文件） |
+| `taskbar-fallback-no-injection`（保留 id） | Windows 内嵌 Beta | 仅新模块获自窗 SetParent，未知停显；禁 DLL/全局 Hook | `lyrics-window` + 文件/符号限定扫描；Rust `taskbar_lyrics_test` 验行为 |
 | `settings-persistence` | 设置持久化 | `settings.json` 形状 + DPAPI 会话信封 | `settings-test-proxy` / `session-store` / `settings-page` |
 
 三条口径（写在脚本文件头，这里复述）：**不复制断言逻辑**（引用既有测试，否则漂移的那一份才是假证据）；

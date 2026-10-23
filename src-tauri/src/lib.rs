@@ -15,6 +15,7 @@ pub mod close_behavior;
 mod commands;
 pub mod login;
 pub mod lyrics_window;
+pub mod taskbar_lyrics;
 mod secure_store;
 mod sidecar;
 pub mod shortcuts;
@@ -43,6 +44,8 @@ pub const DATA_DIR_ENV: &str = "HWMUSIC_DATA_DIR";
 /// 名字钉成常量而不是就地拼字符串：它同时是排障入口（用户被要求去看这个目录）与
 /// 清理脚本的靶子（`.tmp/<数据根>/logs`），改名等于同时弄坏这两件事。
 pub const LOG_DIR_NAME: &str = "logs";
+
+fn persist_window_state(label: &str) -> bool { label == MAIN_WINDOW_LABEL }
 
 const MAIN_WINDOW_WIDTH: f64 = 1280.0;
 const MAIN_WINDOW_HEIGHT: f64 = 800.0;
@@ -266,7 +269,7 @@ fn apply_close_action<E>(
 }
 
 #[derive(Default)]
-struct ExitState(std::sync::atomic::AtomicBool);
+struct ExitState(std::sync::atomic::AtomicBool, std::sync::atomic::AtomicBool);
 
 impl ExitState {
     fn request<E>(&self, spawn: impl FnOnce() -> Result<(), E>, focus: impl FnOnce()) -> Result<(), E> {
@@ -295,8 +298,16 @@ pub(crate) fn request_app_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> 
         std::thread::Builder::new()
             .name("app-exit".into())
             .spawn(move || finish_app_exit(
-                || commands::shutdown_core(&app, "请求退出"),
-                || app.exit(0),
+                || {
+                    let owner = app.clone();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2100);
+                    let _ = app.run_on_main_thread(move || lyrics_window::begin_shutdown(&owner));
+                    commands::shutdown_core(&app, "请求退出");
+                    while std::time::Instant::now() < deadline && !lyrics_window::shutdown_finished(&app) {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                },
+                || { app.state::<ExitState>().1.store(true, std::sync::atomic::Ordering::Release); app.exit(0); },
             ))
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -342,8 +353,8 @@ pub fn run() {
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
-                // 只记 main/lyrics：其它窗口（如登录子窗）的位置不该被持久化
-                .with_filter(|label| label == MAIN_WINDOW_LABEL || label == LYRICS_WINDOW_LABEL)
+                // 歌词几何归歌词宿主管理，尤其不能把 Shell child 的坐标写进窗口状态文件。
+                .with_filter(persist_window_state)
                 .skip_initial_state(LYRICS_WINDOW_LABEL)
                 .build(),
         )
@@ -391,6 +402,11 @@ pub fn run() {
 
             // 先登记运行配置与 revision，主窗随后通过条件恢复接入保存快照。
             app.manage(lyrics_window::LyricsWindowState::default());
+            #[cfg(windows)] {
+                app.manage(taskbar_lyrics::Host::default());
+                if let Err(reason) = taskbar_lyrics::observe_main(handle) { log::warn!("任务栏消息观察不可用：{}", reason.as_str()); }
+                taskbar_lyrics::Host::start(handle);
+            }
 
             // core（sidecar）的托管状态**先于托盘安装**登记（R11 修复轮 1/5）：
             // 启动提示的排队能力住在 `Arc<CoreState>` 里，而 `tray::install` 装不上时要发一条
@@ -480,11 +496,15 @@ pub fn run() {
         .run(|app_handle, event| {
             // tao 在 Windows 上 run_return 之后直接 process::exit，Drop 不会执行：
             // 退出路径必须显式收尸（关 stdin → sidecar exit(0) → 帧泵 EOF → 结清 pending）。
-            if matches!(
-                event,
-                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
-            ) {
-                commands::shutdown_core(app_handle, "应用退出");
+            match event {
+                tauri::RunEvent::ExitRequested { api, .. } => {
+                    if !app_handle.state::<ExitState>().1.load(std::sync::atomic::Ordering::Acquire) {
+                        api.prevent_exit();
+                        let _ = request_app_exit(app_handle);
+                    }
+                }
+                tauri::RunEvent::Exit => commands::shutdown_core(app_handle, "应用退出"),
+                _ => {}
             }
         });
 }
@@ -549,6 +569,12 @@ mod tests {
     fn lib_source() -> String {
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
             .expect("要能读到自己的源码")
+    }
+
+    #[test]
+    fn window_state_only_persists_main_and_never_shell_child_geometry() {
+        assert!(persist_window_state("main"));
+        for label in ["lyrics", "login", "login-theme", "login-return"] { assert!(!persist_window_state(label)); }
     }
 
     #[test]
@@ -1087,9 +1113,8 @@ mod tests {
             );
         }
         assert!(
-            plugins.contains("with_filter(") && plugins.contains("MAIN_WINDOW_LABEL")
-                && plugins.contains("LYRICS_WINDOW_LABEL"),
-            "只记 main 与 lyrics 两个窗口的位置与尺寸：{plugins}"
+            plugins.contains("with_filter(persist_window_state)"),
+            "歌词位置不交给 window-state 持久化：{plugins}"
         );
 
         assert!(plugins.contains("skip_initial_state(LYRICS_WINDOW_LABEL)"), "歌词几何由配置接管，插件不能在窗口 ready 时异步盖回旧尺寸/任务栏位置");

@@ -100,7 +100,7 @@ export function createLyricsBridge(deps = {}) {
   /** 上一次**推出去**的进度：节流的比较基准（没推的那个不算，否则永远差 20ms）。 */
   let lastProgress = null;
 
-  let status = { config: normalizeLyricsConfig({}), visible: false, revision: -1, initialized: false, saveError: null };
+  let status = { config: normalizeLyricsConfig({}), visible: false, requestedVisible: false, taskbar: { supported: false, attached: false, reason: "disabled" }, revision: -1, runtimeRevision: -1, initialized: false, saveError: null };
   let initialization = null;
   let generation = 0;
   let saveEnabled = false;
@@ -116,9 +116,11 @@ export function createLyricsBridge(deps = {}) {
 
   function acceptStatus(answer) {
     if (answer?.ready === true || !answer?.config || !Number.isSafeInteger(answer.revision) || answer.revision < status.revision) return status;
+    const runtimeRevision = Number.isSafeInteger(answer.runtimeRevision) ? answer.runtimeRevision : -1;
+    if (runtimeRevision < (status.runtimeRevision ?? -1)) return status;
     const config = normalizeLyricsConfig(answer.config);
     const changed = keyOf(config) !== keyOf(status.config);
-    publish({ config, visible: answer.visible === true, revision: answer.revision });
+    publish({ config, visible: answer.visible === true, requestedVisible: answer.requestedVisible === true || (answer.requestedVisible === undefined && answer.visible === true), taskbar: answer.taskbar ?? status.taskbar, revision: answer.revision, runtimeRevision });
     if (saveEnabled && changed) queueSave(config);
     return status;
   }

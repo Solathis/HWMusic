@@ -21,7 +21,7 @@
 | 全局快捷键 | **verified（代码级）** + untested（真机注册与投递） | untested（**且只在 X11 会话下可能可用**，见 §5） | untested |
 | DPAPI 会话加密 | **verified**（本机真跑过 `cargo test`；1 条半程端到端 ignored） | untested（`#[cfg(not(windows))]` 一行 stub，本机不参与编译） | untested（同上） |
 | HTTP 代理（webview 侧） | **verified（代码级）** + untested（真抓包） | untested | untested（需 `macos-proxy` feature 且**仅 14+**） |
-| 任务栏歌词 | 降级实现（独立透明窗贴边） | 降级实现（同左） | 降级实现（同左） |
+| 任务栏歌词 | 实验内嵌 Beta；Low 环境成功路径待验 | unsupported | unsupported |
 | 开机自启 | untested（真实注册表写入**刻意没测**，见 §6） | untested | untested（`MacosLauncher::LaunchAgent`） |
 | 本机 `vite build` 临时目录 | **已验证需要 TEMP 指向仓内**（沙箱限制） | untested | untested |
 
@@ -116,7 +116,7 @@ webview 仍走代理——这是两套网络栈的行为不一致，如实记（
 - **目录必须先建**：WebView2 不会自建，缺目录时建窗直接 `os error 5`（拒绝访问）。
 - **登录窗不进 window-state 白名单**：它的位置不该被持久化（R2 已定）。
 - **窗口状态的平台差异（未验证）**：多显示器、不同 DPI、自动隐藏任务栏这些机器上，
-  window-state 的恢复与任务栏歌词的贴边表现都只有**纯函数级**证据（几何矩阵含负坐标副屏），
+  window-state 的主窗恢复与 Beta 多屏几何都只有**纯函数级**证据（几何矩阵含负坐标副屏），
   **没有在多屏/混合 DPI 机器上真跑过**。
 
 ## 5. 全局快捷键
@@ -164,43 +164,17 @@ webview 仍走代理——这是两套网络栈的行为不一致，如实记（
 「插件没注册」走 `try_state` 而不是 panic）；**真实注册表写入/读取未实测**。
 界面开关跟着**观测到的实际状态**走（写完回读 `is_enabled`），不做乐观翻转。
 
-## 7. 任务栏歌词：三端都是**降级实现**
+## 7. 任务栏歌词（Beta）：仅 Windows 实验内嵌
 
-### 依据：三端都没有公开 API
+用户已授权精确自窗 SetParent 到合法 primary/secondary Shell root，Win10 可用 ReBar/WorkerW。Shell 没有稳定的歌词 API，故功能标 Beta，不保证全部 Windows 10/11 版本。Linux/macOS 明确 unsupported，不提供贴边浮窗冒充任务栏。
 
-| 平台 | 有没有「往任务栏里写文字」的公开 API | 结论 |
-|---|---|---|
-| Windows | 没有。任务栏文字属于 explorer 的私有实现（`Shell_TrayWnd`/`SetParent`/`SetWindowsHookEx` 都是注入系统进程的做法） | 不注入 |
-| Linux | 没有。各桌面环境（GNOME/KDE/Xfce）的任务栏都是各自 shell 的私有实现，无跨 DE 稳定接口 | 不注入 |
-| macOS | 没有。菜单栏项目（`NSStatusItem`）是应用自己的图标，不是可写文字的公共区域 | 不注入 |
+`taskbar_lyrics.rs` 只在 Windows 编译原生部分，使用实际父客户区映射和只读 UIA 占用差集；单 MTA/单在途查询、固定时效、迟到废弃；未知 UIA、无 100 DIP 安全空段、自动隐藏、权限/DPI 不符均隐藏并给结构化原因。自窗 owner 线程/创建代次/活性限制所有 native 写，Explorer 按钮尺寸/样式不改。切回 desktop 或换 Shell/parent/monitor 重建自窗并用 C ready 补文档进度；退出不 join UIA。
 
-### 唯一允许的做法：独立透明窗 + `work_area` 贴边
+桌面模式仍是 960×160 DIP 横版或 320×620 DIP 窄高竖版，夹工作区，可拖锁与媒体控制；Beta 单行最多 1200×44 DIP、有效字号≤20px、点透无控件带。window-state 只保存主窗，原生 D 状态不持久化。
 
-`src-tauri/src/lyrics_window.rs`：label `lyrics` 的**独立透明窗**，贴显示器 `work_area` **下沿**
-（= 任务栏上沿，理论上不重叠）。两种模式：
+扫描例外仅新模块的限定符号集合；DLL/全局 Hook/foreign HWND 写/系统进程 kill 始终禁止。MIT 参考固定 commit 与全文许可见 NOTICE。
 
-| 模式 | 尺寸 | 位置 | 字号 |
-|---|---|---|---|
-| `taskbar` | `TASKBAR_SIZE = 1200×44`（单行） | 水平居中贴 `work_area` 下沿 | ≤ `TASKBAR_MAX_FONT_PX = 20px`（配置值本身保留，切回桌面模式时用户的选择还在） |
-| `desktop` | `DESKTOP_SIZE = 960×120` | 再上抬 `DESKTOP_LIFT = 120px`，**夹回工作区顶部** | 档位 16/20/28/40/56px |
-
-- 尺寸与位置都**夹进工作区**：小屏上窗口不该比屏幕还宽；窗口比工作区还大时贴左上角摆，**绝不推出屏幕外**。
-  （「负偏移钳 0」钳的是**偏移**而不是最终坐标——副屏在主屏左侧时工作区原点就是负的，钳坐标会把窗口扔到主屏上。）
-- 显示器口径：**优先主窗 `current_monitor()`，取不到退主屏**。
-- 任务栏模式**一律点透**（贴边的一条显示带不该抢底下窗口的点击）；桌面模式默认可点（要能接手拖动）。
-
-### 红线（由全源码扫描钉死，0 命中）
-
-`SetWindowsHookEx` / `SetWinEventHook` / `Shell_TrayWnd` / `FindWindow` / `SetParent` / `explorer.exe` / …
-这份 token 清单的真源写在 `test/lyrics-window.test.mjs` 的 `banned` 数组里，
-`npm run test:acceptance` 把它读出来扫**更大范围**（`src` + `src-tauri/src` + `src-tauri/tests` + `scripts`，
-测试文件本身不扫——否则清单会命中自己）。
-
-### 未验证
-
-- **真窗的透明 / 置顶 / 无边框 / 拖动 / 点透目视未实测**（本机起不了真窗）；
-- **任务栏模式与真实任务栏的视觉关系未测**：不同 DPI、自动隐藏任务栏的机器上要看一眼；
-- **多显示器实机未测**（三屏矩阵是纯函数层面的，含负坐标副屏）。
+实测边界：当前调试 EXE 为 Low 完整性，返回 access_denied 并停显，设置原因/回桌面拖控/正常退出收 sidecar 已验。真实 GetParent/父客户区内歌词像素、按钮前后尺寸不变、按钮中心不命中 app 必须在权限可用环境补验；17 按钮零覆盖的失败路径不算内嵌成功。多显示器/高 DPI/真实 Explorer 重建/Win10 尚未实机验。
 
 ## 8. 只在一端存在的东西（不要误当跨平台能力）
 

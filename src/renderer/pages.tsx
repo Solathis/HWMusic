@@ -30,6 +30,7 @@ import {
 } from "../shared/request-channels.ts"
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "./components/ui/alert"
 import { Button } from "./components/ui/button"
+import { Badge } from "./components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card"
 import { Input } from "./components/ui/input"
 import { Label } from "./components/ui/label"
@@ -91,6 +92,7 @@ import {
   colorTokenLabel,
   fontStepLabel,
   modeLabel,
+  taskbarStatusText,
 } from "./features/lyrics/lyrics-window.mjs"
 import type { LyricsWindowBinding } from "./use-lyrics-window.ts"
 
@@ -898,7 +900,7 @@ export function SettingsPage({
               <div className="flex items-center gap-2">
                 <Switch
                   id="lyrics-visible"
-                  checked={lyrics?.visible === true}
+                  checked={(lyrics?.requestedVisible ?? lyrics?.visible) === true}
                   disabled={lyrics === null}
                   onCheckedChange={(checked) => lyrics?.setVisible(checked)}
                 />
@@ -1022,6 +1024,10 @@ export function SettingsPage({
                 ))}
               </div>
               <p className="text-xs text-muted-foreground">{LYRICS_SESSION_NOTICE}</p>
+              {lyrics?.config.mode === "taskbar" ? <div role="status" className="flex flex-wrap items-center gap-2">
+                <Badge variant="secondary">Beta</Badge>
+                <span className="text-sm text-muted-foreground">{taskbarStatusText(lyrics.taskbar)}</span>
+              </div> : null}
               {lyrics?.saveError ? <Alert>
                 <AlertTitle>桌面歌词配置未保存</AlertTitle>
                 <AlertDescription>{lyrics.saveError}</AlertDescription>

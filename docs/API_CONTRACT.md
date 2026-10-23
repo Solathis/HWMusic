@@ -1335,7 +1335,7 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 4. **勾选态与歌词窗存在性的同步**：**R12 已收口**（见 §2.9）：勾选态仍由托盘自己镜像并翻转，
    R12 只补失败路径（窗命令失败 → `app:notice` + 勾选翻回实际状态），不建双向同步链。
 
-### 2.9 桌面歌词窗与任务栏降级（R12 落地；**R41 修了"永久空白"与主题**）
+### 2.9 桌面歌词窗与 Windows 任务栏 Beta（R44d；R12/R41 历史见下）
 
 桌面歌词窗本体在 Rust（`src-tauri/src/lyrics_window.rs`）：label `lyrics`、无边框、透明、无阴影、
 置顶、不进任务栏、不可缩放、不抢焦点、**先建出来是隐藏的**（摆好几何再 `show`，防闪默认样式）、
@@ -1364,14 +1364,14 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 |---|---|---|---|
 | `lyrics:document` | 主窗 → 歌词窗 | `{lines, status}` | 歌词文档。歌词窗**没有业务频道权限**（`core_call` 只收主窗），所以广播是它唯一的数据来源；主窗面板与歌词窗共用**同一份行数组**，两处不可能显示两首歌 |
 | `lyrics:progress` | 主窗 → 歌词窗 | `{timeMs, playing, seekGeneration}` | 进度。歌词窗里没有音频元素，进度只能由主窗推；**节流在桥里**（`shouldPushProgress`：≥100ms 或播放/跳转变化才发），且只在窗真的开着时跑 |
-| `lyrics:state` | 宿主 → 两窗 | `{config, visible, revision}` | Rust 同一 Mutex 原子更新配置与 revision；另有 `{ready:true}` 握手，不当作配置消费 |
+| `lyrics:state` | 宿主 → 两窗 | `{config, visible, revision, requestedVisible, taskbar:{supported,attached,reason}}` | Rust 原子 config/revision；D 独立运行状态可同 revision 更新、不落盘。另有 `{ready:true}` 握手，不当作配置消费 |
 
 **Tauri 歌词专命令**（名字唯一真源 `src/shared/commands.ts`，均 async，按 webview label 守卫）：
 
 | 命令 | 载荷 | 回执 | 来源及说明 |
 |---|---|---|---|
-| `core_lyrics_toggle` | `{checked}` | `{config, visible, revision}` | **main-only**；显示已有窗前 reload，关闭只隐藏 |
-| `core_lyrics_configure` | `{config, restoreIfPristine?}` | `{config, visible, revision}` | **main/lyrics**；只收合同配置字段，未知字段/非法值拒绝；空补丁纯读。恢复标志仅 main 可带，且只在 revision=0 接受盘上快照并推进至 1 |
+| `core_lyrics_toggle` | `{checked}` | 同 lyrics:state 状态载荷 | **main-only**；desktop 显示已有窗前 reload，普通关闭只隐藏；Beta 不走 tao show/hide |
+| `core_lyrics_configure` | `{config, restoreIfPristine?}` | 同 lyrics:state 状态载荷 | **main/lyrics**；只收合同配置字段，未知字段/非法值拒绝；空补丁不改配置，当前 lyrics 文档 generation 的订阅后空读同时确认 native ready。恢复标志仅 main 可带，且只在 revision=0 接受盘上快照并推进至 1 |
 | `core_lyrics_control` | `{payload:{action:'toggle'|'previous'|'next'}}` | `null` | **main/lyrics**；非法动作/extra 字段拒绝；转既有 `player:command {command}`，只在唯一主窗播放器执行 |
 | `core_lyrics_document` | `{document:{lines,status}}` | `null` | **main-only**；归一、缓存并广播文档 |
 | `core_lyrics_progress` | `{progress:{timeMs,playing,seekGeneration}}` | `null` | **main-only**；主窗 ≥100ms / 播放或 seek 变化节流 |
@@ -1379,7 +1379,7 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 `core_call` 与 `core_login_chrome` 的既有来源守卫不放宽。歌词窗没有任意业务 HTTP、登录、文档写入或进度写入权限。
 歌词页先订阅 document/config/progress/theme，再 `configure({})` 回读权威配置，最后 signalReady；主窗补读最新配置、补文档/进度/主题。
 
-**几何**：desktop 横版约 **960×160 DIP**，竖版约 **320×620 DIP**（仍由 AMLL 官方纵向滚动，非中文 writing-mode 竖排）；taskbar 保留 **1200×44 DIP** 横条降级。
+**几何**：desktop 横版约 **960×160 DIP**，竖版约 **320×620 DIP**（仍由 AMLL 官方纵向滚动，非中文 writing-mode 竖排）；taskbar 最多 **1200×44 DIP**，实际尺寸由安全空白决定，不能走 desktop 几何/样式分支。
 只 mode/layout 变化重新计算 size/position，颜色、字号、锁、点透、演出选项不重定位。已有用户位置保留并夹入当前歌词窗显示器工作区；首次优先主窗显示器，退主屏。
 window-state 不自动恢复 lyrics 的旧尺寸/坐标，避免异步覆盖配置几何或 Taskbar。拖柄与非交互歌词宿主通过官方 `startDragging()` 拖动，排除按钮/输入/滑块等交互节点。
 
@@ -1410,16 +1410,18 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 （`tray::revert_lyrics_checked`，只有托盘握着那个句柄）。翻回不再发广播：那是
 对已发生事实的修正，不是新的目标态（再发一条会让渲染层再跑一遍大概率仍然失败的命令）。
 
-**任务栏歌词是降级实现**：三端都没有"往任务栏里写文字"的公开 API，所以只有"独立透明窗 +
-贴 `work_area` 下沿"这一种做法。**绝不注入系统进程、不装系统钩子、不做 shell 扩展**——
-`test/lyrics-window.test.mjs` 有一条全源码扫描把这件事钉死（`SetWindowsHookEx` /
-`SetWinEventHook` / `Shell_TrayWnd` / `FindWindow` / `SetParent` / `explorer.exe` / … 0 命中）。
+**R44d 任务栏歌词（Beta）**：用户明确授权 Windows 精确自窗 `SetParent` 到合法 Shell primary/secondary root 或 Win10 ReBar/WorkerW。原生写仅 `taskbar_lyrics.rs` 内、owner UI 线程、当前创建代次且 PID/thread/live 相符的 lyrics HWND；Explorer 只读，不改任务按钮样式/尺寸，不用 DLL/全局 Hook/系统 kill。非 Windows 不支持，不再有 work_area 贴边回退。
+
+状态增补 `{requestedVisible, taskbar:{supported,attached,reason}}`，与 config/revision 分离，仅透传，不落 settings；同 revision 可更新 D 状态。reason 词表为 disabled/waiting/attached/no_space/uia_unknown/timeout/access_denied/shell_unavailable/auto_hide/dpi_mismatch/stale/attach_failed/unsupported/destroy_failed。句柄/父矩形不下发 renderer。用户请求显示与实际 visible 分离，隐藏或 no_space 后继续 probe。
+
+几何来自实际 parent 客户区与 MapWindowPoints，UIA 只读递归已知纯容器、保留未知节点/Win10 任务列表；8 DIP 间隔、至少 100 DIP 连续空白、最多 1200×44 DIP。UIA 独立单 MTA 线程/单在途，500ms 刷新、从查询开始计龄 2 秒，迟到永久丢弃；独立定时停显。apply/show 前重核 Shell/parent/monitor/DPI/客户区与实际 GetParent/rect，并显式同步自身 WebView client bounds。换 parent/monitor 或退出 Beta 销毁重建自窗，不把 tao 原生样式缓存混用；URL generation 绑定订阅后 configure 空读 ready，继续 C 文档/进度/主题握手。
+
+退出先登记 Destroyed 屏障再 destroy，固定 deadline 不因重试延后；不 join UIA，sidecar 幂等收尾，final-exit 许可后 ExitRequested 放行。window-state 只存主窗，不记录 Shell child 几何。MIT 来源固定 commit 与全文许可见 NOTICE。
 
 **如实登记的未验证项（本任务）**：
 
 1. **R44c Windows 已真验**：拖柄 rect 变化、锁后不动/解锁恢复、锁中媒体一次、横竖几何、样式/颜色/锁/点透不回跳、hide/reopen 最新配置、配置保存及重启恢复；证据 `.tmp/r44c-native-evidence.json` / `.tmp/r44c-restart-evidence.json`。多显示器/高 DPI 和 Linux/macOS 未实机验；
-2. **任务栏模式与真实任务栏的视觉关系未实测**：窗口贴 `work_area` 下沿（= 任务栏上沿），
-   理论上不重叠；不同 DPI/自动隐藏任务栏的机器上要看一眼（R14 的验收路径）；
+2. **Windows Beta 成功路径受外部权限阻断**：本机 Low 完整性调试 EXE 已实测 access_denied、原因 UI 与停显/回桌面拖控/退出；真实 Shell parent、客户区内歌词像素、按钮前后不变与命中验证仍未通过，须正常权限环境补验；
 3. **歌词端点未联调**：`playback:lyrics` 的**响应形状**是宽容读取的（候选键见上），
    真实形状确认后应收敛到那一个键（`warnings` 会指出实际读到的是哪个）。
 

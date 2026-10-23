@@ -1,20 +1,5 @@
-/**
- * R12 桌面歌词窗与任务栏降级：跨语言契约 + 纯逻辑 + 无注入扫描。
- *
- * 这个文件钉三类"写错只有用户能发现"的事：
- *
- * 1. **跨语言名字**：新增请求频道 `playback:lyrics`、三条广播（`lyrics:document` /
- *    `lyrics:progress` / `lyrics:state`）、四条 tauri 命令（toggle/configure/document/progress）。
- *    名字写错一个字母 = "点了没反应"或"invoke 报 command not found"，都要到运行时才知道；
- * 2. **窗口与几何的口径**：建窗属性一次到位（无边框/透明/置顶/不进任务栏/不可缩放/隐藏后 show）、
- *    独立 webview 数据目录、代理三窗收口、**隐藏不销毁**、任务栏贴 work_area 下沿（降级实现）；
- * 3. **无注入红线**：任务栏歌词只允许"独立透明窗 + 贴边"，源码扫描必须 0 命中
- *    系统钩子 / explorer 注入一类 API —— 这是本项目的硬红线（简报与计划都写了）。
- *
- * 几何矩阵、配置钳制、命令失败收口这些**判定**在 Rust 内联单测里（`cargo test`，
- * 与 tray.rs/close_behavior.rs 同款做法）；这里扫的是"接线在不在、两侧一不一致"。
- *
- * 先写先看红。
+/** 歌词跨语言契约、配置保存与运行状态；原生几何/代次/退出行为在 Rust 测试。
+ * Windows Beta 只授权 taskbar_lyrics.rs 对精确自窗附着，DLL/全局 Hook 仍全树禁止。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -45,6 +30,8 @@ import {
   LYRICS_STATUS,
   MIN_PROGRESS_INTERVAL_MS,
   TASKBAR_MAX_FONT_PX,
+  TASKBAR_REASONS,
+  taskbarStatusText,
   clickThroughEnabled,
   colorTokenLabel,
   dragRegionEnabled,
@@ -366,6 +353,57 @@ test("R44c review 卸载后的保存失败可见且重挂手动重试，不假�
   stop(); env.bridge.dispose();
 });
 
+test("R44d taskbar 状态独立于 config/revision 透传，不持久化原生状态或 handles", async () => {
+  const env = revisionBridge(); await env.bridge.initialize();
+  const config = { ...DEFAULT_LYRICS_CONFIG, mode: "taskbar" };
+  await env.emit({ revision: 2, config, visible: false, requestedVisible: true, taskbar: { supported: true, attached: false, reason: "access_denied" } });
+  await flushBridge();
+  assert.deepEqual(env.bridge.snapshot().taskbar, { supported: true, attached: false, reason: "access_denied" });
+  assert.equal(env.bridge.snapshot().requestedVisible, true);
+  const writes = env.writes.length;
+  await env.emit({ revision: 2, config, visible: true, requestedVisible: true, taskbar: { supported: true, attached: true, reason: "attached" } });
+  await flushBridge();
+  assert.equal(env.bridge.snapshot().taskbar.attached, true, "同 config revision 的独立 D 状态必须可更新");
+  assert.equal(env.writes.length, writes, "纯 D 状态不写 settings");
+  assert.equal("taskbar" in env.stored(), false);
+  assert.equal(modeLabel("taskbar"), "任务栏歌词（Beta）");
+  await env.emit({ revision: 1, config: DEFAULT_LYRICS_CONFIG, visible: false, taskbar: { attached: false, reason: "disabled", supported: false } });
+  assert.equal(env.bridge.snapshot().taskbar.attached, true, "旧 revision 的 D 状态也不得覆盖新配置");
+  env.bridge.dispose();
+});
+
+test("R44d D5 同配置 revision 的迟到 waiting 回执不能覆盖新 attached，反向也拒旧", async () => {
+  const gate = deferredBridge(); const env = revisionBridge({ configureGate: gate }); await env.bridge.initialize();
+  const old = env.bridge.applyConfig({ color: "primary" }); await flushBridge();
+  const config = { ...DEFAULT_LYRICS_CONFIG, color: "primary", mode: "taskbar" };
+  await env.emit({ revision: 2, runtimeRevision: 8, config, visible: true, requestedVisible: true, taskbar: { supported: true, attached: true, reason: "attached" } });
+  await env.emit({ revision: 2, runtimeRevision: 7, config, visible: false, requestedVisible: true, taskbar: { supported: true, attached: false, reason: "waiting" } });
+  gate.resolve(); await old;
+  assert.equal(env.bridge.snapshot().visible, true);
+  assert.equal(env.bridge.snapshot().taskbar.attached, true);
+  assert.equal(env.bridge.snapshot().runtimeRevision, 8);
+  await env.emit({ revision: 2, runtimeRevision: 9, config, visible: false, requestedVisible: true, taskbar: { supported: true, attached: false, reason: "timeout" } });
+  await env.emit({ revision: 2, runtimeRevision: 8, config, visible: true, requestedVisible: true, taskbar: { supported: true, attached: true, reason: "attached" } });
+  assert.equal(env.bridge.snapshot().visible, false);
+  assert.equal(env.bridge.snapshot().taskbar.reason, "timeout");
+  await flushBridge(); assert.equal("runtimeRevision" in env.stored(), false); env.bridge.dispose();
+});
+
+test("R44d Rust 与 renderer 独立状态词表一致，未知原因不假称已内嵌", () => {
+  const source = rustSource("taskbar_lyrics.rs");
+  const mapping = source.slice(source.indexOf("pub fn as_str"), source.indexOf("pub fn payload"));
+  assert.deepEqual([...mapping.matchAll(/=> "([a-z_]+)"/g)].map((m) => m[1]), TASKBAR_REASONS);
+  for (const reason of TASKBAR_REASONS) assert.ok(taskbarStatusText({ reason }).length > 0);
+  assert.match(taskbarStatusText({ reason: "access_denied" }), /权限.*停显/);
+  assert.doesNotMatch(taskbarStatusText({ reason: "new-unknown" }), /已内嵌/);
+});
+
+test("R44d config 白名单不接受 renderer 伪造 taskbar 状态或原生目标", () => {
+  const config = normalizeLyricsConfig({ mode: "taskbar", taskbar: { attached: true }, parent: 123, hwnd: 123 });
+  assert.equal(config.mode, "taskbar");
+  assert.equal("taskbar" in config, false); assert.equal("parent" in config, false); assert.equal("hwnd" in config, false);
+});
+
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const read = (relative) => readFileSync(`${repoRoot}${relative}`, "utf8");
 const rustSource = (name) => read(`src-tauri/src/${name}`);
@@ -475,7 +513,7 @@ test("Rust：建窗属性一次到位（无边框/透明/无阴影/置顶/不进
     [".decorations(false)", "无边框"],
     [".transparent(true)", "透明"],
     [".shadow(false)", "无阴影"],
-    [".always_on_top(true)", "置顶"],
+    [".always_on_top(desktop_topmost(config))", "仅桌面置顶"],
     [".skip_taskbar(true)", "不进任务栏"],
     [".resizable(false)", "不可缩放"],
     [".focused(false)", "不抢焦点"],
@@ -504,12 +542,12 @@ test("Rust：代理三窗收口——歌词窗也接 proxy_url（不接就是绕
   assert.match(rust, /crate::proxy_url_argument\(/, "解析失败一律降级成「没配」，绝不把建窗带崩");
 });
 
-test("Rust：隐藏不销毁（没有 destroy/close，也没有第二份窗口表）", () => {
+test("Rust：普通开关隐藏不销毁，换模式与退出走受控销毁", () => {
   const rust = rustProduction(rustSource("lyrics_window.rs"));
-  assert.match(rust, /\.hide\(\)/, "关闭桌面歌词 = 隐藏（保住 webview 与进度）");
-  for (const forbidden of [".destroy(", ".close(", "unstable"]) {
-    assert.ok(!rust.includes(forbidden), `歌词窗模块不许出现 ${forbidden}（隐藏不销毁）`);
-  }
+  const toggle = rust.slice(rust.indexOf("fn apply_toggle"), rust.indexOf("pub struct ToggleFailurePlan"));
+  assert.match(toggle, /\.hide\(\)/, "普通关闭保留 webview 与进度");
+  assert.doesNotMatch(toggle, /\.destroy\(|\.close\(/);
+  assert.match(rust, /rebuild_window/);
   assert.ok(
     !rust.includes("Mutex<Option<WebviewWindow>>") && !rust.includes("Vec<WebviewWindow>"),
     "窗口归属 tauri 的窗口表（get_webview_window 现问），不许自己再记一份镜像",
@@ -599,6 +637,11 @@ test("无注入：全源码扫描——系统钩子 / explorer 注入类 API 零
     "mouse_event",
     "explorer.exe",
     "inject_",
+    "CreateRemoteThread",
+    "WriteProcessMemory",
+    "VirtualAllocEx",
+    "QueueUserAPC",
+    "NtCreateThreadEx",
   ];
   const scanned = [];
   const walk = (relative) => {
@@ -621,13 +664,14 @@ test("无注入：全源码扫描——系统钩子 / explorer 注入类 API 零
   for (const relative of scanned) {
     const source = read(relative);
     for (const token of banned) {
-      if (source.includes(token)) offenders.push(`${relative}: ${token}`);
+      const allowed = relative === "src-tauri/src/taskbar_lyrics.rs" && ["Shell_TrayWnd", "FindWindowW", "FindWindowExW", "SetParent", "explorer.exe"].includes(token);
+      if (source.includes(token) && !allowed) offenders.push(`${relative}: ${token}`);
     }
   }
   assert.deepEqual(
     offenders,
     [],
-    `任务栏歌词只允许「独立透明窗 + 贴 work_area 下沿」这一种降级实现（三端无公开文字 API）：\n${offenders.join("\n")}`,
+    `仅 taskbar_lyrics.rs 有精确自窗内嵌例外，DLL/全局 Hook 仍全树禁止：\n${offenders.join("\n")}`,
   );
 });
 

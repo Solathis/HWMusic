@@ -10,7 +10,7 @@
 > 也不代表官方立场。请自行评估使用风险。
 
 Tauri v2 + React 的桌面客户端外壳：官方授权页扫码登录、音乐库浏览、播放器与歌词、
-桌面歌词窗与任务栏歌词降级、托盘与全局快捷键、统一 HTTP 代理设置。
+桌面歌词窗与 Windows 任务栏歌词 Beta、托盘与全局快捷键、统一 HTTP 代理设置。
 
 **当前交付状态的准确说法**：代码级与纯函数级已验收（Node 528 / Rust 194 / 验收六路径 6 / 真 Chromium 7 项 / NSIS 静态校验 8 项，全绿）；
 **但真实账号扫码、真实音乐业务端点、真实窗口视觉与 Linux/macOS 平台都还没有实测**。
@@ -92,7 +92,7 @@ npm run dev
   Media Session 系统媒体控件对接。
 - **歌词**：AMLL 官方组件渲染、`[offset:]` 补偿与翻译行合并、逐行滚动、面板与独立歌词窗。
 - **桌面歌词窗**：官方拖柄、只禁拖动的锁定、受限媒体控制、横版/窄高竖版、透明/面板 surface，字号颜色令牌与 AMLL 模糊/缩放/弹簧选项；配置保存到既有 settings 并重启恢复（失败明确提示未保存，可手动重试）。
-- **任务栏歌词（降级实现）**：独立透明窗贴 `work_area` 下沿。**不是**注入任务栏 —— 见第 8 节。
+- **任务栏歌词（Beta）**：Windows 实验原生自窗内嵌；仅使用 UIA 确认的任务栏安全空白，权限不符/占用未知/自动隐藏时停显并说明原因。当前 Low 完整性调试环境的真实附着受外部权限阻断，桌面恢复已验；不以贴边浮窗冒充成功。
 - **托盘与关窗行为**：9 槽位菜单、关窗 fail-safe（托盘真的装上才藏窗口，否则真退出）。
 - **全局快捷键**：媒体三键 + `Ctrl+Alt+L` 等，逐条注册、失败回退并有提示。
 - **设置**：HTTP 代理（含凭据与例外列表、测试连接）、开机自启、关窗行为、歌词窗配置。
@@ -182,7 +182,7 @@ CI 的 runner 自带可写 TEMP，不受影响。
 | 1 | **凭据只在 sidecar / Rust** | 渲染层拿不到 Token；业务 HTTP 只在 sidecar 侧；`auth:status` 载荷里没有账号标识（不为显示扩协议） |
 | 2 | **登录页零权限、零注入** | 登录窗独立子 webview + 独立数据目录；`capabilities/main.json` 只给 main，`lyrics.json` 只给 lyrics 事件/自窗拖动；不订阅 `initialization_script`/`eval`，白名单与回调只靠导航事件观测 |
 | 3 | **不放宽任何安全开关** | `tauri.conf.json` 的 CSP 收紧（`connect-src` 只有 `'self' ipc: http://ipc.localhost`；`object-src 'none'`；`base-uri 'none'`；`frame-ancestors 'none'`）；不关 webSecurity、不放宽 TLS、不注册全局 `hms://` 协议、不改系统代理 |
-| 4 | **不注入、不 Hook 系统进程** | 托盘用 Tauri `tray-icon`；任务栏歌词只用「独立透明窗 + `work_area` 贴边」；`SetWindowsHookEx`/`SetWinEventHook`/`Shell_TrayWnd`/`FindWindow`/`SetParent`/`explorer.exe` 等 token 由 `npm run test:acceptance` 的**全源码扫描**钉成 0 命中 |
+| 4 | **不注入 DLL、不装全局 Hook、不改 Explorer 按钮** | 托盘用 Tauri `tray-icon`；Windows Beta 仅新原生模块可对精确自窗 SetParent，foreign HWND 只读。全树扫描仍禁 DLL/Hook，例外钉死到文件与符号集合 |
 
 关键实现事实：
 
@@ -238,8 +238,7 @@ CI 的 runner 自带可写 TEMP，不受影响。
    **仍未人工目视**：托盘点击、歌词窗透明/置顶/点透、媒体键手感。
 5. **Linux / macOS 未实测，本仓不宣称支持**。Windows 之外的构建在本机不参与编译（`#[cfg(windows)]`/`#[cfg(target_os)]` 分支），
    Linux 打包未做过，macOS 只配了 `macos-proxy`（且仅 14+ 生效）。差异细节见 [docs/PLATFORM_DIFFERENCES.md](docs/PLATFORM_DIFFERENCES.md)。
-6. **任务栏歌词是降级实现**：三端都没有「往任务栏里写文字」的公开 API，所以只有「独立透明窗 + 贴 `work_area` 下沿」
-   这一种做法，**绝不注入系统进程、不装系统钩子、不做 shell 扩展**。
+6. **Windows 任务栏歌词为 Beta**：自窗内嵌依赖 Shell 私有窗口结构，当前 Low 调试环境实测拒绝并停显；成功附着与系统按钮不变仍待正常权限环境验收。Linux/macOS 不支持。始终禁止 DLL/全局 Hook/修改 Explorer 按钮/系统进程 kill。
 7. **安装包未签名、未实际执行安装**：`check:nsis` 只做静态校验；CI 未在 GitHub 上真跑过一遍。
 8. **歌词窗配置会保存**，若数据根不可写，设置页显示未保存与重试；窗口位置不作为配置保存。旧仓数据迁移仍不做。
 

@@ -17,6 +17,9 @@ export interface LyricsWindowBinding {
   config: typeof DEFAULT_LYRICS_CONFIG
   /** 歌词窗此刻是不是开着（宿主回执里的观测值，不是"我们请求它开着"）。 */
   visible: boolean
+  requestedVisible?: boolean
+  runtimeRevision?: number
+  taskbar?: { supported: boolean; attached: boolean; reason: string }
   /** 开/关桌面歌词窗。 */
   setVisible: (next: boolean) => void
   /** 改配置（字号/颜色/模式/锁定/点透）。 */
@@ -42,7 +45,7 @@ const log = (...parts: unknown[]) => console.warn("[hwmusic-lyrics]", ...parts)
 export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): LyricsWindowBinding {
   const bridge = getLyricsBridge()
   const [windowStatus, setWindowStatus] = useState(() => bridge.snapshot())
-  const { config, visible, saveError } = windowStatus
+  const { config, visible, requestedVisible, taskbar, saveError } = windowStatus
   const trackId = state.track?.id ?? null
   const title = trackNameOrNull(state.track)
   const artist = trackArtistsOrNull(state.track)
@@ -141,7 +144,7 @@ export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): Lyr
   )
 
   return useMemo(
-    () => ({ config, visible, setVisible, updateConfig, saveError, retrySave, canImport: trackId !== null, importFile }),
-    [config, visible, setVisible, updateConfig, saveError, retrySave, trackId, importFile],
+    () => ({ config, visible, requestedVisible, taskbar, setVisible, updateConfig, saveError, retrySave, canImport: trackId !== null, importFile }),
+    [config, visible, requestedVisible, taskbar, setVisible, updateConfig, saveError, retrySave, trackId, importFile],
   )
 }

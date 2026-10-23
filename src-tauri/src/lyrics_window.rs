@@ -1,6 +1,6 @@
 //! 桌面歌词的运行配置与 revision 由 Rust 原子持有，主窗代理 settings 持久化。
 //! 配置/媒体专命令限 main/lyrics；开关、文档、进度与 core_call 仍限主窗。
-//! 几何只随 mode/layout 变化；任务栏模式暂保留独立贴边窗口，后续附着独立实现。
+//! desktop 几何只随 mode/layout 变化；Windows taskbar 交独立原生宿主，失败停显而不贴边。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -106,7 +106,7 @@ pub fn position_for(area: Rect, mode: LyricsMode, size: Size) -> Point {
 // 配置（纯函数 + 会话内状态）
 // ---------------------------------------------------------------------------
 
-/// 两种模式：桌面悬浮条（可拖）与任务栏显示带（贴边、点透）。
+/// 桌面悬浮与 Windows 自窗内嵌 Beta（单行、点透）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LyricsMode {
     Desktop,
@@ -238,6 +238,8 @@ impl LyricsConfig {
     }
 }
 
+pub fn desktop_topmost(config: &LyricsConfig) -> bool { config.mode == LyricsMode::Desktop }
+
 pub fn click_through_enabled(config: &LyricsConfig) -> bool {
     config.click_through || config.mode == LyricsMode::Taskbar
 }
@@ -256,12 +258,36 @@ pub struct LyricsSnapshot {
 pub struct LyricsWindowState {
     config: Mutex<LyricsSnapshot>,
     document: Mutex<Option<Value>>,
+    lifecycle: Mutex<LyricsLifecycle>,
     operations: tauri::async_runtime::Mutex<()>,
+    runtime_status: Mutex<(u64, Option<Value>)>,
+}
+
+#[derive(Default)]
+struct LyricsLifecycle {
+    requested: bool,
+    generation: u64,
+    live_generation: Option<u64>,
+    desktop_position: Option<Point>,
+    shutting_down: bool,
+    destroy_waiter: Option<(u64, std::sync::mpsc::Sender<bool>)>,
 }
 
 impl LyricsWindowState {
     pub fn snapshot(&self) -> LyricsSnapshot { lock(&self.config).clone() }
     pub fn config(&self) -> LyricsConfig { self.snapshot().config }
+
+    fn with_desktop_position<T>(&self, apply: impl FnOnce(Option<Point>) -> T) -> T {
+        let position = lock(&self.lifecycle).desktop_position;
+        apply(position)
+    }
+
+    fn stamp_status(&self, mut payload: Value) -> Value {
+        let mut status = lock(&self.runtime_status);
+        if status.1.as_ref() != Some(&payload) { status.0 += 1; status.1 = Some(payload.clone()); }
+        payload["runtimeRevision"] = json!(status.0);
+        payload
+    }
 
     fn configure(&self, patch: &Value, restore: bool) -> (LyricsConfig, LyricsSnapshot, bool) {
         let mut state = lock(&self.config);
@@ -277,8 +303,105 @@ impl LyricsWindowState {
     fn store_document(&self, document: Value) { *lock(&self.document) = Some(document); }
 }
 
+pub fn current_status<R: Runtime>(app: &AppHandle<R>) -> Value {
+    let state = app.state::<LyricsWindowState>(); let snapshot = state.snapshot();
+    let mut payload = status_payload(&snapshot.config, is_open(app), snapshot.revision);
+    payload["requestedVisible"] = json!(lock(&state.lifecycle).requested);
+    #[cfg(windows)] { payload["taskbar"] = app.state::<crate::taskbar_lyrics::Host>().payload(); }
+    #[cfg(not(windows))] { payload["taskbar"] = crate::taskbar_lyrics::Reason::Unsupported.payload(false); }
+    state.stamp_status(payload)
+}
+
+pub fn emit_status<R: Runtime>(app: &AppHandle<R>) {
+    let owner = app.clone();
+    let _ = app.run_on_main_thread(move || { emit_core_event(&owner, LYRICS_STATE, current_status(&owner)); });
+}
+
+async fn read_status<R: Runtime>(app: &AppHandle<R>) -> Result<Value, CoreError> {
+    let (tx, rx) = tauri::async_runtime::channel(1); let owner = app.clone();
+    app.run_on_main_thread(move || { let _ = tx.try_send(current_status(&owner)); }).map_err(|e| CoreError::new("internal", e.to_string()))?;
+    let mut rx = rx;
+    rx.recv().await.ok_or_else(|| CoreError::new("internal", "歌词运行状态回读失败"))
+}
+
+async fn rebuild_window<R: Runtime>(app: &AppHandle<R>, save_desktop: bool) -> Result<(), CoreError> {
+    let state = app.state::<LyricsWindowState>();
+    if lock(&state.lifecycle).shutting_down { return Err(CoreError::new("shutting_down", "应用正在退出")); }
+    if let Some(window) = app.get_webview_window(LYRICS_WINDOW_LABEL) {
+        if save_desktop { lock(&state.lifecycle).desktop_position = window.outer_position().ok().map(|p| Point { x: p.x.into(), y: p.y.into() }); }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let expected_generation = lock(&state.lifecycle).live_generation;
+        let owner = app.clone();
+        app.run_on_main_thread(move || {
+            let state = owner.state::<LyricsWindowState>();
+            let generation = lock(&state.lifecycle).live_generation;
+            if generation != expected_generation { let _ = sender.send(generation.is_none()); return; }
+            let Some(generation) = generation else { let _ = sender.send(true); return; };
+            // Register the receipt before asking the runtime to destroy the window.
+            lock(&state.lifecycle).destroy_waiter = Some((generation, sender));
+            #[cfg(windows)] let result = owner.state::<crate::taskbar_lyrics::Host>().detach(&window, generation).map_err(|_| ());
+            #[cfg(not(windows))] let result = window.destroy().map_err(|_| ());
+            if result.is_err() {
+                if let Some((_, sender)) = lock(&state.lifecycle).destroy_waiter.take() { let _ = sender.send(false); }
+            }
+        }).map_err(|e| CoreError::new("internal", e.to_string()))?;
+        let destroyed = tauri::async_runtime::spawn_blocking(move || receiver.recv_timeout(std::time::Duration::from_millis(2100)).unwrap_or(false)).await.unwrap_or(false);
+        if !destroyed { return Err(CoreError::new("destroy_failed", "歌词窗清理未完成，已停显；请关闭歌词后重试")); }
+    }
+    let requested = lock(&state.lifecycle).requested;
+    if requested {
+        let config = state.config();
+        apply_toggle(app, &config, true)?;
+        if config.mode == LyricsMode::Desktop {
+            state.with_desktop_position(|position| -> Result<(), CoreError> {
+                if let (Some(position), Some(window)) = (position, app.get_webview_window(LYRICS_WINDOW_LABEL)) {
+                    let (size, point) = geometry_plan(work_area(app, false)?, &config, window.scale_factor().unwrap_or(1.0), Some(position));
+                    window.set_size(PhysicalSize::new(size.width.round() as u32, size.height.round() as u32)).and_then(|_| window.set_position(PhysicalPosition::new(point.x.round() as i32, point.y.round() as i32))).map_err(|e| CoreError::new("internal", e.to_string()))?;
+                }
+                Ok(())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+pub fn schedule_rebuild<R: Runtime>(app: &AppHandle<R>) {
+    let generation = lock(&app.state::<LyricsWindowState>().lifecycle).live_generation;
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<LyricsWindowState>(); let _operation = state.operations.lock().await;
+        if lock(&state.lifecycle).live_generation != generation || state.config().mode != LyricsMode::Taskbar { return; }
+        if let Err(error) = rebuild_window(&app, false).await { log::warn!("任务栏歌词重建失败：{}", error.message); }
+        emit_status(&app);
+    });
+}
+
+pub fn begin_shutdown<R: Runtime>(app: &AppHandle<R>) {
+    let state = app.state::<LyricsWindowState>();
+    let mut lifecycle = lock(&state.lifecycle); lifecycle.shutting_down = true; lifecycle.requested = false;
+    #[cfg(windows)] {
+        let host = app.state::<crate::taskbar_lyrics::Host>(); host.shutdown();
+        let generation = lifecycle.live_generation;
+        lock(&host.barrier).begin(host.now(), generation);
+        drop(lifecycle);
+        if let (Some(generation), Some(window)) = (generation, app.get_webview_window(LYRICS_WINDOW_LABEL)) {
+            if host.detach(&window, generation).is_err() { lock(&host.barrier).failed(generation); }
+        }
+    }
+    #[cfg(not(windows))] { drop(lifecycle); if let Some(window) = app.get_webview_window(LYRICS_WINDOW_LABEL) { let _ = window.destroy(); } }
+}
+
+pub fn shutdown_finished<R: Runtime>(app: &AppHandle<R>) -> bool {
+    #[cfg(windows)] { let host = app.state::<crate::taskbar_lyrics::Host>(); let finished = lock(&host.barrier).finished(host.now()); finished }
+    #[cfg(not(windows))] { let _ = app; true }
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub fn ready_generation(source: &str, document_generation: Option<u64>, live_generation: Option<u64>, empty_read: bool) -> Option<u64> {
+    if source == LYRICS_WINDOW_LABEL && empty_read && document_generation == live_generation { document_generation } else { None }
 }
 
 pub fn require_lyrics_source(label: &str) -> Result<(), CoreError> {
@@ -441,6 +564,11 @@ fn build_lyrics_window<R: Runtime>(
     app: &AppHandle<R>,
     config: &LyricsConfig,
 ) -> Result<WebviewWindow<R>, CoreError> {
+    let generation = {
+        let state = app.state::<LyricsWindowState>(); let mut lifecycle = lock(&state.lifecycle);
+        if lifecycle.shutting_down { return Err(CoreError::new("shutting_down", "应用正在退出")); }
+        lifecycle.generation += 1; lifecycle.live_generation = Some(lifecycle.generation); lifecycle.generation
+    };
     let data_root = app
         .try_state::<crate::WebviewDataRoot>()
         .map(|root| root.0.clone())
@@ -469,13 +597,13 @@ fn build_lyrics_window<R: Runtime>(
     let mut builder = WebviewWindowBuilder::new(
         app,
         LYRICS_WINDOW_LABEL,
-        WebviewUrl::App(lyrics_window_url(config, crate::theme::current_theme(app)).into()),
+        WebviewUrl::App(format!("{}&generation={generation}", lyrics_window_url(config, crate::theme::current_theme(app))).into()),
     )
     .title(LYRICS_WINDOW_TITLE)
     .decorations(false)
     .transparent(true)
     .shadow(false)
-    .always_on_top(true)
+    .always_on_top(desktop_topmost(config))
     .skip_taskbar(true)
     .resizable(false)
     .focused(false)
@@ -486,7 +614,7 @@ fn build_lyrics_window<R: Runtime>(
         builder = builder.proxy_url(proxy);
     }
 
-    builder
+    let window = builder
         // 页面（重新）加载完成 → 把最后一份歌词文档重发一次（R41a）。
         //
         // 为什么挂在这里：`apply_toggle` 每次显示已有窗口都会 `reload()`，而主窗的重推
@@ -496,14 +624,49 @@ fn build_lyrics_window<R: Runtime>(
         // 只认 `Finished`：`Started` 时页面里的 JS 还没执行，重发等于发进空气。
         // 按 label 过滤：这个回调跟着这个窗的 webview 走，判一次 label 是兜底
         // （"这条广播只发给歌词窗"这件事由它自证，而不是靠"只有一个窗"这种当下的巧合）。
-        .on_page_load(|webview, payload| {
+        .on_page_load(move |webview, payload| {
             if payload.event() != PageLoadEvent::Finished || webview.label() != LYRICS_WINDOW_LABEL {
                 return;
+            }
+            if let Some(state) = webview.app_handle().try_state::<LyricsWindowState>() {
+                if lock(&state.lifecycle).live_generation != Some(generation) { return; }
             }
             replay_document(webview.app_handle());
         })
         .build()
-        .map_err(|source| CoreError::new("internal", format!("歌词窗建不起来：{source}")))
+        .map_err(|source| {
+            let state = app.state::<LyricsWindowState>(); let mut lifecycle = lock(&state.lifecycle);
+            if lifecycle.live_generation == Some(generation) { lifecycle.live_generation = None; }
+            CoreError::new("internal", format!("歌词窗建不起来：{source}"))
+        })?;
+    let events = app.clone();
+    window.on_window_event(move |event| {
+        if !matches!(event, tauri::WindowEvent::Destroyed) { return; }
+        let mut recover = false;
+        if let Some(state) = events.try_state::<LyricsWindowState>() {
+            let mut lifecycle = lock(&state.lifecycle);
+            if lifecycle.live_generation == Some(generation) { lifecycle.live_generation = None; }
+            if lifecycle.destroy_waiter.as_ref().is_some_and(|(g, _)| *g == generation) {
+                if let Some((_, waiter)) = lifecycle.destroy_waiter.take() { let _ = waiter.send(true); }
+            } else { recover = lifecycle.requested && !lifecycle.shutting_down; }
+        }
+        #[cfg(windows)]
+        events.state::<crate::taskbar_lyrics::Host>().destroyed(generation);
+        if recover { schedule_rebuild(&events); }
+    });
+    #[cfg(windows)] {
+        let owner_app = app.clone(); let owned = window.clone(); let enabled = config.mode == LyricsMode::Taskbar;
+        app.run_on_main_thread(move || {
+            let state = owner_app.state::<LyricsWindowState>();
+            if lock(&state.lifecycle).live_generation != Some(generation) { return; }
+            let requested = lock(&state.lifecycle).requested;
+            let monitor = crate::taskbar_lyrics::monitor_for(&owner_app);
+            let host = owner_app.state::<crate::taskbar_lyrics::Host>();
+            if let Err(reason) = host.register(&owned, generation, enabled, requested, monitor) { host.failed(reason); }
+            emit_status(&owner_app);
+        }).map_err(|error| CoreError::new("internal", error.to_string()))?;
+    }
+    Ok(window)
 }
 
 #[derive(Debug, PartialEq)]
@@ -525,6 +688,7 @@ pub fn geometry_plan(area: Rect, config: &LyricsConfig, scale: f64, current: Opt
 }
 
 pub fn apply_window_effects(previous: Option<&LyricsConfig>, config: &LyricsConfig, area: Rect, scale: f64, current: Option<Point>, mut apply: impl FnMut(WindowEffect)) {
+    if config.mode == LyricsMode::Taskbar { return; }
     if previous.is_none_or(|old| old.mode != config.mode || old.layout != config.layout) {
         let (size, point) = geometry_plan(area, config, scale, current);
         apply(WindowEffect::Geometry(size, point));
@@ -535,6 +699,7 @@ pub fn apply_window_effects(previous: Option<&LyricsConfig>, config: &LyricsConf
 }
 
 fn apply_config<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<R>, previous: Option<&LyricsConfig>, config: &LyricsConfig) -> Result<(), CoreError> {
+    if config.mode == LyricsMode::Taskbar { return Ok(()); }
     let geometry = previous.is_none_or(|old| old.mode != config.mode || old.layout != config.layout);
     let area = if geometry { work_area(app, previous.is_some() && config.mode == LyricsMode::Desktop)? } else { Rect { x:0.0, y:0.0, width:1.0, height:1.0 } };
     let current = window.outer_position().ok().map(|p| Point {x: p.x.into(), y: p.y.into()});
@@ -579,13 +744,31 @@ fn apply_config<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<R>, previ
 /// 帧的顺序由"知道页面何时就绪"的那一侧定，而不是靠"希望主窗推得够晚"。
 /// 主窗那次重推因此删掉了（它在任何时序下都不落在可用的那一刻，留着只会让人以为它在起作用）。
 ///
-/// 与 R12 的"隐藏不销毁"并不冲突：webview 仍然活着（省掉建窗那几百毫秒与一份新数据目录），
-/// 变的只是"页面在打开时是新鲜的"。
+/// 普通 desktop 开关仍隐藏不销毁；跨 mode/parent/monitor 重建与退出另走受控销毁。
+/// taskbar 的 show/hide、几何、点透全交原生宿主，不混用 tao 样式缓存。
 fn apply_toggle<R: Runtime>(
     app: &AppHandle<R>,
     config: &LyricsConfig,
     checked: bool,
 ) -> Result<bool, CoreError> {
+    let state = app.state::<LyricsWindowState>();
+    if lock(&state.lifecycle).shutting_down { return Err(CoreError::new("shutting_down", "应用正在退出")); }
+    lock(&state.lifecycle).requested = checked;
+    if config.mode == LyricsMode::Taskbar {
+        if checked && app.get_webview_window(LYRICS_WINDOW_LABEL).is_none() { build_lyrics_window(app, config)?; }
+        #[cfg(windows)] {
+            let owner = app.clone();
+            let generation = lock(&state.lifecycle).live_generation;
+            app.run_on_main_thread(move || {
+                let state = owner.state::<LyricsWindowState>();
+                let lifecycle = lock(&state.lifecycle);
+                if lifecycle.live_generation != generation || lifecycle.shutting_down || state.config().mode != LyricsMode::Taskbar { return; }
+                let requested = lifecycle.requested; drop(lifecycle);
+                owner.state::<crate::taskbar_lyrics::Host>().request(true, requested, crate::taskbar_lyrics::monitor_for(&owner));
+            }).map_err(|error| CoreError::new("internal", error.to_string()))?;
+        }
+        return Ok(is_open(app));
+    }
     if !checked {
         if let Some(window) = app.get_webview_window(LYRICS_WINDOW_LABEL) {
             window
@@ -659,12 +842,13 @@ pub async fn core_lyrics_toggle(
     let _operation = state.operations.lock().await;
     let snapshot = state.snapshot();
     match apply_toggle(&app, &snapshot.config, checked) {
-        Ok(visible) => {
-            let payload = status_payload(&snapshot.config, visible, snapshot.revision);
+        Ok(_) => {
+            let payload = read_status(&app).await?;
             emit_core_event(&app, LYRICS_STATE, payload.clone());
             Ok(payload)
         }
         Err(error) => {
+            lock(&state.lifecycle).requested = is_open(&app);
             let plan = toggle_failure_plan(checked, is_open(&app), &error.message);
             crate::tray::revert_lyrics_checked(&app, plan.tray_checked);
             emit_core_event(&app, APP_NOTICE, json!({ "text": plan.notice }));
@@ -683,15 +867,32 @@ pub async fn core_lyrics_configure(
     validate_configure(webview.label(), &config, restore_if_pristine)?;
     let state = app.state::<LyricsWindowState>();
     let _operation = state.operations.lock().await;
+    #[cfg(windows)] {
+        let document_generation = webview.url().ok().and_then(|url| url.query_pairs().find(|(key, _)| key == "generation").and_then(|(_, value)| value.parse().ok()));
+        let generation = ready_generation(webview.label(), document_generation, lock(&state.lifecycle).live_generation, config.as_object().is_some_and(|map| map.is_empty()));
+        if let Some(generation) = generation { app.state::<crate::taskbar_lyrics::Host>().ready(generation); }
+    }
     let (previous, snapshot, changed) = state.configure(&config, restore_if_pristine == Some(true));
     if changed {
-        if let Some(window) = app.get_webview_window(LYRICS_WINDOW_LABEL) {
+        if previous.mode != snapshot.config.mode {
+            if let Err(error) = rebuild_window(&app, previous.mode == LyricsMode::Desktop).await {
+                // 切出 Beta 失败（restore/销毁任一环节）时旧 taskbar 宿主必须失败关闭：
+                // 只 invalidate 一次查询不够，旧 policy 可能凭旧 enabled/requested 再次探测并重新显示。
+                #[cfg(windows)] {
+                    let host = app.state::<crate::taskbar_lyrics::Host>();
+                    if previous.mode == LyricsMode::Taskbar { host.revoke(crate::taskbar_lyrics::Reason::DestroyFailed); }
+                    else { host.failed(crate::taskbar_lyrics::Reason::DestroyFailed); }
+                }
+                emit_status(&app);
+                return Err(error);
+            }
+        } else if let Some(window) = app.get_webview_window(LYRICS_WINDOW_LABEL) {
             if let Err(error) = apply_config(&app, &window, Some(&previous), &snapshot.config) {
                 log::warn!("歌词窗配置已更新，但窗口属性未完全应用（{error}）");
             }
         }
     }
-    let payload = status_payload(&snapshot.config, is_open(&app), snapshot.revision);
+    let payload = read_status(&app).await?;
     if changed { emit_core_event(&app, LYRICS_STATE, payload.clone()); }
     Ok(payload)
 }
@@ -770,6 +971,29 @@ pub async fn core_lyrics_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn d5_runtime_status_sequence_changes_without_config_revision_or_persistence() {
+        let state = LyricsWindowState::default();
+        let waiting = state.stamp_status(json!({"config":{},"revision":2,"visible":false}));
+        let attached = state.stamp_status(json!({"config":{},"revision":2,"visible":true}));
+        assert!(attached["runtimeRevision"].as_u64().unwrap() > waiting["runtimeRevision"].as_u64().unwrap());
+        assert_eq!(state.stamp_status(json!({"config":{},"revision":2,"visible":true})), attached);
+        assert_eq!(state.snapshot().revision, 0);
+    }
+
+    #[test]
+    fn d4_desktop_restore_drops_lifecycle_lock_before_synchronous_ui() {
+        let state = LyricsWindowState::default();
+        lock(&state.lifecycle).desktop_position = Some(Point { x: 12.0, y: -24.0 });
+        let position = state.with_desktop_position(|point| {
+            let mut lifecycle = state.lifecycle.try_lock().expect("UI callback must acquire lifecycle without deadlocking");
+            lifecycle.requested = true;
+            point
+        });
+        assert_eq!(position, Some(Point { x: 12.0, y: -24.0 }));
+        assert!(lock(&state.lifecycle).requested);
+    }
 
     #[test]
     fn r44c_pristine_restore_and_atomic_revision_reject_stale_disk() {
@@ -1300,7 +1524,7 @@ mod tests {
             ".decorations(false)",
             ".transparent(true)",
             ".shadow(false)",
-            ".always_on_top(true)",
+            ".always_on_top(desktop_topmost(config))",
             ".skip_taskbar(true)",
             ".resizable(false)",
             ".focused(false)",
@@ -1313,7 +1537,8 @@ mod tests {
         ] {
             assert!(production.contains(required), "建窗契约缺一项：{required}");
         }
-        assert!(!production.contains(".destroy("), "关闭桌面歌词 = 隐藏，不销毁（保住 webview 与进度）");
+        let toggle = production.split("fn apply_toggle").nth(1).unwrap().split("pub struct ToggleFailurePlan").next().unwrap();
+        assert!(!toggle.contains(".destroy("), "普通开关保留页面；换模式/退出才销毁");
         assert!(production.contains(".hide()"), "必须真的调 hide()");
 
         // 三条广播都得从这里发出去（歌词窗唯一的输入）；用**调用形状**扫（去掉空白再比，

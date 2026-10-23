@@ -13,20 +13,20 @@
  * 2. **颜色只认设计令牌**（`LYRICS_COLOR_TOKENS`）：不接受任意色值。
  *    渲染层把令牌 id 写进 `data-lyrics-color`，真正的 AMLL 歌词颜色变量映射在
  *    `amll-theme.css`（那些变量的唯一接线点，R9 的规矩，由扫描钉住）。
- * 3. **任务栏模式一律点透**：它是贴在 work_area 下沿的一条显示带，挡住底下窗口的点击
- *    比"能点它"重要得多；桌面模式默认可点（要能接手拖动）。
+ * 3. **任务栏模式一律点透**：Windows Beta 只占任务栏已确认的安全空白；失败停显。
+ *    桌面模式默认可点（要能接手拖动）。
  *
  * Rust 侧握着同一张档位表/词表（`src-tauri/src/lyrics_window.rs`），由
  * `test/lyrics-window.test.mjs` 逐条钉住两侧相等。
  */
 import { normalizeThemeChoice } from "../theme/theme.mjs";
 
-/** 两种模式：桌面悬浮条（可拖）与任务栏显示带（贴 work_area 下沿）。 */
+/** 桌面悬浮与 Windows 真实任务栏内嵌 Beta。 */
 export const LYRICS_MODES = ["desktop", "taskbar"];
 
 const MODE_LABELS = {
   desktop: "桌面悬浮",
-  taskbar: "任务栏",
+  taskbar: "任务栏歌词（Beta）",
 };
 
 /**
@@ -93,7 +93,21 @@ export const LYRICS_STATUS = {
 };
 
 export const LYRICS_SESSION_NOTICE =
-  "桌面歌词配置会保存并在重启后恢复。锁定只禁拖动，媒体按钮和解锁仍可用；点透后请从主窗设置关闭点透。竖版为窄高滚动窗，并非中文竖排。";
+  "桌面歌词配置会保存并在重启后恢复。锁定只禁拖动，媒体按钮和解锁仍可用；点透后请从主窗设置关闭点透。竖版为窄高滚动窗，并非中文竖排。任务栏歌词（Beta）仅 Windows 实验内嵌，可能随系统版本失效；无安全空白、自动隐藏或权限不符时停显，不会退为贴边浮窗。请从主窗切回桌面模式恢复拖动与控制。";
+
+export const TASKBAR_REASONS = ["disabled", "waiting", "attached", "no_space", "uia_unknown", "timeout", "access_denied", "shell_unavailable", "auto_hide", "dpi_mismatch", "stale", "attach_failed", "unsupported", "destroy_failed"];
+
+export function taskbarStatusText(status) {
+  const labels = {
+    disabled: "未启用", waiting: "等待安全空白与歌词就绪", attached: "已内嵌任务栏",
+    no_space: "没有足够的安全空白，已停显", uia_unknown: "无法确认系统按钮占用，已停显",
+    timeout: "系统占用查询超时，已停显并等待恢复", access_denied: "权限或完整性级别不匹配，已停显；请在正常安装环境使用",
+    shell_unavailable: "任务栏暂不可用，已停显并等待恢复", auto_hide: "自动隐藏任务栏不支持，已停显",
+    dpi_mismatch: "任务栏与应用 DPI 上下文不兼容，已停显", stale: "任务栏几何已变化，等待重新确认",
+    attach_failed: "内嵌验证失败，已停显", unsupported: "当前平台不支持 Windows 任务栏内嵌", destroy_failed: "歌词窗清理未完成，已停显",
+  };
+  return labels[status?.reason] ?? labels.uia_unknown;
+}
 
 function stepOf(id) {
   return LYRICS_FONT_STEPS.find((step) => step.id === id) ?? null;
@@ -158,7 +172,7 @@ export function dragRegionEnabled(config) {
   return normalized.mode === "desktop" && !normalized.locked && !normalized.clickThrough;
 }
 
-/** 点透开关：用户显式开了就点透；任务栏模式一律点透（贴边的一条显示带不该抢点击）。 */
+/** 点透开关：桌面尊重用户选项，内嵌 Beta 始终点透。 */
 export function clickThroughEnabled(config) {
   const normalized = normalizeLyricsConfig({}, config);
   return normalized.clickThrough || normalized.mode === "taskbar";

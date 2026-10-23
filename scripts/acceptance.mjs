@@ -23,7 +23,7 @@
  * | `proxy` | 代理 | 单一真源 settings.json + 三窗接线 + 凭据纪律 |
  * | `tray` | 托盘 | 托盘 9 槽位 + 关窗 fail-safe（托盘真装上才藏窗口） |
  * | `desktop-lyrics` | 桌面歌词 | 独立透明窗 + 几何纯函数 + 不回写 |
- * | `taskbar-fallback-no-injection` | 任务栏降级 | 贴 work_area 下沿；全源码 0 注入 API |
+ * | `taskbar-fallback-no-injection` | Windows 内嵌 Beta | 保留路径 id；仅新模块受限自窗授权，禁 DLL/全局 Hook |
  * | `settings-persistence` | 设置持久化 | settings.json 形状 + DPAPI 会话信封 |
  */
 import { spawnSync } from "node:child_process";
@@ -102,12 +102,12 @@ export const ACCEPTANCE_PATHS = [
   },
   {
     id: "taskbar-fallback-no-injection",
-    title: "任务栏歌词是降级实现（无注入）",
-    why: "三端都没有公开的文字 API：只允许「独立透明窗 + 贴 work_area 下沿」，绝不注入 explorer / 装系统钩子",
+    title: "Windows 任务栏歌词 Beta（受限自窗内嵌）",
+    why: "仅新 taskbar 模块获精确自窗附着授权；未知占用停显，仍禁注入与全局系统钩子",
     tests: ["test/lyrics-window.test.mjs"],
     anchors: [
-      { file: "src-tauri/src/lyrics_window.rs", pattern: /work_area/, why: "贴边用的是 work_area（不是硬编码屏幕坐标）" },
-      { file: "src-tauri/src/lyrics_window.rs", pattern: /pub const TASKBAR_SIZE/, why: "任务栏模式尺寸是常量真源" },
+      { file: "src-tauri/src/taskbar_lyrics.rs", pattern: /pub fn safe_slot/, why: "父客户区与占用差集决定安全空白" },
+      { file: "src-tauri/src/taskbar_lyrics.rs", pattern: /fn ensure_own/, why: "所有原生写前核自窗创建代次与 owner 线程" },
     ],
     scanTree: { roots: SCAN_ROOTS, skipDirs: SCAN_SKIP_DIRS, tokenSource: BANNED_TOKEN_SOURCE, minFiles: 40 },
   },
@@ -232,6 +232,23 @@ export function scanFiles(roots = SCAN_ROOTS, skipDirs = SCAN_SKIP_DIRS, root = 
   return files;
 }
 
+export const TASKBAR_NATIVE_FILE = "src-tauri/src/taskbar_lyrics.rs";
+const TASKBAR_ALLOWED = new Set([["Set", "Parent"], ["Find", "WindowW"], ["Find", "WindowExW"], ["Shell_", "TrayWnd"], ["explorer", ".exe"]].map((parts) => parts.join("")));
+export function nativeTokenAllowed(file, token) { return file === TASKBAR_NATIVE_FILE && TASKBAR_ALLOWED.has(token); }
+
+export function taskbarWriteViolations(source) {
+  const code = stripComments(source, TASKBAR_NATIVE_FILE);
+  const mutations = ["Set" + "Parent", "SetWindowPos", "SetWindowLongPtrW", "ShowWindow", "SetWindowSubclass", "EnableWindow"];
+  const violations = [];
+  for (const name of mutations) {
+    for (const hit of code.matchAll(new RegExp(`\\b${name}\\s*\\(\\s*([^,\\n]*)`, "g"))) {
+      const target = hit[1].trim();
+      if (!/^ensure_own\(/.test(target)) violations.push(`${name}: ${target}`);
+    }
+  }
+  return violations;
+}
+
 /** 全源码扫描：返回命中项（token 清单来自既有测试）。 */
 export function scanForTokens({ root = ROOT, tokens, roots = SCAN_ROOTS, skipDirs = SCAN_SKIP_DIRS } = {}) {
   const files = scanFiles(roots, skipDirs, root);
@@ -239,8 +256,9 @@ export function scanForTokens({ root = ROOT, tokens, roots = SCAN_ROOTS, skipDir
   for (const relative of files) {
     const source = stripComments(readFileSync(path.join(root, relative), "utf8"), relative);
     for (const token of tokens) {
-      if (source.includes(token)) offenders.push(`${relative}: ${token}`);
+      if (source.includes(token) && !nativeTokenAllowed(relative, token)) offenders.push(`${relative}: ${token}`);
     }
+    if (relative === TASKBAR_NATIVE_FILE) offenders.push(...taskbarWriteViolations(source).map((v) => `${relative}: foreign-write ${v}`));
   }
   return { files, offenders };
 }
