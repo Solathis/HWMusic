@@ -184,6 +184,212 @@ pub fn require_request_channel(channel: &str) -> Result<(), CoreError> {
     ))
 }
 
+// ---------------------------------------------------------------------------
+// R44e：持久化准入（唯一写者是 sidecar 的 writeTail；这里只管"谁能进、谁在飞"）
+// ---------------------------------------------------------------------------
+
+/// `settings:set` / `settings:get` 的频道名（与 `src/shared/request-channels.ts` 同源）。
+pub const SETTINGS_SET_CHANNEL: &str = "settings:set";
+pub const SETTINGS_GET_CHANNEL: &str = "settings:get";
+
+/// **保留键**：只能经各自的运行时命令改（`core_login_chrome` 的 theme、`core_lyrics_configure`），
+/// 渲染层不许用一条 `settings:set` 绕过运行时直接 patch 它们。
+///
+/// 绕过的代价不是"少一条广播"，而是**两份真相**：盘上写成了新主题/新歌词配置，Rust 内存里的
+/// 权威值、`theme:changed` 广播与原生标题栏都还停在旧的那一份（重启才"变回去"）。
+pub const RESERVED_SETTINGS_KEYS: &[&str] = &["theme", "lyricsWindow"];
+
+/// 内部 settings 调用的超时（秒）。
+///
+/// 刻意比 `CALL_TIMEOUT_SECS`（60，渲染层业务调用）短得多：这两条内部调用服务于**退出**与
+/// **主题/歌词落盘**，它们的调用方都要在有界时间内给结论（保窗可重试，而不是吊死退出）。
+pub const SETTINGS_CALL_TIMEOUT_SECS: u64 = 10;
+
+/// 持久化阶段（退出编排的状态机；只是"准入门"，不是进程状态）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistPhase {
+    /// 正常受理（渲染层与内部写都收）
+    Running,
+    /// 已进入退出准备：**拒新的渲染层写**，已受理的收尾、内部保存/退出 drain 继续
+    PreparingExit,
+    /// 准备成功、正在做不可逆清理：不再受理任何持久写
+    Exiting,
+}
+
+/// 一次持久写是谁发起的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersistKind {
+    /// 渲染层经 `core_call` 发起（退出准备后一律拒：那时界面正在收摊，新的写没有意义）
+    Renderer,
+    /// Rust 自己的运行时（主题事务、歌词保存任务、退出 drain）发起
+    Internal,
+}
+
+/// 准入判定（**纯函数**：判定与入队必须在同一个加锁方法里发生，不能先查 Running 再排队）。
+pub fn decide_persist_admission(phase: PersistPhase, kind: PersistKind) -> Result<(), CoreError> {
+    match (phase, kind) {
+        (PersistPhase::Running, _) => Ok(()),
+        (PersistPhase::PreparingExit, PersistKind::Internal) => Ok(()),
+        (PersistPhase::PreparingExit, PersistKind::Renderer) => Err(CoreError::new(
+            "shutting_down",
+            "应用正在退出：已停止受理新的设置保存（本次退出会先把已受理的配置写完）",
+        )),
+        (PersistPhase::Exiting, _) => Err(CoreError::new(
+            "shutting_down",
+            "应用正在退出：不再受理设置写入",
+        )),
+    }
+}
+
+/// 一次已受理的持久写（RAII 凭据）。
+///
+/// **它就是"在飞"的记账**：退出编排等的是"没有凭据还活着"，而不是"调用方还在等"。
+/// 凭据必须由**拥有任务**持有到实际调用有结论为止——`spawn_blocking`/后台线程里的
+/// 那一份守卫一旦交给 invoke 的等待者，WebView 一关（或一次导航）就会提前放行退出。
+pub struct PersistAdmission {
+    gate: Arc<PersistenceGate>,
+}
+
+impl Drop for PersistAdmission {
+    fn drop(&mut self) {
+        self.gate.finish_one();
+    }
+}
+
+/// 持久化准入门（在 `setup` 里登记；`Arc` 是给凭据留的引用）。
+#[derive(Default)]
+pub struct PersistenceGate {
+    state: Mutex<GateState>,
+    idle: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct GateState {
+    phase: Option<PersistPhase>,
+    in_flight: usize,
+}
+
+fn lock_gate(state: &Mutex<GateState>) -> MutexGuard<'_, GateState> {
+    state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl PersistenceGate {
+    pub fn new() -> Self {
+        PersistenceGate {
+            state: Mutex::new(GateState {
+                // Option 只为了 Default：首次访问即 Running
+                phase: Some(PersistPhase::Running),
+                in_flight: 0,
+            }),
+            idle: std::sync::Condvar::new(),
+        }
+    }
+
+    pub fn phase(&self) -> PersistPhase {
+        lock_gate(&self.state)
+            .phase
+            .unwrap_or(PersistPhase::Running)
+    }
+
+    pub fn in_flight(&self) -> usize {
+        lock_gate(&self.state).in_flight
+    }
+
+    /// 受理一次写。**判定与记账在同一个临界区**：中间没有"判定说 Running、入队时已冻结"的缝。
+    pub fn admit(self: &Arc<Self>, kind: PersistKind) -> Result<PersistAdmission, CoreError> {
+        let mut state = lock_gate(&self.state);
+        let phase = state.phase.unwrap_or(PersistPhase::Running);
+        decide_persist_admission(phase, kind)?;
+        state.in_flight += 1;
+        drop(state);
+        Ok(PersistAdmission {
+            gate: Arc::clone(self),
+        })
+    }
+
+    /// 一次受理的写有结论了（成功/失败/超时都算结论）。
+    fn finish_one(&self) {
+        let mut state = lock_gate(&self.state);
+        state.in_flight = state.in_flight.saturating_sub(1);
+        if state.in_flight == 0 {
+            self.idle.notify_all();
+        }
+    }
+
+    /// 进入退出准备（幂等）：此后的**渲染层**写被拒，内部收尾继续。
+    pub fn begin_prepare(&self) {
+        let mut state = lock_gate(&self.state);
+        if state.phase != Some(PersistPhase::Exiting) {
+            state.phase = Some(PersistPhase::PreparingExit);
+        }
+    }
+
+    /// 准备成功、进入不可逆清理：不再受理任何持久写。
+    pub fn begin_exit(&self) {
+        lock_gate(&self.state).phase = Some(PersistPhase::Exiting);
+    }
+
+    /// 准备失败：**回到 Running**（CAS 同义复位——下一次 Quit 必须能再试一次）。
+    pub fn abort_prepare(&self) {
+        let mut state = lock_gate(&self.state);
+        if state.phase != Some(PersistPhase::Exiting) {
+            state.phase = Some(PersistPhase::Running);
+        }
+    }
+
+    /// 等已受理的写落地（有界）。`true` = 已排空。
+    pub fn wait_drained(&self, deadline: std::time::Instant) -> bool {
+        let mut state = lock_gate(&self.state);
+        while state.in_flight > 0 {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            state = self
+                .idle
+                .wait_timeout(state, deadline - now)
+                .map(|(guard, _)| guard)
+                .unwrap_or_else(|poisoned| poisoned.into_inner().0);
+        }
+        true
+    }
+}
+
+/// 取登记好的准入门（没登记 = setup 未完成：调用方按"不能写"处理，绝不假装成功）。
+pub fn persistence_gate<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Arc<PersistenceGate>, CoreError> {
+    app.try_state::<Arc<PersistenceGate>>()
+        .map(|state| Arc::clone(state.inner()))
+        .ok_or_else(|| CoreError::new("internal", "持久化准入门未登记（setup 未完成）：这次不写盘"))
+}
+
+/// `core_call(settings:set)` 的**保留键闸门**（纯函数）。
+///
+/// 只拒"渲染层直接 patch 保留键"，其余载荷（proxy / queue / closeBehavior / reset / 未知键）
+/// 原样放过：那些字段本来就归设置页写。
+pub fn reject_reserved_settings_keys(channel: &str, payload: &Value) -> Result<(), CoreError> {
+    if channel != SETTINGS_SET_CHANNEL {
+        return Ok(());
+    }
+    let Some(patch) = payload.get("patch").and_then(Value::as_object) else {
+        return Ok(()); // 形状问题交给 sidecar 的 planSettingsWrite 报 invalid_payload
+    };
+    let reserved: Vec<&str> = RESERVED_SETTINGS_KEYS
+        .iter()
+        .copied()
+        .filter(|key| patch.contains_key(*key))
+        .collect();
+    if reserved.is_empty() {
+        return Ok(());
+    }
+    Err(CoreError::new(
+        "forbidden_source",
+        format!(
+            "settings:set 不接受直接改保留键（{}）：主题走 core_login_chrome 的 theme 动作，歌词配置走 core_lyrics_configure",
+            reserved.join(" / ")
+        ),
+    ))
+}
+
 /// 托管状态：当前 core（sidecar）进程。None = 未启动或已收尸。
 #[derive(Default)]
 pub struct CoreState {
@@ -621,9 +827,19 @@ pub async fn core_call(
     require_request_channel(&channel)?;
 
     let state = app.state::<Arc<CoreState>>().inner().clone();
-    let shared = require_shared(&state)?;
     let payload = payload.unwrap_or(Value::Null);
+    // R44e：保留键只能走各自运行时命令（绕过去就是盘上与内存两份真相）。
+    reject_reserved_settings_keys(&channel, &payload)?;
+    let shared = require_shared(&state)?;
+    // R44e：settings:set 是**持久写**，要过准入门；凭据随阻塞任务一起活到调用有结论为止
+    //（invoke 的等待者消失不会提前放行退出——它只是不再收结果）。
+    let admission = if channel == SETTINGS_SET_CHANNEL {
+        Some(persistence_gate(&app)?.admit(PersistKind::Renderer)?)
+    } else {
+        None
+    };
     let call = tauri::async_runtime::spawn_blocking(move || {
+        let _admission = admission;
         shared.call(&channel, payload, Duration::from_secs(CALL_TIMEOUT_SECS))
     });
 
@@ -634,6 +850,167 @@ pub async fn core_call(
             format!("core_call 任务失败：{source}"),
         )),
     }
+}
+
+// ---------------------------------------------------------------------------
+// R44e：内部 settings 调用（Rust 拥有的运行时写；不经 invoke、不持进程槽锁）
+// ---------------------------------------------------------------------------
+
+/// 把一次内部 settings 调用限制在**整个退出准备的绝对期限**之内（review finding 4）。
+///
+/// 退出准备只有一条 4 秒预算（[`crate::EXIT_PREPARE_BUDGET_MS`]）：uncertain 重存与最终的
+/// `settings:get` 屏障要拿的是**这一刻剩下的**时间，而不是各自再起一个 10 秒等待；剩下的
+/// 时间连一次调用都不够时直接结构化失败（`timeout`）——退出走既有的可逆 abort，保窗可重试。
+pub fn call_timeout_within(
+    deadline: std::time::Instant,
+    now: std::time::Instant,
+    cap: Duration,
+) -> Result<Duration, CoreError> {
+    if now >= deadline {
+        return Err(CoreError::new(
+            "timeout",
+            "退出准备的预算已用尽（这次保存没有时间窗口）：本次不退出，请稍后重试",
+        ));
+    }
+    Ok((deadline - now).min(cap))
+}
+
+/// 一次内部调用放在**拥有任务**里跑：写帧与等回执都在后台线程上，调用方只等到自己的绝对期限。
+///
+/// 为什么不能只把 timeout 交给 [`CoreShared::call`]（review round 2 finding 2）：那是
+/// `recv_timeout` 的上限，而 `call` 在等回执**之前**要**同步**写一帧（`write_line` 锁写入端 →
+/// `write_all` → `flush`）。对端管道堵住时这一段没有任何上限，4 秒的退出预算能被一次写盘整个
+/// 拖穿——"有界退出"就不成立了。
+///
+/// 两条不变：
+/// 1. **所有权随任务走**：`owned`（受理凭据）由后台线程持有到那一笔真正有结论为止（响应 /
+///    自己的超时 / 收尸）。调用方超时返回时它**不**被释放，所以 `wait_drained` 仍看得见这一笔：
+///    "可能已经发出去的迟到写"没落定之前，退出不可能成功，也不会有"退出成功之后才写盘"。
+/// 2. **不阻塞 UI 线程**：调用方是退出线程 / 主题事务线程 / 歌词保存线程；写帧的阻塞只留在
+///    这一条后台线程里。
+pub fn call_owned_within(
+    shared: Arc<CoreShared>,
+    channel: &'static str,
+    payload: Value,
+    deadline: std::time::Instant,
+    cap: Duration,
+    owned: Option<PersistAdmission>,
+) -> Result<Value, CoreError> {
+    // 预算判定在起线程之前：没预算就一次都不发（结构化 timeout，退出走可逆 abort）。
+    let timeout = call_timeout_within(deadline, std::time::Instant::now(), cap)?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("settings-call".into())
+        .spawn(move || {
+            // 凭据活到 `call` 有结论（含同步写帧被堵住的那一段）：这就是"写在飞"的记账。
+            let _owned = owned;
+            let _ = sender.send(shared.call(channel, payload, timeout));
+        })
+        .map_err(|error| CoreError::new("internal", format!("内部调用任务起不来（{error}）：这次不写盘")))?;
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    match receiver.recv_timeout(left) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(CoreError::new(
+            "timeout",
+            format!("内部调用 {channel} 没在给定时间内返回（写可能仍在进行，不能当作没写）"),
+        )),
+        // 拥有任务没回话（线程本身出事）：同样**不能**当作"没写"——那一帧可能已经发出去了。
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(CoreError::new(
+            "uncertain",
+            format!("内部调用 {channel} 的拥有任务没有结论（写可能已经发生，不能当作没写）"),
+        )),
+    }
+}
+
+/// 取 `Arc<CoreShared>`（克隆出来就放掉进程槽锁：等待期间不能再持它）。
+fn shared_for_call<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Arc<CoreShared>, CoreError> {
+    let state = app
+        .try_state::<Arc<CoreState>>()
+        .ok_or_else(|| CoreError::new("core_unavailable", "core 状态未登记（setup 未完成）"))?;
+    require_shared(state.inner())
+}
+
+/// 内部 `settings:set`：同步语义的一次写（调用方负责把它放到不占主线程的线程上）。
+///
+/// 三条不变量：
+/// 1. 准入凭据由**拥有任务**持有到 `call` 有结论（调用方是 Rust 拥有的任务，不是 WebView 等待者）；
+/// 2. 等待期间不持进程槽锁（`shared_for_call` 只克隆 `Arc`）；
+/// 3. 返回 `timeout` 只说明"调用方没等到"，**写可能迟到**（`CoreShared::call` 超时后 `forget` 了
+///    接收槽，sidecar 仍可能把那一帧处理完）。所以调用方必须把"超时"当 `uncertain`，不能当"没写"；
+///    而那一笔的准入凭据要等它自己落定才放（超时返回不释放，退出因此挡得住）。
+pub fn settings_write_owned<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    patch: Value,
+) -> Result<Value, CoreError> {
+    settings_write_owned_within(app, patch, Duration::from_secs(SETTINGS_CALL_TIMEOUT_SECS))
+}
+
+/// 同上，但**整次调用**（同步写帧 + 等回执）不许超过 `timeout`。
+///
+/// 时间上限不是转手给 `CoreShared::call` 的 `recv_timeout`（那只管等回执）：写帧也在限时之内，
+/// 由 [`call_owned_within`] 的拥有任务在期限上把控制权交回调用方。
+pub fn settings_write_owned_within<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    patch: Value,
+    timeout: Duration,
+) -> Result<Value, CoreError> {
+    let gate = persistence_gate(app)?;
+    let shared = shared_for_call(app)?;
+    // 受理凭据交给**调用任务**，不留在调用方：调用方超时返回之后这一笔仍算在飞（可能迟到写成）。
+    let admission = Some(gate.admit(PersistKind::Internal)?);
+    call_owned_within(
+        shared,
+        SETTINGS_SET_CHANNEL,
+        serde_json::json!({ "patch": patch }),
+        std::time::Instant::now() + timeout,
+        timeout,
+        admission,
+    )
+}
+
+/// 内部 `settings:get`：**读也是屏障**（sidecar 先排空已受理的写再读盘）。
+///
+/// 上限来自**退出准备的绝对期限**（剩余预算；没预算就立刻失败），并且与写共用同一条拥有任务
+/// 边界（[`call_owned_within`]）——"同步写帧被堵住"不会把调用方拖过它的期限。
+///
+/// 只有这一个入口：退出路径的读**永远**拿剩余预算，没有"另起一个 10 秒"的变体。
+pub fn settings_read_owned_before<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    deadline: std::time::Instant,
+) -> Result<Value, CoreError> {
+    call_owned_within(
+        shared_for_call(app)?,
+        SETTINGS_GET_CHANNEL,
+        Value::Null,
+        deadline,
+        Duration::from_secs(SETTINGS_CALL_TIMEOUT_SECS),
+        None,
+    )
+}
+
+/// 内部 `settings:set` 的**拥有任务**形式：起一条后台线程跑 [`settings_write_owned`]，
+/// 结果经通道回来。
+///
+/// 为什么是线程而不是"让命令自己 await"：主题的整笔事务（写 → 校验回执 → 更新内存/原生/广播）
+/// 必须由 Rust 拥有——invoke 的等待者（WebView 导航、组件卸载）消失**不能**取消后半提交。
+/// 丢弃返回的 receiver 只会让结果没人看，线程照样跑完、凭据照样在结论时放掉。
+pub fn spawn_settings_write<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    patch: Value,
+) -> std::sync::mpsc::Receiver<Result<Value, CoreError>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let owner = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("settings-write".into())
+        .spawn(move || {
+            let _ = sender.send(settings_write_owned(&owner, patch));
+        });
+    receiver
+}
+
+/// 从 `settings:set` 回执里取权威文档里某个键的值（纯函数：形状认不出就 `None`，绝不猜）。
+pub fn settings_receipt_value<'a>(answer: &'a Value, key: &str) -> Option<&'a Value> {
+    answer.get("settings")?.get("data")?.get(key)
 }
 
 /// 渲染层就绪通知：启动期提示队列的冲刷钩子。
@@ -802,9 +1179,11 @@ pub fn core_get_tray_available(webview: Webview) -> Result<bool, CoreError> {
 /// - `{action:"theme"}` → `{theme: "light"|"dark"|"system"}`：读回当前档位；
 /// - `{action:"theme", theme}` → 落盘 + 更新内存 + 广播 `theme:changed`，回执是**实际生效**的档位。
 ///
-/// 同步命令：三件事都不需要主线程往返（写盘是文件 IO、广播是 `app.emit`）。
+/// 异步命令：`theme` 的**整笔事务**（写盘 → 校验回执 → 内存/原生/revision/广播）由 Rust 拥有的
+/// 线程完成，所以这条命令是 async——它等的是"事务有结论"，而不是"这一次调用返回了"。
+/// 等待者消失（WebView 导航/组件卸载）不会取消后半提交（见 [`crate::theme::spawn_theme_transaction`]）。
 #[tauri::command]
-pub fn core_login_chrome(
+pub async fn core_login_chrome(
     app: AppHandle,
     webview: Webview,
     payload: Option<Value>,
@@ -817,13 +1196,16 @@ pub fn core_login_chrome(
             Ok(serde_json::json!({ "cancelled": cancelled }))
         }
         LoginChromeAction::ReadTheme => {
-            let theme = crate::theme::current_theme(&app);
-            Ok(serde_json::json!({ "theme": theme.setting() }))
+            // 读回也带 revision：渲染层拿它拒绝"慢半拍"的旧回执（同一份单调合同）。
+            // 档位与编号是同一次原子快照（不会拼出"新档位 + 旧编号"）。
+            Ok(crate::theme::reply_payload(crate::theme::current_snapshot(&app)))
         }
         LoginChromeAction::SetTheme(choice) => {
-            let applied = crate::theme::set_theme(&app, choice)?;
-            log::info!("主题已改为 {}", applied.describe());
-            Ok(serde_json::json!({ "theme": applied.setting() }))
+            // 回执是**这一笔事务自己提交的** `{theme, revision}`——不是事务结束后另读的快照。
+            // 另读会让"旧档位 + 新编号"溜回渲染层（单调合同拦不住，界面被拉回旧主题）。
+            let commit = crate::theme::set_theme(&app, choice).await?;
+            log::info!("主题已改为 {}（revision {}）", commit.theme.describe(), commit.revision);
+            Ok(crate::theme::reply_payload(commit))
         }
     }
 }
@@ -925,7 +1307,7 @@ mod tests {
             None => &source[..],
         };
         let start = production
-            .find("pub fn core_login_chrome(")
+            .find("pub async fn core_login_chrome(")
             .expect("找不到命令本体");
         let end = production[start..]
             .find("\n}\n")
@@ -1584,5 +1966,277 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(read_autostart(&on), Ok(true));
+    }
+
+    // ---- R44e：持久化准入 ---------------------------------------------------------
+
+    /// 准入矩阵（纯函数）：只有"退出准备中的渲染层写"与"正在不可逆清理"被拒，
+    /// 内部保存/退出 drain 在准备阶段仍然收。
+    #[test]
+    fn r44e_persist_admission_freezes_only_new_renderer_writes() {
+        assert_eq!(decide_persist_admission(PersistPhase::Running, PersistKind::Renderer), Ok(()));
+        assert_eq!(decide_persist_admission(PersistPhase::Running, PersistKind::Internal), Ok(()));
+        assert_eq!(decide_persist_admission(PersistPhase::PreparingExit, PersistKind::Internal), Ok(()));
+        let frozen = decide_persist_admission(PersistPhase::PreparingExit, PersistKind::Renderer)
+            .expect_err("退出准备中不再受理新的渲染层写");
+        assert_eq!(frozen.kind.as_deref(), Some("shutting_down"));
+        for kind in [PersistKind::Renderer, PersistKind::Internal] {
+            let exiting = decide_persist_admission(PersistPhase::Exiting, kind).expect_err("不可逆清理中不写盘");
+            assert_eq!(exiting.kind.as_deref(), Some("shutting_down"));
+        }
+    }
+
+    /// 冻结与受理在**同一个临界区**：准备开始之后到的写拿到的是 prepared 状态（不是"先查 Running 再排队"）。
+    /// 凭据活着的期间 `wait_drained` 必须为假——退出等的是"没有在飞的写"，不是"没人等结果"。
+    #[test]
+    fn r44e_gate_counts_in_flight_writes_and_refuses_after_prepare() {
+        let gate = Arc::new(PersistenceGate::new());
+        assert_eq!(gate.phase(), PersistPhase::Running);
+
+        let held = gate.admit(PersistKind::Renderer).expect("运行中受理");
+        assert_eq!(gate.in_flight(), 1);
+        assert!(!gate.wait_drained(std::time::Instant::now() + std::time::Duration::from_millis(20)), "在飞时不算排空");
+
+        gate.begin_prepare();
+        assert_eq!(gate.phase(), PersistPhase::PreparingExit);
+        assert!(gate.admit(PersistKind::Renderer).is_err(), "冻结后拒新渲染层写");
+        let internal = gate.admit(PersistKind::Internal).expect("退出 drain 的内部写仍受理");
+        assert_eq!(gate.in_flight(), 2);
+
+        drop(held);
+        drop(internal);
+        assert_eq!(gate.in_flight(), 0);
+        assert!(gate.wait_drained(std::time::Instant::now() + std::time::Duration::from_millis(20)), "落定即排空");
+
+        // 准备失败 → 复位 Running，下一次 Quit 能再试
+        gate.abort_prepare();
+        assert_eq!(gate.phase(), PersistPhase::Running);
+        assert!(gate.admit(PersistKind::Renderer).is_ok());
+
+        // 准备成功后进入不可逆清理：内部写也拒
+        gate.begin_exit();
+        assert!(gate.admit(PersistKind::Internal).is_err());
+        gate.abort_prepare();
+        assert_eq!(gate.phase(), PersistPhase::Exiting, "不可逆清理阶段不能被复位成 Running");
+    }
+
+    /// R44e fix1 / review finding 4：内部 settings 调用只能拿**整个退出准备剩下的**时间。
+    ///
+    /// 修复前 uncertain 重存与最终 `settings:get` 各自另起一个 10 秒等待：4 秒预算之外的
+    /// 两段等待合起来还能把"有界退出"拖到 20 秒。这里钉的是"剩余预算才是上限，没预算就立刻失败"。
+    #[test]
+    fn fix4_a_settings_call_never_gets_more_time_than_the_exit_budget_that_is_left() {
+        let now = std::time::Instant::now();
+        let cap = std::time::Duration::from_secs(SETTINGS_CALL_TIMEOUT_SECS);
+        let deadline = now + std::time::Duration::from_millis(400);
+
+        assert_eq!(
+            call_timeout_within(deadline, now, cap).expect("还有预算"),
+            std::time::Duration::from_millis(400),
+            "只剩 400ms 就只拿 400ms（不另起 10 秒）"
+        );
+        assert_eq!(
+            call_timeout_within(deadline, now + std::time::Duration::from_millis(150), cap).expect("还有预算"),
+            std::time::Duration::from_millis(250),
+            "预算随时间推进缩小"
+        );
+
+        let exhausted = call_timeout_within(deadline, deadline, cap).expect_err("没有预算就不许再起一笔等待");
+        assert_eq!(exhausted.kind.as_deref(), Some("timeout"), "结构化失败（走既有的可逆 abort）");
+        assert!(call_timeout_within(deadline, deadline + std::time::Duration::from_millis(1), cap).is_err());
+
+        assert_eq!(
+            call_timeout_within(now + std::time::Duration::from_secs(60), now, cap).expect("预算充裕"),
+            cap,
+            "预算比单笔上限还多时仍受单笔上限约束"
+        );
+    }
+
+    /// 保留键闸门：`settings:set` 不许直接 patch `theme` / `lyricsWindow`，其余载荷原样放过。
+    #[test]
+    fn r44e_reserved_settings_keys_cannot_be_patched_through_core_call() {
+        for key in ["theme", "lyricsWindow"] {
+            let payload = json!({ "patch": { (key): "dark" } });
+            let error = reject_reserved_settings_keys(SETTINGS_SET_CHANNEL, &payload)
+                .expect_err("保留键必须被拒");
+            assert_eq!(error.kind.as_deref(), Some("forbidden_source"), "键：{key}");
+            assert!(error.message.contains(key), "错误要点名是哪个键：{}", error.message);
+        }
+        let mixed = json!({ "patch": { "proxy": { "enabled": true }, "lyricsWindow": {} } });
+        assert!(reject_reserved_settings_keys(SETTINGS_SET_CHANNEL, &mixed).is_err(), "混合载荷里带保留键也要拒");
+
+        for allowed in [
+            json!({ "patch": { "proxy": { "enabled": false } } }),
+            json!({ "patch": { "closeBehavior": "quit" } }),
+            json!({ "patch": { "queue": { "ids": [] } } }),
+            json!({ "patch": { "futureKey": 7 } }),
+            json!({ "reset": true }),
+            Value::Null,
+        ] {
+            assert_eq!(reject_reserved_settings_keys(SETTINGS_SET_CHANNEL, &allowed), Ok(()), "载荷：{allowed}");
+        }
+        // 其他频道不受这条闸门影响（例如 settings:get）
+        assert_eq!(
+            reject_reserved_settings_keys(SETTINGS_GET_CHANNEL, &json!({ "patch": { "theme": "dark" } })),
+            Ok(())
+        );
+    }
+
+    // ---- R44e fix2：同步写帧也能拖穿退出预算（review round 2 finding 2）-------------
+
+    /// 一个"写进去就停住"的管道：真的会阻塞的 `Write`。
+    ///
+    /// 生产里的 `CoreShared::write_line` 是**同步**的（锁写入端 → `write_all` → `flush`）：
+    /// 对端管道堵住时它就停在 `write` 里。给 `recv_timeout` 一个 timeout 对这一段毫无作用——
+    /// 这正是 finding 2 说的"deadline 只限制了等回执"。
+    #[derive(Clone)]
+    struct BlockingWriter {
+        entered: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        release: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        written: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl BlockingWriter {
+        fn new() -> Self {
+            Self {
+                entered: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+                release: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+                written: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        /// 写帧那一步真的已经进来了（不是"调用方还没开始就超时了"）。
+        fn write_entered(&self) -> bool {
+            *self.entered.0.lock().unwrap()
+        }
+
+        fn release(&self) {
+            *self.release.0.lock().unwrap() = true;
+            self.release.1.notify_all();
+        }
+
+        fn written(&self) -> String {
+            String::from_utf8_lossy(&self.written.lock().unwrap()).to_string()
+        }
+    }
+
+    impl std::io::Write for BlockingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            {
+                let mut entered = self.entered.0.lock().unwrap();
+                *entered = true;
+                self.entered.1.notify_all();
+            }
+            // 对端管道堵住：一直停在这里，直到测试放行（10 秒兜底，免得测试自己挂死）
+            let released = self.release.0.lock().unwrap();
+            let _ = self
+                .release
+                .1
+                .wait_timeout_while(released, Duration::from_secs(10), |done| !*done);
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// R44e fix2 / review round 2 finding 2：写帧被堵住时，调用方仍必须在**自己的**期限上回来。
+    ///
+    /// 修复前 `settings_write_owned_within` 只把时间上限交给 `CoreShared::call` 的 `recv_timeout`，
+    /// 而同步写帧在它之前，可以先把整个退出预算吃掉。这里用真的会阻塞的 `Write`：调用方必须按
+    /// deadline（200ms）返回结构化 `timeout`，而**迟到的那一笔仍然算在准入账上**——退出不可能
+    /// 在"可能已发出的迟到写"落定之前成功，也不会出现"退出成功之后才写盘"。
+    #[test]
+    fn fix2_a_blocked_bridge_write_still_returns_by_the_exit_deadline() {
+        let writer = BlockingWriter::new();
+        let shared = CoreShared::new(Box::new(writer.clone()));
+        let gate = Arc::new(PersistenceGate::new());
+        let admission = gate.admit(PersistKind::Internal).expect("退出 drain 的内部写仍受理");
+        let deadline = std::time::Instant::now() + Duration::from_millis(200);
+
+        let began = std::time::Instant::now();
+        let result = call_owned_within(
+            Arc::clone(&shared),
+            SETTINGS_SET_CHANNEL,
+            json!({ "patch": { "queue": { "volume": 50 } } }),
+            deadline,
+            // 单笔上限比预算宽松：证明卡住调用方的是 deadline，不是 cap
+            Duration::from_secs(2),
+            Some(admission),
+        );
+        let elapsed = began.elapsed();
+
+        let error = result.expect_err("写被堵住时必须在预算内返回，不许陪着同步写一起等");
+        assert_eq!(
+            error.kind.as_deref(),
+            Some("timeout"),
+            "结构化超时（主题留 uncertain、退出走可逆 abort 都认这一码）"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "调用方必须按 deadline 回来（上限 1 秒，实际 {elapsed:?}）"
+        );
+        assert!(writer.write_entered(), "卡住的正是同步写帧那一步（不是还没开始就超时）");
+
+        // 迟到的写仍在准入账上：`wait_drained` 为假 = 退出不可能在它落定之前成功
+        assert_eq!(gate.in_flight(), 1, "超时返回不许把这一笔的准入一起放掉");
+        assert!(
+            !gate.wait_drained(std::time::Instant::now() + Duration::from_millis(80)),
+            "迟到写没落定之前，退出必须被它挡住"
+        );
+
+        // 放行：那一帧真的写出去（不是被扔掉的幻影），之后准入才落定
+        writer.release();
+        assert!(
+            gate.wait_drained(std::time::Instant::now() + Duration::from_secs(5)),
+            "迟到写有结论之后才排空"
+        );
+        assert_eq!(gate.in_flight(), 0);
+        let frame = writer.written();
+        assert!(frame.contains(SETTINGS_SET_CHANNEL), "迟到的那一帧确实发出去了：{frame}");
+        assert!(frame.contains("\"volume\":50"), "发出去的是那一笔写（载荷没被篡改）：{frame}");
+    }
+
+    /// 最终 `settings:get` 屏障走同一条路：读被堵住时也必须在同一个期限上回来（读没有准入，
+    /// 这里钉的是"调用方按 deadline 返回"这一半）。
+    #[test]
+    fn fix2_the_final_settings_barrier_returns_by_the_same_deadline() {
+        let writer = BlockingWriter::new();
+        let shared = CoreShared::new(Box::new(writer.clone()));
+        let deadline = std::time::Instant::now() + Duration::from_millis(150);
+
+        let began = std::time::Instant::now();
+        let error = call_owned_within(
+            shared,
+            SETTINGS_GET_CHANNEL,
+            Value::Null,
+            deadline,
+            Duration::from_secs(2),
+            None,
+        )
+        .expect_err("读被堵住也要有界返回");
+        let elapsed = began.elapsed();
+
+        assert_eq!(error.kind.as_deref(), Some("timeout"));
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "屏障读必须按 deadline 回来（上限 1 秒，实际 {elapsed:?}）"
+        );
+        assert!(writer.write_entered(), "卡住的正是同步写帧那一步");
+        writer.release(); // 收尸：让后台那一笔有结论，别把 10 秒兜底留给下一条用例
+    }
+
+    /// `settings:set` 回执里取键值：形状认不出回 None（调用方必须走 uncertain，而不是假成功）。
+    #[test]
+    fn r44e_settings_receipt_reading_never_guesses() {
+        let answer = json!({ "settings": { "schemaVersion": 1, "data": { "theme": "dark", "lyricsWindow": { "style": "panel" } } } });
+        assert_eq!(settings_receipt_value(&answer, "theme"), Some(&json!("dark")));
+        assert_eq!(settings_receipt_value(&answer, "lyricsWindow"), Some(&json!({ "style": "panel" })));
+        assert_eq!(settings_receipt_value(&answer, "missing"), None);
+        for junk in [json!(null), json!({}), json!({ "settings": null }), json!({ "settings": { "data": [] } })] {
+            assert_eq!(settings_receipt_value(&junk, "theme"), None, "载荷：{junk}");
+        }
     }
 }

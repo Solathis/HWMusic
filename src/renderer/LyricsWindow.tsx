@@ -20,8 +20,10 @@ import {
   lyricsConfigFromSearch,
   normalizeLyricsConfig,
   reanchorProgress,
+  saveErrorText,
 } from "./features/lyrics/lyrics-window.mjs"
 import { lyricsNoticeText } from "./features/playback/playback-state.mjs"
+import { createThemeAcceptor } from "./features/theme/theme-accept.mjs"
 import { applyThemeChoice } from "./features/theme/theme.mjs"
 
 /** 广播进来的歌词文档（主窗转发的那一份）。 */
@@ -51,16 +53,27 @@ export function LyricsWindow() {
   const seekSeenRef = useRef(0)
   const revisionRef = useRef(-1)
   const [actionError, setActionError] = useState<string | null>(null)
-  const acceptConfig = useCallback((payload: unknown) => {
-    const next = payload as { ready?: boolean; config?: unknown; revision?: number } | null
+  // R44e：持久化状态由 Rust 报告（这一层不保存任何东西）。保存失败也要在这个窗里看得见、点得动。
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const acceptStatus = useCallback((payload: unknown) => {
+    const next = payload as { ready?: boolean; config?: unknown; revision?: number; saveError?: unknown } | null
     if (next?.ready || !next?.config || !Number.isSafeInteger(next.revision) || next.revision! < revisionRef.current) return
     revisionRef.current = next.revision!
     setConfig(normalizeLyricsConfig(next.config))
+    setSaveError(saveErrorText(typeof next.saveError === "string" ? next.saveError : null))
   }, [])
+  const retrySave = () => {
+    setActionError(null)
+    void coreLyricsConfigure({}, true)
+      .then(acceptStatus)
+      .catch(() => setActionError("保存重试未能发出，请从主窗设置重试。"))
+  }
 
   useEffect(() => {
     let alive = true
     const stops: Array<() => void> = []
+    // R44e：主题也走共享的单调接受器（旧广播/旧回执不许盖掉新主题）
+    const themeAcceptor = createThemeAcceptor((choice) => applyThemeChoice(document.documentElement, choice))
     const keep = (off: () => void) => {
       if (alive) stops.push(off)
       else off()
@@ -73,9 +86,9 @@ export function LyricsWindow() {
           status: typeof payload?.status === "string" ? payload.status : LYRICS_STATUS.unavailable,
         })
       }).then(keep),
-      onCoreEvent<unknown>(LYRICS_STATE, (payload) => { if (alive) acceptConfig(payload) }).then(keep),
-      onCoreEvent<{ theme?: string }>(THEME_CHANGED, (payload) => {
-        applyThemeChoice(document.documentElement, payload?.theme)
+      onCoreEvent<unknown>(LYRICS_STATE, (payload) => { if (alive) acceptStatus(payload) }).then(keep),
+      onCoreEvent<{ theme?: string; revision?: number }>(THEME_CHANGED, (payload) => {
+        themeAcceptor.accept(payload)
       }).then(keep),
       onCoreEvent<{ timeMs?: unknown; playing?: unknown; seekGeneration?: unknown }>(
         LYRICS_PROGRESS,
@@ -98,7 +111,7 @@ export function LyricsWindow() {
       if (!alive) return
       const authoritative = await coreLyricsConfigure({})
       if (!alive) return
-      acceptConfig(authoritative)
+      acceptStatus(authoritative)
       await signalLyricsReady()
     }).catch((cause) => {
       if (alive) {
@@ -149,7 +162,7 @@ export function LyricsWindow() {
   }
   const configure = (patch: Partial<typeof config>) => {
     setActionError(null)
-    void coreLyricsConfigure(patch).then(acceptConfig).catch(() => setActionError("配置未能应用，请从主窗设置重试。"))
+    void coreLyricsConfigure(patch).then(acceptStatus).catch(() => setActionError("配置未能应用，请从主窗设置重试。"))
   }
   const control = (action: "toggle" | "previous" | "next") => {
     setActionError(null)
@@ -232,6 +245,10 @@ export function LyricsWindow() {
         <CardContent className="flex min-h-0 flex-1 flex-col px-0">{content}</CardContent>
       </Card> : <>{config.mode === "desktop" ? <div className="shrink-0 p-1">{controls}</div> : null}{content}</>}
       {actionError ? <p role="alert" className="shrink-0 text-sm text-muted-foreground">{actionError}</p> : null}
+      {saveError ? <div role="alert" data-testid="lyrics-save-error" className="flex shrink-0 items-center justify-center gap-2 p-1">
+        <p className="text-center text-xs text-muted-foreground">{saveError}</p>
+        <Button variant="ghost" size="icon-sm" aria-label="重试保存桌面歌词配置" onClick={retrySave}>重试</Button>
+      </div> : null}
     </div>
   </TooltipProvider>
 }

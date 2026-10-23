@@ -50,7 +50,7 @@ fn d_native_parent_process() {
 
 #[tauri::command]
 async fn core_lyrics_configure(webview: tauri::Webview, config: Value) -> Result<Value, crate::bridge::CoreError> {
-    crate::lyrics_window::validate_configure(webview.label(), &config, None)?;
+    crate::lyrics_window::validate_configure(webview.label(), &config, None, None)?;
     let config=crate::lyrics_window::LyricsConfig::default().apply_patch(&json!({"mode":"taskbar","size":"md"}));
     Ok(json!({"config":config.payload(),"revision":1,"runtimeRevision":1,"visible":false}))
 }

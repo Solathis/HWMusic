@@ -1,9 +1,11 @@
-//! 桌面歌词的运行配置与 revision 由 Rust 原子持有，主窗代理 settings 持久化。
+//! 桌面歌词的运行配置与 revision 由 Rust 原子持有；`settings.json` 的唯一写者是 sidecar。
+//! 持久化任务**由 Rust 拥有**（R44e）：它不依赖主窗 WebView、不依赖渲染层的保存队列，
+//! 认证卸载/渲染层崩溃/退出都改不了"最新配置最终落盘"这件事。
 //! 配置/媒体专命令限 main/lyrics；开关、文档、进度与 core_call 仍限主窗。
 //! desktop 几何只随 mode/layout 变化；Windows taskbar 交独立原生宿主，失败停显而不贴边。
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Condvar, Mutex, MutexGuard};
 
 use serde_json::{json, Value};
 use tauri::{
@@ -12,7 +14,8 @@ use tauri::{
 };
 
 use crate::bridge::{CoreError, LYRICS_DOCUMENT, LYRICS_PROGRESS, LYRICS_STATE, APP_NOTICE};
-use crate::commands::{emit_core_event, require_main_webview};
+use crate::commands::{emit_core_event, require_main_webview, settings_receipt_value};
+use crate::webview_proxy::SETTINGS_FILE_NAME;
 use crate::{LYRICS_WINDOW_LABEL, MAIN_WINDOW_LABEL};
 
 // ---------------------------------------------------------------------------
@@ -228,6 +231,26 @@ impl LyricsConfig {
         })
     }
 
+    /// **落盘合同**：只有 `DEFAULT_LYRICS_CONFIG` 那 11 个字面键。
+    ///
+    /// 刻意与 [`LyricsConfig::payload`] 分开：`effectiveSize` 是派生值（由 mode+size 算出来的），
+    /// taskbar 的附着/可见/revision/dirty/saveError 是运行时状态——把它们写进 `settings.json`
+    /// 就是给同一件事造第二份真相（而且下次启动会读回一个不该有的字段）。
+    pub fn persisted(&self) -> Value {
+        json!({
+            "mode": self.mode.as_str(), "layout": self.layout, "style": self.style,
+            "size": self.size, "color": self.color, "locked": self.locked,
+            "clickThrough": self.click_through, "enableBlur": self.enable_blur,
+            "enableScale": self.enable_scale, "enableSpring": self.enable_spring,
+            "showControls": self.show_controls,
+        })
+    }
+
+    /// 从盘上读到的那一格还原配置：**未知字段按默认**（坏值不猜，与 `apply_patch` 同一条纪律）。
+    pub fn restored(raw: Option<&Value>) -> LyricsConfig {
+        LyricsConfig::default().apply_patch(raw.unwrap_or(&Value::Null))
+    }
+
     pub fn query(&self) -> String {
         format!(
             "mode={}&size={}&color={}&locked={}&clickThrough={}&layout={}&style={}&enableBlur={}&enableScale={}&enableSpring={}&showControls={}",
@@ -254,6 +277,121 @@ pub struct LyricsSnapshot {
     revision: u64,
 }
 
+/// 歌词配置在 `settings.json` 里的键名（与渲染层 `LYRICS_SETTING_KEY` 同源）。
+pub const LYRICS_SETTING_KEY: &str = "lyricsWindow";
+
+/// 保存失败的两种**代码**（渲染层用纯函数把它翻成人话；盘上不留这些码）。
+pub const SAVE_ERROR_WRITE_FAILED: &str = "settings_write_failed";
+pub const SAVE_ERROR_UNCONFIRMED: &str = "settings_write_unconfirmed";
+
+/// 歌词配置的持久化记账（**Rust 拥有**：与 WebView / React 生命周期无关）。
+///
+/// 单写者 + 单在途 + 最新待写（latestPending）：
+/// - `pending`：只保留**最新**一份（旧值没有意义：用户要的是最后那一下）；
+/// - `inflight`：正在写的那一代（成功只确认**对应快照**，新值继续写）；
+/// - `saved`：最后一次**确认**写进盘的那一份；`dirty = saved != 运行配置`；
+/// - `save_error`：失败也要用户看得见（不自动重试；`retrySave` 或下一次改动才重试）；
+/// - `frozen`：退出准备开始后不再自动受理新值（这时也不该有新值：准入门已经拦住了）；
+/// - `retried_for_exit`：**一次 Quit 至多一次**重试（不许无限重试把退出拖死）。
+#[derive(Default)]
+struct LyricsPersistence {
+    enabled: bool,
+    frozen: bool,
+    stopped: bool,
+    saved: Option<LyricsConfig>,
+    pending: Option<(u64, LyricsConfig)>,
+    inflight: Option<u64>,
+    generation: u64,
+    save_error: Option<String>,
+    retried_for_exit: bool,
+}
+
+/// 一次写盘的结论（为什么不是 `Result`：三种结论的**处置**各不相同，混成 Ok/Err 会丢掉一种）。
+#[derive(Debug, Clone)]
+enum WriteOutcome {
+    /// 回执里读出了配置（与请求一致才算确认成功）
+    Confirmed(LyricsConfig),
+    /// 回执读不出配置（形状不认识）：不能算已保存
+    Unreadable,
+    /// 明确失败（core 不可用/被拒/超时）：保存失败可见、保留 dirty、不自动重试
+    Failed,
+}
+
+impl LyricsPersistence {
+    fn dirty(&self) -> bool {
+        self.pending.is_some() || self.inflight.is_some()
+    }
+
+    /// 受理一次新值（**不 await**：与配置接受同一步完成，中间没有可以丢队列的缝）。
+    fn enqueue(&mut self, config: &LyricsConfig) -> bool {
+        if !self.enabled || self.frozen || self.stopped {
+            return false;
+        }
+        if self.saved.as_ref() == Some(config) && self.pending.is_none() {
+            return false;
+        }
+        self.generation += 1;
+        self.pending = Some((self.generation, config.clone()));
+        self.save_error = None; // 新值是一次新的尝试（不是"自动重试"同一个失败值）
+        true
+    }
+
+    /// 写盘结论 → 记账转移（**纯逻辑**：成功只确认对应快照、失败保 dirty 且停自动重试）。
+    fn settle(&mut self, sent: &LyricsConfig, outcome: WriteOutcome) {
+        self.inflight = None;
+        match outcome {
+            WriteOutcome::Confirmed(confirmed) if &confirmed == sent => {
+                // 成功只确认**对应快照**：期间又来了新值（pending 非空）就不算"现在已与盘一致"。
+                if self.pending.is_none() {
+                    self.saved = Some(sent.clone());
+                }
+                self.save_error = None;
+            }
+            WriteOutcome::Confirmed(_) | WriteOutcome::Unreadable => {
+                self.save_error = Some(SAVE_ERROR_UNCONFIRMED.to_string());
+            }
+            WriteOutcome::Failed => {
+                self.save_error = Some(SAVE_ERROR_WRITE_FAILED.to_string());
+            }
+        }
+    }
+
+    /// 退出准备时的排空计划（**纯逻辑**）：已失败的那一份在本轮 Quit **至多**重试一次；
+    /// 有脏值但没在排队的，补排一次最新值。`true` = 排了新东西进队列。
+    fn plan_exit_drain(&mut self, current: &LyricsConfig) -> bool {
+        self.frozen = true;
+        if self.stopped || !self.enabled {
+            return false;
+        }
+        if self.save_error.is_some() {
+            if self.retried_for_exit {
+                return false;
+            }
+            self.retried_for_exit = true;
+            self.save_error = None;
+            self.generation += 1;
+            self.pending = Some((self.generation, current.clone()));
+            return true;
+        }
+        if self.pending.is_none() && self.inflight.is_none() && self.saved.as_ref() != Some(current) {
+            self.generation += 1;
+            self.pending = Some((self.generation, current.clone()));
+            return true;
+        }
+        false
+    }
+
+    /// 退出准备**失败**（保窗）时的复原：解冻、并把"本轮已重试过"清掉——一次失败的退出不能
+    /// 把这个会话的保存能力一起带走。
+    ///
+    /// 只复原这两格：`saved`/`pending`/`save_error` **一格都不许动**（没写成就不许宣布已保存、
+    /// 也不许把错误洗掉——用户要看得见"上一次没存进去"）。
+    fn abort_exit_drain(&mut self) {
+        self.frozen = false;
+        self.retried_for_exit = false;
+    }
+}
+
 #[derive(Default)]
 pub struct LyricsWindowState {
     config: Mutex<LyricsSnapshot>,
@@ -261,6 +399,9 @@ pub struct LyricsWindowState {
     lifecycle: Mutex<LyricsLifecycle>,
     operations: tauri::async_runtime::Mutex<()>,
     runtime_status: Mutex<(u64, Option<Value>)>,
+    persist: Mutex<LyricsPersistence>,
+    persist_idle: Condvar,
+    writer: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 #[derive(Default)]
@@ -274,6 +415,37 @@ struct LyricsLifecycle {
 }
 
 impl LyricsWindowState {
+    /// 启动时的**只读**恢复：从 `settings.json` 读出歌词配置当基线。
+    ///
+    /// 为什么启动就要读：主窗不再 bootstrap 写盘（R44e 删掉了那个 writer），Rust 内存里这份
+    /// 必须与盘上一致，否则第一帧 `configure({})` 的读回会给出"默认值"——用户看到的配置
+    /// 会在他没改过任何东西的情况下被重置成默认，而下一次改动还会把默认值写回盘。
+    ///
+    /// **坏文件/坏字段不默认回写**：读不懂就当默认（与 `theme::read_theme` 同一条纪律），
+    /// 诊断留在日志里；真正的"文件认不出"由 sidecar 的 `save` 拒绝覆盖。
+    pub fn restore(data_dir: &Path) -> Self {
+        let raw: Option<String> = std::fs::read_to_string(data_dir.join(SETTINGS_FILE_NAME)).ok();
+        let parsed: Option<Value> = raw.as_deref().and_then(|text| serde_json::from_str(text).ok());
+        let recognized: Option<Value> = parsed.as_ref().and_then(|document| {
+            let version_ok = document.get("schemaVersion").and_then(Value::as_f64)
+                == Some(crate::webview_proxy::SETTINGS_SCHEMA_VERSION);
+            if !version_ok {
+                return None;
+            }
+            document.get("data")?.as_object()?.get(LYRICS_SETTING_KEY).cloned()
+        });
+        if raw.is_some() && recognized.is_none() {
+            log::warn!("{SETTINGS_FILE_NAME} 的形状不认识：歌词配置按默认恢复，且不覆盖原文件（诊断见 sidecar 日志）");
+        }
+        let baseline = LyricsConfig::restored(recognized.as_ref());
+        log::info!("歌词配置（按 {SETTINGS_FILE_NAME} 恢复）：mode={} layout={} style={}", baseline.mode.as_str(), baseline.layout, baseline.style);
+        LyricsWindowState {
+            config: Mutex::new(LyricsSnapshot { config: baseline.clone(), revision: 0 }),
+            persist: Mutex::new(LyricsPersistence { enabled: true, saved: Some(baseline), ..Default::default() }),
+            ..Default::default()
+        }
+    }
+
     pub fn snapshot(&self) -> LyricsSnapshot { lock(&self.config).clone() }
     pub fn config(&self) -> LyricsConfig { self.snapshot().config }
 
@@ -289,14 +461,60 @@ impl LyricsWindowState {
         payload
     }
 
-    fn configure(&self, patch: &Value, restore: bool) -> (LyricsConfig, LyricsSnapshot, bool) {
-        let mut state = lock(&self.config);
-        let current = state.config.clone();
-        if restore && state.revision != 0 { return (current, state.clone(), false); }
-        let next = current.apply_patch(patch);
-        let changed = next != current || restore;
-        if changed { state.config = next; state.revision += 1; }
-        (current, state.clone(), changed)
+    /// 接受一次配置补丁：改运行配置 + 推进 revision，并在**同一步**把新值交给持久化任务。
+    ///
+    /// 两把锁的次序是死规矩：**先 config、后 persist，永不反向**（持久化线程只拿 persist）。
+    /// 从"接受"到"入队"之间**没有 await**，所以没有"配置已接受、保存队列丢了这一笔"的缝。
+    fn configure(&self, patch: &Value) -> (LyricsConfig, LyricsSnapshot, bool) {
+        let (previous, snapshot, changed) = {
+            let mut state = lock(&self.config);
+            let current = state.config.clone();
+            let next = current.apply_patch(patch);
+            let changed = next != current;
+            if changed { state.config = next; state.revision += 1; }
+            (current, state.clone(), changed)
+        };
+        if changed {
+            let queued = lock(&self.persist).enqueue(&snapshot.config);
+            if queued { self.persist_idle.notify_all(); }
+        }
+        (previous, snapshot, changed)
+    }
+
+    /// 用户点了"重试保存"（或退出 drain 主动重存）：把当前运行配置重新排进队列。
+    fn retry_save(&self) -> bool {
+        let config = self.config();
+        let mut persist = lock(&self.persist);
+        if !persist.enabled || persist.stopped || persist.frozen {
+            return false;
+        }
+        persist.save_error = None;
+        persist.generation += 1;
+        persist.pending = Some((persist.generation, config));
+        drop(persist);
+        self.persist_idle.notify_all();
+        true
+    }
+
+    /// 退出准备**失败**（`abort_exit` 保窗）时的复原：解冻 + 唤醒保存任务。
+    ///
+    /// 这是 review finding 1 的修复点：`prepare_exit_persistence` 失败后若不解冻，`enqueue` 与
+    /// `retry_save` 会一直拒收，下一次 Quit 也不再重排——一次失败的退出把整个会话的保存能力带走。
+    pub fn abort_exit_drain(&self) {
+        {
+            let mut persist = lock(&self.persist);
+            persist.abort_exit_drain();
+        }
+        self.persist_idle.notify_all();
+    }
+
+    /// 状态里的持久化两格（`dirty` / `saveError`）：保存完成或失败都会让 payload 变，
+    /// `stamp_status` 因此推进 runtimeRevision——同 revision 的旧回执就盖不掉新状态了。
+    fn persistence_status(&self, payload: &mut Value) {
+        let current = self.config();
+        let persist = lock(&self.persist);
+        payload["dirty"] = json!(persist.dirty() || persist.saved.as_ref() != Some(&current));
+        payload["saveError"] = persist.save_error.clone().map(Value::String).unwrap_or(Value::Null);
     }
 
     pub fn document(&self) -> Option<Value> { lock(&self.document).clone() }
@@ -309,6 +527,7 @@ pub fn current_status<R: Runtime>(app: &AppHandle<R>) -> Value {
     payload["requestedVisible"] = json!(lock(&state.lifecycle).requested);
     #[cfg(windows)] { payload["taskbar"] = app.state::<crate::taskbar_lyrics::Host>().payload(); }
     #[cfg(not(windows))] { payload["taskbar"] = crate::taskbar_lyrics::Reason::Unsupported.payload(false); }
+    state.persistence_status(&mut payload);
     state.stamp_status(payload)
 }
 
@@ -322,6 +541,147 @@ async fn read_status<R: Runtime>(app: &AppHandle<R>) -> Result<Value, CoreError>
     app.run_on_main_thread(move || { let _ = tx.try_send(current_status(&owner)); }).map_err(|e| CoreError::new("internal", e.to_string()))?;
     let mut rx = rx;
     rx.recv().await.ok_or_else(|| CoreError::new("internal", "歌词运行状态回读失败"))
+}
+
+// ---------------------------------------------------------------------------
+// 歌词配置持久化（R44e：唯一保存任务，Rust 拥有，与 WebView 生命周期无关）
+// ---------------------------------------------------------------------------
+
+/// 起持久化线程（`setup` 里调一次；重复调用无副作用）。
+///
+/// 为什么是**线程**而不是渲染层的保存队列：集成审查 I2 的复现是"认证卸载 LibraryShell →
+/// 桥取消订阅 → 仍开着的歌词窗继续合法改配置，但磁盘没有新写"。保存这件事必须与 React 的
+/// 挂载周期、与渲染层是否还活着完全脱钩——只有 Rust 拥有它，登出/崩溃都还在写。
+pub fn start_persistence<R: Runtime>(app: &AppHandle<R>) {
+    let state = app.state::<LyricsWindowState>();
+    {
+        let writer = lock(&state.writer);
+        if writer.is_some() { return; }
+    }
+    let owner = app.clone();
+    match std::thread::Builder::new().name("lyrics-persist".into()).spawn(move || persistence_loop(&owner)) {
+        Ok(handle) => { *lock(&state.writer) = Some(handle); }
+        Err(error) => log::error!("歌词配置保存任务起不来（配置会只留在内存里）：{error}"),
+    }
+}
+
+/// 停下持久化线程（退出收尾时调；在飞的那一笔先等它有结论）。
+pub fn stop_persistence<R: Runtime>(app: &AppHandle<R>) {
+    let state = app.state::<LyricsWindowState>();
+    lock(&state.persist).stopped = true;
+    state.persist_idle.notify_all();
+}
+
+fn persistence_loop<R: Runtime>(app: &AppHandle<R>) {
+    loop {
+        let state = app.state::<LyricsWindowState>();
+        let job = {
+            let mut persist = lock(&state.persist);
+            loop {
+                if persist.stopped { return; }
+                if let Some(job) = persist.pending.take() { break Some(job); }
+                persist = state.persist_idle.wait(persist).unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+        };
+        let Some((generation, config)) = job else { continue };
+        {
+            let mut persist = lock(&state.persist);
+            persist.inflight = Some(generation);
+        }
+        // **不持 worker 需要的锁**去等 sidecar：等写盘时只拿着自己那份快照。
+        let result = crate::commands::settings_write_owned(app, json!({ LYRICS_SETTING_KEY: config.persisted() }));
+        let outcome = match result {
+            Ok(answer) => match settings_receipt_value(&answer, LYRICS_SETTING_KEY) {
+                Some(value) => WriteOutcome::Confirmed(LyricsConfig::restored(Some(value))),
+                None => WriteOutcome::Unreadable,
+            },
+            Err(error) => {
+                log::warn!("歌词配置保存失败（本次运行仍生效，不自动重试）：{}", error.message);
+                WriteOutcome::Failed
+            }
+        };
+        let mut persist = lock(&state.persist);
+        persist.settle(&config, outcome);
+        drop(persist);
+        state.persist_idle.notify_all();
+        emit_status(app);
+    }
+}
+
+/// 渲染层发起的歌词配置：**先过退出准入门，再原子接受并入队**（review finding 2）。
+///
+/// 修复前 `core_lyrics_configure` 直接 `state.configure(...)`：退出线程校验完盘上文档、
+/// 还没进入不可逆阶段的那段窗口里，歌词窗发来的一笔配置仍会被接受——内存变了、worker 却已冻结，
+/// 磁盘永远停在旧值。这条缝与渲染层的 settings 写是同一条，所以走的也是同一个
+/// [`crate::commands::PersistenceGate`]。
+///
+/// 受理凭据（`PersistAdmission`）在本函数体内**持有到配置被接受、持久任务已入队**为止：
+/// - 判定与记账在 `admit` 的同一个临界区（不会"判定 Running、入队时已冻结"）；
+/// - 退出要等的正是这个凭据（`wait_drained`），所以"已受理还没入队"的那一笔挡得住退出；
+/// - 锁次序：准入门（`admit` 内部即放）→ config → persist，与既有纪律一致。
+fn accept_renderer_configure(
+    gate: &std::sync::Arc<crate::commands::PersistenceGate>,
+    state: &LyricsWindowState,
+    config: &Value,
+    retry: bool,
+) -> Result<(LyricsConfig, LyricsSnapshot, bool), CoreError> {
+    let _admission = gate.admit(crate::commands::PersistKind::Renderer)?;
+    let (previous, snapshot, changed) = state.configure(config);
+    if retry {
+        state.retry_save();
+    }
+    Ok((previous, snapshot, changed))
+}
+
+/// 退出准备**失败**（`abort_exit` 保窗）时把「准入门 ↔ 歌词持久化」一起复原。
+///
+/// **顺序是合同**（review round 2 finding 1）：先解冻歌词持久化（并唤醒保存任务），**再**把全局
+/// 准入门放回 `Running`。反过来的话，门一开、歌词还冻着，这中间到达的一笔 `core_lyrics_configure`
+/// 会被准入门受理，`configure` 改掉运行值，`enqueue` 却因 `frozen` 返回 false 且被忽略——
+/// 内存是新值、盘上是旧值、退出却是"成功"的。开门之后任何一笔写能进来时，歌词一定已经可写。
+///
+/// `while_gate_still_closed` 是这一刀的**观察点**（生产传空闭包）：它跑在"已解冻、门还关着"
+/// 的那一刻，让"顺序"成为可断言的行为，而不是靠读源码里的调用次序。
+pub fn restore_after_failed_exit(
+    gate: &std::sync::Arc<crate::commands::PersistenceGate>,
+    state: &LyricsWindowState,
+    while_gate_still_closed: impl FnOnce(),
+) {
+    state.abort_exit_drain();
+    while_gate_still_closed();
+    gate.abort_prepare();
+}
+
+/// 退出准备：**冻结 + 重试一次（若上一次失败）+ 等排空**。
+///
+/// 返回 `Ok(())` 才允许往下走 D 的不可逆清理。失败/超时保持现状：盘上可能还是旧的，
+/// 但 Rust 侧的 dirty/saveError 仍在，主窗可以回读并给出可操作提示（保窗可重试）。
+pub fn prepare_exit_persistence<R: Runtime>(app: &AppHandle<R>, deadline: std::time::Instant) -> Result<(), CoreError> {
+    let state = app.state::<LyricsWindowState>();
+    let current = state.config();
+    {
+        let mut persist = lock(&state.persist);
+        persist.plan_exit_drain(&current);
+    }
+    state.persist_idle.notify_all();
+    loop {
+        {
+            let persist = lock(&state.persist);
+            if persist.pending.is_none() && persist.inflight.is_none() {
+                if persist.save_error.is_some() {
+                    let code = persist.save_error.clone().unwrap_or_default();
+                    return Err(CoreError::new("settings_unsaved", format!("歌词配置未保存（{code}）：本次不退出，请重试")));
+                }
+                return Ok(());
+            }
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(CoreError::new("timeout", "等待歌词配置保存超时：本次不退出，请重试"));
+        }
+        let persist = lock(&state.persist);
+        let _ = state.persist_idle.wait_timeout(persist, std::time::Duration::from_millis(20).min(deadline - now));
+    }
 }
 
 async fn rebuild_window<R: Runtime>(app: &AppHandle<R>, save_desktop: bool) -> Result<(), CoreError> {
@@ -409,10 +769,24 @@ pub fn require_lyrics_source(label: &str) -> Result<(), CoreError> {
     Err(CoreError::new("forbidden_source", "歌词配置与媒体控制仅接受主窗或歌词窗调用"))
 }
 
-pub fn validate_configure(label: &str, patch: &Value, restore: Option<bool>) -> Result<(), CoreError> {
+pub fn validate_configure(label: &str, patch: &Value, retry_save: Option<bool>, restore_if_pristine: Option<Value>) -> Result<(), CoreError> {
     require_lyrics_source(label)?;
-    if label != MAIN_WINDOW_LABEL && restore.is_some() {
-        return Err(CoreError::new("forbidden_source", "仅主窗可以恢复歌词配置"));
+    if restore_if_pristine.is_some() {
+        // R44e：启动时由 Rust **只读**恢复盘上配置（`LyricsWindowState::restore`），恢复不再由
+        // 渲染层触发——旧参数留着会被当成"又要覆盖一次盘"，所以明确拒，不静默当普通改值。
+        return Err(CoreError::new(
+            "invalid_payload",
+            "restoreIfPristine 已取消：启动配置由宿主只读恢复，不再接受渲染层恢复请求",
+        ));
+    }
+    if retry_save == Some(true) {
+        let empty = patch.as_object().map(|object| object.is_empty()).unwrap_or(false);
+        if !empty {
+            return Err(CoreError::new(
+                "invalid_payload",
+                "retrySave 只能与空 config 一起用（它重存的是当前运行配置，不是又改一次值）",
+            ));
+        }
     }
     let Some(object) = patch.as_object() else { return Err(CoreError::new("invalid_payload", "歌词配置必须是对象")); };
     for (key, value) in object {
@@ -857,14 +1231,23 @@ pub async fn core_lyrics_toggle(
     }
 }
 
+/// 改歌词配置（窄命令）：`{config, retrySave?}`。
+///
+/// - `config: {}`（无 `retrySave`）= **纯读**当前运行状态（回执含 config/visible/revision/dirty/saveError）；
+/// - `config: {...}` = 接受一次补丁：改运行值、推进 revision，并由 Rust 的保存任务落盘；
+/// - `{config: {}, retrySave: true}` = 重存当前运行配置（保存失败后的手动重试；main/lyrics 都可调）。
+///
+/// `restoreIfPristine` 已取消：启动配置由 Rust 只读恢复（见 [`LyricsWindowState::restore`]），
+/// 传进来明确回 `invalid_payload`，不静默当成普通改值。
 #[tauri::command]
 pub async fn core_lyrics_configure(
     app: AppHandle,
     webview: tauri::Webview,
     config: Value,
-    restore_if_pristine: Option<bool>,
+    retry_save: Option<bool>,
+    restore_if_pristine: Option<Value>,
 ) -> Result<Value, CoreError> {
-    validate_configure(webview.label(), &config, restore_if_pristine)?;
+    validate_configure(webview.label(), &config, retry_save, restore_if_pristine)?;
     let state = app.state::<LyricsWindowState>();
     let _operation = state.operations.lock().await;
     #[cfg(windows)] {
@@ -872,7 +1255,9 @@ pub async fn core_lyrics_configure(
         let generation = ready_generation(webview.label(), document_generation, lock(&state.lifecycle).live_generation, config.as_object().is_some_and(|map| map.is_empty()));
         if let Some(generation) = generation { app.state::<crate::taskbar_lyrics::Host>().ready(generation); }
     }
-    let (previous, snapshot, changed) = state.configure(&config, restore_if_pristine == Some(true));
+    let retry = retry_save == Some(true);
+    let gate = crate::commands::persistence_gate(&app)?;
+    let (previous, snapshot, changed) = accept_renderer_configure(&gate, &state, &config, retry)?;
     if changed {
         if previous.mode != snapshot.config.mode {
             if let Err(error) = rebuild_window(&app, previous.mode == LyricsMode::Desktop).await {
@@ -893,7 +1278,7 @@ pub async fn core_lyrics_configure(
         }
     }
     let payload = read_status(&app).await?;
-    if changed { emit_core_event(&app, LYRICS_STATE, payload.clone()); }
+    if changed || retry { emit_core_event(&app, LYRICS_STATE, payload.clone()); }
     Ok(payload)
 }
 
@@ -995,23 +1380,33 @@ mod tests {
         assert!(lock(&state.lifecycle).requested);
     }
 
+    /// R44e：原子 revision 仍成立；`restoreIfPristine` 那条旧入口**已取消**（启动恢复由宿主只读做）。
     #[test]
-    fn r44c_pristine_restore_and_atomic_revision_reject_stale_disk() {
+    fn r44e_atomic_revision_and_the_retired_pristine_restore() {
         let state = LyricsWindowState::default();
-        let (_, restored, changed) = state.configure(&json!({"layout":"vertical", "style":"panel"}), true);
+        let (_, accepted, changed) = state.configure(&json!({"layout":"vertical", "style":"panel"}));
         assert!(changed);
-        assert_eq!(restored.revision, 1);
-        assert_eq!(restored.config.payload()["layout"], "vertical");
-        let (_, next, _) = state.configure(&json!({"locked":true}), false);
+        assert_eq!(accepted.revision, 1);
+        assert_eq!(accepted.config.payload()["layout"], "vertical");
+        let (_, next, _) = state.configure(&json!({"locked":true}));
         assert_eq!(next.revision, 2);
-        let (_, reread, changed) = state.configure(&json!({"layout":"horizontal"}), true);
-        assert!(!changed);
-        assert_eq!(reread.revision, 2);
-        assert_eq!(reread.config.payload()["layout"], "vertical");
-        assert_eq!(state.configure(&json!({}), false).1.revision, 2);
+        // 旧参数必须明确被拒（不许静默当成普通改值）
+        let retired = validate_configure(MAIN_WINDOW_LABEL, &json!({}), None, Some(json!(true)))
+            .expect_err("restoreIfPristine 已取消");
+        assert_eq!(retired.kind.as_deref(), Some("invalid_payload"));
+        assert!(retired.message.contains("restoreIfPristine"), "{}", retired.message);
+        for source in [MAIN_WINDOW_LABEL, LYRICS_WINDOW_LABEL] {
+            assert!(validate_configure(source, &json!({}), None, Some(Value::Null)).is_err(), "连 null 也拒（按旧合同传过就是旧调用方）");
+        }
+        // retrySave 只能与空 config 一起用；空 config 本身仍是纯读
+        assert!(validate_configure(LYRICS_WINDOW_LABEL, &json!({}), Some(true), None).is_ok());
+        let bad_retry = validate_configure(MAIN_WINDOW_LABEL, &json!({"locked": true}), Some(true), None)
+            .expect_err("retrySave 不许夹带改值");
+        assert_eq!(bad_retry.kind.as_deref(), Some("invalid_payload"));
+        assert_eq!(state.configure(&json!({})).1.revision, 2, "空补丁是纯读：不动 revision");
         std::thread::scope(|scope| {
             let handles: Vec<_> = (0..20).map(|i| { let state = &state; scope.spawn(move || {
-                let (_, snapshot, changed) = state.configure(&json!({"size": if i % 2 == 0 {"sm"} else {"xl"}}), false);
+                let (_, snapshot, changed) = state.configure(&json!({"size": if i % 2 == 0 {"sm"} else {"xl"}}));
                 changed.then_some(snapshot.revision)
             }) }).collect();
             let mut revisions: Vec<_> = handles.into_iter().filter_map(|handle| handle.join().unwrap()).collect();
@@ -1033,16 +1428,18 @@ mod tests {
             for bad in [json!({"action":"play"}), json!({"action":"next","url":"bad"}), json!("next"), json!({})] {
                 assert!(control_payload(source, &bad).is_err());
             }
-            assert!(validate_configure(source, &json!({"locked":true}), None).is_ok());
-            assert!(validate_configure(source, &json!({"document":[]}), None).is_err());
-            assert!(validate_configure(source, &json!({"enableBlur":"yes"}), None).is_err());
+            assert!(validate_configure(source, &json!({"locked":true}), None, None).is_ok());
+            assert!(validate_configure(source, &json!({"document":[]}), None, None).is_err());
+            assert!(validate_configure(source, &json!({"enableBlur":"yes"}), None, None).is_err());
         }
         for source in ["login", "login-theme", "login-return", "tray", ""] {
             assert!(control_payload(source, &json!({"action":"next"})).is_err());
-            assert!(validate_configure(source, &json!({}), None).is_err());
+            assert!(validate_configure(source, &json!({}), None, None).is_err());
         }
-        assert!(validate_configure("lyrics", &json!({}), Some(false)).is_err());
-        assert!(validate_configure("main", &json!({}), Some(true)).is_ok());
+        // R44e：恢复已取消，任何来源（含主窗）传旧参数都拒；retrySave 只接受空 config。
+        assert!(validate_configure(MAIN_WINDOW_LABEL, &json!({}), None, Some(json!(false))).is_err());
+        assert!(validate_configure(MAIN_WINDOW_LABEL, &json!({}), Some(true), None).is_ok());
+        assert!(validate_configure(MAIN_WINDOW_LABEL, &json!({"locked":true}), Some(true), None).is_err());
         assert!(require_main_webview("lyrics").is_err());
         assert!(crate::commands::require_login_chrome_source("lyrics").is_err());
     }
@@ -1377,7 +1774,7 @@ mod tests {
         assert_eq!(state.document(), Some(json!({ "lines": [], "status": "unavailable" })));
 
         // 文档与配置各占一把锁：改配置不会把文档弄丢（两件事互不干扰）
-        state.configure(&json!({"mode": "taskbar"}), false);
+        state.configure(&json!({"mode": "taskbar"}));
         assert_eq!(state.config().mode, LyricsMode::Taskbar);
         assert_eq!(state.document(), Some(json!({ "lines": [], "status": "unavailable" })));
     }
@@ -1570,5 +1967,410 @@ mod tests {
             assert!(body.find(guard).unwrap() < 900);
         }
         assert_eq!(production.matches("#[tauri::command]").count(), 5);
+    }
+
+    // ---- R44e：歌词配置持久化（Rust 拥有的保存任务）--------------------------------
+
+    fn persisted_config(patch: Value) -> LyricsConfig {
+        LyricsConfig::default().apply_patch(&patch)
+    }
+
+    /// 落盘合同恰好是 11 个字面键：不含 `effectiveSize`（派生值）与 taskbar/revision/visible/dirty。
+    #[test]
+    fn r44e_the_persisted_contract_is_exactly_the_config_keys() {
+        let persisted = LyricsConfig::default().persisted();
+        let mut keys: Vec<&str> = persisted.as_object().expect("必须是对象").keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        let mut expected = vec![
+            "mode", "layout", "style", "size", "color", "locked", "clickThrough",
+            "enableBlur", "enableScale", "enableSpring", "showControls",
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected, "只写合同 config 字段");
+        assert!(persisted.get("effectiveSize").is_none(), "派生值不入盘");
+        for forbidden in ["revision", "visible", "dirty", "saveError", "requestedVisible", "taskbar"] {
+            assert!(persisted.get(forbidden).is_none(), "{forbidden} 是运行时状态，不入盘");
+        }
+        // status 里则有它们（渲染层要读）
+        let status = status_payload(&LyricsConfig::default(), true, 3);
+        assert_eq!(status["revision"], 3);
+        assert_eq!(status["config"]["effectiveSize"], "lg");
+    }
+
+    /// 读回：未知字段/坏值一律按默认（不猜、不回写默认值去砸盘）。
+    #[test]
+    fn r44e_restoring_a_stored_config_never_guesses() {
+        let restored = LyricsConfig::restored(Some(&json!({
+            "mode": "taskbar", "layout": "vertical", "style": "panel",
+            "size": "huge", "locked": true, "futureKey": 7
+        })));
+        assert_eq!(restored.mode, LyricsMode::Taskbar);
+        assert_eq!(restored.layout, "vertical");
+        assert_eq!(restored.style, "panel");
+        assert_eq!(restored.size, DEFAULT_LYRICS_SIZE, "认不出的字号档位按默认");
+        assert!(restored.locked);
+        assert_eq!(restored.persisted().get("futureKey"), None, "未知字段不跟着进落盘合同");
+        assert_eq!(LyricsConfig::restored(None), LyricsConfig::default(), "没有这一格 = 默认");
+        assert_eq!(LyricsConfig::restored(Some(&json!("坏形状"))), LyricsConfig::default());
+    }
+
+    /// 接受一次配置 = 改运行值 + **同一步**交给保存任务（中间没有可丢队列的缝）。
+    #[test]
+    fn r44e_accepting_a_config_enqueues_it_for_persistence_in_the_same_step() {
+        let mut persist = LyricsPersistence { enabled: true, saved: Some(LyricsConfig::default()), ..Default::default() };
+        let vertical = persisted_config(json!({"layout": "vertical"}));
+        assert!(persist.enqueue(&vertical));
+        let (generation, pending) = persist.pending.clone().expect("入队");
+        assert_eq!(pending, vertical);
+        assert!(!persist.dirty() || persist.pending.is_some());
+
+        // 后续值合并到 latestPending（不并行写、不丢最新的那一笔）
+        let panel = persisted_config(json!({"layout": "vertical", "style": "panel"}));
+        assert!(persist.enqueue(&panel));
+        let (next_generation, pending) = persist.pending.clone().expect("仍在队里");
+        assert!(next_generation > generation, "generation 单调（成功只确认对应快照）");
+        assert_eq!(pending, panel);
+
+        // 与已保存一致的值不再入队（纯读不回写）
+        let mut saved_panel = LyricsPersistence { enabled: true, saved: Some(panel.clone()), ..Default::default() };
+        assert!(!saved_panel.enqueue(&panel));
+        assert!(saved_panel.pending.is_none());
+    }
+
+    /// 单在途 + 最新待写：成功只确认**对应快照**；期间来了新值就继续写。
+    #[test]
+    fn r44e_success_confirms_only_its_own_snapshot_and_newer_values_keep_writing() {
+        let vertical = persisted_config(json!({"layout": "vertical"}));
+        let panel = persisted_config(json!({"layout": "vertical", "style": "panel"}));
+        let mut persist = LyricsPersistence { enabled: true, saved: Some(LyricsConfig::default()), inflight: Some(1), ..Default::default() };
+
+        // 在飞期间来了新值
+        persist.enqueue(&panel);
+        persist.settle(&vertical, WriteOutcome::Confirmed(vertical.clone()));
+        assert_eq!(persist.saved, Some(LyricsConfig::default()), "有更新的待写值：这一笔不宣布'盘已一致'");
+        assert!(persist.dirty(), "仍脏（pending 还在）");
+        assert_eq!(persist.save_error, None);
+
+        // 第二笔写的是最新值：确认后清脏
+        persist.pending = None;
+        persist.inflight = Some(2);
+        persist.settle(&panel, WriteOutcome::Confirmed(panel.clone()));
+        assert_eq!(persist.saved, Some(panel));
+        assert!(!persist.dirty());
+    }
+
+    /// 回执认不出 / 明确失败：都不算已保存；失败保 dirty 且**不自动重试**。
+    #[test]
+    fn r44e_unconfirmed_and_failed_writes_stay_dirty_without_automatic_retry() {
+        let vertical = persisted_config(json!({"layout": "vertical"}));
+        let mut persist = LyricsPersistence { enabled: true, saved: Some(LyricsConfig::default()), inflight: Some(1), ..Default::default() };
+        persist.settle(&vertical, WriteOutcome::Unreadable);
+        assert_eq!(persist.save_error.as_deref(), Some(SAVE_ERROR_UNCONFIRMED));
+        assert_eq!(persist.saved, Some(LyricsConfig::default()));
+        assert!(!persist.dirty(), "没有待写值就不再排队（不自动重试）");
+
+        let mut failed = LyricsPersistence { enabled: true, saved: Some(LyricsConfig::default()), inflight: Some(1), ..Default::default() };
+        failed.settle(&vertical, WriteOutcome::Failed);
+        assert_eq!(failed.save_error.as_deref(), Some(SAVE_ERROR_WRITE_FAILED));
+        assert_eq!(failed.saved, Some(LyricsConfig::default()), "失败不确认任何东西");
+        assert!(failed.pending.is_none(), "失败不自己重排队");
+
+        // 回执是**另一份**配置（并发写者）也不能算成功
+        let mut mismatch = LyricsPersistence { enabled: true, saved: Some(LyricsConfig::default()), inflight: Some(1), ..Default::default() };
+        mismatch.settle(&vertical, WriteOutcome::Confirmed(LyricsConfig::default()));
+        assert_eq!(mismatch.save_error.as_deref(), Some(SAVE_ERROR_UNCONFIRMED));
+        assert_eq!(mismatch.saved, Some(LyricsConfig::default()));
+    }
+
+    /// 退出 drain：上一次失败的那一份**本轮至多重试一次**，且冻结后不再自动受理新值。
+    #[test]
+    fn r44e_exit_drain_retries_a_failed_save_at_most_once() {
+        let vertical = persisted_config(json!({"layout": "vertical"}));
+        let mut persist = LyricsPersistence {
+            enabled: true,
+            saved: Some(LyricsConfig::default()),
+            inflight: Some(1),
+            ..Default::default()
+        };
+        persist.settle(&vertical, WriteOutcome::Failed);
+        assert_eq!(persist.save_error.as_deref(), Some(SAVE_ERROR_WRITE_FAILED));
+
+        assert!(persist.plan_exit_drain(&vertical), "Quit 时把上一次失败的那一份重排一次");
+        assert!(persist.frozen, "冻结：不再自动受理新值");
+        assert_eq!(persist.save_error, None, "重排时清掉旧错误（这次结论说了算）");
+        assert!(persist.pending.is_some());
+        assert!(!persist.enqueue(&vertical), "冻结之后新值不再入队");
+
+        // 重试又失败 → 本轮不再重试
+        persist.pending = None;
+        persist.inflight = Some(2);
+        persist.settle(&vertical, WriteOutcome::Failed);
+        assert!(!persist.plan_exit_drain(&vertical), "一次 Quit 至多一次重试");
+        assert_eq!(persist.save_error.as_deref(), Some(SAVE_ERROR_WRITE_FAILED));
+    }
+
+    /// 没有失败、但脏着（比如保存任务刚好还没轮到）：Quit 时要补排最新值。
+    #[test]
+    fn r44e_exit_drain_flushes_a_dirty_value_that_was_never_queued() {
+        let vertical = persisted_config(json!({"layout": "vertical"}));
+        let mut persist = LyricsPersistence {
+            enabled: true,
+            saved: Some(LyricsConfig::default()),
+            ..Default::default()
+        };
+        assert!(persist.plan_exit_drain(&vertical));
+        assert_eq!(persist.pending.as_ref().map(|(_, config)| config), Some(&vertical));
+        assert!(!persist.plan_exit_drain(&vertical), "已经在队里就不再补（幂等）");
+    }
+
+    // ---- R44e fix1：退出准备失败后的可恢复性（review finding 1）--------------------
+
+    /// 一个"保存任务在线、盘上还是默认值"的状态（这几条用例的起点）。
+    fn enabled_state() -> LyricsWindowState {
+        LyricsWindowState {
+            persist: Mutex::new(LyricsPersistence {
+                enabled: true,
+                saved: Some(LyricsConfig::default()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// 一次"保存失败 → Quit 冻结 → drain 重试也失败"之后的现场（两条用例共用）。
+    fn state_after_a_failed_exit_drain() -> (LyricsWindowState, LyricsConfig) {
+        let vertical = persisted_config(json!({"layout": "vertical"}));
+        let state = enabled_state();
+        assert!(state.configure(&json!({"layout": "vertical"})).2, "运行值改成了 vertical");
+        {
+            let mut persist = lock(&state.persist);
+            persist.pending = None;
+            persist.inflight = Some(1);
+            persist.settle(&vertical, WriteOutcome::Failed);
+        }
+        assert!(lock(&state.persist).plan_exit_drain(&vertical), "Quit：冻结并重排一次");
+        {
+            let mut persist = lock(&state.persist);
+            persist.pending = None;
+            persist.inflight = Some(2);
+            persist.settle(&vertical, WriteOutcome::Failed);
+        }
+        assert!(lock(&state.persist).frozen, "退出准备期间保持冻结");
+        (state, vertical)
+    }
+
+    /// R44e fix1 / review finding 1：退出准备失败（`abort_exit` 保窗）之后，歌词保存必须**解冻**。
+    ///
+    /// 现场：一次保存失败 → Quit（冻结 + 本轮至多重试一次）→ 重试也失败 → 退出失败保窗。
+    /// 修复前 `frozen`/`retried_for_exit` 留在原处：手动 retrySave 不入队、下一次 Quit 不再重排，
+    /// 本次会话再也保存不了（盘上永远是旧的），而界面又不能说"存过了"。
+    #[test]
+    fn fix1_aborting_a_failed_exit_makes_lyrics_persistence_writable_again() {
+        let (state, vertical) = state_after_a_failed_exit_drain();
+
+        state.abort_exit_drain();
+
+        let persist = lock(&state.persist);
+        assert!(!persist.frozen, "abort 之后不许继续冻结（否则本次会话再也保存不了）");
+        assert!(!persist.retried_for_exit, "下一次 Quit 是一次新的尝试（本轮至多一次重试仍成立）");
+        assert_eq!(persist.saved, Some(LyricsConfig::default()), "没写成就不许宣布已保存");
+        assert_eq!(
+            persist.save_error.as_deref(),
+            Some(SAVE_ERROR_WRITE_FAILED),
+            "失败仍然可见（abort 不许把错误洗掉）"
+        );
+        drop(persist);
+
+        assert!(state.retry_save(), "abort 之后手动重试必须能入队");
+        assert_eq!(
+            lock(&state.persist).pending.as_ref().map(|(_, config)| config.clone()),
+            Some(vertical.clone())
+        );
+
+        // 之后的一次改动（渲染层新值）也要能入队，并且排队的正是**最新**那份
+        lock(&state.persist).pending = None; // worker 取走了上一笔
+        assert!(state.configure(&json!({"style": "panel"})).2, "abort 之后新值必须接受");
+        let newest = state.config();
+        assert_eq!(
+            lock(&state.persist).pending.as_ref().map(|(_, config)| config.clone()),
+            Some(newest.clone()),
+            "排队的是最新接受的那一份"
+        );
+
+        // 下一次 Quit 还能再排队（一次新尝试）
+        {
+            let mut persist = lock(&state.persist);
+            persist.pending = None;
+            persist.inflight = None;
+            persist.save_error = Some(SAVE_ERROR_WRITE_FAILED.to_string());
+        }
+        assert!(lock(&state.persist).plan_exit_drain(&newest), "失败保窗后的下一次 Quit 必须能重排最新值");
+    }
+
+    /// R44e fix1：abort 必须**唤醒**保存任务——它可能正睡在 condvar 上等下一笔。
+    #[test]
+    fn fix1_aborting_a_failed_exit_wakes_the_persistence_worker() {
+        let state = std::sync::Arc::new(state_after_a_failed_exit_drain().0);
+        let waiter = {
+            let state = std::sync::Arc::clone(&state);
+            std::thread::spawn(move || {
+                let persist = lock(&state.persist);
+                let (restored, waited) = state
+                    .persist_idle
+                    .wait_timeout(persist, std::time::Duration::from_secs(2))
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                // 超时说明没人叫醒它；被叫醒才算 abort 叫到了保存任务
+                let woken = !waited.timed_out();
+                drop(restored);
+                woken
+            })
+        };
+        // 让 worker 先睡下，再 abort（顺序反过来就测不到"唤醒"这件事）
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        state.abort_exit_drain();
+        assert!(waiter.join().expect("worker 线程"), "abort 必须 notify 保存任务，否则队列里有值也永远不动");
+    }
+
+    // ---- R44e fix1：歌词配置走退出准入门（review finding 2）------------------------
+
+    /// R44e fix1 / review finding 2：退出准备开始后，渲染层发起的 `core_lyrics_configure`
+    /// 必须被**结构化拒绝**（与渲染层 settings 写同一条准入）。
+    ///
+    /// 修复前它绕过准入门：退出线程刚校验完盘上文档、还没进入不可逆阶段时，歌词窗发来一笔配置
+    /// 仍会被接受——内存变了、worker 却已冻结，磁盘永远停在旧值。
+    #[test]
+    fn fix2_lyrics_configure_is_refused_once_exit_preparation_closed_admission() {
+        let gate = std::sync::Arc::new(crate::commands::PersistenceGate::new());
+        let state = enabled_state();
+        gate.begin_prepare();
+
+        let error = match accept_renderer_configure(&gate, &state, &json!({"layout": "vertical"}), false) {
+            Ok(_) => panic!("退出准备开始后不许再受理新的渲染层配置"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.kind.as_deref(),
+            Some("shutting_down"),
+            "结构化拒绝：渲染层要能认出这是「正在退出」而不是坏载荷"
+        );
+        assert_eq!(state.config(), LyricsConfig::default(), "被拒的那一笔不许改运行值");
+        assert!(lock(&state.persist).pending.is_none(), "被拒的那一笔不许入队");
+        assert_eq!(gate.in_flight(), 0, "被拒的调用不留在飞计数里");
+
+        // 同一份准入门在 Running 时照旧受理
+        gate.abort_prepare();
+        assert!(accept_renderer_configure(&gate, &state, &json!({"layout": "vertical"}), false).is_ok());
+        assert_eq!(state.config().layout, "vertical");
+    }
+
+    /// 修复 2 的另一半：受理凭据要**持有到配置被接受并入队**为止，退出等的是它。
+    #[test]
+    fn fix2_lyrics_configure_holds_its_admission_until_the_value_is_enqueued() {
+        let gate = std::sync::Arc::new(crate::commands::PersistenceGate::new());
+        let state = std::sync::Arc::new(enabled_state());
+        // 占住持久记账锁：这一笔就停在"准入已拿、还没入队"的那一步（正是退出最怕的缝）
+        let held = lock(&state.persist);
+        let worker = {
+            let gate = std::sync::Arc::clone(&gate);
+            let state = std::sync::Arc::clone(&state);
+            std::thread::spawn(move || {
+                accept_renderer_configure(&gate, &state, &json!({"layout": "vertical"}), false)
+                    .map(|(_, snapshot, changed)| (snapshot.config, changed))
+            })
+        };
+
+        let wait_until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while gate.in_flight() == 0 {
+            assert!(std::time::Instant::now() < wait_until, "准入没有被登记");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            !gate.wait_drained(std::time::Instant::now() + std::time::Duration::from_millis(50)),
+            "已受理但还没入队的那一笔必须挡住退出（否则退出会越过它去排空）"
+        );
+
+        drop(held);
+        let (config, changed) = worker.join().expect("configure 线程").expect("入队成功");
+        assert!(changed);
+        assert_eq!(
+            lock(&state.persist).pending.as_ref().map(|(_, queued)| queued.clone()),
+            Some(config),
+            "凭据放下时值已经入队（中间没有可丢队列的缝）"
+        );
+        assert_eq!(gate.in_flight(), 0, "入队完成之后才放下准入凭据");
+        assert!(gate.wait_drained(std::time::Instant::now()), "入队之后退出不再被这一笔挡住");
+    }
+
+    // ---- R44e fix2：abort 的顺序（review round 2 finding 1）-----------------------
+
+    /// R44e fix2 / review round 2 finding 1：退出失败的复原必须**先解冻歌词、再打开准入门**。
+    ///
+    /// 反过来的顺序留了一条真实的丢写缝：`gate.abort_prepare()` 一执行，渲染层写立刻可受理；
+    /// 此时歌词那一格还冻着。夹在中间到达的一笔 `core_lyrics_configure` 会通过准入门，`configure`
+    /// 改掉运行值与 revision，`enqueue` 却因 `frozen` 返回 false——而调用方忽略这个返回值。
+    /// 结果：内存是新值、盘上是旧值，退出却已经"成功"了。
+    ///
+    /// 探针切在**生产顺序的那一刀**上（`restore_after_failed_exit` 就是 `abort_exit` 调的那个
+    /// helper）：歌词已解冻、门还关着。顺序一旦换回来，探针会先看到 Running（或看到仍未解冻），
+    /// 断言立刻红——不是靠读源码里的调用顺序。
+    #[test]
+    fn fix2_abort_unfreezes_lyrics_before_it_reopens_the_admission_gate() {
+        use crate::commands::{PersistKind, PersistPhase};
+        let gate = std::sync::Arc::new(crate::commands::PersistenceGate::new());
+        let state = state_after_a_failed_exit_drain().0;
+        gate.begin_prepare();
+
+        restore_after_failed_exit(&gate, &state, || {
+            assert_eq!(
+                gate.phase(),
+                PersistPhase::PreparingExit,
+                "歌词还没解冻就先把准入门打开了：这一刀就是复审说的丢写缝"
+            );
+            assert!(
+                gate.admit(PersistKind::Renderer).is_err(),
+                "门还关着：这段时间到达的渲染层写一笔都进不来"
+            );
+            assert!(!lock(&state.persist).frozen, "解冻必须在开门之前就已经生效");
+            // 不看标志位，看它真的能不能入队（"内存改了、队列收下、盘上会写"）
+            assert!(state.configure(&json!({ "style": "panel" })).2, "解冻之后新值必须被接受");
+            assert_eq!(
+                lock(&state.persist).pending.as_ref().map(|(_, queued)| queued.clone()),
+                Some(state.config()),
+                "解冻之后接受的那一份必须真的在队列里"
+            );
+        });
+
+        assert_eq!(gate.phase(), PersistPhase::Running, "复原完成后门照旧回到 Running");
+        // 门开之后到达的渲染层配置：受理 + 入队（不是"受理了但没人写"）
+        assert!(
+            accept_renderer_configure(&gate, &state, &json!({ "layout": "vertical" }), false).is_ok(),
+            "门开了之后渲染层配置照旧受理"
+        );
+        assert_eq!(gate.in_flight(), 0, "入队完成后凭据放掉");
+        assert_eq!(state.config().layout, "vertical");
+        assert_eq!(
+            lock(&state.persist).pending.as_ref().map(|(_, queued)| queued.clone()),
+            Some(state.config()),
+            "被受理的那一笔必须在队列里（否则就是复审说的 frozen gap）"
+        );
+    }
+
+    /// 唯一写者的形状：本模块不自己写 `settings.json`，写盘走内部 `settings:set`。
+    #[test]
+    fn r44e_the_lyrics_module_owns_no_second_settings_json_writer() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs"))
+            .expect("要能读到自己的源码");
+        let production = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        for forbidden in ["std::fs::write(", "std::fs::rename(", "write_settings_document"] {
+            assert!(!production.contains(forbidden), "歌词模块不许自己写 settings.json（唯一写者是 sidecar）：{forbidden}");
+        }
+        assert!(production.contains("settings_write_owned"), "保存必须走内部 settings:set");
+        assert!(production.contains("SETTINGS_FILE_NAME"), "启动恢复的读盘自读取的是同一个文件");
+        // 保存任务必须是 Rust 拥有的线程，且不依赖任何 webview/事件订阅
+        assert!(production.contains("fn start_persistence"), "保存任务由宿主启动");
+        assert!(production.contains("lyrics-persist"), "独立线程名（与 WebView 生命周期无关）");
+        for forbidden in ["onCoreEvent", "webview.listen", "PageLoadEvent::"] {
+            let _ = forbidden; // 基线与页面加载无关：保存不看页面
+        }
     }
 }

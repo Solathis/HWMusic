@@ -1,4 +1,11 @@
-/** 主窗配置代理：先订阅/恢复，按 Rust revision 接收状态，单写者保存配置；歌词不落此桥存储。 */
+/** 主窗配置代理（R44e）：只订阅/转发 Rust 的运行状态与权威配置；**不再自己写 settings**。
+ *
+ * 为什么删掉这一层的保存队列（R44c 的旧裁决）：它绑在 React 的生命周期上。集成审查 I2 的复现是
+ * "认证卸载 LibraryShell → 桥取消订阅 → 仍开着的歌词窗继续合法改配置，但磁盘没有新写"；
+ * I1 则是"退出时第一笔挂起、第二笔还在本地队列里，`shutdown_core` 先拿走 process → 丢最后一笔"。
+ * 现在配置的落盘由 Rust 的保存任务负责（`src-tauri/src/lyrics_window.rs`），与 WebView 是否还活着无关；
+ * 这一层只剩：订阅广播、发窄命令、把权威状态投影给界面。
+ */
 import { LYRICS_STATE, LYRICS_TOGGLE } from "../../../shared/channels.ts";
 import {
   CORE_LYRICS_CONFIGURE,
@@ -6,7 +13,7 @@ import {
   CORE_LYRICS_PROGRESS,
   CORE_LYRICS_TOGGLE,
 } from "../../../shared/commands.ts";
-import { LYRICS_CACHE_CLEAR, LYRICS_CACHE_INFO, LYRICS_IMPORT, PLAYBACK_LYRICS, SETTINGS_GET, SETTINGS_SET } from "../../../shared/request-channels.ts";
+import { LYRICS_CACHE_CLEAR, LYRICS_CACHE_INFO, LYRICS_IMPORT, PLAYBACK_LYRICS } from "../../../shared/request-channels.ts";
 import {
   coreLyricsConfigure,
   coreLyricsDocument,
@@ -19,12 +26,12 @@ import {
 import { parseAmllLyrics } from "./amll-adapter.ts";
 import { readLyricsFile } from "./lyrics-import.mjs";
 import {
-  LYRICS_SETTING_KEY,
   LYRICS_STATUS,
   lyricsDocumentOf,
   lyricsStatusFromFailure,
   normalizeLyricsConfig,
   progressOf,
+  saveErrorText,
   shouldPushProgress,
 } from "./lyrics-window.mjs";
 
@@ -35,7 +42,7 @@ async function defaultCallCommand(command, args) {
     case CORE_LYRICS_TOGGLE:
       return coreLyricsToggle(payload.checked === true);
     case CORE_LYRICS_CONFIGURE:
-      return coreLyricsConfigure(payload.config ?? {}, payload.restoreIfPristine);
+      return coreLyricsConfigure(payload.config ?? {}, payload.retrySave === true ? true : undefined);
     case CORE_LYRICS_DOCUMENT:
       return coreLyricsDocument(payload.document ?? {});
     case CORE_LYRICS_PROGRESS:
@@ -100,53 +107,41 @@ export function createLyricsBridge(deps = {}) {
   /** 上一次**推出去**的进度：节流的比较基准（没推的那个不算，否则永远差 20ms）。 */
   let lastProgress = null;
 
-  let status = { config: normalizeLyricsConfig({}), visible: false, requestedVisible: false, taskbar: { supported: false, attached: false, reason: "disabled" }, revision: -1, runtimeRevision: -1, initialized: false, saveError: null };
+  let status = { config: normalizeLyricsConfig({}), visible: false, requestedVisible: false, taskbar: { supported: false, attached: false, reason: "disabled" }, revision: -1, runtimeRevision: -1, dirty: false, saveError: null, saveErrorCode: null, initialized: false };
   let initialization = null;
   let generation = 0;
-  let saveEnabled = false;
-  let savedConfig = null;
-  let latestPending = null;
-  let saving = null;
   let readyReader = null;
   const observers = new Map();
   const stops = [];
   const notify = () => { for (const handler of observers.keys()) handler(status); };
   const publish = (patch) => { status = { ...status, ...patch }; notify(); };
-  const keyOf = (config) => JSON.stringify(config);
 
   function acceptStatus(answer) {
     if (answer?.ready === true || !answer?.config || !Number.isSafeInteger(answer.revision) || answer.revision < status.revision) return status;
     const runtimeRevision = Number.isSafeInteger(answer.runtimeRevision) ? answer.runtimeRevision : -1;
     if (runtimeRevision < (status.runtimeRevision ?? -1)) return status;
     const config = normalizeLyricsConfig(answer.config);
-    const changed = keyOf(config) !== keyOf(status.config);
-    publish({ config, visible: answer.visible === true, requestedVisible: answer.requestedVisible === true || (answer.requestedVisible === undefined && answer.visible === true), taskbar: answer.taskbar ?? status.taskbar, revision: answer.revision, runtimeRevision });
-    if (saveEnabled && changed) queueSave(config);
+    const saveErrorCode = typeof answer.saveError === "string" && answer.saveError !== "" ? answer.saveError : null;
+    publish({
+      config,
+      visible: answer.visible === true,
+      requestedVisible: answer.requestedVisible === true || (answer.requestedVisible === undefined && answer.visible === true),
+      taskbar: answer.taskbar ?? status.taskbar,
+      revision: answer.revision,
+      runtimeRevision,
+      // R44e：持久化状态由 Rust 报告（脏/失败都不藏在渲染层里），失败代码在这一层翻成人话
+      dirty: answer.dirty === true,
+      saveErrorCode,
+      saveError: saveErrorText(saveErrorCode),
+    });
     return status;
   }
 
-  function queueSave(config) {
-    latestPending = normalizeLyricsConfig(config);
-    if (saving || !saveEnabled || status.saveError) return saving;
-    saving = (async () => {
-      while (latestPending) {
-        const next = latestPending;
-        latestPending = null;
-        if (keyOf(next) === savedConfig) continue;
-        try {
-          await callCore(SETTINGS_SET, { patch: { [LYRICS_SETTING_KEY]: next } });
-          savedConfig = keyOf(next);
-        } catch {
-          latestPending = status.config;
-          publish({ saveError: "桌面歌词配置未保存，本次运行仍生效。请检查数据目录后点击重试保存。" });
-          return;
-        }
-      }
-    })().finally(() => {
-      saving = null;
-      if (latestPending && !status.saveError) queueSave(latestPending);
-    });
-    return saving;
+  /** 重试保存：**窄命令**（空 config + retrySave），落盘由 Rust 的保存任务执行。 */
+  async function retrySave() {
+    await initialize();
+    if (status.saveErrorCode === null) return status;
+    return statusCommand(CORE_LYRICS_CONFIGURE, { config: {}, retrySave: true });
   }
 
   function initialize() {
@@ -165,27 +160,19 @@ export function createLyricsBridge(deps = {}) {
         }).then(keep),
       ]);
       if (mine !== generation) return status;
-      if (status.initialized) {
-        const current = await callCommand(CORE_LYRICS_CONFIGURE, { config: {} });
-        return mine === generation ? acceptStatus(current) : status;
-      }
-      const answer = await callCore(SETTINGS_GET, null);
+      // 启动配置由 Rust 只读恢复（`LyricsWindowState::restore`），这里只**读回权威状态**：
+      // 不再 bootstrap 写盘，也就没有"渲染层拿旧盘覆盖运行值"这条缝。
+      const current = await callCommand(CORE_LYRICS_CONFIGURE, { config: {} });
       if (mine !== generation) return status;
-      const disk = normalizeLyricsConfig(answer?.settings?.data?.[LYRICS_SETTING_KEY]);
-      savedConfig = keyOf(disk);
-      const restored = await callCommand(CORE_LYRICS_CONFIGURE, { config: disk, restoreIfPristine: true });
-      if (mine !== generation) return status;
-      if (!restored?.config || !Number.isSafeInteger(restored.revision) || restored.revision < 0) {
+      if (!current?.config || !Number.isSafeInteger(current.revision) || current.revision < 0) {
         throw { kind: "invalid_response", message: "歌词配置缺少权威 revision" };
       }
-      acceptStatus(restored);
-      saveEnabled = true;
+      acceptStatus(current);
       publish({ initialized: true });
-      if (keyOf(status.config) !== savedConfig) queueSave(status.config);
       return status;
     })().catch((cause) => {
       if (mine === generation) {
-        publish({ saveError: "桌面歌词配置未能恢复，未覆盖原设置。请检查数据目录并重试。" });
+        publish({ saveError: "桌面歌词配置未能恢复（Rust 回执缺少权威 revision），本次运行按默认配置显示。请稍后重试。", saveErrorCode: "state_unreadable" });
         generation += 1;
         for (const stop of stops.splice(0)) stop();
         initialization = null;
@@ -223,13 +210,6 @@ export function createLyricsBridge(deps = {}) {
 
   function applyConfig(patch) {
     return statusCommand(CORE_LYRICS_CONFIGURE, { config: patch ?? {} });
-  }
-
-  async function retrySave() {
-    await initialize();
-    if (saving) await saving;
-    publish({ saveError: null });
-    return queueSave(status.config);
   }
 
   function dispose() {

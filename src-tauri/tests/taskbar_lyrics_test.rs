@@ -144,7 +144,7 @@ fn taskbar_mode_never_emits_desktop_geometry_or_style_effects() {
     assert!(!desktop_topmost(&config)); assert!(desktop_topmost(&LyricsConfig::default()));
     for source in ["main", "lyrics"] {
         for field in ["parent", "hwnd", "taskbar", "requestedVisible"] {
-            assert!(validate_configure(source, &serde_json::json!({field: 4}), None).is_err());
+            assert!(validate_configure(source, &serde_json::json!({field: 4}), None, None).is_err());
         }
     }
 }

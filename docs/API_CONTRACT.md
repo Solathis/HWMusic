@@ -267,21 +267,32 @@ DNS  api-drcn.music.dbankcloud.cn                  → 2407:c080:1400:61:40a0:d5
 
 ```
 core_login_chrome {action:"return"}                       → {cancelled: boolean}
-core_login_chrome {action:"theme"}                        → {theme: "light"|"dark"|"system"}   （读回）
-core_login_chrome {action:"theme", theme:"light"|...}     → {theme: ...}                        （改 + 广播）
+core_login_chrome {action:"theme"}                        → {theme: "light"|"dark"|"system", revision}   （读回）
+core_login_chrome {action:"theme", theme:"light"|...}     → {theme: ..., revision}                        （改 + 广播）
 ```
 
 - 回执是**事实**（不是"已受理"）：取消那条读的就是结论槽是否真的收口了一次进行中的登录；
   改主题那条回的是**实际生效**的档位（落盘失败走结构化错误，不静默改档）。
 - 认不出的 `action`/档位一律结构化 `invalid_payload`（不猜）。
 - 主题状态归 **Rust** 持有（`settings.json` 的 `theme` 键），改完广播 `theme:changed`
-  （`{theme}` 目标态）——主窗与两个浮动控件各自把类落到 `<html>` 上（`features/theme/theme.mjs`）。
-  写盘只动 `theme` 一个键、原子替换、**认不出的文件绝不覆盖**（与 `settings.mjs` 同一条纪律）；
-  文件不存在时造出来的那份**自带 `closeBehavior` 的默认值**（否则会把它悄悄读成保守值）。
-  R44a：建主窗时 `builder.theme(current_theme.to_native())` 恢复原生标题栏；light/dark 分别为
-  `Some(Theme::Light/Dark)`，system 为 `None`（无 Theme::System，不强制为浅色）。改主题落盘后调用
+  （`{theme, revision}` 目标态）——主窗、两个浮动控件与歌词窗各自把类落到 `<html>` 上（`features/theme/theme.mjs`）。
+- **R44e：`settings.json` 的唯一写者是 sidecar**（`src/main/settings.mjs` 的 `writeTail` 尾链）。
+  Rust 不再自己 read/rename 这个文件——两个写者各自"读旧文档 → 改自己那一键 → rename"会互相覆盖
+  （原子替换不等于串行读改写）。主题改盘走**内部** `settings:set`（`commands::settings_write_owned`），
+  与代理/队列/歌词配置排在同一条尾链上；启动时仍只读 `parse`/`read`（缺文件回默认，坏文件不覆盖）。
+- **整笔主题事务由 Rust 拥有**：接受补丁 → 置 uncertain → 内部 `settings:set` → 校验回执里的主题 →
+  确认后更新内存/原生/revision → 广播。写可能已发出但没等到回执（超时）时，那一笔在确认提交前保持
+  uncertain（**不能把超时当没写**）；退出前会重存一次当前权威主题来消除它。invoke 的等待者消失
+  （WebView 导航/组件卸载）**不会取消**后半提交。
+- 读回与广播都带**单调 revision**：三个消费者共用纯函数 `acceptThemePayload`（旧回执不许盖掉新广播；
+  没有编号的老载荷照收但不把水位往回退）。读回失败时，已经收到过带编号答案的界面**不回落**系统档。
+- 保留键：`core_call(settings:set)` 明确拒直接 patch `theme` / `lyricsWindow`
+  （`forbidden_source`）——绕过运行时只会造成盘上写新、内存/广播/原生仍旧的两份真相。
+  `proxy` / `queue` / `closeBehavior` / `reset` / 未知键照旧可写。
+- R44a：建主窗时 `builder.theme(current_theme.to_native())` 恢复原生标题栏；light/dark 分别为
+  `Some(Theme::Light/Dark)`，system 为 `None`（无 Theme::System，不强制为浅色）。确认落盘后调用
   主窗 `window.set_theme(...)` 再广播网页，不重建或注入官方登录页。原生调用失败返回结构化 `internal`，
-  明确说明主题已保存并广播、原生应用失败；不回滚已写值，下次建窗重试。
+  明确说明主题已保存并广播、原生应用失败；不回滚已写值，下次建窗重试（R44e 保持这条 A 语义）。
 
 **渲染层 ← sidecar 的登录状态广播（R7 增补的广播频道）**
 
@@ -1299,11 +1310,24 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 
 **关窗两态与 fail-safe**：`decide_close(behavior: CloseBehavior, tray_available)` 是唯一决策。
 `tray` 且托盘可用 → `prevent_close + hide`，托盘不可用仍保守退出；`quit` 拦住单窗关闭，
-与托盘 Quit 共用 `request_app_exit`。托管 `ExitState` 的 AtomicBool 先 CAS，成功者只起一个后台线程，
-经 `shutdown_core` 收 sidecar 后 `app.exit(0)` 退出所有本应用窗口；重复请求不 spawn。
-线程创建失败复位门禁并恢复主窗，隐藏失败同样保留应用。RunEvent 幂等收尾保留，CoreState 取走进程后
-先释放槽位锁再等待子进程，避免主线程退出事件等待后台锁。主窗仍显式 `skip_taskbar(false)`。
-原生行为须控制器统一重启后复验，来源守卫、Sidecar/core 白名单与 IPC 权限不变。
+与托盘 Quit 共用 `request_app_exit`。托管 `ExitState` 的 AtomicBool 先 CAS，成功者只起一个后台线程；
+重复请求不 spawn。线程创建失败复位门禁并恢复主窗，隐藏失败同样保留应用。
+主窗仍显式 `skip_taskbar(false)`。来源守卫、Sidecar/core 白名单与 IPC 权限不变。
+
+**R44e：正常退出先做可失败的保存准备，再做不可逆清理**（顺序是合同）：
+
+1. `PersistenceGate.begin_prepare()`：**冻结**新的渲染层持久写（已受理的继续收尾；内部保存/退出 drain 仍收）；
+2. 等已受理的写与整笔主题事务**有结论**（有界，`EXIT_PREPARE_BUDGET_MS`）；
+3. 歌词最新配置排空：上一次保存失败的本轮 Quit **至多**重试一次；
+4. 主题 uncertain（可能已写但没确认）重存当前权威主题并校验回执；
+5. 内部 `settings:get` 作**写队列屏障**（sidecar 先排空已受理的写再读盘）；
+6. 校验盘上权威文档（`data.theme` / `data.lyricsWindow`）与运行中的权威值一致；
+7. 只有全部成功才：`begin_exit()` → 取消**自窗**菜单/拖动模态（`WM_CANCELMODE`，PostMessage、只对自己的 HWND，
+   且只在准备成功之后）→ 停保存任务 → D 的 detach/destroy 屏障 → `shutdown_core` → `app.exit(0)`。
+
+任何一步失败/超时都**保窗可重试**：准入门回到 `Running`、退出 CAS 复位、主窗重新聚焦，并经 `app:notice`
+给出可操作提示（Rust 侧的 `dirty`/`saveError` 仍可回读）。失败路径**不**关 stdin、不拿走 process、
+不进入不可逆 detach。强杀/断电不承诺刷盘，也不为此加常驻服务。
 
 **关窗行为从哪来（读盘这侧在 Rust）**：`close_behavior.rs` 读的是**同一份** `settings.json`
 （与 `webview_proxy` 共用文件名与 schemaVersion 闸门），分三档：
@@ -1364,14 +1388,14 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 |---|---|---|---|
 | `lyrics:document` | 主窗 → 歌词窗 | `{lines, status}` | 歌词文档。歌词窗**没有业务频道权限**（`core_call` 只收主窗），所以广播是它唯一的数据来源；主窗面板与歌词窗共用**同一份行数组**，两处不可能显示两首歌 |
 | `lyrics:progress` | 主窗 → 歌词窗 | `{timeMs, playing, seekGeneration}` | 进度。歌词窗里没有音频元素，进度只能由主窗推；**节流在桥里**（`shouldPushProgress`：≥100ms 或播放/跳转变化才发），且只在窗真的开着时跑 |
-| `lyrics:state` | 宿主 → 两窗 | `{config, visible, revision, requestedVisible, taskbar:{supported,attached,reason}}` | Rust 原子 config/revision；D 独立运行状态可同 revision 更新、不落盘。另有 `{ready:true}` 握手，不当作配置消费 |
+| `lyrics:state` | 宿主 → 两窗 | `{config, visible, revision, dirty, saveError, requestedVisible, taskbar:{supported,attached,reason}}` | Rust 原子 config/revision；保存完成/失败也推进 `runtimeRevision`（同 config revision 的持久化状态可更新、不落盘）。D 的 taskbar 状态同理。另有 `{ready:true}` 握手，不当作配置消费 |
 
 **Tauri 歌词专命令**（名字唯一真源 `src/shared/commands.ts`，均 async，按 webview label 守卫）：
 
 | 命令 | 载荷 | 回执 | 来源及说明 |
 |---|---|---|---|
 | `core_lyrics_toggle` | `{checked}` | 同 lyrics:state 状态载荷 | **main-only**；desktop 显示已有窗前 reload，普通关闭只隐藏；Beta 不走 tao show/hide |
-| `core_lyrics_configure` | `{config, restoreIfPristine?}` | 同 lyrics:state 状态载荷 | **main/lyrics**；只收合同配置字段，未知字段/非法值拒绝；空补丁不改配置，当前 lyrics 文档 generation 的订阅后空读同时确认 native ready。恢复标志仅 main 可带，且只在 revision=0 接受盘上快照并推进至 1 |
+| `core_lyrics_configure` | `{config, retrySave?}` | 同 lyrics:state 状态载荷 | **main/lyrics**；只收合同配置字段，未知字段/非法值拒绝；空补丁=纯读（不改配置），当前 lyrics 文档 generation 的订阅后空读同时确认 native ready。`retrySave:true` **只能与空 config 同用**（重存当前运行配置，不是又改一次值）。**`restoreIfPristine` 已取消**：启动配置由宿主只读恢复，传旧参数一律 `invalid_payload` |
 | `core_lyrics_control` | `{payload:{action:'toggle'|'previous'|'next'}}` | `null` | **main/lyrics**；非法动作/extra 字段拒绝；转既有 `player:command {command}`，只在唯一主窗播放器执行 |
 | `core_lyrics_document` | `{document:{lines,status}}` | `null` | **main-only**；归一、缓存并广播文档 |
 | `core_lyrics_progress` | `{progress:{timeMs,playing,seekGeneration}}` | `null` | **main-only**；主窗 ≥100ms / 播放或 seek 变化节流 |
@@ -1394,9 +1418,15 @@ window-state 不自动恢复 lyrics 的旧尺寸/坐标，避免异步覆盖配�
 字号档位为 16/20/28/40/56px；颜色只认 foreground/muted/primary/contrast 令牌。任务栏模式有效字号 ≤20px 且强制横条点透，保留用户原档位；clean/panel 均不渲染任何控件带，showControls 不改变 44px 歌词可用高度。
 锁定仅禁拖，解锁/媒体仍可点击；点透整窗不接鼠标，须在主窗设置恢复。
 
-**恢复/保存**：Rust 为本次运行唯一权威。主窗单例桥先订阅 status，关闭保存门，读 `settings:get` 的 `data.lyricsWindow`，白名单归一后 `configure(..., restoreIfPristine:true)`；建立权威 baseline 才开门。
-同一 status 订阅按 revision 接收，旧回执不倒退，不乐观覆盖。保存只有一个 inflight + latestPending，经现 settings:set 代理写配置字段，不存 visible/effectiveSize/revision；settings 回执不是新配置。sidecar 的 load→merge→rename 在同一保存尾链串行，防歌词与队列互删。
-失败保留运行态，设置页明确显示未保存/重试，不自动重试或反复 toast。最后主窗观察卸载只清监听/命令 generation，已接受配置的 inflight/pending 继续收尾；重挂只重接订阅并回读 Rust，不重新读盘 bootstrap。迟到 unlisten 与 HMR dispose 清理避免双监听，旧播放 runtime dispose 同时 pause 音频，避免替代实例双声。
+**恢复/保存（R44e：唯一写者是 sidecar）**：Rust 持有本次运行的权威配置与 revision，**启动时只读**恢复
+`settings.json` 的 `data.lyricsWindow` 当基线（坏文件/坏字段按默认，不回写默认值）。
+**落盘由 Rust 的保存任务拥有**（独立线程，与 WebView / React 生命周期无关）：单在途 + 最新待写，
+成功后只确认对应快照（期间来了新值继续写），失败保留运行值、标 `dirty`/`saveError` 并**停止自动重试**；
+`retrySave` 或下一次改动才重试。写入的字段是合同里的 11 个 config 键，**不含** `visible`/`revision`/`effectiveSize`/`dirty`。
+同一 status 订阅按 `revision` + `runtimeRevision` 接收，旧回执不倒退；渲染层不再有保存队列，
+主窗观察者卸载、渲染层崩溃、登出门禁都不影响落盘。失败文案由渲染层按稳定代码翻译（`saveErrorText`），
+设置页与歌词窗都能显示"未保存/未确认 + 重试"。sidecar 的 `load→merge→rename` 在**唯一一条写尾链**上串行，
+它与内部 `settings:get` 之间由"读排空屏障"排序（读之前先等已受理的写落定）。
 
 **歌词数据流**：主窗在曲目变化时调 `playback:lyrics` → 官方 `parseLrc` 适配
 （`features/lyrics/amll-adapter.ts`）→ `player.setLyrics(lines, status)`（主窗面板）

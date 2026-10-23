@@ -173,7 +173,7 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
 | D2 | **每日推荐 / 移动端 / 云同步 / 自动更新服务 / 其它平台音源** | pending（范围外） | 计划 Global Constraints 明确排除 |
 | D3 | **音频解密 / 绕过付费或 DRM** | pending（范围外） | 只播官方接口给出的地址 |
 | D4 | **主题手动切换** | pending（**裁决非目标**） | 亮暗**只跟系统 `prefers-color-scheme`**。两份令牌（媒体查询 + `.dark`）逐条一致由测试钉住；渲染层不得写 `dark` 类或存主题偏好（同文件扫描）。**不引 next-themes**（它的防闪烁内联脚本会被 CSP `script-src 'self'` 拦） |
-| D5 | **歌词窗配置持久化** | R44c 已提供 | Rust 持有运行配置与 revision，主窗通过既有 settings:get/set 保存 `data.lyricsWindow`。失败保留运行配置，设置页显示未保存及重试；不持久化 visible/revision/effectiveSize。桌面横/竖、锁定、媒体控制与重启恢复已有 Windows 证据，其他平台/多屏高 DPI 仍待验 |
+| D5 | **歌词窗配置持久化** | R44e 已提供（Rust 拥有保存任务） | `settings.json` 的唯一写者是 sidecar（`writeTail`）；Rust 启动时**只读**恢复 `data.lyricsWindow` 当基线，运行期的保存由**独立线程**（`lyrics-persist`）负责：单在途 + 最新待写，成功只确认对应快照，失败保留运行值、标 `dirty`/`saveError` 并停止自动重试（`retrySave` 或下一次改动才重试）。落盘字段是合同 11 键，不含 visible/revision/effectiveSize/dirty。正常退出先排空/校验这最后一笔再进入 D 的不可逆清理，失败保窗可重试。桌面横/竖、锁定、媒体控制与重启恢复已有 Windows 证据（R44c），R44e 的"登出后仍落盘 / Quit 不丢最后一笔 / 重启读回"未在真机复验（未重启应用），其他平台与多屏高 DPI 仍待验 |
 | D6 | **Windows 任务栏歌词（Beta）** | in-progress（成功路径受外部权限限制） | 用户授权精确自窗 `SetParent` 内嵌，不改 Explorer 按钮，不注入 DLL/全局 Hook。Low 完整性 debug EXE 实测返回 access_denied 并停显，切回 desktop 可恢复拖动/控件；真实 parent/client/歌词像素与系统按钮不变须在正常权限环境补验。非 Windows 不支持，不退成贴边浮窗 |
 | D7 | **设置页不显示当前生效的快捷键** | pending（范围外） | 生效组合记在 `ShortcutState`（托管状态），只在启动提示说一次 |
 | D8 | **队列面板没有「移除单曲 / 拖动排序」** | pending（范围外） | 只有点击跳播与清空。「移除当前项时的播放语义」（停还是接着播下一首）需要裁决，没自己拍 |

@@ -63,6 +63,25 @@ export const LYRICS_LAYOUTS = ["horizontal", "vertical"];
 export const LYRICS_STYLES = ["clean", "panel"];
 export const LYRICS_SETTING_KEY = "lyricsWindow";
 
+/**
+ * 持久化失败的**代码 → 人话**（R44e）。
+ *
+ * Rust 的保存任务只报稳定的代码（`settings_write_failed` / `settings_write_unconfirmed`），
+ * 文案在渲染层这一处翻——两侧不必各自维护一份中文，也不会把带路径的错误原文糊到界面上。
+ */
+export const LYRICS_SAVE_ERRORS = {
+  settings_write_failed: "桌面歌词配置未保存，本次运行仍生效。请检查数据目录后点击重试保存。",
+  settings_write_unconfirmed: "桌面歌词配置未确认已保存，本次运行仍生效。请点击重试保存。",
+};
+
+export const LYRICS_SAVE_ERROR_DEFAULT = "桌面歌词配置未保存，本次运行仍生效。请点击重试保存。";
+
+/** 保存失败代码 → 给用户看的一句话；`null`（没失败）→ `null`。 */
+export function saveErrorText(code) {
+  if (typeof code !== "string" || code === "") return null;
+  return LYRICS_SAVE_ERRORS[code] ?? LYRICS_SAVE_ERROR_DEFAULT;
+}
+
 export const DEFAULT_LYRICS_CONFIG = {
   mode: "desktop",
   layout: "horizontal",

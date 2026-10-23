@@ -246,8 +246,13 @@ test("命令名：core_login_chrome 是跨语言契约（常量表 + 渲染层�
   );
 
   // Rust 侧：定义 + 注册（只定义不注册 = 点了没反应，回一句 command not found）
+  //
+  // R44e：命令是 **async** 的。整笔主题事务（写盘 → 校验回执 → uncertain 处置 → 内存/原生/
+  // revision/广播）由 Rust 拥有的线程完成，这条命令等的是"事务有结论"而不是"这次调用返回了"；
+  // invoke 的等待者消失（WebView 导航/组件卸载）不会取消后半提交。
   const commands = rustProduction("commands.rs");
-  assert.match(commands, /pub fn core_login_chrome/, "Rust 侧要有这条命令");
+  assert.match(commands, /pub async fn core_login_chrome/, "Rust 侧要有这条命令（R44e 起是 async：整笔事务由 Rust 拥有）");
+  assert.doesNotMatch(commands, /pub fn core_login_chrome\(/, "同步签名会挡住「等整笔事务」这件事");
   const lib = rustProduction("lib.rs");
   const handlerAt = lib.indexOf("invoke_handler(tauri::generate_handler![");
   assert.ok(handlerAt > -1, "找不到 generate_handler! 的注册处");
@@ -266,19 +271,80 @@ test("命令守卫：浮动控件的来源（main / login-return / login-theme�
   assert.match(guardBody, /MAIN_WINDOW_LABEL/, "主窗来源允许（gate 自己那个主题控件也走这条命令）");
 });
 
-test("主题广播保持原载荷；原生标题栏接线仅作用主窗，不接官方登录页", () => {
+test("主题广播带单调 revision；原生标题栏接线仅作用主窗，不接官方登录页", () => {
   const theme = rustProduction("theme.rs");
-  const set = theme.slice(theme.indexOf("pub fn set_theme<"));
-  assert.match(set, /get_webview_window\(crate::MAIN_WINDOW_LABEL\)/);
-  assert.match(set, /window\.set_theme\(native\)/);
-  assert.doesNotMatch(set, /crate::login::|reapply_login_theme/);
-  assert.match(set, /json!\(\{ "theme": applied\.setting\(\) \}\)/);
+  // R44e：入口只负责"把整笔事务交给 Rust 拥有的线程"，事务本身在 run_theme_transaction 里
+  const setter = theme.slice(theme.indexOf("pub async fn set_theme<"));
+  assert.ok(setter.length > 0, "set_theme 必须是 async（等整笔事务有结论）");
+  assert.match(setter, /spawn_theme_transaction/, "整笔事务由 Rust 拥有的线程跑（invoke 等待者消失不取消）");
+  const transaction = theme.slice(theme.indexOf("fn run_theme_transaction<"));
+  assert.ok(transaction.length > 0, "找不到整笔事务的生产接线");
+  assert.match(transaction, /get_webview_window\(crate::MAIN_WINDOW_LABEL\)/, "原生主题只作用主窗");
+  assert.match(transaction, /window\.set_theme\(native\)/);
+  assert.doesNotMatch(theme, /crate::login::|reapply_login_theme/, "官方登录页是零注入硬边界：主题不碰它");
+  assert.match(
+    transaction,
+    /json!\(\{ "theme": applied\.setting\(\), "revision": revision \}\)/,
+    "广播带 revision：渲染层要用它拒绝旧回执",
+  );
   assert.match(rustProduction("lib.rs"), /\.theme\(theme::current_theme\(app\)\.to_native\(\)\)/);
   assert.equal(THEME_CHANGED, "theme:changed");
   assert.ok(BROADCAST_CHANNELS.includes(THEME_CHANGED), "不在广播白名单里 = Rust 会把这条广播当白名单外帧丢掉");
   const bridge = rustProduction("bridge.rs");
   assert.ok(bridge.includes(`"${THEME_CHANGED}"`), "Rust 侧广播白名单必须同样含 theme:changed");
   assert.match(bridge, /pub const THEME_CHANGED/, "Rust 侧要有同名常量（镜像副本）");
+});
+
+test("R44e 主题 revision 单调：旧读回/旧广播都不得盖掉新档位（同一份纯合同）", async () => {
+  const { acceptThemePayload } = await import("../src/renderer/features/theme/theme.mjs");
+
+  // 从未收到过任何 revision：第一个带 revision 的回执接受
+  let seen = -1;
+  let verdict = acceptThemePayload(seen, { theme: "dark", revision: 4 });
+  assert.deepEqual(verdict, { accept: true, seen: 4 });
+  seen = verdict.seen;
+
+  // 更旧的读回（同一个新广播之前发起的）：拒
+  assert.deepEqual(acceptThemePayload(seen, { theme: "light", revision: 3 }), { accept: false, seen: 4 });
+  // 同一个 revision 再来一次：接受（幂等，不会卡住界面刷新）
+  assert.deepEqual(acceptThemePayload(seen, { theme: "system", revision: 4 }), { accept: true, seen: 4 });
+  // 没有 revision 的旧载荷（C 阶段的广播形状）：照旧接受，且不把 seen 往回退
+  assert.deepEqual(acceptThemePayload(seen, { theme: "light" }), { accept: true, seen: 4 });
+
+  // 所有主题消费者都用这同一份合同（读回/广播/歌词窗补发/写回回执）
+  for (const [relative, contract] of [
+    ["src/renderer/theme-sync.ts", /acceptThemePayload/],
+    // 控件接线复用共享接受器（`createThemeAcceptor` 就是 acceptThemePayload 的有状态包装）
+    ["src/renderer/features/theme/use-theme-choice.ts", /createThemeAcceptor/],
+    ["src/renderer/host-api.ts", /acceptThemePayload/],
+  ]) {
+    assert.match(stripComments(read(relative)), contract, `${relative} 必须复用同一份单调接收合同`);
+  }
+});
+
+test("R44e fix1 选择回执与广播共用同一份单调合同：迟到的旧 invoke 回执不得把主题拉回旧档位", async () => {
+  const { createThemeChoiceTracker } = await import("../src/renderer/features/theme/use-theme-choice.ts");
+  const applied = [];
+  const tracker = createThemeChoiceTracker((choice) => applied.push(choice));
+
+  // 广播先把界面带到深色（revision 4）
+  assert.equal(tracker.accept({ theme: "dark", revision: 4 }), true);
+  assert.equal(tracker.choice(), "dark");
+
+  // 用户紧接着又选了浅色：那一笔事务提交并广播 revision 5
+  assert.equal(tracker.accept({ theme: "light", revision: 5 }), true);
+
+  // 第一次选择（深色）的 invoke 回执这时才回来，自称 revision 4：界面必须停在新档位
+  assert.equal(tracker.accept({ theme: "dark", revision: 4 }), false, "旧 revision 的回执必须被拒");
+  assert.equal(tracker.choice(), "light", "页面类与控件高亮都停在新档位");
+  assert.deepEqual(applied, ["dark", "light"], "旧回执一次都不许落地");
+
+  // 写回那条路也必须过同一个接受器（不许自己 setChoice / applyTheme）
+  const wiring = stripComments(read("src/renderer/features/theme/use-theme-choice.ts"));
+  const select = wiring.slice(wiring.indexOf("const select = useCallback"));
+  assert.ok(select.length > 0, "写回入口必须存在");
+  assert.match(select, /\.accept\(/, "select 的回执过同一个单调接受器");
+  assert.doesNotMatch(select, /setChoice\(|applyTheme\(/, "select 不许自己写高亮/切类");
 });
 
 test("歌词 ready 主题补发：延迟旧读取期间的新主题广播不得回退主窗或歌词窗", async () => {
@@ -417,7 +483,7 @@ test("R41b 三态唯一接线：use-theme-choice 里读回/订阅/写回，三�
 
   // 三件事都在这一处：订阅广播、读回档位、写回档位
   assert.match(wiring, /onCoreEvent<ThemePayload>\(\s*THEME_CHANGED/, "订阅 theme:changed");
-  assert.match(wiring, /coreLoginChrome<\{ theme\?: string \}>\(\{ action: "theme" \}\)/, "读回当前档位（同一个动作，不带 theme 就是读）");
+  assert.match(wiring, /coreLoginChrome<ThemePayload>\(\{ action: "theme" \}\)/, "读回当前档位（同一个动作，不带 theme 就是读）");
   assert.match(wiring, /action: "theme", theme: next/, "写回档位也走这条命令");
   assert.match(wiring, /applyTheme\(/, "落类只经 theme-sync → theme.mjs 的 applyThemeChoice");
   /**

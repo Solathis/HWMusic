@@ -21,6 +21,7 @@ import {
   CORE_SET_AUTOSTART,
 } from "../shared/commands.ts";
 import { CORE_EVENT, LYRICS_STATE, THEME_CHANGED } from "../shared/channels.ts";
+import { acceptThemePayload } from "./features/theme/theme.mjs";
 import { AUTH_LOGOUT } from "../shared/request-channels.ts";
 import type { CoreError } from "../shared/result.ts";
 import type { RequestChannel } from "../shared/request-channels.ts";
@@ -151,9 +152,13 @@ export async function coreLyricsToggle(checked: boolean): Promise<unknown> {
   return invokeLyrics(CORE_LYRICS_TOGGLE, { checked });
 }
 
-/** 改歌词窗配置（**空对象 = 读回当前配置**，设置页挂载时用）。 */
-export async function coreLyricsConfigure(config: unknown, restoreIfPristine?: boolean): Promise<unknown> {
-  return invokeLyrics(CORE_LYRICS_CONFIGURE, restoreIfPristine === undefined ? { config } : { config, restoreIfPristine });
+/** 改歌词窗配置（**空对象 = 读回当前配置**，设置页挂载时用）。
+ *
+ * R44e：`retrySave` 只能与空 config 一起用——它重存的是**当前运行配置**（保存失败后的手动重试），
+ * 不是又改一次值。落盘由 Rust 拥有的保存任务完成，渲染层不再自己写 settings。
+ */
+export async function coreLyricsConfigure(config: unknown, retrySave?: boolean): Promise<unknown> {
+  return invokeLyrics(CORE_LYRICS_CONFIGURE, retrySave === undefined ? { config } : { config, retrySave });
 }
 
 export async function coreLyricsControl(action: "toggle" | "previous" | "next"): Promise<unknown> {
@@ -215,14 +220,28 @@ export async function signalLyricsReady(): Promise<void> {
   await emit<CoreEventEnvelope>(CORE_EVENT, { channel: LYRICS_STATE, payload: { ready: true } });
 }
 
+/**
+ * 主窗替歌词窗"补一次主题"（歌词窗调不动读主题那条命令）。
+ *
+ * R44e：判定用共享的单调合同 [`acceptThemePayload`]——读回**必须比期间收到的广播更新**才补发，
+ * 否则这份延迟的旧读回会把刚广播出去的新主题又盖回去（主窗与歌词窗一起回退）。
+ * 临时观察无论成功失败都要清掉。
+ */
 export async function syncLyricsTheme(): Promise<void> {
-  let superseded = false;
-  const stop = await onCoreEvent(THEME_CHANGED, () => { superseded = true; });
+  let newest = -1;
+  let interrupted = false;
+  const stop = await onCoreEvent<{ theme?: string; revision?: number }>(THEME_CHANGED, (payload) => {
+    interrupted = true;
+    newest = acceptThemePayload(newest, payload).seen;
+  });
   try {
-    const answer = await coreLoginChrome<{ theme?: string }>({ action: "theme" });
-    if (!superseded) {
-      await emit<CoreEventEnvelope>(CORE_EVENT, { channel: THEME_CHANGED, payload: { theme: answer?.theme } });
-    }
+    const answer = await coreLoginChrome<{ theme?: string; revision?: number }>({ action: "theme" });
+    // 期间来过广播：只有"比它更新的读回"才值得补发（没有编号也算旧）。
+    const verdict = acceptThemePayload(newest, answer);
+    if (interrupted && verdict.seen <= newest) return;
+    const payload: { theme?: string; revision?: number } = { theme: answer?.theme };
+    if (Number.isSafeInteger(answer?.revision)) payload.revision = answer!.revision!;
+    await emit<CoreEventEnvelope>(CORE_EVENT, { channel: THEME_CHANGED, payload });
   } finally {
     stop();
   }

@@ -56,40 +56,75 @@ import { createMusicApi } from "../src/protocols/music.mjs";
 const flushBridge = () => new Promise((resolve) => setTimeout(resolve, 0));
 const deferredBridge = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 
-function revisionBridge({ disk = {}, settingsGate = null, configureGate = null, saveGate = null } = {}) {
+/**
+ * 假 Rust 后端（**R44e 合同**：`settings.json` 的唯一写者是 sidecar，歌词保存由 Rust 拥有）。
+ *
+ * 这个夹具刻意把两件事分开：
+ * - `callCommand` 模拟 `core_lyrics_configure` 的**权威回执**（接受补丁 → 推进 revision →
+ *   回执里带 `dirty` / `saveError`）；
+ * - 「保存任务」是后端**自己**的异步步骤（`persisted` / `saves`），与桥没有任何调用关系——
+ *   桥一旦还想自己写盘，`settingsCalls` 就会记下来（并且那次调用会抛）。
+ */
+function revisionBridge({ disk = {}, configureGate = null, saveGate = null, saveFailure = null } = {}) {
   const listeners = new Map();
   const commands = [];
-  const writes = [];
-  let config = { ...DEFAULT_LYRICS_CONFIG };
+  const settingsCalls = [];
+  const persisted = [];
+  const saves = [];
+  let config = normalizeLyricsConfig(disk);
+  let saved = normalizeLyricsConfig(disk);
   let revision = 0;
-  let stored = disk;
+  let saveError = null;
+  let pending = 0;
+  let inflight = false;
+  let failure = saveFailure;
+  const status = () => ({
+    config, revision, visible: false,
+    dirty: pending > 0 || inflight || JSON.stringify(saved) !== JSON.stringify(config),
+    saveError,
+  });
+
+  function scheduleSave() {
+    if (inflight) return;
+    inflight = true;
+    saves.push("start");
+    void (async () => {
+      if (saveGate && saves.length === 1) await saveGate.promise;
+      if (failure !== null) saveError = failure;
+      else { saved = config; saveError = null; persisted.push(saved); }
+      inflight = false;
+      pending = 0;
+      saves.push("end");
+      for (const handler of [...(listeners.get(LYRICS_STATE) ?? [])]) await handler(status());
+    })();
+  }
+
   const bridge = createLyricsBridge({
-    callCore: async (channel, payload) => {
-      if (channel === "settings:get") {
-        if (settingsGate) await settingsGate.promise;
-        return { settings: { schemaVersion: 1, data: { lyricsWindow: stored } } };
-      }
-      if (channel === "settings:set") {
-        writes.push(payload.patch);
-        if (saveGate && writes.length === 1) await saveGate.promise;
-        stored = payload.patch.lyricsWindow;
-        return { settings: { schemaVersion: 1, data: { lyricsWindow: disk } } };
+    callCore: async (channel) => {
+      if (String(channel).startsWith("settings:")) {
+        settingsCalls.push({ channel });
+        throw new Error(`渲染层不许自己写配置：${channel}`);
       }
       throw new Error(`Unexpected ${channel}`);
     },
     callCommand: async (command, args) => {
       commands.push({ command, args });
-      if (command === CORE_LYRICS_CONFIGURE) {
-        if (!args.restoreIfPristine || revision === 0) {
-          const next = normalizeLyricsConfig(args.config, config);
-          if (JSON.stringify(next) !== JSON.stringify(config) || args.restoreIfPristine) revision += 1;
-          config = next;
-        }
-        const answer = { config, revision, visible: false };
-        if (configureGate && args.config.color === "primary") await configureGate.promise;
-        return answer;
+      if (command !== CORE_LYRICS_CONFIGURE) return { ...status(), visible: true };
+      if (configureGate && args.config?.color === "primary") await configureGate.promise;
+      if (args.retrySave === true) {
+        saveError = null;
+        pending += 1;
+        scheduleSave();
+        return status();
       }
-      return { config, revision, visible: true };
+      const next = normalizeLyricsConfig(args.config, config);
+      if (JSON.stringify(next) !== JSON.stringify(config)) {
+        config = next;
+        revision += 1;
+        pending += 1;
+        scheduleSave();
+      }
+      return status();
     },
     subscribeCoreEvent: async (channel, handler) => {
       const handlers = listeners.get(channel) ?? new Set();
@@ -99,7 +134,14 @@ function revisionBridge({ disk = {}, settingsGate = null, configureGate = null, 
     syncTheme: async () => {}, log: () => {},
   });
   const emit = async (payload) => { for (const handler of listeners.get(LYRICS_STATE) ?? []) await handler(payload); };
-  return { bridge, commands, writes, emit, stored: () => stored, listeners };
+  return {
+    bridge, commands, settingsCalls, persisted, saves, emit, listeners,
+    /** 后端（= Rust 保存任务）下一次保存失败/成功由它控制。 */
+    setFailure: (next) => { failure = next; },
+    stored: () => saved,
+    /** `writes` 只是 `persisted` 的旧名字：保留是为了让 R44d 那几条状态用例读起来不变。 */
+    get writes() { return persisted; },
+  };
 }
 
 test("R44c 配置 JSON/query 保留布局样式与 AMLL 开关，点透不等于锁定", () => {
@@ -116,65 +158,61 @@ test("R44c 配置 JSON/query 保留布局样式与 AMLL 开关，点透不等于
   assert.equal(clickThroughEnabled({ ...DEFAULT_LYRICS_CONFIG, locked: true }), false);
 });
 
-test("R44c bootstrap 只恢复一次，盘读取前不写默认，动作等恢复且只存配置", async () => {
-  const settingsGate = deferredBridge();
-  const saved = { style: "panel", layout: "vertical", bogus: "drop" };
-  const env = revisionBridge({ disk: saved, settingsGate });
+test("R44e 启动只读：桥不读也不写 settings，恢复由 Rust 只读完成，只读一次权威状态", async () => {
+  const env = revisionBridge({ disk: { style: "panel", layout: "vertical", bogus: "drop" } });
   const first = env.bridge.initialize();
   const second = env.bridge.initialize();
-  const change = env.bridge.applyConfig({ locked: true });
-  await flushBridge();
-  assert.equal(env.writes.length, 0);
-  assert.equal(env.commands.length, 0);
-  settingsGate.resolve();
-  await Promise.all([first, second, change]);
-  await flushBridge();
-  assert.equal(env.commands.filter((call) => call.args.restoreIfPristine).length, 1);
+  await Promise.all([first, second]);
+  assert.deepEqual(env.settingsCalls, [], "桥不许用 settings:get / settings:set 自己读盘或写盘（唯一写者是 sidecar）");
+  assert.equal(env.commands.length, 1, "初始化只读一次权威状态（并发 initialize 合并成一次）");
+  assert.deepEqual(env.commands[0].args, { config: {} }, "读回不带 restoreIfPristine（那个参数已取消）");
   assert.equal(env.bridge.snapshot().config.style, "panel");
   assert.equal(env.bridge.snapshot().config.layout, "vertical");
-  assert.equal(env.stored().locked, true);
-  assert.deepEqual(Object.keys(env.writes.at(-1)), ["lyricsWindow"]);
-  assert.equal("revision" in env.stored(), false);
-  assert.equal("bogus" in env.stored(), false);
+  assert.equal("bogus" in env.bridge.snapshot().config, false, "未知字段不进运行配置");
+  assert.deepEqual(env.persisted, [], "启动不许写默认值（那会把用户盘上的旧配置覆盖掉）");
   env.bridge.dispose();
 });
 
-test("R44c 新广播先于旧 configure/settings 回执到达：UI 与最后磁盘不回退，保存仅一 inflight", async () => {
+test("R44e 配置改动只发窄命令：Rust 回执与广播是唯一状态来源，桥不排队也不落盘", async () => {
   const configureGate = deferredBridge();
-  const saveGate = deferredBridge();
-  const env = revisionBridge({ configureGate, saveGate });
+  const env = revisionBridge({ configureGate });
   await env.bridge.initialize();
   const old = env.bridge.applyConfig({ color: "primary" });
   await flushBridge();
   await env.emit({ revision: 5, visible: true, config: { ...DEFAULT_LYRICS_CONFIG, layout: "vertical", style: "panel" } });
   await env.emit({ revision: 6, visible: true, config: { ...DEFAULT_LYRICS_CONFIG, layout: "vertical", style: "panel", locked: true } });
   await flushBridge();
-  assert.equal(env.writes.length, 1, "后续状态合并到 latestPending，不并行写盘");
   configureGate.resolve(); await old;
-  assert.equal(env.bridge.snapshot().revision, 6);
+  await flushBridge();
+  assert.equal(env.bridge.snapshot().revision, 6, "迟到的旧 configure 回执不能把界面/配置退回旧值");
   assert.equal(env.bridge.snapshot().config.color, "foreground");
-  saveGate.resolve();
-  await flushBridge(); await flushBridge();
-  assert.equal(env.writes.length, 2);
-  assert.equal(env.stored().style, "panel");
-  assert.equal(env.stored().locked, true);
-  assert.equal(env.bridge.snapshot().revision, 6, "settings 回执不是配置来源");
+  assert.deepEqual(env.settingsCalls, [], "整条链路没有渲染层写者");
+  assert.equal(
+    env.commands.filter((call) => call.command === CORE_LYRICS_CONFIGURE).length,
+    2,
+    "每次改动一条窄命令（桥里没有第二套保存队列）",
+  );
   env.bridge.dispose();
 });
 
-test("R44c 保存失败保运行配置、标出未保存并可手动重试，不自动重试", async () => {
-  const gate = deferredBridge();
-  const env = revisionBridge({ saveGate: gate });
+test("R44e 保存失败由 Rust 记账：saveError 翻成人话、retrySave 只发 {config:{},retrySave:true}", async () => {
+  const env = revisionBridge({ saveFailure: "settings_write_failed" });
   await env.bridge.initialize();
   await env.bridge.applyConfig({ locked: true });
-  gate.reject(new Error("disk unavailable"));
   await flushBridge();
-  assert.equal(env.bridge.snapshot().config.locked, true);
-  assert.match(env.bridge.snapshot().saveError, /未保存/);
-  await flushBridge(); assert.equal(env.writes.length, 1);
+  assert.equal(env.bridge.snapshot().config.locked, true, "保存失败保运行配置（本次运行仍生效）");
+  assert.match(env.bridge.snapshot().saveError ?? "", /未保存/, "保存失败要让人看得见");
+  assert.equal(env.bridge.snapshot().dirty, true, "失败保 dirty");
+  assert.deepEqual(env.settingsCalls, [], "失败也不是渲染层去补写");
+  env.setFailure(null);
   await env.bridge.retrySave();
-  assert.equal(env.writes.length, 2);
+  await flushBridge();
+  const retry = env.commands.at(-1);
+  assert.equal(retry.command, CORE_LYRICS_CONFIGURE);
+  assert.deepEqual(retry.args, { config: {}, retrySave: true }, "重试是窄命令：重存当前运行配置，不是又改一次值");
   assert.equal(env.bridge.snapshot().saveError, null);
+  assert.equal(env.bridge.snapshot().dirty, false);
+  assert.deepEqual(env.stored(), { ...DEFAULT_LYRICS_CONFIG, locked: true });
   env.bridge.dispose();
 });
 
@@ -239,17 +277,12 @@ test("R44c StrictMode 观察取消重挂只一套系统订阅，lyrics 广播实
   assert.equal(env.listeners.get(LYRICS_STATE).size, 0);
 });
 
-test("R44c 恢复回执无权威 revision 时不开保存门，不把默认覆盖旧盘", async () => {
-  const writes = [];
+test("R44e 读回没有权威 revision：不采用、不假称已恢复，并给出可重试的错误", async () => {
   const bridge = createLyricsBridge({
-    callCore: async (channel, payload) => {
-      if (channel === "settings:get") return { settings: { data: { lyricsWindow: { style: "panel" } } } };
-      writes.push(payload); return {};
-    },
+    callCore: async (channel) => { throw new Error(`渲染层不许自己读写设置：${channel}`); },
     callCommand: async () => null, subscribeCoreEvent: async () => () => {}, log: () => {},
   });
   await assert.rejects(bridge.initialize());
-  assert.equal(writes.length, 0);
   assert.match(bridge.snapshot().saveError, /未能恢复/);
   bridge.dispose();
 });
@@ -263,37 +296,22 @@ test("R44c 最后主窗观察卸载后清理系统订阅，StrictMode 同步重�
   assert.equal(env.listeners.get("lyrics:toggle").size, 0);
 });
 
-test("R44c 保存完成与 finally 之间来的新 revision 仍会排入下一次写盘", async () => {
-  let listener;
-  let disk = null;
-  let writes = 0;
-  let revision = 1;
-  let config = { ...DEFAULT_LYRICS_CONFIG };
-  const bridge = createLyricsBridge({
-    callCore: async (channel, payload) => {
-      if (channel === "settings:get") return { settings: { data: {} } };
-      disk = payload.patch.lyricsWindow; writes += 1;
-      if (writes === 1) queueMicrotask(() => queueMicrotask(() => listener({ config: { ...DEFAULT_LYRICS_CONFIG, layout: "vertical" }, revision: 3, visible: false })));
-      return {};
-    },
-    callCommand: async (_command, args) => {
-      config = normalizeLyricsConfig(args.config, config);
-      if (!args.restoreIfPristine) revision += 1;
-      return { config, revision, visible: false };
-    },
-    subscribeCoreEvent: async (channel, callback) => { if (channel === LYRICS_STATE) listener = callback; return () => {}; },
-    log: () => {},
-  });
-  await bridge.initialize();
-  await bridge.applyConfig({ style: "panel" });
-  await flushBridge(); await flushBridge();
-  assert.equal(bridge.snapshot().revision, 3);
-  assert.equal(disk.layout, "vertical");
-  assert.equal(writes, 2);
-  bridge.dispose();
+test("R44e 桥不合并也不重放：两次快速改动各一条窄命令，状态只认 Rust 回执 revision", async () => {
+  const env = revisionBridge();
+  await env.bridge.initialize();
+  await env.bridge.applyConfig({ style: "panel" });
+  await env.bridge.applyConfig({ layout: "vertical" });
+  await flushBridge();
+  const updates = env.commands.filter((call) => call.command === CORE_LYRICS_CONFIGURE);
+  assert.equal(updates.length, 3, "初始化读回 + 两次改动，一次一条（桥里没有 latestPending 队列）");
+  assert.deepEqual(updates[1].args, { config: { style: "panel" } });
+  assert.deepEqual(updates[2].args, { config: { layout: "vertical" } });
+  assert.equal(env.bridge.snapshot().revision, 2, "revision 只由 Rust 权威回执推进");
+  assert.deepEqual(env.stored(), { ...DEFAULT_LYRICS_CONFIG, style: "panel", layout: "vertical" });
+  env.bridge.dispose();
 });
 
-test("R44c review 卸载最后观察者仍收尾已接受的 pending，不遗失最终竖版", async () => {
+test("R44e 卸载所有渲染层观察者后保存仍在：桥不写盘，Rust 保存任务继续把最新配置落盘", async () => {
   const gate = deferredBridge();
   const env = revisionBridge({ saveGate: gate });
   const stop = env.bridge.observe(() => {});
@@ -302,17 +320,17 @@ test("R44c review 卸载最后观察者仍收尾已接受的 pending，不遗失
   await env.bridge.applyConfig({ layout: "vertical" });
   stop(); await flushBridge();
   assert.equal(env.listeners.get(LYRICS_STATE).size, 0, "卸载系统监听，不留幽灵回调");
-  assert.equal(env.writes.length, 1, "仍只有第一笔保存 inflight");
+  assert.deepEqual(env.settingsCalls, [], "保存从不经渲染层（logout 之后也一样）");
   gate.resolve(); await flushBridge(); await flushBridge();
   assert.equal(env.bridge.snapshot().config.layout, "vertical");
   assert.equal(env.stored().layout, "vertical", "已接受配置不能在 logout/LibraryShell 卸载时丢盘");
   assert.equal(env.stored().style, "panel");
-  assert.equal(env.writes.length, 2);
+  assert.equal(env.persisted.at(-1).layout, "vertical", "最后一笔由 Rust 保存任务落盘（不是桥）");
   assert.equal(env.bridge.snapshot().saveError, null);
   env.bridge.dispose();
 });
 
-test("R44c review 保存未完成时重挂只重接监听，不重复 bootstrap 或并发新写者", async () => {
+test("R44e 重挂只重接监听：不重新读盘也不并发第二个写者，旧监听不得复活", async () => {
   const gate = deferredBridge();
   const env = revisionBridge({ saveGate: gate });
   const off = env.bridge.observe(() => {});
@@ -324,32 +342,33 @@ test("R44c review 保存未完成时重挂只重接监听，不重复 bootstrap 
   const stop = env.bridge.observe(() => {});
   await env.bridge.initialize();
   for (const callback of oldListeners) await callback({ revision: 999, config: DEFAULT_LYRICS_CONFIG, visible: true });
-  assert.equal(env.bridge.snapshot().revision, 3, "卸载的旧监听不能以高 revision 复活覆盖当前态");
-  assert.equal(env.commands.filter((call) => call.args.restoreIfPristine).length, 1, "不以延迟的旧盘重新 bootstrap");
-  assert.equal(env.writes.length, 1);
+  assert.equal(env.bridge.snapshot().revision, 2, "卸载的旧监听不能以高 revision 复活覆盖当前态");
+  assert.equal(env.commands.filter((call) => call.args?.restoreIfPristine !== undefined).length, 0, "restoreIfPristine 已取消");
   assert.equal(env.listeners.get(LYRICS_STATE).size, 1);
   assert.equal(env.bridge.snapshot().config.layout, "vertical");
+  assert.deepEqual(env.settingsCalls, []);
   gate.resolve(); await flushBridge(); await flushBridge();
-  assert.equal(env.writes.length, 2);
   assert.equal(env.stored().layout, "vertical");
   stop(); env.bridge.dispose();
 });
 
-test("R44c review 卸载后的保存失败可见且重挂手动重试，不假称保存成功", async () => {
-  const gate = deferredBridge();
-  const env = revisionBridge({ saveGate: gate });
+test("R44e 卸载后的保存失败仍可见，重挂后手动重试走窄命令并清掉错误", async () => {
+  const env = revisionBridge({ saveFailure: "settings_write_unconfirmed" });
   const off = env.bridge.observe(() => {});
   await env.bridge.initialize();
   await env.bridge.applyConfig({ style: "panel" });
-  await env.bridge.applyConfig({ layout: "vertical" });
+  await flushBridge();
   off(); await flushBridge();
-  gate.reject(new Error("disk locked")); await flushBridge();
-  assert.match(env.bridge.snapshot().saveError ?? "", /未保存/);
+  assert.match(env.bridge.snapshot().saveError ?? "", /未确认/, "卸载渲染层之后错误仍留在 Rust 状态里");
+  env.setFailure(null);
   const stop = env.bridge.observe(() => {});
   await env.bridge.initialize();
+  assert.match(env.bridge.snapshot().saveError ?? "", /未确认/, "重挂看得到上一次的失败");
   await env.bridge.retrySave();
-  assert.equal(env.stored().layout, "vertical");
+  await flushBridge();
+  assert.deepEqual(env.commands.at(-1).args, { config: {}, retrySave: true });
   assert.equal(env.bridge.snapshot().saveError, null);
+  assert.equal(env.stored().style, "panel");
   stop(); env.bridge.dispose();
 });
 
@@ -402,6 +421,19 @@ test("R44d config 白名单不接受 renderer 伪造 taskbar 状态或原生目�
   const config = normalizeLyricsConfig({ mode: "taskbar", taskbar: { attached: true }, parent: 123, hwnd: 123 });
   assert.equal(config.mode, "taskbar");
   assert.equal("taskbar" in config, false); assert.equal("parent" in config, false); assert.equal("hwnd" in config, false);
+});
+
+test("R44e 歌词桥里没有第二个 settings 写者：SETTINGS_GET/SET、bootstrap 恢复与 JS 保存队列都不在了", () => {
+  const bridge = stripComments(read("src/renderer/features/lyrics/lyrics-bridge.mjs"));
+  assert.doesNotMatch(bridge, /SETTINGS_(GET|SET)/, "桥不许再引 settings:get / settings:set 常量");
+  assert.doesNotMatch(bridge, /restoreIfPristine/, "启动恢复由 Rust 只读完成，桥不再发那条参数");
+  assert.doesNotMatch(bridge, /queueSave|latestPending|savedConfig|saveEnabled/, "桥里不再有第二套保存队列");
+  assert.doesNotMatch(bridge, /localStorage|sessionStorage/, "渲染层不存第二份配置");
+
+  // 保存任务在 Rust：唯一的内部写口子是 commands::settings_write_owned，且歌词不可自己写盘
+  const lyrics = rustProduction(rustSource("lyrics_window.rs"));
+  assert.match(lyrics, /settings_write_owned/, "歌词落盘走内部 settings:set（与主题/代理同一条尾链）");
+  assert.doesNotMatch(lyrics, /std::fs::write|std::fs::rename/, "歌词模块不许自己写 settings.json");
 });
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));

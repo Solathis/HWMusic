@@ -1,4 +1,4 @@
-/** 主窗观察单例歌词桥的权威配置/保存状态，并转发唯一播放器的文档与进度。 */
+/** 主窗观察单例歌词桥的权威配置/保存状态（落盘归 Rust），并转发唯一播放器的文档与进度。 */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { getLyricsBridge } from "./features/lyrics/lyrics-bridge.mjs"
@@ -13,7 +13,7 @@ import type { PlayerRuntime } from "./features/playback/player-runtime.ts"
 import type { PlayerState } from "./features/playback/use-player.ts"
 
 export interface LyricsWindowBinding {
-  /** Rust 运行权威配置的投影，持久化由单例桥代理。 */
+  /** Rust 运行权威配置的投影（持久化由 Rust 的保存任务拥有，桥只读回状态）。 */
   config: typeof DEFAULT_LYRICS_CONFIG
   /** 歌词窗此刻是不是开着（宿主回执里的观测值，不是"我们请求它开着"）。 */
   visible: boolean

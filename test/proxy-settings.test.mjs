@@ -460,6 +460,99 @@ test("凭据卫生：0600 尽力而为——收不紧记一条日志，但不判
 });
 
 // ---------------------------------------------------------------------------
+// R44e：单一写者 + 读排空屏障
+// ---------------------------------------------------------------------------
+
+test("R44e 读是排空屏障：已受理的写落定之后才读盘，读回的是新值而非旧盘", async (t) => {
+  const dir = await tempDir("read-barrier");
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const realFs = await import("node:fs/promises");
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let held = true;
+  const store = storeAt(dir, { fs: { ...realFs, async writeFile(...args) {
+    if (held) { held = false; await gate; }
+    return realFs.writeFile(...args);
+  } } });
+
+  const write = store.save({ lyricsWindow: { style: "panel", layout: "vertical" } });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  let settled = false;
+  const read = store.read().then((document) => { settled = true; return document; });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(settled, false, "已受理的写还在飞时，读不能抢先返回旧盘");
+  release();
+  await write;
+  const document = await read;
+  assert.deepEqual(document.data.lyricsWindow, { style: "panel", layout: "vertical" }, "读回的是刚写的值");
+  assert.equal(document.data.closeBehavior, DEFAULT_CLOSE_BEHAVIOR, "新文档带关窗行为默认值");
+});
+
+test("R44e 读屏障不自等也不改盘：读只排空与 load，不追加写", async (t) => {
+  const dir = await tempDir("read-no-self-wait");
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const realFs = await import("node:fs/promises");
+  const calls = [];
+  const store = storeAt(dir, { fs: { ...realFs, async rename(from, to) {
+    calls.push("rename");
+    return realFs.rename(from, to);
+  } } });
+
+  // save 内部若走 read() 就会等自己尚未落定的尾链：这里必须自己能完成。
+  const saved = await Promise.race([
+    store.save({ proxy: fullProxy() }).then(() => "saved"),
+    new Promise((resolve) => setTimeout(() => resolve("deadlock"), 300)),
+  ]);
+  assert.equal(saved, "saved", "save 不得等待自己的 writeTail（自等）");
+  assert.equal(calls.length, 1);
+
+  const document = await store.read();
+  assert.equal(document.data.proxy.host, "proxy.local");
+  assert.equal(calls.length, 1, "纯读不改盘");
+});
+
+test("R44e 同一 chunk 内的 set/set/get：get 排在两笔已发送的 set 之后", async (t) => {
+  const dir = await tempDir("same-chunk-order");
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const realFs = await import("node:fs/promises");
+  let slow = 0;
+  const store = storeAt(dir, { fs: { ...realFs, async writeFile(...args) {
+    slow += 1;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return realFs.writeFile(...args);
+  } } });
+
+  // 与 src/host/bridge.mjs 的真实入帧一致：同一 chunk 的帧**同步**逐个交给处理器，
+  // 不等前一个 handler 结束。排空屏障必须让后面的 get 看见前面的 set。
+  const { createDispatcher } = await import("../src/host/dispatcher.mjs");
+  const { createSettingsHandlers } = await import("../src/main/settings.mjs");
+  const handlers = createSettingsHandlers({ store });
+  const dispatcher = createDispatcher({ onHandlerError: () => {} });
+  dispatcher.register("settings:get", handlers.get);
+  dispatcher.register("settings:set", (request) => handlers.set(request));
+
+  const answers = [];
+  const frames = [
+    { channel: "settings:set", payload: { patch: { lyricsWindow: { style: "panel" } } } },
+    { channel: "settings:set", payload: { patch: { theme: "dark" } } },
+    { channel: "settings:get", payload: null },
+  ];
+  const inflight = frames.map((frame, index) => new Promise((resolve) => {
+    void dispatcher.dispatch({ id: `c${index}`, ...frame }, (result) => {
+      answers.push({ index, result });
+      resolve();
+    });
+  }));
+  await Promise.all(inflight);
+
+  const got = answers.find((entry) => entry.index === 2);
+  assert.equal(got.result.ok, true);
+  assert.deepEqual(got.result.data.settings.data.lyricsWindow, { style: "panel" }, "get 看见了第一笔 set");
+  assert.equal(got.result.data.settings.data.theme, "dark", "get 看见了第二笔 set");
+  assert.equal(slow, 2, "两笔 set 各写盘一次，get 不写");
+});
+
+// ---------------------------------------------------------------------------
 // 请求频道处理器（settings:get / settings:set）
 // ---------------------------------------------------------------------------
 

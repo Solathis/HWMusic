@@ -42,6 +42,30 @@ export const THEME_DEFAULT = THEME_CHOICE.system;
 /** 会被强制加到 `<html>` 上的两个类（system 一个都不加）。 */
 export const THEME_FORCED_CLASSES = [THEME_CHOICE.light, THEME_CHOICE.dark];
 
+/**
+ * 主题回执的**单调 revision 合同**（R44e）：读回、广播、歌词窗补发**共用这一份判定**。
+ *
+ * 为什么需要它：每个消费者都"先订阅广播、再读回当前档位"，而读回是异步的——慢半拍的旧回执
+ * 会盖掉刚收到的新广播（界面从新主题跳回旧主题）。把判定收成一个纯函数，就不会出现
+ * "主窗拒旧回执、歌词窗不拒"这种各写一套的不一致。
+ *
+ * 规则：
+ * - 带 `revision` 的载荷按**单调**收：比已见的旧 → 拒（`accept:false`，水位不动）；
+ * - 同一个 revision 再来一次 → 收（幂等，界面刷新不会被卡住）；
+ * - **没有** `revision` 的老形状 → 照旧收，但**不把水位往回退**（C 阶段的广播没有编号）。
+ *
+ * @param {number} seen 已见的最高 revision（`-1` = 还没见过）
+ * @param {unknown} payload `{theme?, revision?}`
+ * @returns {{accept: boolean, seen: number}}
+ */
+export function acceptThemePayload(seen, payload) {
+  const source = payload !== null && typeof payload === "object" ? payload : {};
+  const revision = Number.isSafeInteger(source.revision) ? source.revision : -1;
+  const watermark = Number.isSafeInteger(seen) ? seen : -1;
+  if (revision >= 0 && revision < watermark) return { accept: false, seen: watermark };
+  return { accept: true, seen: Math.max(watermark, revision) };
+}
+
 /** 主题控件的测试锚点（gate 里那份与浮动那份各自挂在自己那一份 DOM 上）。 */
 export const THEME_CONTROL_TESTID = "login-theme-control";
 

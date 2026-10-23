@@ -26,6 +26,7 @@ mod webview_proxy;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use serde_json::Value;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_log::{Target, TargetKind};
 use tauri_plugin_window_state::StateFlags;
@@ -284,11 +285,156 @@ impl ExitState {
         }
         Ok(())
     }
+
+    /// 准备失败时的 CAS 复位：下一次 Quit 必须能**再试一次**（不是"这次失败就永远退不了"）。
+    fn reset_request(&self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
 }
+
+/// 正常退出的准备预算（毫秒）：保存准备是有界的，超时/失败都**保窗可重试**。
+///
+/// 为什么不许无限等：`CoreShared::call` 自己就有 10 秒上限（[`commands::SETTINGS_CALL_TIMEOUT_SECS`]），
+/// 两次写 + 一次确认读必须落在这个预算里；否则用户会看到"点了退出没反应"的窗口。
+pub const EXIT_PREPARE_BUDGET_MS: u64 = 4000;
 
 fn finish_app_exit(shutdown: impl FnOnce(), exit: impl FnOnce()) {
     shutdown();
     exit();
+}
+
+/// 退出前的持久化校验（**纯函数**）：盘上的权威文档必须与 Rust 内存里的权威值一致。
+///
+/// 为什么必须比对而不是"写调用没报错就行"：`CoreShared::call` 超时后 sidecar 仍可能把那一帧
+/// 处理完（也可能永远不处理）。只有一次**排在写队列后面**的 `settings:get` 读回来的文档，
+/// 才能证明"最后一笔真的落盘了"。缺键按默认比（用户从没选过时盘上本来就没有这一格）。
+pub fn verify_persisted_documents(
+    answer: &Value,
+    theme: theme::ThemeChoice,
+    lyrics: &lyrics_window::LyricsConfig,
+) -> Result<(), String> {
+    let stored_theme = commands::settings_receipt_value(answer, theme::THEME_KEY)
+        .and_then(Value::as_str)
+        .and_then(|raw| theme::ThemeChoice::from_setting(Some(raw)))
+        .unwrap_or(theme::DEFAULT_THEME);
+    if stored_theme != theme {
+        return Err(format!(
+            "盘上主题是 {}，运行中的是 {}：最后一次写入没有确认",
+            stored_theme.setting(),
+            theme.setting()
+        ));
+    }
+    let stored_lyrics = lyrics_window::LyricsConfig::restored(
+        commands::settings_receipt_value(answer, lyrics_window::LYRICS_SETTING_KEY),
+    );
+    if &stored_lyrics != lyrics {
+        return Err("盘上的歌词配置与运行中的不一致：最后一次写入没有确认".to_string());
+    }
+    Ok(())
+}
+
+/// 取消**本应用自窗**的菜单/拖动模态（只在准备成功之后、排队退出之前调）。
+///
+/// 控制器真验（`.tmp/r44-own-cancel-menu.json`）：一个 own 系统菜单模态会把排队的 `app.exit`
+/// 堵住 8 秒以上（GUI flags 12 / menuOwner=main），只对精确 own HWND 发一次 `WM_CANCELMODE`
+/// 后 169ms 就退出了。三条限制写死在这里：
+///
+/// 1. **只发自己进程的窗口 HWND**：目标来自 `app.webview_windows()`（本应用注册过的窗），
+///    不枚举系统窗口、不碰 foreign HWND、不按类名/标题猜；
+/// 2. **`PostMessage`（异步、不等回包）**：不重入消息泵、不阻塞退出线程；不注入键盘、不点别人的窗；
+/// 3. **只在保存准备成功之后**：准备失败时用户的菜单/拖动状态不许先被摧毁（那会让"退出失败保窗"
+///    变成"退出失败还顺手关掉了用户正在用的菜单"）。
+#[cfg(windows)]
+pub fn cancel_own_modal_menus(post: impl Fn(isize) -> bool, targets: impl IntoIterator<Item = (String, isize)>) -> Vec<String> {
+    let mut cancelled = Vec::new();
+    for (label, hwnd) in targets {
+        if hwnd == 0 {
+            continue; // 没有原生句柄（窗还没建好/已销毁）：不发
+        }
+        if post(hwnd) {
+            cancelled.push(label);
+        }
+    }
+    if !cancelled.is_empty() {
+        log::info!("退出前已请求取消自窗模态（WM_CANCELMODE）：{}", cancelled.join(", "));
+    }
+    cancelled
+}
+
+#[cfg(windows)]
+fn cancel_own_modals_now<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CANCELMODE};
+    let targets: Vec<(String, isize)> = app
+        .webview_windows()
+        .into_iter()
+        .filter_map(|(label, window)| window.hwnd().ok().map(|hwnd| (label, hwnd.0 as isize)))
+        .collect();
+    cancel_own_modal_menus(
+        |hwnd| {
+            let handle = windows::Win32::Foundation::HWND(hwnd as *mut std::ffi::c_void);
+            // SAFETY: 句柄来自本应用自己的窗口注册表；PostMessage 对已销毁窗口只会失败，不会崩。
+            unsafe { PostMessageW(Some(handle), WM_CANCELMODE, Default::default(), Default::default()).is_ok() }
+        },
+        targets,
+    );
+}
+
+#[cfg(not(windows))]
+fn cancel_own_modals_now<R: tauri::Runtime>(_: &tauri::AppHandle<R>) {}
+
+/// 正常退出的**准备阶段**：冻结 → 排空 → 重试/处置 → 屏障读 → 校验。
+///
+/// 只有整段成功，调用方才允许进入 D 的不可逆 detach / core 收尸 / `app.exit`。
+fn prepare_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(EXIT_PREPARE_BUDGET_MS);
+    let gate = commands::persistence_gate(app).map_err(|error| error.message)?;
+    // 1) 冻结：此后的渲染层写一律拒（已受理的继续收尾）
+    gate.begin_prepare();
+    prepare_exit_with(
+        deadline,
+        // 2) 等已受理的写与整笔主题事务有结论（有界）
+        |deadline| {
+            if gate.wait_drained(deadline) {
+                Ok(())
+            } else {
+                Err(format!("等待已受理的保存超时（还有 {} 笔在飞）", gate.in_flight()))
+            }
+        },
+        // 3) 歌词最新配置：失败过一次的话本轮 Quit 至多重试一次
+        |deadline| lyrics_window::prepare_exit_persistence(app, deadline).map_err(|error| error.message),
+        // 4) 主题 uncertain：重存当前权威主题并确认（只拿剩余预算）
+        |deadline| theme::resolve_uncertain(app, deadline).map(|_| ()).map_err(|error| error.message),
+        // 5) `settings:get` 是写队列的屏障（sidecar 先排空已受理的写再读盘；同样只拿剩余预算）
+        |deadline| commands::settings_read_owned_before(app, deadline).map_err(|error| error.message),
+        // 6) 校验权威持久：不一致就保窗（不许"看起来退了、其实丢了一笔"）
+        |answer| {
+            verify_persisted_documents(
+                answer,
+                theme::current_theme(app),
+                &app.state::<lyrics_window::LyricsWindowState>().config(),
+            )
+        },
+    )
+}
+
+/// [`prepare_exit`] 的**可脱机测试**版本：每一步由参数注入，但**共用同一个绝对期限**。
+///
+/// 为什么要有这一层：退出准备的有界性是 review finding 4 的对象——4 秒是整段的上限，
+/// 不是"每一段各自 10 秒"。把步进抽出来的唯一目的就是让"每一步拿到的是不是同一个 deadline"
+/// 成为可断言的行为，而不是靠读源码。
+fn prepare_exit_with(
+    deadline: std::time::Instant,
+    wait_drained: impl FnOnce(std::time::Instant) -> Result<(), String>,
+    drain_lyrics: impl FnOnce(std::time::Instant) -> Result<(), String>,
+    resolve_theme: impl FnOnce(std::time::Instant) -> Result<(), String>,
+    read_settings: impl FnOnce(std::time::Instant) -> Result<serde_json::Value, String>,
+    verify: impl FnOnce(&serde_json::Value) -> Result<(), String>,
+) -> Result<(), String> {
+    wait_drained(deadline)?;
+    drain_lyrics(deadline)?;
+    resolve_theme(deadline)?;
+    let answer = read_settings(deadline)?;
+    verify(&answer)
 }
 
 pub(crate) fn request_app_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<(), String> {
@@ -297,21 +443,101 @@ pub(crate) fn request_app_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> 
         let app = app.clone();
         std::thread::Builder::new()
             .name("app-exit".into())
-            .spawn(move || finish_app_exit(
-                || {
-                    let owner = app.clone();
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2100);
-                    let _ = app.run_on_main_thread(move || lyrics_window::begin_shutdown(&owner));
-                    commands::shutdown_core(&app, "请求退出");
-                    while std::time::Instant::now() < deadline && !lyrics_window::shutdown_finished(&app) {
-                        std::thread::sleep(std::time::Duration::from_millis(20));
-                    }
-                },
-                || { app.state::<ExitState>().1.store(true, std::sync::atomic::Ordering::Release); app.exit(0); },
-            ))
+            .spawn(move || run_exit(&app))
             .map(|_| ())
             .map_err(|error| error.to_string())
     }, || focus_main(app))
+}
+
+/// 退出顺序的**唯一收口**：准备成功才跑不可逆清理，失败只跑失败分支（且不做任何不可逆的事）。
+///
+/// 抽成这个 helper 是为了让"顺序是合同"可测：`run_exit` 走的正是它，不是另外抄一遍。
+fn finish_prepared_exit(
+    preparation: Result<(), String>,
+    commit: impl FnOnce(),
+    abort: impl FnOnce(&str),
+) -> Result<(), String> {
+    match preparation {
+        Ok(()) => {
+            commit();
+            Ok(())
+        }
+        Err(reason) => {
+            abort(&reason);
+            Err(reason)
+        }
+    }
+}
+
+/// 准备成功之后：进入不可逆阶段（取消自窗模态 → 停保存任务 → D 屏障/core 收尸 → app.exit）。
+fn commit_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    if let Ok(gate) = commands::persistence_gate(app) {
+        log::info!("退出准备完成（持久化阶段：{:?}）：进入不可逆清理", gate.phase());
+        gate.begin_exit();
+    }
+    // 用户在退出前开着菜单/拖着窗：只有准备成功之后才取消（准备失败时不能先摧毁他的状态）。
+    cancel_own_modals_now(app);
+    lyrics_window::stop_persistence(app);
+    finish_app_exit(
+        || {
+            let owner = app.clone();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2100);
+            let _ = app.run_on_main_thread(move || lyrics_window::begin_shutdown(&owner));
+            commands::shutdown_core(app, "请求退出");
+            while std::time::Instant::now() < deadline && !lyrics_window::shutdown_finished(app) {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        },
+        || {
+            app.state::<ExitState>().1.store(true, std::sync::atomic::Ordering::Release);
+            app.exit(0);
+        },
+    );
+}
+
+/// 准备失败：保窗、复位（**先**歌词保存解冻、**再**准入门回到 Running、CAS 清掉），把可操作提示交给渲染层。
+///
+/// 歌词那一格是 review finding 1：退出准备会冻结保存任务并把"本轮已重试过"置位；不解冻的话，
+/// 一次失败的退出会让这个会话再也保存不了歌词配置（手动重试与下一次 Quit 都被拒），
+/// 而盘上仍是旧值。解冻**不**碰 dirty/saved/saveError：没写成就不许宣布已保存。
+fn abort_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>, reason: &str) {
+    // 顺序是合同（review round 2 finding 1）：歌词先解冻，准入门**最后**才开。门一开就有渲染层
+    // 写可以进来，那时歌词必须已经可写，否则受理的那一笔会落在冻结的队列上被静默丢掉。
+    let gate = commands::persistence_gate(app).ok();
+    let lyrics = app.try_state::<lyrics_window::LyricsWindowState>();
+    match (gate, lyrics) {
+        (Some(gate), Some(lyrics)) => {
+            lyrics_window::restore_after_failed_exit(&gate, lyrics.inner(), || {})
+        }
+        // 少了任何一格就各自复原各自那一格：不许因为对面没登记就整个不复原
+        (gate, lyrics) => {
+            if let Some(gate) = gate {
+                gate.abort_prepare();
+            }
+            if let Some(lyrics) = lyrics {
+                lyrics.abort_exit_drain();
+            }
+        }
+    }
+    app.state::<ExitState>().reset_request();
+    log::warn!("正常退出未完成（{reason}）：已保留窗口与 core，可再次退出重试");
+    commands::emit_core_event(
+        app,
+        crate::bridge::APP_NOTICE,
+        serde_json::json!({
+            "text": format!("退出未完成：配置还没全部保存（{reason}）。窗口已保留，请稍后重新退出一次。")
+        }),
+    );
+    focus_main(app);
+}
+
+/// 退出线程：**先做可失败的保存准备，再做不可逆清理**（顺序是合同，不是风格）。
+fn run_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let _ = finish_prepared_exit(
+        prepare_exit(app),
+        || commit_exit(app),
+        |reason| abort_exit(app, reason),
+    );
 }
 
 /// 建窗用的代理 URL 参数：取值链的**最后一道闸**。
@@ -396,12 +622,17 @@ pub fn run() {
             // ——早一步登记，就不存在"第一个读它的人比登记早"的窗口。
             app.manage(theme::ThemeState::restore(&data_root));
             app.manage(ExitState::default());
+            // R44e：持久化准入门**先于**任何能写盘的运行时登记（主题事务、歌词保存任务、退出编排
+            // 都要在受理时看到同一个阶段）。
+            app.manage(Arc::new(commands::PersistenceGate::new()));
 
             let data_root = create_main_window(handle)?;
             app.manage(WebviewDataRoot(data_root.clone()));
 
-            // 先登记运行配置与 revision，主窗随后通过条件恢复接入保存快照。
-            app.manage(lyrics_window::LyricsWindowState::default());
+            // 先登记运行配置与 revision（R44e：**只读**恢复盘上的歌词配置当基线——主窗不再
+            // bootstrap 写盘，内存与盘上必须一开始就一致），再起 Rust 拥有的保存任务。
+            app.manage(lyrics_window::LyricsWindowState::restore(&data_root));
+            lyrics_window::start_persistence(handle);
             #[cfg(windows)] {
                 app.manage(taskbar_lyrics::Host::default());
                 if let Err(reason) = taskbar_lyrics::observe_main(handle) { log::warn!("任务栏消息观察不可用：{}", reason.as_str()); }
@@ -575,6 +806,211 @@ mod tests {
     fn window_state_only_persists_main_and_never_shell_child_geometry() {
         assert!(persist_window_state("main"));
         for label in ["lyrics", "login", "login-theme", "login-return"] { assert!(!persist_window_state(label)); }
+    }
+
+    // ---- R44e：正常退出的保存准备 -------------------------------------------------
+
+    fn settings_document(theme: Option<&str>, lyrics: Option<Value>) -> Value {
+        let mut data = serde_json::json!({ "closeBehavior": "tray" });
+        if let Some(theme) = theme { data["theme"] = serde_json::json!(theme); }
+        if let Some(lyrics) = lyrics { data["lyricsWindow"] = lyrics; }
+        serde_json::json!({ "settings": { "schemaVersion": 1, "data": data } })
+    }
+
+    /// 校验：盘上的权威文档必须与运行中的权威值一致；缺键按默认比（用户从没选过时盘上本来就没有）。
+    #[test]
+    fn r44e_exit_verification_compares_the_authoritative_document() {
+        let defaults = lyrics_window::LyricsConfig::default();
+        assert_eq!(
+            verify_persisted_documents(&settings_document(None, None), theme::ThemeChoice::System, &defaults),
+            Ok(()),
+            "从没写过盘时（缺两格）默认值与运行值一致，退出不该被卡住"
+        );
+
+        let dark_panel = lyrics_window::LyricsConfig::default().apply_patch(&serde_json::json!({ "style": "panel" }));
+        assert_eq!(
+            verify_persisted_documents(
+                &settings_document(Some("dark"), Some(dark_panel.persisted())),
+                theme::ThemeChoice::Dark,
+                &dark_panel
+            ),
+            Ok(())
+        );
+
+        let theme_mismatch = verify_persisted_documents(
+            &settings_document(Some("light"), Some(dark_panel.persisted())),
+            theme::ThemeChoice::Dark,
+            &dark_panel,
+        )
+        .expect_err("盘上主题与内存不一致 = 最后一笔没确认");
+        assert!(theme_mismatch.contains("主题"), "{theme_mismatch}");
+
+        let lyrics_mismatch = verify_persisted_documents(
+            &settings_document(Some("dark"), Some(defaults.persisted())),
+            theme::ThemeChoice::Dark,
+            &dark_panel,
+        )
+        .expect_err("盘上歌词配置与内存不一致");
+        assert!(lyrics_mismatch.contains("歌词"), "{lyrics_mismatch}");
+
+        // 回执形状认不出：两格都按默认比 → 与"运行值也是默认"一致、与"运行值非默认"不一致
+        assert_eq!(
+            verify_persisted_documents(&Value::Null, theme::ThemeChoice::System, &defaults),
+            Ok(())
+        );
+        assert!(
+            verify_persisted_documents(&Value::Null, theme::ThemeChoice::System, &dark_panel).is_err(),
+            "读不到文档就不能替运行值背书"
+        );
+    }
+
+    /// 自窗模态取消：只发非零句柄、逐个报结果；空列表什么都不发。
+    #[cfg(windows)]
+    #[test]
+    fn r44e_own_modal_cancel_only_targets_own_nonzero_handles() {
+        let posted = std::cell::RefCell::new(Vec::new());
+        let cancelled = cancel_own_modal_menus(
+            |hwnd| {
+                posted.borrow_mut().push(hwnd);
+                true
+            },
+            vec![("main".to_string(), 101), ("lyrics".to_string(), 0), ("login-theme".to_string(), 202)],
+        );
+        assert_eq!(*posted.borrow(), vec![101, 202], "句柄 0 不发（窗没建好/已销毁）");
+        assert_eq!(cancelled, vec!["main".to_string(), "login-theme".to_string()]);
+
+        posted.borrow_mut().clear();
+        assert!(cancel_own_modal_menus(|hwnd| { posted.borrow_mut().push(hwnd); true }, Vec::new()).is_empty());
+        assert!(posted.borrow().is_empty(), "没有自窗就不许发消息");
+
+        // 发送失败（窗口已销毁）不算已取消：结果里不出现它
+        assert!(cancel_own_modal_menus(|_| false, vec![("main".to_string(), 5)]).is_empty());
+    }
+
+    /// R44e / I1：退出顺序是**合同**——准备成功之前不许做任何不可逆的事（取消用户菜单/拖动、
+    /// 停歌词保存任务、D 的 detach+收尸、`app.exit`）；准备失败一条都不做，只把原因报一次。
+    ///
+    /// 这条用例走的是 `run_exit` 用的那个 helper（生产路径本身），不是"源码里像不像那个顺序"：
+    /// 两个闭包各记一笔，断言两种结论下的次数。
+    #[test]
+    fn r44e_irreversible_cleanup_never_runs_before_a_successful_prepare() {
+        let log = std::cell::RefCell::new(Vec::new());
+        let refused = finish_prepared_exit(
+            Err("等待已受理的保存超时（还有 1 笔在飞）".to_string()),
+            || log.borrow_mut().push("commit".to_string()),
+            |reason| log.borrow_mut().push(format!("abort:{reason}")),
+        );
+        assert!(refused.is_err(), "准备失败必须如实失败（调用方据此保窗）");
+        assert_eq!(
+            *log.borrow(),
+            vec!["abort:等待已受理的保存超时（还有 1 笔在飞）".to_string()],
+            "准备失败：不可逆清理（取消菜单/停保存/D 收尸/exit）一次都不许发生"
+        );
+
+        log.borrow_mut().clear();
+        let committed = finish_prepared_exit(
+            Ok(()),
+            || log.borrow_mut().push("commit".to_string()),
+            |_| log.borrow_mut().push("abort".to_string()),
+        );
+        assert!(committed.is_ok());
+        assert_eq!(
+            *log.borrow(),
+            vec!["commit".to_string()],
+            "准备成功才进入不可逆清理，而且只做一次"
+        );
+    }
+
+    /// 退出请求的 CAS：失败必须能复位重试；成功（终于允许退出）之后不许再被复位。
+    #[test]
+    fn r44e_exit_cas_resets_only_before_the_final_exit() {
+        use std::sync::atomic::Ordering;
+        let state = ExitState::default();
+        let spawned = std::cell::Cell::new(0);
+        assert_eq!(state.request(|| { spawned.set(spawned.get() + 1); Ok::<(), String>(()) }, || {}), Ok(()));
+        assert_eq!(state.request(|| { spawned.set(spawned.get() + 1); Ok::<(), String>(()) }, || {}), Ok(()));
+        assert_eq!(spawned.get(), 1, "重复 Quit 不重复起退出线程");
+
+        state.reset_request();
+        assert_eq!(state.request(|| { spawned.set(spawned.get() + 1); Ok::<(), String>(()) }, || {}), Ok(()));
+        assert_eq!(spawned.get(), 2, "准备失败复位之后必须能再试一次");
+
+        state.1.store(true, Ordering::Release);
+        assert!(state.1.load(Ordering::Acquire));
+    }
+
+    /// R44e fix1 / review finding 4：整个退出准备**共用一个绝对期限**。
+    ///
+    /// 修复前只有"等在飞"与"歌词排空"拿 deadline；uncertain 重存与最终 `settings:get` 各自
+    /// 另起 10 秒等待——4 秒不是上限。这里跑的是 `prepare_exit` 用的那个 helper（生产路径本身）。
+    #[test]
+    fn fix4_the_whole_preparation_shares_one_absolute_deadline() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(EXIT_PREPARE_BUDGET_MS);
+        let seen = std::cell::RefCell::new(Vec::new());
+        prepare_exit_with(
+            deadline,
+            |given| {
+                seen.borrow_mut().push(("wait", given));
+                Ok(())
+            },
+            |given| {
+                seen.borrow_mut().push(("lyrics", given));
+                Ok(())
+            },
+            |given| {
+                seen.borrow_mut().push(("theme", given));
+                Ok(())
+            },
+            |given| {
+                seen.borrow_mut().push(("read", given));
+                Ok(serde_json::json!({}))
+            },
+            |_| {
+                seen.borrow_mut().push(("verify", deadline));
+                Ok(())
+            },
+        )
+        .expect("准备成功");
+        let steps: Vec<(&str, bool)> = seen.borrow().iter().map(|(name, given)| (*name, *given == deadline)).collect();
+        assert_eq!(
+            steps,
+            vec![("wait", true), ("lyrics", true), ("theme", true), ("read", true), ("verify", true)],
+            "每一步拿到的都是同一个绝对期限（不许各自重起一个 10 秒等待）"
+        );
+    }
+
+    /// R44e fix1 / review finding 4：预算用尽时**立刻**有界失败，后面的步骤一步都不许再跑。
+    ///
+    /// 失败走既有的可逆 abort（保窗、保 core、uncertain/dirty 留给下次），不进入不可逆清理。
+    #[test]
+    fn fix4_an_exhausted_budget_stops_the_preparation_before_any_further_write() {
+        let ran = std::cell::RefCell::new(Vec::new());
+        let result = prepare_exit_with(
+            std::time::Instant::now(),
+            |_| {
+                ran.borrow_mut().push("wait");
+                Ok(())
+            },
+            |_| {
+                ran.borrow_mut().push("lyrics");
+                Ok(())
+            },
+            |_| {
+                ran.borrow_mut().push("theme");
+                Err("退出准备预算已用尽：本次不退出，请稍后重试".to_string())
+            },
+            |_| {
+                ran.borrow_mut().push("read");
+                Ok(serde_json::json!({}))
+            },
+            |_| {
+                ran.borrow_mut().push("verify");
+                Ok(())
+            },
+        );
+        let reason = result.expect_err("没有预算就必须有界失败（保窗可重试）");
+        assert!(reason.contains("预算"), "{reason}");
+        assert_eq!(*ran.borrow(), vec!["wait", "lyrics", "theme"], "失败之后不许再跑最终读与校验");
     }
 
     #[test]
@@ -1172,9 +1608,47 @@ mod tests {
         assert!(callback.contains("request_app_exit("), "quit 必须退出整个应用，不能只关主窗留下歌词/登录辅助窗");
         assert!(!callback.contains("shutdown_core(") && !callback.contains("app.exit("), "退出收尾不能阻塞关窗回调");
         assert!(callback.contains("focus_main(&close_app)"), "执行失败必须保留可恢复窗口");
-        let exit = production.split("fn request_app_exit<").nth(1).expect("退出工作线程").split("/// 建窗用的代理").next().expect("退出函数收口");
-        assert!(exit.contains(".spawn(move || finish_app_exit("));
-        assert!(exit.find("commands::shutdown_core(").expect("既有 sidecar 收尾") < exit.find("app.exit(0)").expect("整个应用退出"));
+        let exit = production.split("fn request_app_exit<").nth(1).expect("退出工作线程").split("fn finish_prepared_exit(").next().expect("退出函数收口");
+        assert!(exit.contains(".spawn(move || run_exit(&app))"), "退出必须在工作线程里跑（不许阻塞 UI 线程）");
+        assert!(!exit.contains("commands::shutdown_core("), "请求本身不负责收尸：先做可失败的保存准备");
+        // R44e：顺序合同——准备成功才允许 commit_exit（取消自窗模态/D 屏障/shutdown_core/app.exit）
+        let runner = production
+            .split("fn run_exit<")
+            .nth(1)
+            .expect("退出线程主体")
+            .split("/// 建窗用的代理")
+            .next()
+            .expect("退出线程收口");
+        assert!(runner.contains("finish_prepared_exit("), "退出必须经由统一收口");
+        assert!(runner.contains("prepare_exit(app)"), "先做保存准备");
+        assert!(runner.contains("commit_exit(app)"), "成功分支才进入不可逆清理");
+        assert!(runner.contains("abort_exit(app, reason)"), "失败分支只保窗复位");
+        let commit = production
+            .split("fn commit_exit<")
+            .nth(1)
+            .expect("不可逆清理")
+            .split("fn abort_exit<")
+            .next()
+            .expect("不可逆清理收口");
+        let cancel = commit.find("cancel_own_modals_now(app)").expect("准备成功后取消自窗模态");
+        let shutdown = commit.find("commands::shutdown_core(").expect("既有 sidecar 收尾");
+        let exit_at = commit.find("app.exit(0)").expect("整个应用退出");
+        assert!(cancel < shutdown, "取消模态在最终排队退出之前");
+        assert!(shutdown < exit_at, "收尸必须先于整个应用退出");
+        let failure_branch = production
+            .split("fn abort_exit<")
+            .nth(1)
+            .expect("失败分支")
+            .split("fn run_exit<")
+            .next()
+            .expect("失败分支收口");
+        assert!(!failure_branch.contains("shutdown_core("), "准备失败不许关掉 core");
+        assert!(!failure_branch.contains("begin_shutdown("), "准备失败不许进入 D 的不可逆 detach");
+        assert!(!failure_branch.contains("app.exit(0)"), "准备失败不许退出");
+        assert!(failure_branch.contains("abort_prepare()"), "准备失败必须复位准入门（可重试）");
+        assert!(failure_branch.contains("reset_request()"), "准备失败必须复位退出 CAS（可重试）");
+        assert!(failure_branch.contains("focus_main(app)"), "准备失败要把主窗拉回可操作的焦点");
+        assert!(failure_branch.contains("APP_NOTICE"), "准备失败要留一条可操作提示");
         assert!(production.contains(".skip_taskbar(false)"), "任务栏按钮不能被主窗策略隐藏");
     }
 

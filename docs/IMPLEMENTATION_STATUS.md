@@ -147,7 +147,7 @@
 | 15 | 歌词解析适配（`[offset:]` + 翻译行）+ 逐行滚动 | **verified** | untested | `test/lyrics.test.mjs`、`test/amll-adapter.test.mjs`、`test/lyric-sync.test.mjs`；AMLL 官方组件真实挂载冒烟 23/23 |
 | 16 | 歌词文本通道（`playback:lyrics`） | **verified（频道）** | untested（端点未配） | `test/lyrics-window.test.mjs`、`test/channel-parity.test.mjs` |
 | 17 | Media Session 系统媒体控件 | **verified（映射逻辑）** | untested | `test/media-session.test.mjs` |
-| 18 | 桌面歌词窗（五条 async 专命令、锁/媒体、横竖/样式、配置持久化） | **verified** | **R44c Windows 已验拖锁、一次媒体、几何与重启配置；其余平台/多屏待验** | `test/lyrics-window.test.mjs`、`playback-runtime`、`proxy-settings`；Rust 原子 revision/来源/几何注入测试；browser 面板像素；`.tmp/r44c-native-evidence.json`、`.tmp/r44c-restart-evidence.json` |
+| 18 | 桌面歌词窗（五条 async 专命令、锁/媒体、横竖/样式、配置持久化） | **verified** | **R44c Windows 已验拖锁、一次媒体、几何与重启配置；R44e 持久化改由 Rust 保存任务拥有（登出/退出不丢），真机退出重启复验未做；其余平台/多屏待验** | `test/lyrics-window.test.mjs`、`playback-runtime`、`proxy-settings`；Rust 原子 revision/来源/几何注入测试；browser 面板像素；`.tmp/r44c-native-evidence.json`、`.tmp/r44c-restart-evidence.json` |
 | 19 | Windows 任务栏歌词（Beta，精确自窗原生内嵌） | **in-progress** | Low 完整性拒绝/停显/回桌面恢复已验；真实附着受外部权限阻断 | `taskbar_lyrics.rs` 的 parent-client/UIA/单在途/代次/退出纯测试；acceptance 仅新模块限定例外，DLL/全局 Hook 仍禁；详 task-44d-report |
 | 20 | 托盘（9 槽位菜单 / 勾选镜像 / 失败提示） | **verified** | untested | `test/tray.test.mjs`；Rust `tray.rs` 内联测试 |
 | 21 | 关窗 fail-safe（托盘真装上才藏窗口） | **verified** | untested | `src-tauri/src/tray.rs` 的 `decide_close` 矩阵；`scripts/acceptance.mjs` 的 `tray` 路径（锚点要求现场查 `tray_by_id`） |

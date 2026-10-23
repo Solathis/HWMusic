@@ -334,8 +334,17 @@ export function createSettingsStore({ dir = null, fs = nodeFs, log = defaultLog 
 
   /**
    * 读设置。**读不到、读坏了都回默认文档**（代理当没配），并把原因记一条日志——不抛、不砸文件。
+   *
+   * R44e：本函数是**排空屏障**——先等已受理的写（`writeTail`）落定再读盘。原子 rename 只保证
+   * "不会读到半个文件"，不保证"读到的是刚受理的那一笔"：`set` 刚返回接受、副本还在排队时来一个
+   * `get`，没有这道屏障就会读回旧文档（主题/歌词的退出校验正是这样被骗过）。
+   *
+   * 屏障**只加在 `read` 上**：`save`/`reset` 内部继续直接 `load()`，否则会等自己那条还没落定的
+   * 尾链（自等死锁）。`writeTail` 本身已 `catch` 过，等它不会抛；失败的那一笔由 `save` 的调用方
+   * 收结构化错误。
    */
   async function read() {
+    await writeTail;
     return (await load()).document;
   }
 
