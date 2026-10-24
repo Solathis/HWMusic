@@ -49,6 +49,12 @@
  * 3. 顶部内缩不许出现第二份字面量：高度来自 src/shared/login-inset.mjs，且不许写 `h-12`；
  * 4. 二维码必须由**成熟库**（`qrcode`，MIT）渲染：不手写二维码组件、不自绘编码逻辑。
  * 先写先看红。
+ *
+ * R45A1 增补（用户第 10 项：已登录冷启动不许先闪登录页）：第 1 条**判据收紧**——
+ * "门禁分支在 shell 之前"变成"**三态**判定在 shell 之前"。`checking`（还不知道）不再画成
+ * 登录页，而是中性启动屏；登录页只在**确定未登录**之后出现（判定：`features/auth/startup-view.mjs`
+ * 的 `startupViewOf`；纯决定与竞态序列由 `test/startup-view.test.mjs` 钉，渲染标记由
+ * `test/login-gate-markup.test.mjs` 的 R45A1 段钉）。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -141,14 +147,20 @@ function loggedOut(extra = {}) {
 // ---------------------------------------------------------------------------
 // 1. 门禁判定：未登录（含"还不知道"）都不许渲染 app-shell
 // ---------------------------------------------------------------------------
+//
+// R45A1 起要把两件事分开说（用户第 10 项：已登录冷启动不许先闪登录页）：
+// - **能不能渲染 app-shell**：仍是本文件的 `shouldShowLoginGate`（只有「已登录」为假）；
+// - **渲染哪一个非 shell 界面**：`checking` 是中性启动屏、`loggedOut` 才是 LoginGate
+//   （`features/auth/startup-view.mjs` 的 `startupViewOf`，由 `test/startup-view.test.mjs` 钉）。
+// 所以在「还不知道」这一档，"不放行主界面"照旧成立，但它显示的**不是**登录页。
 
-test("门禁判定：只有「已登录」才放行 app-shell；检查中与未登录都显示门禁", () => {
+test("门禁判定：只有「已登录」才放行 app-shell（检查中与未登录都不放行）", () => {
   assert.equal(shouldShowLoginGate({ phase: LOGIN_GATE_PHASE.checking, busy: false }), true);
   assert.equal(shouldShowLoginGate({ phase: LOGIN_GATE_PHASE.loggedOut, busy: false }), true);
   assert.equal(shouldShowLoginGate({ phase: LOGIN_GATE_PHASE.loggedIn, busy: false }), false);
 });
 
-test("门禁判定：状态未知时不许猜（检查中按门禁处理，绝不按已登录处理）", () => {
+test("门禁判定：状态未知时不许猜（检查中按「还没登录」处理，绝不按已登录处理）", () => {
   const initial = initialGateState();
   assert.equal(initial.phase, LOGIN_GATE_PHASE.checking);
   assert.equal(shouldShowLoginGate(initial), true);
@@ -373,21 +385,32 @@ test("常驻入口：任何「还没登录」的非 busy 档位下它都是「�
 });
 
 // ---------------------------------------------------------------------------
-// 5. 外壳顺序：门禁分支必须在 app-shell 之前
+// 5. 外壳顺序：门禁判定必须在 app-shell 之前
 // ---------------------------------------------------------------------------
+//
+// R45A1（用户第 10 项）改了这一段的**判据**，没有放宽它：
+// 原来只问"门禁分支在 shell 之前"，现在要问"**三态**判定在 shell 之前，且两个非 shell 落点
+// 各自只有一个位置"。`checking` 落在中性启动屏、`logged_out` 才落在 LoginGate——
+// 写成 `phase !== loggedIn ? <LoginGate/> : shell` 就是已登录冷启动那一闪的原始写法。
 
-test("外壳顺序：App() 里门禁分支排在 app-shell 之前（未登录绝不渲染主界面）", () => {
+test("外壳顺序：App() 里三态判定排在 app-shell 之前（未登录绝不渲染主界面）", () => {
   const source = read("src/renderer/App.tsx");
   const start = source.indexOf("export function App(");
   assert.ok(start > -1, "App.tsx 必须导出 App()");
   const end = source.indexOf("\n}", start);
   const body = source.slice(start, end === -1 ? undefined : end);
 
-  const gate = body.indexOf("shouldShowLoginGate(");
-  const shell = body.indexOf("app-shell");
-  assert.ok(gate > -1, `App() 里必须用 shouldShowLoginGate 判定门禁：${body}`);
+  const view = body.indexOf("startupViewOf(gate.state)");
+  const shell = body.indexOf('data-shell="app-shell"');
+  assert.ok(view > -1, `App() 里必须用 startupViewOf 判定启动三态：${body}`);
   assert.ok(shell > -1, `App() 里要有 app-shell 挂载点（R8 的落点）：${body}`);
-  assert.ok(gate < shell, "门禁判定必须排在 app-shell 之前：顺序反了就是未登录先渲染主界面");
+  assert.ok(view < shell, "三态判定必须排在 app-shell 之前：顺序反了就是未登录先渲染主界面");
+  assert.match(
+    body,
+    /view === STARTUP_VIEW\.loginGate\s*\?\s*<LoginGate gate=\{gate\} \/>\s*:\s*<StartupChecking gate=\{gate\} \/>/,
+    `只有确定未登录才渲染 LoginGate（checking 恒为中性启动屏，复审 R45A1）：${body}`,
+  );
+  assert.equal(source.split("<LoginGate").length - 1, 1, "LoginGate 在 App.tsx 里只许有一个落点");
   assert.doesNotMatch(body, /^\s*return\s+<AppShell/m, "不得绕过门禁直接返回主界面");
 });
 
@@ -673,6 +696,13 @@ test("重查（R19）：挂载 effect 里**订阅之后**先报就绪、再查�
     /import\s*\{[^}]*AUTH_GET_STATUS[^}]*\}\s*from\s*"\.\.\/shared\/request-channels\.ts"/,
     "AUTH_GET_STATUS 必须从 src/shared/request-channels.ts 导入（唯一真源）",
   );
+  // 复审 R45A1：查询只有**一处实现**——挂载时那一次与启动屏上的「重新检查」共用它。
+  // 两处各写一份 `coreCall(AUTH_GET_STATUS)` 的下场是"重试发的是另一条请求"，而按钮看起来一样。
+  assert.equal(
+    (gate.match(/coreCall<AuthStatusPayload>\(AUTH_GET_STATUS/g) ?? []).length,
+    1,
+    "auth:get-status 只许有一处实现（挂载查询与重新检查共用同一条）",
+  );
 
   const effectStart = gate.indexOf("useEffect(() => {");
   const effectEnd = gate.indexOf("const startQr = useCallback");
@@ -682,7 +712,7 @@ test("重查（R19）：挂载 effect 里**订阅之后**先报就绪、再查�
   const statusAt = effect.indexOf("onCoreEvent<AuthStatusPayload>(AUTH_STATUS");
   const qrAt = effect.indexOf("onCoreEvent<QrStatusPayload>(AUTH_QR");
   const readyAt = effect.indexOf("rendererReady()");
-  const queryAt = effect.indexOf("coreCall<AuthStatusPayload>(AUTH_GET_STATUS");
+  const queryAt = effect.indexOf("queryStatus()");
   assert.ok(statusAt > -1, "订阅 auth:status");
   assert.ok(qrAt > -1, "订阅 auth:qr");
   assert.ok(readyAt > -1, "报就绪（冲刷启动期排队的提示）");
@@ -691,25 +721,35 @@ test("重查（R19）：挂载 effect 里**订阅之后**先报就绪、再查�
   assert.ok(qrAt < queryAt, "二维码那条订阅同理");
   assert.ok(readyAt < queryAt, "先冲刷排队的那条广播、再查：查询的应答一定不比排队的旧");
 
-  // 两处喂的状态事件必须是同一份映射（各写一份 = 早晚漂移）
+  // 广播与查询共用同一份映射（各写一份 = 早晚漂移）
   const mapping = gate.match(/function statusEventOf\(/g) ?? [];
   assert.equal(mapping.length, 1, "广播与查询共用同一个载荷 → 事件映射（statusEventOf）");
   assert.match(
-    effect,
-    /const applyStatus = [\s\S]*?reduceGateState\(current, statusEventOf\(payload\)\)/,
-    "effect 里只有**一个** apply：广播回调与查询应答都经它进状态机（statusEventOf 只在那里被调用）",
-  );
-  assert.equal(
-    (effect.match(/applyStatus\(/g) ?? []).length,
-    2,
-    "applyStatus：广播与查询各喂一次（R38 起账号资料也走这同一次）",
+    gate,
+    /const applyStatusPayload = [\s\S]*?reduceGateState\(current, statusEventOf\(payload\)\)/,
+    "只有**一个** apply：广播回调与查询应答都经它进状态机（statusEventOf 只在那里被调用）",
   );
   // R38：账号资料与登录状态**来自同一份载荷、同一处解析**（另起一处订阅就会让
   // "状态说已登录、资料说没登录"有地方长出来）
   assert.match(
-    effect,
-    /const applyStatus = [\s\S]*?setProfile\(profileFromStatusPayload\(payload\)\)/,
+    gate,
+    /const applyStatusPayload = [\s\S]*?setProfile\(profileFromStatusPayload\(payload\)\)/,
     "profile 的解析必须与登录状态在同一处 apply 里（同一份 payload）",
+  );
+  // 两条喂入口：广播回调一次、查询应答一次（都经那唯一一份 apply）
+  assert.match(effect, /applyStatusPayload\(payload\)/, "广播回调走那唯一一份 apply");
+  assert.match(gate, /applyStatusPayload\(snapshot\)/, "查询应答也走那唯一一份 apply");
+
+  // 失败事件也只有一处构造：挂载首查与「重新检查」说的是同一件事
+  assert.equal(
+    (gate.match(/function statusFailureEvent\(/g) ?? []).length,
+    1,
+    "查询失败的事件文案只在一处构造（重试与首查共用）",
+  );
+  assert.equal(
+    (gate.match(/statusFailureEvent\(/g) ?? []).length,
+    3,
+    "statusFailureEvent：定义 1 处 + 首查与重新检查各用 1 次",
   );
 });
 

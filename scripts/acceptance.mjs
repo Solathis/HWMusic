@@ -61,7 +61,7 @@ export const ACCEPTANCE_PATHS = [
     tests: ["test/login-gate.test.mjs", "test/login-callback.test.mjs"],
     anchors: [
       { file: "src/renderer/features/auth/login-gate-logic.mjs", pattern: /export function shouldShowLoginGate/, why: "门禁判定是纯函数（唯一真源）" },
-      { file: "src/renderer/App.tsx", pattern: /shouldShowLoginGate\(gate\.state\)/, why: "外壳真的按判定挡在渲染之前" },
+      { file: "src/renderer/App.tsx", pattern: /startupViewOf\(gate\.state\)/, why: "外壳真的按三态判定挡在渲染之前（R45A1：checking 是中性启动屏，不是登录页）" },
       { file: "src/renderer/App.tsx", pattern: /<LoginGate gate=\{gate\} \/>/, why: "挡住时渲染登录门禁" },
       { file: "src/renderer/login-gate.tsx", pattern: /reduceGateState/, why: "门禁状态机来自纯逻辑模块" },
     ],

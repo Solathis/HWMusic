@@ -161,17 +161,21 @@ export function trackCoverUrlOf(item) {
 }
 
 /**
- * 时长读数：**只认 `duration` 秒数**（协议层 durationOfEntry 已从可信顶层或标准 MP3 资源归一化）。
+ * 时长读数：**只认 `duration` 秒数**（协议层 durationOfEntry 已从可信顶层或显式 MP3 资源归一化）。
  * `times` 不具时长资格，任何层都不按它的量级猜单位。
  *
  * 这里不再猜别的名字：单位与键名换算都在协议层一处收口，渲染层只认内部形状。
+ * 契约与协议层同一份（有限正数、24 小时以内）：越界值回 null 而不是原样返回，
+ * 否则表格会把坏数据画成 `0:00`/`1441:00`，看起来像"这首歌真的这么长"。
  */
+const TRACK_DURATION_SECONDS_LIMIT = 24 * 3600;
+
 export function trackDurationOf(item) {
   if (!isObject(item)) return null;
   const raw = item.duration;
-  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
-  if (typeof raw === "string" && raw.trim() !== "" && Number.isFinite(Number(raw))) return Number(raw);
-  return null;
+  const seconds = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN;
+  if (!Number.isFinite(seconds) || seconds <= 0 || seconds >= TRACK_DURATION_SECONDS_LIMIT) return null;
+  return seconds;
 }
 
 /**

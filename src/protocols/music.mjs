@@ -151,6 +151,14 @@ export const MUSIC_ERROR_KINDS = {
    * （数据目录没传对），两件事的下一步完全不同——前者用户换个来源，后者要看宿主怎么起的。
    */
   cacheUnavailable: "cache_unavailable",
+  /**
+   * 这次响应**已经过期**（R45A3 fix3）：请求在途时会话换了，或同一张歌单又开了更新的第一页。
+   *
+   * 为什么不并进 `network_error` / `invalid_response`：这两条都是"接口这次不行，重试可能就好了"，
+   * 而这一条是"**这份数据属于过去**"——迟到的旧会话列表绝不能交回调用方，更不能写进缓存
+   * （写进去就是拿上一个人的歌单内容当这个人的）。下一步是重新打开/重新取，不是重试同一份。
+   */
+  staleResponse: "stale_response",
 };
 
 /** 能佐证"这是试听片段"的标志位候选（与 auditionTime 齐备才算试听）。 */
@@ -318,24 +326,118 @@ function durationSeconds(value) {
   return Number.isFinite(seconds) && seconds > 0 && seconds < TRACK_DURATION_SECONDS_LIMIT ? seconds : null;
 }
 
-function standardResourceDuration(resource) {
-  if (!isObject(resource) || resource.quality !== MUSIC_QUALITY_TYPES.standard) return null;
+/**
+ * 资源是否**显式**声明成 MP3：`format`/`mediaFileType` 里出现过的值必须都读作 MP3。
+ *
+ * 一个都没声明就是 `false`——2026-10-23 真机里有 87 条 `quality="1"` 但 `format=""`，
+ * 编码根本没写出来；"标准档大概就是 MP3"是契约推定，不是这条数据说的，所以不取。
+ * 两个字段同时在（早期真机样本两个都是 "MP3"）就必须一致：`format:"MP3", mediaFileType:"FLAC"`
+ * 是自相矛盾的资源，不认。
+ */
+function declaresMp3(resource) {
   const formats = [resource.format, resource.mediaFileType].filter((value) => value !== undefined && value !== null && value !== "");
-  if (formats.length === 0 || formats.some((value) => typeof value !== "string" || value.trim().toUpperCase() !== "MP3")) return null;
+  if (formats.length === 0) return false;
+  return formats.every((value) => typeof value === "string" && value.trim().toUpperCase() === "MP3");
+}
+
+/** 音质档是不是标准档：真机里是字符串 `"1"`，也兼容数字 `1`（同一档，不猜别的值）。 */
+function isStandardQuality(quality) {
+  return quality !== undefined && quality !== null && quality !== "" && String(quality) === MUSIC_QUALITY_TYPES.standard;
+}
+
+/**
+ * 音质档的**标识形状**（`null` = 没声明档位）：数字，或纯数字字符串（真机是 `"0"`/`"1"`/`"17"`）。
+ *
+ * 为什么要有这一条（R45A2 fix1）：用户裁定放宽成"任意**明确声明 MP3** 的音质档"，
+ * 于是"档位到底有没有被声明"必须判得清楚——放宽的是档位，不是"猜一个档位"。
+ * 三种情况因此分开：
+ * - 有标识（`"0"`、`2`…）→ 是一档，可以被采纳；
+ * - 数组形态里没有 `quality`、对象形态里也借不到 key → **没声明档位**，不取；
+ * - 有值但不是音质标识的形状（`"best"`、`true`、`{}`…）→ 认不出，也不取。
+ */
+function qualityIdOf(quality) {
+  if (typeof quality === "number") return Number.isInteger(quality) && quality >= 0 ? String(quality) : null;
+  if (typeof quality !== "string") return null;
+  return /^\d+$/.test(quality) ? quality : null;
+}
+
+function resourceDuration(resource) {
+  if (!isObject(resource) || !declaresMp3(resource)) return null;
   return durationSeconds(resource.duration);
 }
 
-/** 条目时长（秒）：顶层 duration 优先；再取 contentExInfo 的标准 MP3 资源，绝不读 times。 */
+/**
+ * 条目里所有"音质档 → 资源"的候选（`contentExInfo` 可能是 JSON 字符串）。
+ *
+ * 两种容器都读：`completeFileInfos`（对象 = 档位→资源，数组 = 资源列表）与 `fileInfos`（同两种形态）。
+ * 对象形态的 key 就是音质档，资源自己没写 `quality` 时按 key 读。
+ * `fileType` 不是编码名（真机是 "1"/"17" 这种数字档位），这里**不看它**。
+ */
+function resourceCandidates(item) {
+  const extra = contentExInfoOf(item);
+  const candidates = [];
+  const collect = (container) => {
+    if (Array.isArray(container)) {
+      for (const resource of container) {
+        if (!isObject(resource)) continue;
+        candidates.push({ quality: resource.quality, resource });
+      }
+      return;
+    }
+    if (!isObject(container)) return;
+    for (const [key, resource] of Object.entries(container)) {
+      if (!isObject(resource)) continue;
+      const own = resource.quality;
+      candidates.push({ quality: own === undefined || own === null || own === "" ? key : own, resource });
+    }
+  };
+  collect(extra?.completeFileInfos);
+  collect(extra?.fileInfos);
+  return candidates;
+}
+
+/**
+ * 条目时长（秒）。
+ *
+ * 顺序即优先级：**可信顶层 `duration`** → `contentExInfo` 里**显式档位的显式 MP3** 资源
+ * （**标准档 `quality="1"` 先取**，其余明确声明的档位作为兜底）。
+ *
+ * 2026-10-23 只读取证（已登录会话，歌单详情一页 1623 条）：条目**没有**顶层 `duration`、
+ * **没有** `songInfo`，时长只在 `contentExInfo`（JSON 字符串）的 `fileInfos[]` 里，元素形如
+ * `{quality:"1", format:"MP3", fileType:"1", duration:"240"}`；同一首的各档 `duration` **完全相同**
+ * （383/383 一致）。
+ *
+ * 选源口径的三次变化（读这段代码的人必须知道现在为什么是这样）：
+ * 1. R45A2：按"显式 MP3 + 标准档优先"取，非标准档也收；
+ * 2. R45A2 复审：收回到合同原文"只认显式标准档 `quality="1"` 的 MP3"——选源代码不单方面放宽合同；
+ *    代价是真机约 167 条只有 `quality:"0"` 的老歌继续显示「—」；
+ * 3. **R45A2 fix1（用户裁定，记录在 progress.md）**：用户要的是"所有歌曲都有时长"，
+ *    并明确授权把口径放宽成"**任意明确声明 MP3 的音质档**"。于是：
+ *    - 档位必须**显式存在**且形如华为的音质标识（数字 / 数字串，见 `qualityIdOf`）；
+ *    - 编码必须是**显式且一致**的 MP3（`declaresMp3`：`format`/`mediaFileType` 都在就必须都读作 MP3）；
+ *    - **标准档仍然排第一顺位**（各档同值是实测观察，"哪天不同值"时标准档才是合同里那一档）；
+ *    - 标准档坏了（编码不符 / 秒数坏或缺失）→ 退到别的显式 MP3 档，这是 fix1 相对复审版
+ *      唯一的行为差异；所有档都不合格时仍然没有时长。
+ *
+ * 三条硬规则没变：`times` 一个字节都不读（真机每次读取都不一样）；秒数只认有限正数 `18:00:00`
+ * 以内，**不按毫秒猜**；视频档是 MKV（15/17，204 秒 ≠ 音频的 203 秒）——MKV/M4A/FLAC/空编码
+ * 一律不取，**不因为"档位很明确"就猜它的编码**。
+ */
 export function durationOfEntry(item) {
   const duration = durationSeconds(item?.duration);
   if (duration !== null) return duration;
-  const extra = contentExInfoOf(item);
-  const complete = extra?.completeFileInfos;
-  const resources = Array.isArray(complete) ? [...complete] : [complete?.[MUSIC_QUALITY_TYPES.standard]];
-  const files = extra?.fileInfos;
-  resources.push(...(Array.isArray(files) ? files : isObject(files) ? Object.values(files) : []));
-  for (const resource of resources) {
-    const seconds = standardResourceDuration(resource);
+  // 只有"档位明确的显式 MP3"才是候选（没声明档位的资源在这里就被排除了）
+  const candidates = resourceCandidates(item).filter((entry) => qualityIdOf(entry.quality) !== null);
+  // ① 标准档第一顺位
+  for (const entry of candidates) {
+    if (!isStandardQuality(entry.quality)) continue;
+    const seconds = resourceDuration(entry.resource);
+    if (seconds !== null) return seconds;
+  }
+  // ② 其余明确声明的档位兜底（fix1 用户裁定）
+  for (const entry of candidates) {
+    if (isStandardQuality(entry.quality)) continue;
+    const seconds = resourceDuration(entry.resource);
     if (seconds !== null) return seconds;
   }
   return null;
@@ -1351,12 +1453,282 @@ export function createMusicApi(options = {}) {
   }
 
   /**
+   * 歌单详情（R45A3 fix1）：**整份响应缓存 + 按页本地切片**。
+   *
+   * 事实（2026-10-23 真机只读取证）：`library:playlist-detail` 一页 `pageSize=50` 拿回 **1623 条**，
+   * 响应里还带 `hasMore=true`——**这个端点不认 `start`/`limit`**，一次就把整张歌单给你。
+   * 所以"触底加载"不能靠它：旧实现把 1623 条整份交给渲染层，首屏一次全渲染，而 `hasMore`
+   * 永远为真（`received >= pageSize`），滚到底还会再问一次同样的 1623 条。
+   *
+   * 修法：**整份只取一次网络**，之后每一页都是这份缓存上的切片。
+   *
+   * 四条边界（与 `lyricAddressIndex` / `lyricMemoryCache` 同一条纪律）：
+   * 1. **只在实例内存**：不落盘、不进设置、不进日志、不跨进程（sidecar 重启即空）；
+   * 2. **键 = 端点 kind + 歌单 id**：自建/收藏是两条端点，同一份 id 在两边的曲目可以不同，
+   *    混在一起就是"收藏歌单里看到自建歌单的歌"；
+   * 3. **一张歌单在同一时刻只留一份解析结果（R45A3 fix2）**：第一页不论解析到哪条 kind、
+   *    不论形状，都先把这张歌单**所有** kind 的旧条目一起失效；后续页只认"最近一次解析到的
+   *    那条 kind"（`activePlaylistKinds`），不再按 `owned` → `collected` 的固定顺序撞运气。
+   *    复审发现的正是这个洞：页 1 这次由公开端点解析、上一轮的 owned 条目还在 → 页 2 切到
+   *    上一轮那份列表，同一张歌单的两页来自两条不同路由；
+   * 4. **有上限、先进先出**（4 张歌单：界面一次只开一张，浏览时来回切几张也就够了——
+   *    整份 1623 条的归一化数组不便宜，缓存不该无界增长）。
+   *
+   * 另外，**会话身份变了（换账号 / 换 token）就整张清空**（`dropPlaylistCacheIfSessionChanged`）：
+   * 上一轮那份属于上一个账号，跨账号复用就是拿别人的歌单内容当自己的。
+   *
+   * **R45A3 fix3（复审 Important）：入口比对拦不住"在途"**。上面那条只在**进入** `getPlaylistDetail`
+   * 时对一次指纹，而 HTTP 可能在途几百毫秒～几十秒；这段时间里会话换了人、或者同一张歌单又开了
+   * 一次第一页，旧响应回来时会把缓存改写成"过去的"那份，而 `playlistCacheSession` 记的已经是新会话 →
+   * 新会话的第 2 页就从那份旧列表里切出来。所以每一次请求都带上"**开始时的会话指纹 + 这张歌单
+   * 第一页的代次**"（`playlistPage1Serials`），`await` 回来后两样都对得上才许写缓存/交回调用方，
+   * 否则整条作废（结构化 `stale_response`）。两样都只是**进程内存里的不透明比较值**：
+   * 指纹是 FNV-1a 散列（不是 token 原文），代次是自增序号，都不进缓存数据、不进日志、不进设置、不落盘。
+   *
+   * 同时（同一条复审）：第一页的失效点从"拿到响应之后"挪到"**发起之前**"——失败与空响应
+   * 也算"这一轮已经问过"，旧缓存一样失效；只有 `page > 1` 的读才允许用旧缓存（且它仍受
+   * "会话没换 + 解析到的端点还是那一条"两道约束）。
+   *
+   * `hasMore` 的唯一判据是 `end < total`（`end = page*pageSize`，`total` = 这份响应的条数），
+   * 所以页 1 的 `hasMore` 与页 2 的 `hasMore` 说的是同一件事，不会"滚到底还说还有"。
+   * 例外是**恰好一整页**这一档（分不清服务端是真分页还是忽略窗口）——见 `serverPageSignatures`。
+   */
+  const playlistDetailCache = new Map();
+  const playlistDetailCacheLimit = positiveInt(options.playlistCacheLimit, 4);
+
+  /** 这张歌单**最近一次**解析到哪条端点（`playlistId → "owned"|"collected"`）。 */
+  const activePlaylistKinds = new Map();
+
+  /**
+   * 这张歌单"第一页尝试"的代次（R45A3 fix3）：`playlistId → 自增序号`。
+   *
+   * 每开一次第一页（不论成败、空响应、哪条端点）就 +1；在途的旧请求回来时对不上就作废。
+   * 有上限（与整表缓存同一档的 4 倍，至少 8）：被挤掉的只是"作废判据"，最坏结果是一次
+   * 多余的网络请求，**绝不会**把旧数据写进缓存。值里只有序号，不含会话内容。
+   */
+  const playlistPage1Serials = new Map();
+  let playlistPage1Seed = 0;
+  const playlistPage1SerialLimit = Math.max(playlistDetailCacheLimit * 4, 8);
+
+  /** auto 服务端分页的第一页端点选择（歌单 id → kind + 会话/第一页代次）。 */
+  const serverPlaylistRoutes = new Map();
+  const serverPlaylistRouteLimit = Math.max(playlistDetailCacheLimit * 4, 8);
+
+  /**
+   * 服务端分页里"整页重复"的指纹（R45A3 fix3，复审 Minor）。
+   *
+   * 背景：响应条数**恰好等于 `pageSize`** 时，两种完全不同的服务端行为长得一样——
+   * ① 真的按 `start`/`limit` 分页（每页内容不同）；② 忽略窗口、每次都回同一份。
+   * ② 会让触底加载反复取同一页、永远滚不完（复审点名的"本地分页停滞"）。
+   *
+   * 做法只做一件保守的事：整页响应的**归一化 ID 序列**（含顺序）记下来，下一次整页响应的
+   * 序列**完全相同**而窗口起点不同 → 认定"它在重复同一份"，这一页收敛成"没有更多"
+   * （`pageSource: "server-repeat"`、`songs: []`，`available` 只说这一份响应的条数）。
+   * ① 那种每页不同的服务端不会撞上（序列不同），所以"120 首 → 三页"的行为原样保留。
+   * 不猜总数、也不把"恰好一整页"直接当成"到底了"。
+   *
+   * 键 = `kind + 歌单 id + pageSize`（不含会话内容）；值 = `{playlistId, start, signature, repeated}`；
+   * 有上限、先进先出；重新打开歌单（新的第一页）或会话/缓存清空时一起丢掉。
+   */
+  const serverPageSignatures = new Map();
+  const serverPageSignatureLimit = Math.max(playlistDetailCacheLimit * 4, 8);
+
+  function playlistCacheKey(kind, id) {
+    return `${kind}\u0000${id}`;
+  }
+
+  function forgetServerPlaylistRoute(id) {
+    serverPlaylistRoutes.delete(id);
+  }
+
+  function rememberServerPlaylistRoute(id, kind, sessionMark, serialMark) {
+    serverPlaylistRoutes.delete(id);
+    serverPlaylistRoutes.set(id, { kind, sessionMark, serialMark });
+    while (serverPlaylistRoutes.size > serverPlaylistRouteLimit) {
+      serverPlaylistRoutes.delete(serverPlaylistRoutes.keys().next().value);
+    }
+  }
+
+  function serverPlaylistRouteOf(id, sessionMark, serialMark) {
+    const route = serverPlaylistRoutes.get(id);
+    if (route === undefined) return null;
+    if (route.sessionMark !== sessionMark || route.serialMark !== serialMark) {
+      forgetServerPlaylistRoute(id);
+      return null;
+    }
+    serverPlaylistRoutes.delete(id);
+    serverPlaylistRoutes.set(id, route);
+    return route.kind;
+  }
+
+  /** 这张歌单的所有端点条目一起忘掉（含"最近解析到哪条"的记忆、分页路由与重复指纹）。 */
+  function forgetPlaylistDetail(id) {
+    playlistDetailCache.delete(playlistCacheKey("owned", id));
+    playlistDetailCache.delete(playlistCacheKey("collected", id));
+    activePlaylistKinds.delete(id);
+    forgetServerPlaylistRoute(id);
+    forgetServerPageSignatures(id);
+  }
+
+  // -------------------------------------------------------------------------
+  // 在途请求的"身份证"（R45A3 fix3）
+  // -------------------------------------------------------------------------
+
+  /** 这张歌单新开一次第一页（不论成败/空）：代次 +1，返回新代次。 */
+  function beginPlaylistPage1(id) {
+    playlistPage1Seed += 1;
+    // 先删再插：Map 的插入顺序就是"最近一次尝试"的顺序（上限淘汰时先丢最旧的）
+    playlistPage1Serials.delete(id);
+    playlistPage1Serials.set(id, playlistPage1Seed);
+    while (playlistPage1Serials.size > playlistPage1SerialLimit) {
+      playlistPage1Serials.delete(playlistPage1Serials.keys().next().value);
+    }
+    return playlistPage1Seed;
+  }
+
+  /** 这张歌单当前的第一页代次（`null` = 一次都没开过 / 判据已被上限挤掉）。 */
+  function currentPlaylistPage1Serial(id) {
+    return playlistPage1Serials.get(id) ?? null;
+  }
+
+  function serverPageSignatureKey(kind, id, pageSize) {
+    return `${kind}\u0000${id}\u0000${pageSize}`;
+  }
+
+  function forgetServerPageSignatures(id) {
+    for (const [key, entry] of [...serverPageSignatures]) {
+      if (entry?.playlistId === id) serverPageSignatures.delete(key);
+    }
+  }
+
+  function rememberServerPageSignature(key, entry) {
+    serverPageSignatures.delete(key);
+    serverPageSignatures.set(key, entry);
+    while (serverPageSignatures.size > serverPageSignatureLimit) {
+      serverPageSignatures.delete(serverPageSignatures.keys().next().value);
+    }
+  }
+
+  /** 一页的"是不是同一份"判据：归一化之后的 ID 序列（顺序也算，不掺任何会话内容）。 */
+  function pageSignatureOf(songs) {
+    return songs.map((song) => song.id).join("\u0000");
+  }
+
+  /**
+   * 迟到/过期响应的人话（R45A3 fix3）：只说"这次请求过期了"，不写会话、不写 token、
+   * 不写上一个账号的任何东西（错误会进运行日志与界面）。
+   */
+  function stalePlaylistDetailResult() {
+    return err(
+      "歌单详情：这次请求已经过期（会话已切换，或同一张歌单已有更新的一次请求），迟到的响应已丢弃——请重新打开歌单",
+      MUSIC_ERROR_KINDS.staleResponse,
+    );
+  }
+
+  function rememberPlaylistDetail(entry) {
+    const key = playlistCacheKey(entry.kind, entry.playlistId);
+    if (playlistDetailCache.has(key)) playlistDetailCache.delete(key);
+    playlistDetailCache.set(key, entry);
+    activePlaylistKinds.set(entry.playlistId, entry.kind);
+    while (playlistDetailCache.size > playlistDetailCacheLimit) {
+      const oldest = playlistDetailCache.keys().next().value;
+      const evicted = playlistDetailCache.get(oldest);
+      playlistDetailCache.delete(oldest);
+      // 被上限淘汰的条目不能再在"最近解析到哪条"里留指针（那会指到不存在的东西）
+      if (evicted !== undefined && activePlaylistKinds.get(evicted.playlistId) === evicted.kind) {
+        activePlaylistKinds.delete(evicted.playlistId);
+      }
+    }
+  }
+
+  /**
+   * 取一份**整表**缓存（`null` = 这一页只能去问网络）。
+   *
+   * 只有"能确定它就是整张歌单"的响应才进缓存（见 `getPlaylistDetail` 的判定），
+   * 所以命中即意味着任意页都能从这份缓存切出来。`kind` 显式给了就只读那一条；
+   * `kind='auto'` **只认这张歌单最近一次解析到的那条**——固定顺序（owned 优先）会让
+   * "这次其实解析到公开端点"的第 2 页切到上一轮那份 owned 列表（R45A3 fix2 的复审发现）。
+   * 记不住解析结果（没有指针）时宁可不命中：多取一次网络，好过切错一份歌单。
+   */
+  function cachedPlaylistDetail(id, kind) {
+    if (kind !== "auto") {
+      return playlistDetailCache.get(playlistCacheKey(kind, id)) ?? null;
+    }
+    const active = activePlaylistKinds.get(id);
+    if (active === undefined) return null;
+    return playlistDetailCache.get(playlistCacheKey(active, id)) ?? null;
+  }
+
+  /**
+   * 会话指纹（R45A3 fix2）：只用于"**会话换了就把缓存清掉**"，不落盘、不进设置、不进日志、
+   * 不参与任何请求。用 FNV-1a 32 位散列而不是原文——`token` 是凭据，进程内存里没必要再留
+   * 一份可读副本，而"换没换人"只需要**变更检测**（真撞了碰撞，后果也只是这次没清，下一轮
+   * 第一页同样会重建缓存）。`token` 与 `snsUserID` 分开散列，避免拼串后错位相等。
+   */
+  function fingerprintOf(text) {
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return (hash >>> 0).toString(16);
+  }
+
+  function sessionFingerprint() {
+    const session = currentSession();
+    const token = isNonEmptyString(session?.token) ? session.token : "";
+    const snsUserID = isNonEmptyString(session?.snsUserID) ? session.snsUserID : "";
+    return `${fingerprintOf(token)}:${fingerprintOf(snsUserID)}`;
+  }
+
+  /** 最近一次取缓存时看到的会话指纹（`null` = 还没比过）。 */
+  let playlistCacheSession = null;
+
+  /**
+   * 查缓存**之前**先对一次会话指纹：变了就整张清空。
+   * 返回 `true` = 这次真的清掉了东西（供测试自证"确实清过"）。
+   */
+  function dropPlaylistCacheIfSessionChanged() {
+    const fingerprint = sessionFingerprint();
+    if (playlistCacheSession === fingerprint) return false;
+    playlistCacheSession = fingerprint;
+    const cleared = playlistDetailCache.size > 0 || activePlaylistKinds.size > 0 || serverPlaylistRoutes.size > 0 || serverPageSignatures.size > 0;
+    playlistDetailCache.clear();
+    activePlaylistKinds.clear();
+    serverPlaylistRoutes.clear();
+    serverPageSignatures.clear();
+    return cleared;
+  }
+
+  /** 整表缓存上的第 `page` 页切片（`hasMore` 只看还有没有剩下的条目）。 */
+  function slicePlaylistDetail(entry, { page, pageSize, start }) {
+    const end = start + pageSize;
+    return ok({
+      playlistId: entry.playlistId,
+      // 歌单元信息是**整张歌单的身份**（第一页带回来的那份），后续页照旧给它
+      playlist: entry.playlist,
+      songs: entry.songs.slice(start, end),
+      hasMore: end < entry.total,
+      page,
+      pageSize,
+      /** 这一页是怎么来的：`server` = 网络分页；`local-slice` = 整份响应已下载，这一页是本地切片。 */
+      pageSource: "local-slice",
+      /** 这一页背后那份响应有多少首（本地切片时 = 整张歌单的条数）。只用于如实说明，不是"总数"承诺。 */
+      available: entry.total,
+    });
+  }
+
+  /**
    * 歌单曲目：自建（type=5，`playlistDetail`）与收藏（type=4，`playlistDetailPublic`）
    * 是**两个不同的端点**，而通道只带 `playlistId`（渲染层不知道 kind）。
    *
    * 所以默认 `kind='auto'` = 先自建、拿不到歌单元信息再试公开那条；`kind` 显式给了就只走那一条。
    * 这不是"猜"：两条路由都是参考实测存在且形状明确的，响应用 `playListInfoEx` / `musicListInfoEx`
    * 自证身份——哪条路真的回了歌单，就从哪条路取。
+   *
+   * R45A3 fix1：整表响应的端点在这里被"收边"— 见 `playlistDetailCache` 的说明。
+   * R45A3 fix3：每一次请求都带上"开始时的会话指纹 + 这张歌单第一页的代次"，`await` 回来后
+   * 两样都对得上才许写缓存/交回调用方（否则 `stale_response`）；第一页的失效点挪到发起之前。
    */
   async function getPlaylistDetail(playlistId, request = {}) {
     if (!isNonEmptyString(playlistId)) return err("歌单曲目接口需要 playlistId", MUSIC_ERROR_KINDS.missingParam);
@@ -1365,6 +1737,39 @@ export function createMusicApi(options = {}) {
     const pageSize = positiveInt(request.pageSize, defaultPageSize);
     const start = startOf(page, pageSize);
     const kind = request.kind ?? "auto";
+
+    // R45A3 fix2：会话换了人/换了 token → 上一轮那份整表缓存属于别人的账号，先清再查
+    dropPlaylistCacheIfSessionChanged();
+
+    /**
+     * 这一次请求的"身份证"（R45A3 fix3）：开始时的会话指纹 + 这张歌单第一页的代次。
+     *
+     * 入口那次比对只能拦住"**进入时**会话已经变了"，拦不住"HTTP 在途时会话换了人 / 又开了
+     * 一次第一页"。旧响应迟到时若不复查，它会把「过去那份」写进缓存，而 `playlistCacheSession`
+     * 记的已经是新会话 → 新会话的第 2 页就从那份属于别人的列表里切（复审点名的洞）。
+     * 两样都只是内存内的不透明比较值，不含 token 原文，不进缓存数据/日志/设置/磁盘。
+     */
+    const sessionMark = sessionFingerprint();
+    if (page === 1) {
+      // 第一页一开就把这张歌单所有 kind 的旧条目失效——**失败/空响应同样算"这一轮已经问过"**
+      // （R45A3 fix3：旧实现在失败/空时提前 return，上一轮的整表缓存还留着，页 2 于是读出旧内容）。
+      // 失效点必须在网络之前：放到"拿到响应之后"就等于让失败这一档继续沿用旧缓存。
+      forgetPlaylistDetail(id);
+      beginPlaylistPage1(id);
+    }
+    const serialMark = currentPlaylistPage1Serial(id);
+    /** `await` 回来后：会话没换、这张歌单也没开更新的第一页，才许写缓存/交回调用方。 */
+    const attemptIsCurrent = () =>
+      sessionFingerprint() === sessionMark && currentPlaylistPage1Serial(id) === serialMark;
+
+    // ① 后续页：整份响应已经在缓存里 → 本地切片（**不发网络**，同一页读多少次都是同一份）
+    const cached = page > 1 ? cachedPlaylistDetail(id, kind) : null;
+    if (cached !== null) return slicePlaylistDetail(cached, { page, pageSize, start });
+
+    const serverRoute = page > 1 && kind === "auto" ? serverPlaylistRouteOf(id, sessionMark, serialMark) : null;
+    if (page > 1 && kind === "auto" && serverRoute === null) {
+      return err("歌单详情缺少第一页的服务端端点选择，请重新加载第 1 页", MUSIC_ERROR_KINDS.invalidResponse);
+    }
 
     const failures = [];
 
@@ -1375,7 +1780,12 @@ export function createMusicApi(options = {}) {
       if (!isObject(container)) return { empty: true, result };
       const songs = extractList({ list: container.playListSongInfoList ?? [] }).map((item) => normalizeTrack(item, trackOptions)).filter((track) => track !== null);
       const playlist = normalizePlaylist({ ...(isObject(container.playListInfo) ? container.playListInfo : {}), contentType: "5" }, { isSafeUrl });
-      return { songs, playlist, received: Array.isArray(container.playListSongInfoList) ? container.playListSongInfoList.length : 0 };
+      return {
+        kind: "owned",
+        songs,
+        playlist,
+        received: Array.isArray(container.playListSongInfoList) ? container.playListSongInfoList.length : 0,
+      };
     }
 
     async function collected() {
@@ -1388,23 +1798,108 @@ export function createMusicApi(options = {}) {
       const songs = extractList({ list: container.songSimpleInfos ?? [] }).map((item) => normalizeTrack(item, trackOptions)).filter((track) => track !== null);
       const detail = isObject(container.musicListDetail) ? container.musicListDetail : {};
       const playlist = normalizePlaylist({ ...detail, contentType: detail.contentType ?? "4" }, { isSafeUrl });
-      return { songs, playlist, received: Array.isArray(container.songSimpleInfos) ? container.songSimpleInfos.length : 0 };
+      return {
+        kind: "collected",
+        songs,
+        playlist,
+        received: Array.isArray(container.songSimpleInfos) ? container.songSimpleInfos.length : 0,
+      };
     }
 
-    const order = kind === "owned" ? [owned] : kind === "collected" ? [collected] : [owned, collected];
+    const order =
+      kind === "owned"
+        ? [owned]
+        : kind === "collected"
+          ? [collected]
+          : serverRoute === "owned"
+            ? [owned]
+            : serverRoute === "collected"
+              ? [collected]
+              : [owned, collected];
     for (const attempt of order) {
       const found = await attempt();
+
+      // R45A3 fix3：`await` 回来先复查"身份证"——会话在途换了人，或同一张歌单又开了更新的
+      // 一次第一页，这份响应属于**过去**：整条作废（不写缓存、不交回调用方、也不再试下一条端点）。
+      if (!attemptIsCurrent()) return stalePlaylistDetailResult();
+
       if (found.failure) {
         failures.push(found.failure);
         continue;
       }
       if (found.empty) continue;
-      return ok({
+
+      /**
+       * ② 这一份响应的形状决定要不要进缓存。旧条目在第一页**发起之前**就失效过了（见上面的
+       * `forgetPlaylistDetail`）：第一页不论成败都算"这一轮已经问过"，失败/空响应一样不许留旧缓存。
+       *
+       * 为什么是"所有 kind"而不是"解析到的那个 kind"：同一份 `playlistId` 在自建/公开两条
+       * 端点上的曲目可以不同，只失效一条等于给另一条留了个"上一轮的答案"——页 1 这次由公开
+       * 端点解析、页 2 却从上一轮那份自建列表切，界面上就是同一张歌单的两页来自两条路由。
+       *
+       * 这份响应**能确定它就是整张歌单**吗？两种形状能确定：
+       * 1. `received > pageSize`：请求只要 50 条，它给了更多——它根本不看窗口（真接口的实测行为）；
+       * 2. 第一页 `received !== pageSize`：首页不满一页 = 没有下一页；首页多于（不可能，见 1）——
+       *    总之"首页给出的条数"就是全部。
+       *
+       * 判断不了的两种形状**不进缓存**，原样交出（那是服务端自己在分页的证据）：
+       * 首页正好一整页；或后续页只给了一小段（可能只是这一页的尾巴）。
+       * 这一档的 `hasMore` 仍用老规矩 `received >= pageSize`——与改动前完全一致，
+       * 所以"服务端真的认 start/limit"那种形状不会因为本地切片被吞掉。
+       * 唯一的例外是"整页重复"（R45A3 fix3，见 `serverPageSignatures`）：恰好一整页 + 下一份
+       * 整页的归一化 ID 序列完全相同（窗口起点不同）→ 收敛成"没有更多"，免得反复取同一页。
+       */
+      const wholeList = found.received > pageSize || (page === 1 && found.received !== pageSize);
+      if (!wholeList) {
+        if (kind === "auto" && page === 1) rememberServerPlaylistRoute(id, found.kind, sessionMark, serialMark);
+        const fullPage = found.received >= pageSize;
+        if (fullPage) {
+          const signature = pageSignatureOf(found.songs);
+          const signatureKey = serverPageSignatureKey(found.kind, id, pageSize);
+          const previous = serverPageSignatures.get(signatureKey);
+          const sameAsBefore = previous !== undefined && previous.signature === signature;
+          const repeated = sameAsBefore && (previous.repeated === true || previous.start !== start);
+          rememberServerPageSignature(signatureKey, { playlistId: id, start, signature, repeated });
+          if (repeated) {
+            return ok({
+              playlistId: id,
+              playlist: found.playlist,
+              // 重复的整页**不再交给调用方**：交出去界面就会把同一批歌再渲染一遍
+              songs: [],
+              hasMore: false,
+              page,
+              pageSize,
+              /** `server-repeat` = 服务端这次回的整页与上一页一模一样（它没认窗口），按"没有更多"收敛。 */
+              pageSource: "server-repeat",
+              /** 只说这一份响应有多少条，**不**冒充这张歌单的总数（端点没给可用的总数元数据）。 */
+              available: found.songs.length,
+            });
+          }
+        }
+        return ok({
+          playlistId: id,
+          playlist: found.playlist,
+          songs: found.songs,
+          hasMore: found.received >= pageSize,
+          page,
+          pageSize,
+          pageSource: "server",
+          available: found.songs.length,
+        });
+      }
+
+      // 同一张歌单只留**一份**解析结果：后续页直接问网络时（缓存里没有这条 kind）也一样，
+      // 否则两条端点各存一份、`auto` 就只能靠"最近一次解析"的记忆兜着，多一份旧条目就多一次切错的机会。
+      forgetPlaylistDetail(id);
+      const entry = {
+        kind: found.kind,
         playlistId: id,
-        playlist: found.playlist,
         songs: found.songs,
-        hasMore: found.received >= pageSize,
-      });
+        playlist: found.playlist,
+        total: found.songs.length,
+      };
+      rememberPlaylistDetail(entry);
+      return slicePlaylistDetail(entry, { page, pageSize, start });
     }
 
     // 两条路都没给出歌单：如实报第一段的失败（网络/端点/业务码），都已成功但内容为空则报 invalid_response

@@ -363,7 +363,15 @@ test("R40 搜索布局：入口只有侧栏那个常驻框，搜索页里没有�
   assert.match(detail, /PLAYLIST_ENQUEUE_LABEL/, "「加入队列」同理");
   assert.match(detail, /playlistPartialNoticeText/, "分页没走完要有一句说明（不把已加载说成全部）");
   assert.match(detail, /<AmllBackground/, "头部底景用 AMLL 官方流体背景");
-  assert.match(detail, /<TrackTable/, "正文仍是那一个曲目表（第 5 项修好之后）");
+  assert.match(
+    detail,
+    /<BrowsableTrackList/,
+    "正文仍是那一个曲目表（R45A3 起包在触底分页的外壳里：外壳与四页共用同一份渲染）",
+  );
+  // 外壳里必须还是那一个 TrackTable（把正文换成别的东西会让双击播放/键盘可达一起消失）
+  const shell = pages.slice(pages.indexOf("function BrowsableTrackList"), pages.indexOf("export interface PageNavigationProps"));
+  assert.ok(shell.length > 0, "要能在 pages.tsx 里找到 BrowsableTrackList");
+  assert.match(shell, /<TrackTable/, "分页外壳的正文仍是 TrackTable");
   assert.doesNotMatch(detail, /\bfetch\s*\(/, "封面仍然只能走 <img>/new Image（不 fetch）");
 });
 

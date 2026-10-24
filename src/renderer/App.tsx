@@ -1,12 +1,23 @@
 /**
  * 主窗外壳（R7 搭骨架，R8 接主界面，R11 接托盘联动）。
  *
- * **顺序是契约**：门禁判定在最前，未登录（含"还不知道"）绝不渲染 app-shell——
+ * **顺序是契约**：界面三态判定在最前，未登录（含"还不知道"）绝不渲染 app-shell——
  * `test/login-gate.test.mjs` 扫源码钉住这个顺序（顺序反了就是把没登录的用户放进主界面，
  * 然后每个请求都失败，用户只会看到一堆报错）。
  *
- * 主界面本身（`LibraryShell`）**必须晚于门禁挂载**：它一挂载就开始取库数据，
- * 未登录时那些请求只会全部失败。门禁通过才渲染，是从结构上保证这件事，而不是靠判断。
+ * R45A1（用户第 10 项）：**"还不知道"有自己的界面**。`checking` 不等于未登录——
+ * 它是"core 还没答上来"（首帧状态，等一次 IPC 往返）。旧版把这一档也画成 `LoginGate`，
+ * 于是已登录的会话冷启动时第一帧就是整张登录页，快照落地才翻成主界面 → 用户看见"闪一下
+ * 登录页"。现在三态各有一个落点（判定唯一真源：`features/auth/startup-view.mjs`）：
+ *
+ * ```
+ *   checking     → 中性启动屏（StartupChecking：一枚转圈，无二维码、无文案、无可点元素）
+ *   logged_out   → LoginGate（原来那一页；二维码到这一刻才自动发起）
+ *   logged_in    → app-shell
+ * ```
+ *
+ * 主界面本身（`LibraryShell`）**必须晚于三态判定挂载**：它一挂载就开始取库数据，
+ * 未登录时那些请求只会全部失败。判定放行才渲染，是从结构上保证这件事，而不是靠判断。
  *
  * 页面切换没有路由库：视图就是一个 `useState` + `renderPage()` 的 switch
  * （页面只有八个，路由库在这里只有依赖和"浏览器历史语义不适用"的麻烦）。
@@ -26,7 +37,7 @@ import {
 } from "lucide-react"
 
 import { APP_OPEN_SETTINGS } from "../shared/channels.ts"
-import { LoginGate, useAuthGate } from "./login-gate"
+import { LoginGate, StartupChecking, useAuthGate } from "./login-gate"
 import type { AccountProfile } from "./login-gate"
 import { Button } from "./components/ui/button"
 import {
@@ -74,7 +85,7 @@ import {
   SearchPage,
   SettingsPage,
 } from "./pages.tsx"
-import { shouldShowLoginGate } from "./features/auth/login-gate-logic.mjs"
+import { STARTUP_VIEW, startupViewOf } from "./features/auth/startup-view.mjs"
 import {
   ACCOUNT_AREA_TESTID,
   ACCOUNT_LOGOUT_CANCEL,
@@ -108,9 +119,27 @@ import { TRAY_AVAILABLE, trayAvailabilityFromAnswer } from "./features/settings/
 
 export function App() {
   const gate = useAuthGate()
+  /**
+   * R45A1（用户第 10 项）：**三态**，不是两态。
+   *
+   * `checking`（还不知道：等 `auth:status` / `auth:get-status` 的应答）**不是**未登录，
+   * 它有自己的界面（`StartupChecking` 那块安静的骨架）。旧代码在这里只问"能不能渲染
+   * app-shell"，把 `checking` 一并画成 `LoginGate`——已登录的会话冷启动时，那第一帧就是
+   * 用户看见的"闪一下登录页"（快照要等一次 IPC 往返才到）。
+   *
+   * 判定只有一处（`features/auth/startup-view.mjs`，纯函数）：
+   * - 检查中不建二维码订单（`shouldAutoStartQr` 只认**确定未登录**）；
+   * - app-shell 仍然只在**已登录**时渲染（"能不能渲染 shell"仍由 `shouldShowLoginGate` 判，
+   *   `startupViewOf` 直接读它，两个模块不可能各说一套）；
+   * - **复审 R45A1**：`checking` 恒为中性启动屏——包括状态查询真的失败那一档。失败时那屏
+   *   自己长出「重新检查登录状态」（真的重发 `auth:get-status`）与网页登录入口，
+   *   所以"不许画成登录页"与"不许困在空转的屏上"同时成立（见 `startupCheckingStatusOf`）。
+   */
+  const view = startupViewOf(gate.state)
 
-  if (shouldShowLoginGate(gate.state)) {
-    return <LoginGate gate={gate} />
+  if (view !== STARTUP_VIEW.appShell) {
+    // 确定未登录 → 登录门禁；还不知道（含查询失败）→ 中性启动屏（它自己带可操作的两条出路）
+    return view === STARTUP_VIEW.loginGate ? <LoginGate gate={gate} /> : <StartupChecking gate={gate} />
   }
 
   // app-shell：登录之后才存在的那一块（R7 的测试锚点，R8 保留）

@@ -64,6 +64,12 @@ import {
   THEME_LABELS,
   themeOptionTestId,
 } from "../src/renderer/features/theme/theme.mjs";
+import {
+  STARTUP_CHECKING_LABEL,
+  STARTUP_CHECKING_TESTID,
+  STARTUP_RETRY_LABEL,
+  STARTUP_RETRY_TESTID,
+} from "../src/renderer/features/auth/startup-view.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 /** 中间产物落在 .tmp（已 gitignore），与 test-browser.mjs 的守卫目录同一个约定。 */
@@ -75,7 +81,7 @@ const BUNDLE = `${OUT_DIR}/entry.mjs`;
 function entriesSource() {
   return `import { renderToStaticMarkup } from "react-dom/server";
 
-import { LoginGate } from "../../src/renderer/login-gate.tsx";
+import { LoginGate, StartupChecking } from "../../src/renderer/login-gate.tsx";
 
 /**
  * 把一份门禁状态渲染成静态标记。
@@ -85,6 +91,23 @@ import { LoginGate } from "../../src/renderer/login-gate.tsx";
 export function renderGate(state) {
   return renderToStaticMarkup(
     <LoginGate gate={{ state, startQr() {}, startLogin() {} }} />,
+  );
+}
+
+/**
+ * R45A1：**启动第一屏**（\`checking\` 那一档）渲染出来的标记。
+ *
+ * 它与 App 的第一帧是同一个东西：\`useAuthGate\` 的初值是 \`initialGateState()\`（checking），
+ * effect 要到首帧之后才跑，所以"冷启动第一帧"就是"这份状态 + 这个组件"。
+ *
+ * 复审 R45A1 起它还要吃状态：查询失败那一档仍是这一屏，只是自己长出
+ * 「重新检查登录状态」与网页登录入口。动作是桩（SSR 不跑回调），本文件只问"这张屏上有什么"。
+ */
+export function renderStartupChecking(state) {
+  return renderToStaticMarkup(
+    <StartupChecking
+      gate={{ state, startQr() {}, startLogin() {}, refreshStatus() {} }}
+    />,
   );
 }
 `;
@@ -722,4 +745,111 @@ test("标记：加载态给同尺寸占位（不是空白也不是跳一下）",
   assert.match(qrHostTag(html), /\bborder\b/, "占位也在那个带边框的容器里（尺寸不跳）");
   assert.equal(occurrences(html, QR_HINT_TEXT), 1, "加载态下提示文字照样在");
   assert.ok(buttonLabels(html).includes(WEB_LOGIN_ENTRY_TEXT), "加载态下常驻入口也在");
+});
+
+// ---------------------------------------------------------------------------
+// R45A1（用户第 10 项）：启动第一屏是中性启动态，**不是**登录页
+// ---------------------------------------------------------------------------
+//
+// 为什么必须在这一层（真 SSR，而不是源码扫描）：用户看见的是**渲染出来的东西**。
+// 源码里"有 `StartupChecking` 这个名字"证明不了那一屏上没有二维码、没有标题、没有按钮。
+//
+// 已登录的会话冷启动时，首帧状态就是 `initialGateState()`（`checking`）：`useAuthGate` 的
+// `useState` 初值，effect 要到首帧之后才跑。所以这里渲出来的就是**那一帧**，
+// 而它必须是安静的启动屏——不是门禁（旧版在 `phase !== loggedIn` 时直接渲 `LoginGate`，
+// 这就是"已登录启动先闪登录页"的原始写法）。
+
+test("R45A1 启动第一屏：checking 渲的是中性启动态（无二维码、无标题、无入口、无按钮）", async () => {
+  const { renderStartupChecking } = await gateRenderer();
+  const html = renderStartupChecking(initialGateState());
+
+  assert.match(html, new RegExp(`data-testid="${STARTUP_CHECKING_TESTID}"`), `启动屏要有测试锚点：${html}`);
+  assert.match(html, /role="status"/, "启动态要有一条可被读屏感知的状态区");
+  assert.match(html, /aria-busy="true"/, "告诉辅助技术：还在启动");
+  assert.match(html, new RegExp(`aria-label="${STARTUP_CHECKING_LABEL}"`), "可达名字来自唯一真源");
+
+  // 安静：整屏没有一句可见文案（用户要求「安静中性」，不允许文案堆叠）
+  assert.equal(
+    visibleText(html).replaceAll("\u0001", "").trim(),
+    "",
+    `启动第一屏不该有可见文案：${visibleText(html).replaceAll("\u0001", "|")}`,
+  );
+
+  // 登录页里的一切都不在：标题 / 提示 / 常驻入口 / 二维码容器 / 主题控件 / canvas / 任何可点元素
+  for (const text of [LOGIN_GATE_TITLE, QR_HINT_TEXT, WEB_LOGIN_ENTRY_TEXT]) {
+    assert.equal(occurrences(html, text), 0, `启动第一屏上出现了登录页的文案「${text}」`);
+  }
+  for (const marker of [
+    `data-testid="${QR_REFRESH_TESTID}"`,
+    `data-testid="${WEB_LOGIN_ENTRY_TESTID}"`,
+    `data-testid="${THEME_CONTROL_TESTID}"`,
+    "<canvas",
+    "<button",
+    "<header",
+  ]) {
+    assert.equal(html.includes(marker), false, `启动第一屏上不该有 ${marker}`);
+  }
+  assert.equal(buttonLabels(html).length, 0, "启动第一屏没有任何可点的东西（它不是门禁，也不是主界面）");
+});
+
+test("R45A1 启动第一屏：确定未登录之后才换成登录页（两屏在标记层面确实是两个东西）", async () => {
+  const { renderGate, renderStartupChecking } = await gateRenderer();
+  const gate = renderGate(loggedOut());
+
+  assert.match(gate, new RegExp(`data-testid="${QR_REFRESH_TESTID}"`), "登录页仍有二维码容器");
+  assert.equal(occurrences(gate, LOGIN_GATE_TITLE), 1, "登录页仍有标题");
+  assert.ok(buttonLabels(gate).includes(WEB_LOGIN_ENTRY_TEXT), "登录页仍有常驻次要入口");
+  assert.equal(
+    gate.includes(`data-testid="${STARTUP_CHECKING_TESTID}"`),
+    false,
+    "登录页不该带启动屏的锚点（两屏不许混成一个）",
+  );
+  assert.notEqual(renderStartupChecking(initialGateState()), gate);
+});
+
+/**
+ * 复审 R45A1（Important）：**查询失败那一档仍是中性启动屏**。
+ *
+ * 上一版把这一档画成了 LoginGate——合同写的是 checking **绝不**渲染 LoginGate/二维码。
+ * 但是"不许画成登录页"与"必须可操作"要同时成立，所以这一屏自己长出三件东西：
+ * 一句原因、一个真的重发 `auth:get-status` 的动作、一个网页登录入口。
+ */
+test("R45A1 查询失败：仍是中性启动屏（无二维码/无登录页文案），但原因与两个动作都在", async () => {
+  const { renderStartupChecking } = await gateRenderer();
+  const failed = reduceGateState(initialGateState(), {
+    type: LOGIN_GATE_EVENT.failed,
+    message: "查询登录状态失败：未知请求频道：auth:get-status",
+  });
+  const html = renderStartupChecking(failed);
+
+  // ① 仍是那一屏（不是登录页）
+  assert.match(html, new RegExp(`data-testid="${STARTUP_CHECKING_TESTID}"`), "失败档还是中性启动屏");
+  assert.match(html, /role="status"/);
+  assert.match(html, /aria-busy="true"/);
+
+  // ② 登录页里的一切都不在：没有二维码容器、没有 canvas、没有标题/提示/主题控件
+  for (const marker of [`data-testid="${QR_REFRESH_TESTID}"`, "<canvas", "<header"]) {
+    assert.equal(html.includes(marker), false, `失败档不该出现 ${marker}（checking 永不渲染二维码）`);
+  }
+  for (const text of [LOGIN_GATE_TITLE, QR_HINT_TEXT]) {
+    assert.equal(occurrences(html, text), 0, `失败档不该出现登录页的文案「${text}」`);
+  }
+
+  // ③ 原因看得见（用户不能困在一张安静的屏上）
+  assert.equal(occurrences(html, "查询登录状态失败"), 1, `失败原因要在屏上出现一次：${visibleText(html)}`);
+
+  // ④ 两个动作都在，且各自只有一处
+  const buttons = buttonSummaries(html);
+  assert.deepEqual(
+    buttons.map((button) => button.testid || button.text).sort(),
+    [WEB_LOGIN_ENTRY_TESTID, STARTUP_RETRY_TESTID].sort(),
+    `失败档恰好两个动作（重新检查 + 网页登录）：${JSON.stringify(buttons)}`,
+  );
+  const retry = buttons.find((button) => button.testid === STARTUP_RETRY_TESTID);
+  assert.equal(retry?.text, STARTUP_RETRY_LABEL, "重试按钮的文案来自唯一真源");
+  assert.equal(retry?.disabled, false, "要能点（点不动就等于没有这条路）");
+  assert.equal(buttonLabels(html).includes(WEB_LOGIN_ENTRY_TEXT), true, "网页登录入口照旧是那个形态");
+
+  // ⑤ 安静档一个按钮都没有（失败才长动作）
+  assert.equal(buttonLabels(renderStartupChecking(initialGateState())).length, 0);
 });

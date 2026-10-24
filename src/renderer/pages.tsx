@@ -12,8 +12,14 @@
  *
  * 端点目前全部未配置（docs/API_CONTRACT.md §2.1），所以"接口尚未配置（待联调确认）。"
  * 就是这些页面今天最常显示的那句话——这是如实，不是坏掉。
+ *
+ * R45A3（简报第 12 项"歌曲列表触底加载，不一次加载全部"）：列表分成两种，**不许混为一谈**——
+ * - 歌单详情 / 搜索 / 专辑：接口真的认 `page`/`pageSize`，滚到离底 240px 取**下一页**；
+ * - 歌手 / 历史：接口**本身不分页**，一次响应就是全部，UI 只本地分批揭示 50 条，
+ *   而且明说"后端一次返回 N 首（1 次网络请求）"——分批显示**不减少任何字节**。
+ * 判定（合并/去重/竞态/重试/上膛）全在 `features/library/pagination.mjs`，这里只接线。
  */
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 import { ListPlusIcon, ListMusicIcon, PlayIcon } from "lucide-react"
 
 import {
@@ -81,6 +87,35 @@ import {
   settingsFailureText,
   validateProxyForm,
 } from "./features/settings/settings-form.mjs"
+import {
+  PAGINATION_FAILURE_TESTID,
+  PAGINATION_PAGE_SIZE,
+  PAGINATION_SOURCE,
+  PAGINATION_RETRY_TESTID,
+  PAGINATION_ROOT_MARGIN,
+  PAGINATION_SENTINEL_TESTID,
+  PAGINATION_STATUS_TESTID,
+  PLAYLIST_SLICE_NOTICE_TESTID,
+  applyFailure,
+  applyPage,
+  beginPage,
+  createLocalListState,
+  createPaginationState,
+  findScrollRoot,
+  hasRevealableItems,
+  isInitialPaging,
+  localRevealNoticeText,
+  markSentinelAway,
+  nextPageOf,
+  paginationNoticeText,
+  playlistLocalSliceNoticeText,
+  resetPagination,
+  retryPagination,
+  revealMore,
+  shouldObserve,
+  shouldRequestNext,
+  visibleItemsOf,
+} from "./features/library/pagination.mjs"
 import { VIEW, createView, viewParam } from "./features/library/views.mjs"
 import { THEME_CHOICES, themeLabel } from "./features/theme/theme.mjs"
 import { useThemeChoice } from "./features/theme/use-theme-choice.ts"
@@ -96,8 +131,13 @@ import {
 } from "./features/lyrics/lyrics-window.mjs"
 import type { LyricsWindowBinding } from "./use-lyrics-window.ts"
 
-/** 页大小：收藏页有自己的常量（滚动加载），这里是一页式列表的取数大小。 */
-const LIST_PAGE_SIZE = 50
+/**
+ * 页大小（收藏页有自己的常量）：与协议层默认的 50 同档。
+ *
+ * 曲目列表触底分页另用 `PAGINATION_PAGE_SIZE`（pagination.mjs 里的同一档数字，
+ * 那里是唯一真源——页面与测试都按它算"一页几首"）。
+ */
+const LIST_PAGE_SIZE = PAGINATION_PAGE_SIZE
 
 /** 视图对象（与 features/library/views.mjs 的 createView 产物同形）。 */
 export interface View {
@@ -162,38 +202,319 @@ function useLibraryResource<T>(
   return state
 }
 
-/** 曲目列表页的公共外壳：加载 / 失败 / 空 / 表格四种渲染只写一次。 */
-function TrackListView({
-  emptyText,
-  resource,
-  onActivateTrack,
-  onOpenAlbum,
-  onOpenArtist,
+// ---------------------------------------------------------------------------
+// 触底分页（R45A3）：判定全在 pagination.mjs，这里只做 React 接线
+// ---------------------------------------------------------------------------
+
+/** 分页状态（与 pagination.mjs 的产物同形）。 */
+type PaginationState = ReturnType<typeof createPaginationState>
+/** 本地分批状态（歌手/历史：一次响应，分批揭示）。 */
+type LocalListState = ReturnType<typeof createLocalListState>
+
+/** 空数组的稳定身份：`data ?? []` 每次渲染都给新数组，会把重置 effect 变成死循环。 */
+const NO_ITEMS: unknown[] = []
+
+/** 协议层一页的回执 → 分页纯逻辑要的形状（渲染层不再解析原始响应）。 */
+function pageAnswerOf(data: unknown) {
+  const payload = (data ?? {}) as {
+    songs?: unknown
+    hasMore?: unknown
+    skipped?: unknown
+    playlist?: unknown
+    pageSource?: unknown
+    available?: unknown
+  }
+  return {
+    items: Array.isArray(payload.songs) ? payload.songs : [],
+    // 只有协议层明说"还有下一页"才算更多（渲染层不自己从条数猜）
+    hasMore: payload.hasMore === true,
+    skipped: Number.isInteger(payload.skipped) ? (payload.skipped as number) : 0,
+    // 歌单详情的歌单元信息跟着第一页过来（分页纯逻辑只认第一页那份）
+    meta: payload.playlist ?? null,
+    // 这一页是怎么来的（`server` / `local-slice` / `server-repeat`）与背后那份响应的条数：两者都由协议层说，
+    // 渲染层既不猜"这是本地切片"，也不自己数总数（R45A3 fix1）
+    pageSource: payload.pageSource,
+    available: payload.available,
+  }
+}
+
+interface Paging {
+  state: PaginationState
+  /** 哨兵：接近它（进入前 240px）取下一页 */
+  sentinelRef: RefObject<HTMLDivElement | null>
+  /** 失败重试：用户在错误条上点的那一下（不自动重试，见 pagination.mjs） */
+  retry: () => void
+}
+
+/**
+ * 服务端分页的列表取数（歌单详情 / 搜索 / 专辑）。
+ *
+ * 三件刻意的接线：
+ * 1. **查询换代**：`holder.key` 与当前查询键不一致时**渲染期就给空状态**——切关键词的那一帧
+ *    绝不能把上一个词的结果留在屏幕上（那是最容易"看起来对、其实在撒谎"的一处）；
+ * 2. **正在请求不重复发**：`inFlightRef` 按"查询代次 + 页号"记在途请求，观察器/重试/首屏
+ *    三条路同时触发也只发一次；
+ * 3. **root 是应用内容区那个滚动容器**（`findScrollRoot` 从哨兵往上找 `overflow-y:auto`），
+ *    页面自己不再造一层滚动容器——那是 `no-self-visual` 的例外集合写死的东西。
+ */
+function usePaginatedTracks({
+  channel,
+  params,
+  enabled = true,
+  pageSize = PAGINATION_PAGE_SIZE,
+  keyOf,
 }: {
-  /** 空态文案由各页给：搜索的"查无所获"与"还没搜"不是同一句话 */
+  channel: RequestChannel
+  /** 载荷里除 `page`/`pageSize` 之外的部分（关键字/歌单 id/专辑 id） */
+  params: Record<string, unknown>
+  enabled?: boolean
+  pageSize?: number
+  /** 去重键（默认按 id；历史/同类列表可以传"含播放时间"的键保留重复） */
+  keyOf?: (item: unknown) => string | null
+}): Paging {
+  const paramsKey = JSON.stringify(params)
+  const queryKey = `${channel}\u0000${paramsKey}\u0000${enabled ? 1 : 0}`
+  const [holder, setHolder] = useState<{ key: string; state: PaginationState }>(() => ({
+    key: queryKey,
+    state: createPaginationState(),
+  }))
+  // 换代的那一帧还没跑 effect：这时先给空状态，别让旧查询的结果继续挂在屏幕上
+  const state = holder.key === queryKey ? holder.state : createPaginationState()
+  const stateRef = useRef(state)
+  stateRef.current = state
+  const keyOfRef = useRef(keyOf)
+  keyOfRef.current = keyOf
+  const generationRef = useRef(0)
+  const inFlightRef = useRef<{ generation: number; page: number } | null>(null)
+  const sentinelRef = useRef<HTMLDivElement | null>(null)
+
+  /** 本查询代次的写状态入口：查询换过（key 不匹配）的迟到响应一律写不进去。 */
+  const patch = useCallback(
+    (update: (previous: PaginationState) => PaginationState) => {
+      setHolder((previous) => (previous.key === queryKey ? { ...previous, state: update(previous.state) } : previous))
+    },
+    [queryKey],
+  )
+
+  const fetchPage = useCallback(
+    async (generation: number, page: number) => {
+      const inFlight = inFlightRef.current
+      // 正在请求不重复发：同一代次同一页的第二条触发直接吞掉（页号由 state 决定，不会跳页）
+      if (inFlight !== null && inFlight.generation === generation) return
+      inFlightRef.current = { generation, page }
+      patch((previous) => beginPage(previous))
+      try {
+        const data = await coreCall<unknown>(channel, { ...JSON.parse(paramsKey), page, pageSize })
+        const answer = pageAnswerOf(data)
+        patch((previous) => applyPage(previous, { generation, ...answer }, keyOfRef.current))
+      } catch (failure) {
+        // 错误路径才写控制台（结构化错误的人话由 libraryFailureText 给，这里不编）
+        console.warn(`库列表分页请求失败（${channel}，第 ${page} 页）：`, failure)
+        patch((previous) => applyFailure(previous, { generation, message: libraryFailureText(failure) }))
+      } finally {
+        const current = inFlightRef.current
+        if (current !== null && current.generation === generation && current.page === page) inFlightRef.current = null
+      }
+    },
+    [channel, paramsKey, pageSize, patch],
+  )
+
+  // 查询变化（换关键词/换歌单/换专辑/换页）或启用状态变化：换代清空，取第一页
+  useEffect(() => {
+    generationRef.current += 1
+    const generation = generationRef.current
+    inFlightRef.current = null
+    setHolder({ key: queryKey, state: resetPagination(createPaginationState(), generation) })
+    // 没启用（没有关键字/没有 id）就不发请求：那不是错误，是"还没到取数的时候"
+    if (enabled) void fetchPage(generation, 1)
+  }, [queryKey, enabled, fetchPage])
+
+  /**
+   * 哨兵：进入前 240px 取下一页。
+   *
+   * "不无限连拉"靠 `armed`（pagination.mjs）：一页取完先卸膛，**离开触发区**才重新上膛。
+   * 观察器只在 `observe`/查询/`rescan` 变化时重建——重建会立刻回调一次当前相交状态，
+   * 所以"取完一页还停在底部"不会被自己再触发一次。
+   */
+  const [rescan, setRescan] = useState(0)
+  const observe = shouldObserve(state)
+  useEffect(() => {
+    const sentinel = sentinelRef.current
+    if (sentinel === null || !observe) return
+    const root = findScrollRoot(sentinel)
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) {
+          setHolder((previous) => (previous.key === queryKey ? { ...previous, state: markSentinelAway(previous.state) } : previous))
+          return
+        }
+        const current = stateRef.current
+        if (!shouldRequestNext(current)) return
+        void fetchPage(generationRef.current, nextPageOf(current))
+      },
+      { root, rootMargin: PAGINATION_ROOT_MARGIN },
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [observe, queryKey, rescan, fetchPage])
+
+  /**
+   * 用户手势（滚轮 / 触摸）= "再次接近底部"，也是短列表唯一能继续取页的路。
+   *
+   * 为什么不只靠观察器：一页取完后哨兵如果**还**在视口里（列表比屏幕短），相交状态不再变化，
+   * 观察器就再也不会回调——用户明明想往下看，却没有下一页。所以一次真实手势就重新上膛并
+   * 请求观察器"再看一眼"，仍然一次手势只取一页（`rescan` 只在需要上膛时才动，滚动期间不重建）。
+   */
+  useEffect(() => {
+    const sentinel = sentinelRef.current
+    if (sentinel === null || !observe) return
+    const root = findScrollRoot(sentinel)
+    const target: any = root ?? (typeof window === "undefined" ? null : window)
+    if (target === null) return
+    const onGesture = () => {
+      if (stateRef.current.armed === true) return
+      setHolder((previous) => (previous.key === queryKey ? { ...previous, state: markSentinelAway(previous.state) } : previous))
+      setRescan((value) => value + 1)
+    }
+    target.addEventListener("wheel", onGesture, { passive: true })
+    target.addEventListener("touchmove", onGesture, { passive: true })
+    return () => {
+      target.removeEventListener("wheel", onGesture)
+      target.removeEventListener("touchmove", onGesture)
+    }
+  }, [observe, queryKey])
+
+  const retry = useCallback(() => {
+    const current = stateRef.current
+    if (current.loading) return
+    const ready = retryPagination(current)
+    patch(() => ready)
+    void fetchPage(generationRef.current, nextPageOf(ready))
+  }, [fetchPage, patch])
+
+  return { state, sentinelRef, retry }
+}
+
+/**
+ * 本地分批（歌手 / 历史）：接口**不分页**，一次响应就是全部，这里只按批揭示。
+ *
+ * `revealMore` 不发任何请求（纯渲染策略）；换歌手/重进历史页时换成新的一份，
+ * 重置发生在**渲染期**（effect 会晚一帧，那一帧会闪一次空态）。
+ */
+function useLocalReveal(items: unknown[]): {
+  state: LocalListState
+  sentinelRef: RefObject<HTMLDivElement | null>
+} {
+  const [state, setState] = useState<LocalListState>(() => createLocalListState(items))
+  const [sourceItems, setSourceItems] = useState(items)
+  if (sourceItems !== items) {
+    setSourceItems(items)
+    setState(createLocalListState(items))
+  }
+  const sentinelRef = useRef<HTMLDivElement | null>(null)
+  const more = hasRevealableItems(state)
+
+  useEffect(() => {
+    const sentinel = sentinelRef.current
+    if (sentinel === null || !more) return
+    const root = findScrollRoot(sentinel)
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return
+        setState((previous) => revealMore(previous))
+      },
+      { root, rootMargin: PAGINATION_ROOT_MARGIN },
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [more, state.revealed])
+
+  return { state, sentinelRef }
+}
+
+/**
+ * 曲目列表的外壳：骨架 / 失败（带重试）/ 空 / 表格 + 状态行 + 哨兵。
+ *
+ * 服务端分页与本地分批**共用这一份渲染**（两者的区别只在喂进来的 `status` 文案与
+ * `observe` 的真假）：两套渲染早晚会长出两种不一致的空态/失败态。
+ */
+function BrowsableTrackList({
+  items,
+  emptyText,
+  navigation,
+  status,
+  sentinelRef,
+  loading = false,
+  initialLoading = false,
+  error = null,
+  onRetry,
+  observe = false,
+}: {
+  items: unknown[]
   emptyText: string
-  resource: Resource<unknown[]>
-  onActivateTrack: (song: unknown, index: number, songs: unknown[]) => void
-  onOpenAlbum: (albumId: string, song: unknown) => void
-  onOpenArtist: (artistId: string, song: unknown) => void
+  navigation: PageNavigationProps
+  /** 状态行：已加载 N 首（服务端分页）/ 后端一次返回 N 首（本地分批） */
+  status: string
+  sentinelRef: RefObject<HTMLDivElement | null>
+  loading?: boolean
+  initialLoading?: boolean
+  error?: string | null
+  onRetry?: () => void
+  observe?: boolean
 }) {
-  if (resource.status === "loading") return <ListSkeleton />
-  if (resource.status === "error") return <LoadFailed text={libraryFailureText(resource.failure)} />
-  const songs = resource.data ?? []
   return (
-    <TrackTable
-      songs={songs}
-      emptyText={emptyText}
-      // 队列要用**整张列表**（只播一首会让"下一首"永远没有下一首）：列表只有页面手里有
-      onActivate={(song, index) => onActivateTrack(song, index, songs)}
-      onOpenAlbum={onOpenAlbum}
-      onOpenArtist={onOpenArtist}
-    />
+    <div className="flex flex-col">
+      {error === null ? null : (
+        <Alert variant="destructive" className="mx-4 mb-3" data-testid={PAGINATION_FAILURE_TESTID}>
+          <AlertDescription>{error}</AlertDescription>
+          {onRetry === undefined ? null : (
+            <AlertAction>
+              <Button variant="secondary" size="sm" onClick={onRetry} data-testid={PAGINATION_RETRY_TESTID}>
+                重试
+              </Button>
+            </AlertAction>
+          )}
+        </Alert>
+      )}
+
+      {items.length === 0 ? (
+        // 四种"还没有歌"要分开：首屏加载 / 翻页加载 → 骨架；失败 → 上面那条 Alert 已说原因；
+        // 真的空 → 空态。把前三种显示成"还没有歌曲"都是假空态。
+        error !== null ? null : loading || initialLoading ? (
+          <ListSkeleton />
+        ) : (
+          <EmptyState text={emptyText} />
+        )
+      ) : (
+        <TrackTable
+          songs={items}
+          emptyText={emptyText}
+          // 队列要用**整张已加载列表**（只播一首会让"下一首"永远没有下一首）
+          onActivate={(song, index) => navigation.onActivateTrack(song, index, items)}
+          onOpenAlbum={navigation.onOpenAlbum}
+          onOpenArtist={navigation.onOpenArtist}
+        />
+      )}
+
+      {loading && items.length > 0 ? <ListSkeleton count={2} /> : null}
+      {status === "" ? null : (
+        <p
+          className="px-4 py-3 text-xs text-muted-foreground"
+          role="status"
+          data-testid={PAGINATION_STATUS_TESTID}
+        >
+          {status}
+        </p>
+      )}
+      {observe ? (
+        <div ref={sentinelRef} className="h-px w-full" aria-hidden="true" data-testid={PAGINATION_SENTINEL_TESTID} />
+      ) : null}
+    </div>
   )
 }
 
 export interface PageNavigationProps {
-  /** 双击曲目：`songs` 是这一页当前的完整列表（播放器用它当队列） */
+  /** 双击曲目：`songs` 是**已加载**的完整列表（播放器用它当队列） */
   onActivateTrack: (song: unknown, index: number, songs: unknown[]) => void
   onOpenAlbum: (albumId: string, song: unknown) => void
   onOpenArtist: (artistId: string, song: unknown) => void
@@ -222,7 +543,7 @@ export function PlaylistsPage({
 }
 
 /**
- * 歌单详情页（R40 **删除重写**）。
+ * 歌单详情页（R40 **删除重写**；R45A3 改成真分页）。
  *
  * 旧版只有一个曲目表：没有歌单名、没有封面、没有"播放全部"——点进一张歌单像是掉进了一份
  * 无名列表。现在三块：
@@ -231,14 +552,15 @@ export function PlaylistsPage({
  *    官方的 `BackgroundRender`（`AmllBackground`）：封面地址交给它之前先由宿主用 `new Image()`
  *    加载成 `HTMLImageElement`——**不是 fetch**（CSP 的 `connect-src` 只有 self/ipc，
  *    字符串地址会被 AMLL 拿去 fetch 而撞墙；图片走的是 `img-src`）；
- * 2. **动作**：`播放全部` = 用这一页的曲目整队替换并从第一首开始（`playQueue`）；
+ * 2. **动作**：`播放全部` = 用**已加载**的曲目整队替换并从第一首开始（`playQueue`）；
  *    `加入队列` = 追加到队尾、不动正在播的那一首（`enqueue`）。两个都**只作用于已加载的曲目**，
  *    分页没走完时页面上有一句说明（不把"前 50 首"说成"整张歌单"）；
- * 3. **正文**：曲目表（沿用 `TrackTable`：双击播放、键盘可达、艺人/专辑跳转）。
+ * 3. **正文**：曲目表（沿用 `TrackTable`：双击播放、键盘可达、艺人/专辑跳转），
+ *    R45A3 起滚到离底 240px 就取下一页（`LIBRARY_PLAYLIST_DETAIL` 的 `page`/`pageSize`）。
  *
- * 数据来源仍是**一次一页**的歌单详情频道（`LIBRARY_PLAYLIST_DETAIL`，载荷 `{playlistId, page,
- * pageSize}`）：`data.playlist` 是协议层归一化过的歌单元信息（名字/封面/曲目数都从它读，
- * 不在渲染层再解析一份原始响应）。
+ * 数据来源仍是**一次一页**的歌单详情频道（载荷 `{playlistId, page, pageSize}`）：
+ * `data.playlist` 是协议层归一化过的歌单元信息（名字/封面/曲目数都从它读，不在渲染层再解析
+ * 一份原始响应）；分页纯逻辑只认**第一页**带回的那份（后续页不覆盖这张歌单的身份）。
  */
 export interface PlaylistDetailData {
   songs: unknown[]
@@ -253,38 +575,36 @@ export function PlaylistDetailPage({
   ...navigation
 }: {
   view: View
-  /** 播放全部：把这一页的曲目整队替换并播放第一首 */
+  /** 播放全部：把**已加载**的曲目整队替换并播放第一首 */
   onPlayAll?: (songs: unknown[]) => void
-  /** 加入队列：追加到队尾（不动正在播的那一首） */
+  /** 加入队列：追加到队尾（不动正在播的那一首），同样只作用于已加载的曲目 */
   onEnqueue?: (songs: unknown[]) => void
 } & PageNavigationProps) {
   const playlistId = viewParam(view, "playlistId")
-  const select = useCallback(
-    (data: { songs?: unknown[]; playlist?: unknown; hasMore?: unknown }): PlaylistDetailData => ({
-      songs: data.songs ?? [],
-      playlist: data.playlist ?? null,
-      // 只有协议层明说"还有下一页"才算更多（渲染层不自己从条数猜）
-      hasMore: data.hasMore === true,
-    }),
-    [],
-  )
-  const resource = useLibraryResource<PlaylistDetailData>(
-    LIBRARY_PLAYLIST_DETAIL,
-    { playlistId, page: 1, pageSize: LIST_PAGE_SIZE },
-    select,
-    playlistId !== null,
-  )
+  const paging = usePaginatedTracks({
+    channel: LIBRARY_PLAYLIST_DETAIL,
+    params: { playlistId },
+    enabled: playlistId !== null,
+  })
 
-  if (resource.status === "loading") return <ListSkeleton />
-  if (resource.status === "error") return <LoadFailed text={libraryFailureText(resource.failure)} />
-
-  const data = resource.data
-  const songs = data?.songs ?? []
-  const playlist = data?.playlist ?? null
-  const hasMore = data?.hasMore === true
+  const state = paging.state
+  const songs = state.items
+  // 歌单元信息只认第一页；重复整页停止时不把元信息里未经验证的 count 当成总数
+  const playlist = state.pageSource === PAGINATION_SOURCE.serverRepeat ? null : state.meta
+  const hasMore = state.hasMore === true
   const coverUrl = playlistCoverUrlOf(playlist)
   const title = playlistDetailTitleOf(playlist, viewParam(view, "name"))
   const actionsDisabled = songs.length === 0
+  /**
+   * 这一页是怎么来的——**只从分页状态读**（它记的是协议层说的 `pageSource`），页面不自己猜
+   * "这就是本地切片"。歌单详情那个端点实测一次回整张歌单，所以第 2 页起是本地切片：
+   * 那句话必须说出来（含"不再发网络请求"与"不减少流量"两条），见 `playlistLocalSliceNoticeText`。
+   */
+  const sliceNotice = playlistLocalSliceNoticeText({
+    source: state.pageSource,
+    available: state.available,
+    loaded: songs.length,
+  })
 
   return (
     <div className="flex flex-col" data-testid="playlist-detail">
@@ -327,12 +647,24 @@ export function PlaylistDetailPage({
         </CardContent>
       </Card>
 
-      <TrackTable
-        songs={songs}
+      {/* 服务端一次回整张歌单时的如实说明（本地切片 ≠ 网络分页，也 ≠ 省流量） */}
+      {sliceNotice === null ? null : (
+        <p className="mx-4 mb-2 text-xs text-muted-foreground" data-testid={PLAYLIST_SLICE_NOTICE_TESTID}>
+          {sliceNotice}
+        </p>
+      )}
+
+      <BrowsableTrackList
+        items={songs}
         emptyText={libraryEmptyText(view)}
-        onActivate={(song, index) => navigation.onActivateTrack(song, index, songs)}
-        onOpenAlbum={navigation.onOpenAlbum}
-        onOpenArtist={navigation.onOpenArtist}
+        navigation={navigation}
+        status={paginationNoticeText({ loaded: songs.length, hasMore, pageSource: state.pageSource })}
+        sentinelRef={paging.sentinelRef}
+        loading={state.loading}
+        initialLoading={isInitialPaging(state)}
+        error={state.error}
+        onRetry={paging.retry}
+        observe={shouldObserve(state)}
       />
     </div>
   )
@@ -343,36 +675,42 @@ export function PlaylistDetailPage({
 // ---------------------------------------------------------------------------
 
 /**
- * 搜索结果页（R40 删掉页内输入框，只剩结果）。
+ * 搜索结果页（R40 删掉页内输入框，只剩结果；R45A3 加触底分页）。
  *
  * 检索词**由外壳经视图参数交下来**（`VIEW.search` 的 `keyword`）：入口在侧栏的常驻搜索框，
  * 结果在内容区，两处必须是同一条数据——页面自己存一份就会出现"侧栏显示 A、内容区显示 B"。
  * 所以这里既不渲染输入框，也不持有 keyword 状态：没提交过（没有 keyword）就显示
  * "输入关键字开始搜索。"，提交过就按同一档规则显示结果或「查无所获」。
  *
- * 页面本身不再自带滚动容器：结果直接落在内容区那一个滚动根里（R39 已记待裁决的重复层，
- * 这里随输入框一起去掉）。
+ * 换关键词 = 换查询：`usePaginatedTracks` 的查询键变了就换代清空并丢掉旧响应
+ * （上一个词的迟到结果绝不许落到新结果里）。
+ *
+ * 页面本身不自带滚动容器：结果直接落在内容区那一个滚动根里（哨兵也观察那一层）。
  */
 export function SearchPage({ view, ...navigation }: { view: View } & PageNavigationProps) {
   const keyword = viewParam(view, "keyword")
-  const select = useCallback((data: { songs?: unknown[] }) => data.songs ?? [], [])
-
-  // 没提交过（keyword 为 null/空）就不发请求：空关键字在 core 侧是 invalid_payload，
+  // 没提交过（keyword 为 null）就不发请求：空关键字在 core 侧是 invalid_payload，
   // 那不是用户想看到的"错误"（"输入关键字开始搜索。"才是实话）
-  const resource = useLibraryResource<unknown[]>(
-    LIBRARY_SEARCH,
-    { keyword: keyword ?? "", page: 1, pageSize: LIST_PAGE_SIZE },
-    select,
-    keyword !== null,
-  )
+  const paging = usePaginatedTracks({
+    channel: LIBRARY_SEARCH,
+    params: { keyword: keyword ?? "" },
+    enabled: keyword !== null,
+  })
 
   if (keyword === null) return <EmptyState text={libraryEmptyText(view)} />
 
   return (
-    <TrackListView
+    <BrowsableTrackList
+      items={paging.state.items}
       emptyText={libraryEmptyText(view, { searched: true })}
-      resource={resource}
-      {...navigation}
+      navigation={navigation}
+      status={paginationNoticeText({ loaded: paging.state.items.length, hasMore: paging.state.hasMore })}
+      sentinelRef={paging.sentinelRef}
+      loading={paging.state.loading}
+      initialLoading={isInitialPaging(paging.state)}
+      error={paging.state.error}
+      onRetry={paging.retry}
+      observe={shouldObserve(paging.state)}
     />
   )
 }
@@ -381,37 +719,92 @@ export function SearchPage({ view, ...navigation }: { view: View } & PageNavigat
 // 专辑 / 歌手 / 播放历史
 // ---------------------------------------------------------------------------
 
+/**
+ * 专辑页：**服务端分页**（协议层的 `album` 认 `start`/`limit`，通道边界仍是 `page`/`pageSize`）。
+ * 滚动接近底就取下一页，`hasMore` 只认协议层那句"还有"。
+ */
 export function AlbumPage({ view, ...navigation }: { view: View } & PageNavigationProps) {
-  const select = useCallback((data: { songs?: unknown[] }) => data.songs ?? [], [])
-  const resource = useLibraryResource<unknown[]>(
-    LIBRARY_ALBUM,
-    { albumId: viewParam(view, "albumId") },
-    select,
-    viewParam(view, "albumId") !== null,
+  const albumId = viewParam(view, "albumId")
+  const paging = usePaginatedTracks({
+    channel: LIBRARY_ALBUM,
+    params: { albumId },
+    enabled: albumId !== null,
+  })
+  return (
+    <BrowsableTrackList
+      items={paging.state.items}
+      emptyText={libraryEmptyText(view)}
+      navigation={navigation}
+      status={paginationNoticeText({ loaded: paging.state.items.length, hasMore: paging.state.hasMore })}
+      sentinelRef={paging.sentinelRef}
+      loading={paging.state.loading}
+      initialLoading={isInitialPaging(paging.state)}
+      error={paging.state.error}
+      onRetry={paging.retry}
+      observe={shouldObserve(paging.state)}
+    />
   )
-  return <TrackListView emptyText={libraryEmptyText(view)} resource={resource} {...navigation} />
 }
 
+/**
+ * 歌手页：**后端不分页**（协议层 `artist` 只认 `songNum`/`albumNum`，没有 start/limit）。
+ *
+ * 所以这里只发**一次**请求，拿到的那一份就是全部；UI 每批揭示 50 条，哨兵每批再加 50。
+ * 状态行必须明说"后端一次返回 N 首（1 次网络请求）"——分批显示**不减少任何字节**，
+ * 说成"减少流量/节省请求"就是撒谎（简报点名的边界）。
+ */
 export function ArtistPage({ view, ...navigation }: { view: View } & PageNavigationProps) {
+  const artistId = viewParam(view, "artistId")
   const select = useCallback((data: { songs?: unknown[] }) => data.songs ?? [], [])
   const resource = useLibraryResource<unknown[]>(
     LIBRARY_ARTIST,
-    { artistId: viewParam(view, "artistId") },
+    { artistId },
     select,
-    viewParam(view, "artistId") !== null,
+    artistId !== null,
   )
-  return <TrackListView emptyText={libraryEmptyText(view)} resource={resource} {...navigation} />
+  const reveal = useLocalReveal(resource.data ?? NO_ITEMS)
+
+  if (resource.status === "loading") return <ListSkeleton />
+  if (resource.status === "error") return <LoadFailed text={libraryFailureText(resource.failure)} />
+
+  return (
+    <BrowsableTrackList
+      items={visibleItemsOf(reveal.state)}
+      emptyText={libraryEmptyText(view)}
+      navigation={navigation}
+      status={localRevealNoticeText(reveal.state)}
+      sentinelRef={reveal.sentinelRef}
+      observe={hasRevealableItems(reveal.state)}
+    />
+  )
 }
 
+/**
+ * 播放历史：与歌手页同一类——接口只给"一条查询的一次响应"（协议层固定 `hasMore:false`），
+ * 所以同样只请求一次、本地分批揭示。
+ *
+ * 历史里的**重复条目是有意义的**（同一首歌今天听了两次），所以这一层不做任何去重；
+ * 有的列表按 id 去重会把它抹成一条，那是在改历史。
+ */
 export function HistoryPage({ ...navigation }: PageNavigationProps) {
   const view = createView(VIEW.history)
   const select = useCallback((data: { songs?: unknown[] }) => data.songs ?? [], [])
-  const resource = useLibraryResource<unknown[]>(
-    LIBRARY_HISTORY,
-    { page: 1, pageSize: LIST_PAGE_SIZE },
-    select,
+  const resource = useLibraryResource<unknown[]>(LIBRARY_HISTORY, { page: 1, pageSize: LIST_PAGE_SIZE }, select)
+  const reveal = useLocalReveal(resource.data ?? NO_ITEMS)
+
+  if (resource.status === "loading") return <ListSkeleton />
+  if (resource.status === "error") return <LoadFailed text={libraryFailureText(resource.failure)} />
+
+  return (
+    <BrowsableTrackList
+      items={visibleItemsOf(reveal.state)}
+      emptyText={libraryEmptyText(view)}
+      navigation={navigation}
+      status={localRevealNoticeText(reveal.state)}
+      sentinelRef={reveal.sentinelRef}
+      observe={hasRevealableItems(reveal.state)}
+    />
   )
-  return <TrackListView emptyText={libraryEmptyText(view)} resource={resource} {...navigation} />
 }
 
 // ---------------------------------------------------------------------------

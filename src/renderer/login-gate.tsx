@@ -126,6 +126,14 @@ import {
   webLoginEntry,
 } from "./features/auth/login-gate-logic.mjs"
 import { QR_SIZE_PX, paintQrCanvas } from "./features/auth/qr-canvas.mjs"
+import {
+  STARTUP_CHECKING_LABEL,
+  STARTUP_CHECKING_TESTID,
+  STARTUP_NOTICE_TESTID,
+  STARTUP_RETRY_LABEL,
+  STARTUP_RETRY_TESTID,
+  startupCheckingStatusOf,
+} from "./features/auth/startup-view.mjs"
 import { ThemeControl } from "./theme-control"
 
 /**
@@ -174,6 +182,14 @@ export interface AuthGate {
    * 门禁这一层在官方页开着时整个被盖住，在这儿留一条取消路径等于留一条点不到的路径。
    */
   startLogin: () => void
+  /**
+   * 重查一次登录状态（复审 R45A1）：真的再发一次 `auth:get-status`。
+   *
+   * 谁调它：中性启动屏上那条「重新检查登录状态」（`checking` + 查询失败时唯一可操作的动作之一）。
+   * 与挂载时那次首查**同一处实现**（`queryStatus`）——两处各写一份 `coreCall` 的下场是
+   * "按钮看起来一样、发的是另一条请求"。失败时仍落回同一句失败说明（不猜档位）。
+   */
+  refreshStatus: () => void
 }
 
 /**
@@ -188,6 +204,21 @@ function statusEventOf(payload: AuthStatusPayload | null | undefined) {
     loggedIn: payload?.loggedIn === true,
     busy: payload?.busy === true,
     message: typeof payload?.message === "string" ? payload.message : undefined,
+  }
+}
+
+/**
+ * 一次"查登录状态失败" → 门禁认得的那条事件（**唯一一处**构造这句人话）。
+ *
+ * 两处会走到这里：挂载时的首查失败、启动屏上「重新检查登录状态」失败。两处说的是同一件事
+ * （"没答上来，但别猜"），所以文案与事件形状只有这一份。
+ */
+function statusFailureEvent(failure: unknown) {
+  return {
+    type: LOGIN_GATE_EVENT.failed,
+    message: isCoreError(failure)
+      ? `查询登录状态失败：${failure.message}`
+      : "查询登录状态失败（详情见日志）",
   }
 }
 
@@ -212,22 +243,41 @@ export function useAuthGate(): AuthGate {
   /** 自动开始只发起一次（StrictMode 会重复跑 effect：两次建单 = 白白换掉一张用户正在扫的码） */
   const qrStartedRef = useRef(false)
 
+  /**
+   * 一份 `auth:status` 载荷 → 状态机 + 账号资料（**唯一一处 apply**）。
+   *
+   * 广播回调与 `auth:get-status` 的应答（无论首查还是「重新检查」）都经它：两处各写一份，
+   * 早晚会出现"广播那条改了、查询这条没跟上"——而它们说的是同一件事。
+   */
+  const applyStatusPayload = useCallback((payload: AuthStatusPayload | null | undefined) => {
+    setState((current) => reduceGateState(current, statusEventOf(payload)))
+    setProfile(profileFromStatusPayload(payload))
+  }, [])
+
+  /**
+   * 问一次"现在是什么状态"（R19 增补，复审 R45A1 起有**两个**调用者）：
+   * 挂载时的首查（effect 里，排在订阅与 `rendererReady` 之后）与启动屏上的「重新检查登录状态」。
+   *
+   * 为什么必须只有这一处：那个按钮的语义就是"再问一次同一个问题"。另写一份 `coreCall`
+   * 会让两处请求的参数/映射悄悄分叉，而用户看不出区别（按钮长得一样）。
+   * 失败**不在这里吞**：交给调用方决定说什么（挂载那次与重试那次说的是同一句，
+   * 见 `statusFailureEvent`）。
+   */
+  const queryStatus = useCallback(async () => {
+    const snapshot = await coreCall<AuthStatusPayload>(AUTH_GET_STATUS, null)
+    applyStatusPayload(snapshot)
+  }, [applyStatusPayload])
+
   useEffect(() => {
     let disposed = false
     let unlistenStatus: (() => void) | null = null
     let unlistenQr: (() => void) | null = null
 
-    /** 载荷 → 门禁状态 + 账号资料（广播与 R19 的查询应答**共用这一处**）。 */
-    const applyStatus = (payload: AuthStatusPayload | null | undefined) => {
-      setState((current) => reduceGateState(current, statusEventOf(payload)))
-      setProfile(profileFromStatusPayload(payload))
-    }
-
     void (async () => {
       try {
         unlistenStatus = await onCoreEvent<AuthStatusPayload>(AUTH_STATUS, (payload) => {
           if (disposed) return
-          applyStatus(payload)
+          applyStatusPayload(payload)
         })
         unlistenQr = await onCoreEvent<QrStatusPayload>(AUTH_QR, (payload) => {
           if (disposed) return
@@ -246,23 +296,14 @@ export function useAuthGate(): AuthGate {
         })
         await rendererReady()
         // 订阅就位、启动期队列冲刷过之后，主动问一次当前状态（见本钩子的说明）
-        const snapshot = await coreCall<AuthStatusPayload>(AUTH_GET_STATUS, null)
-        if (disposed) return
-        applyStatus(snapshot)
+        await queryStatus()
       } catch (failure) {
         // 外壳起不来（core 没启动、查询频道还不存在）不该让界面白屏，但**也不许猜档位**：
-        // 查不到是"还不知道"，不是"未登录"。如实把那句话放到状态行上——空转的
+        // 查不到是"还不知道"，不是"未登录"。如实把那句话放到启动屏上——空转的
         // "正在检查登录状态…"正是 R19 要消灭的那个现象，用户至少还看得见原因，
-        // 并且能走常驻的「在网页中打开登录」。
+        // 并且能按「重新检查登录状态」或走网页登录那条路。
         if (disposed) return
-        setState((current) =>
-          reduceGateState(current, {
-            type: LOGIN_GATE_EVENT.failed,
-            message: isCoreError(failure)
-              ? `查询登录状态失败：${failure.message}`
-              : "查询登录状态失败（详情见日志）",
-          }),
-        )
+        setState((current) => reduceGateState(current, statusFailureEvent(failure)))
       }
     })()
 
@@ -271,7 +312,7 @@ export function useAuthGate(): AuthGate {
       unlistenStatus?.()
       unlistenQr?.()
     }
-  }, [])
+  }, [applyStatusPayload, queryStatus])
 
   const startQr = useCallback(() => {
     setState((current) => reduceGateState(current, { type: LOGIN_GATE_EVENT.qrRequested }))
@@ -301,6 +342,23 @@ export function useAuthGate(): AuthGate {
       }
     })()
   }, [])
+
+  /**
+   * 「重新检查登录状态」（复审 R45A1）：真的再发一次 `auth:get-status`。
+   *
+   * 只在启动屏（`checking` + 查询失败）上出现：那一档不许画成登录页，但也不能让用户困在
+   * 一张永远安静的屏上。失败照旧落回同一句说明（`statusFailureEvent`），**不猜档位**——
+   * 猜"未登录"会白建一张码，猜"已登录"会把没登录的用户放进主界面。
+   */
+  const refreshStatus = useCallback(() => {
+    void (async () => {
+      try {
+        await queryStatus()
+      } catch (failure) {
+        setState((current) => reduceGateState(current, statusFailureEvent(failure)))
+      }
+    })()
+  }, [queryStatus])
 
   const startLogin = useCallback(() => {
     setState((current) => reduceGateState(current, { type: LOGIN_GATE_EVENT.started }))
@@ -358,7 +416,7 @@ export function useAuthGate(): AuthGate {
     return () => clearInterval(timer)
   }, [expiresAt])
 
-  return { state, profile, startQr, startLogin }
+  return { state, profile, startQr, startLogin, refreshStatus }
 }
 
 /** 二维码画布：内容换一张就重画（编码与纠错全交给库，这里不碰二维码算法）。 */
@@ -380,6 +438,74 @@ function QrCanvas({ content }: { content: string }) {
       aria-label="登录二维码"
       className="rounded-md"
     />
+  )
+}
+
+/**
+ * R45A1（用户第 10 项）· **启动第一屏**：`checking` 那一档的安静中性界面。
+ *
+ * 为什么需要它：已登录的会话冷启动时，门禁的第一帧是 `checking`（"还不知道"）——
+ * 那是 `useAuthGate` 的 `useState` 初值，`auth:status` 广播 / `auth:get-status` 应答
+ * 要等一次 IPC 往返才到。旧外壳把这一档与"未登录"画成同一个界面，于是**第一帧就是整张
+ * 登录页**（标题、二维码占位、提示、"正在检查登录状态…"），快照落地才翻成主界面——
+ * 用户看见的就是"启动先闪一下登录页"。
+ *
+ * 这一屏的形态是**有意的克制**（用户要求"安静中性"）：
+ * - 只有一枚既有图标库的转圈（`Loader2Icon` + `animate-spin`，muted 前景色）；
+ *   **没有二维码、没有标题、没有提示、没有主题控件**——那些都是"确定未登录"之后才该出现的东西；
+ * - `role="status"` + `aria-busy` + `aria-label`（[`STARTUP_CHECKING_LABEL`]）让读屏用户
+ *   知道应用在启动。
+ *
+ * **复审 R45A1**：安静 ≠ 无声地空转。查询**真的失败**时这一屏自己长出三件东西
+ * （判定见 `startupCheckingStatusOf`，纯函数）：
+ *
+ * 1. 一句原因（失败说明，来自状态机唯一那处构造）；
+ * 2. 「重新检查登录状态」——真的再发一次 `auth:get-status`（`gate.refreshStatus`）；
+ * 3. 「在网页中打开登录」——原来那条出路（同一条 `auth:login`）。
+ *
+ * 为什么不能像上一版那样把失败档画成 `LoginGate`：合同要求 `checking` **绝不**渲染
+ * LoginGate/二维码。失败不是"确定未登录"，那样做等于用一张可能不需要的码盖住一个还没查完
+ * 的会话——而且二维码会在那一刻被自动建单（`shouldAutoStartQr` 只认确定未登录，这里不会）。
+ *
+ * 它**不延长任何东西**：没有延迟、没有隐藏、没有定时器（`test/startup-view.test.mjs` 钉）。
+ * 状态一到就换成 app-shell 或登录页——它只是"还不知道"那一刻本来的样子。
+ */
+export function StartupChecking({ gate }: { gate: AuthGate }) {
+  const notice = startupCheckingStatusOf(gate.state)
+  // 网页登录入口的形态/文案/锚点仍由门禁逻辑给（唯一真源）：这一刻它只可能是"打开"
+  const entry = webLoginEntry(gate.state)
+
+  return (
+    <div
+      className="flex h-full w-full flex-col items-center justify-center gap-3 bg-background px-6"
+      data-testid={STARTUP_CHECKING_TESTID}
+      role="status"
+      aria-busy="true"
+      aria-label={STARTUP_CHECKING_LABEL}
+    >
+      <Loader2Icon className="size-6 animate-spin text-muted-foreground" aria-hidden="true" />
+      {notice.text === null ? null : (
+        <p className="max-w-sm text-center text-sm text-muted-foreground" data-testid={STARTUP_NOTICE_TESTID}>
+          {notice.text}
+        </p>
+      )}
+      {notice.canRetry ? (
+        <Button variant="secondary" size="sm" onClick={gate.refreshStatus} data-testid={STARTUP_RETRY_TESTID}>
+          {STARTUP_RETRY_LABEL}
+        </Button>
+      ) : null}
+      {notice.canWebLogin && entry.form === "open" ? (
+        <Button
+          variant="link"
+          size="sm"
+          className="text-xs text-muted-foreground"
+          onClick={gate.startLogin}
+          data-testid={entry.testid}
+        >
+          {entry.text}
+        </Button>
+      ) : null}
+    </div>
   )
 }
 
