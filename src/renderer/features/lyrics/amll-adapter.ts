@@ -17,6 +17,35 @@
  */
 import { parseLrc, type LyricLine } from "@applemusic-like-lyrics/lyric";
 
+import { normalizeCustomColor } from "./lyrics-window.mjs";
+
+/**
+ * 官方 AMLL 歌词颜色变量的名字（R45B）。
+ *
+ * 这个变量在 `amll-theme.css` 里按设计令牌接线（`[data-lyrics-color="..."]`）；用户选了
+ * 自定义颜色时，只有**歌词窗**这一个元素上的一次 scoped 覆盖（[`applyCustomColor`]）。
+ * 变量名写在这里而不是组件里：组件不出现 AMLL 变量名（那条扫描保证变量只有 css 与适配层
+ * 两个接线点）。
+ */
+export const AMLL_COLOR_VAR = "--amll-lp-color";
+
+/**
+ * 把自定义颜色写到容器上（scoped 覆盖官方歌词颜色变量）；空/非法值 = 撤掉覆盖回令牌。
+ *
+ * 只用 `style.setProperty` 写**一个已验证的 `#RRGGBB`**：不拼 CSS 文本、不写 `cssText`，
+ * 因此不存在"用户输入变成一条样式规则"的注入面（合法性判定在 `lyrics-window.mjs` 的
+ * `isCustomColor`，那是唯一真源）。
+ */
+export function applyCustomColor(element: HTMLElement | null | undefined, customColor: unknown): void {
+  if (element === null || element === undefined) return;
+  const color = normalizeCustomColor(customColor);
+  if (color === "") {
+    element.style.removeProperty(AMLL_COLOR_VAR);
+    return;
+  }
+  element.style.setProperty(AMLL_COLOR_VAR, color);
+}
+
 /** `[offset:±ms]` 标签（唯一真源；`readLrcOffsetMs` 用它，扫描测试也认它）。 */
 export const LRC_OFFSET_PATTERN = /\[offset:\s*([+-]?\d+)\s*\]/i;
 
@@ -157,6 +186,60 @@ export function mergeTranslationLines(lines: LyricLine[]): { lines: LyricLine[];
 }
 
 const EMPTY_STATS: LyricParseStats = { parsed: 0, merged: 0, extraKept: 0, offsetMs: 0 };
+
+/** 有限毫秒值，认不出回 `null`（不猜：`NaN`/`Infinity`/字符串一律不算时间）。 */
+function finiteMs(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return value;
+}
+
+/**
+ * 逐字高亮（R45B 的 `withKaraokeWords`）：把**行级**歌词推导成逐字词数组，喂给官方
+ * `LyricPlayer` 的逐词高亮（组件只在 `words.length > 1` 且时间不同时才逐字着色）。
+ *
+ * 三条克制，每条都是为了不把"看起来像卡拉 OK"变成"假装精确"：
+ * 1. **已有词级时间原样保留**（`words.length > 1`）：那是源里真有的时间，重切就是破坏数据；
+ * 2. **行级 LRC 的逐字时间是按行时长线性推导的**（按 Unicode code point 等分，末字正好收在
+ *    行尾）。它**不是**服务端精确的卡拉 OK 时间——这句话也写在会话说明与报告里；
+ * 3. **坏时间不伪造**：行区间不是有限正区间、或词上写着倒挂/无限/零长的时间，就原样交回，
+ *    让官方组件按行级处理（宁可不逐字，也不能凭空造一个错的节拍）。
+ *
+ * 返回**全新对象**（行、词数组、词对象全部新建）：AMLL 的铁律是传进去的数组及其内容不得再改，
+ * 而它自己会对行做规范化（`resetLineTimestamps` 等），复用旧引用会把上一份解析结果改掉。
+ */
+export function withKaraokeWords(lines: LyricLine[]): LyricLine[] {
+  if (!Array.isArray(lines)) return [];
+  return lines.map((line) => karaokeLine(line));
+}
+
+function karaokeLine(line: LyricLine): LyricLine {
+  const words = Array.isArray(line?.words) ? line.words : [];
+  const cloned = words.map((word) => ({ ...word }));
+  const next: LyricLine = { ...line, words: cloned };
+  if (cloned.length !== 1) return next;
+
+  const first = cloned[0];
+  const text = typeof first.word === "string" ? first.word : "";
+  const chars = Array.from(text);
+  if (chars.length === 0) return next;
+
+  const wordStart = finiteMs(first.startTime);
+  const wordEnd = finiteMs(first.endTime);
+  // AMLL 自己会把 (0,0) 的词时间按行时间补齐（`resetLineTimestamps`），所以那也是"没写"而不是坏值
+  const wordTimingOk = (wordStart === 0 && wordEnd === 0) || (wordStart !== null && wordEnd !== null && wordStart < wordEnd);
+  const lineStart = finiteMs(line.startTime);
+  const lineEnd = finiteMs(line.endTime);
+  if (!wordTimingOk || lineStart === null || lineEnd === null || lineStart >= lineEnd) return next;
+
+  const total = lineEnd - lineStart;
+  next.words = chars.map((char, index) => ({
+    ...first,
+    word: char,
+    startTime: lineStart + Math.round((total * index) / chars.length),
+    endTime: lineStart + Math.round((total * (index + 1)) / chars.length),
+  }));
+  return next;
+}
 
 /**
  * 歌词文本 → AMLL 行数组（**唯一入口**，面板只消费它）。

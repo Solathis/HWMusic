@@ -164,17 +164,31 @@ test("禁止 <style> 与内联视觉样式：内联 style 只允许几何契约�
   );
 });
 
-test("AMLL 变量只许出现在 amll-theme.css（歌词主题的唯一接线点）", () => {
+/**
+ * AMLL 变量只许出现在这两处：
+ * - `amll-theme.css`：设计令牌 → AMLL 变量的**唯一**映射表（档位/颜色都在那里）；
+ * - `features/lyrics/amll-adapter.ts`：用户自定义歌词颜色那一次 **scoped 覆盖**（R45B）。
+ *   覆盖必须写在代码里（值来自用户），但写的是同一个变量、只写到歌词窗的那一个容器上，
+ *   且合法性只认六位 hex（`isCustomColor`）。组件层仍然一个变量名都不许出现。
+ */
+const AMLL_VARIABLE_FILES = ["src/renderer/amll-theme.css", "src/renderer/features/lyrics/amll-adapter.ts"];
+
+test("AMLL 变量只许出现在 amll-theme.css（与 R45B 的 scoped 覆盖适配层）", () => {
   const offenders = [];
   for (const relative of rendererAllFiles()) {
-    if (relative.endsWith("amll-theme.css")) continue;
+    if (AMLL_VARIABLE_FILES.includes(relative)) continue;
     const source = read(relative);
     if (/--amll-[a-z-]+/.test(source)) offenders.push(relative);
   }
-  assert.deepEqual(offenders, [], `AMLL 变量是歌词主题的接线细节，只能写在 amll-theme.css：${offenders.join(", ")}`);
+  assert.deepEqual(offenders, [], `AMLL 变量是歌词主题的接线细节，只能写在 amll-theme.css（与适配层那一次 scoped 覆盖）：${offenders.join(", ")}`);
 
   const theme = read("src/renderer/amll-theme.css");
   assert.match(theme, /--amll-lp-color/, "amll-theme.css 必须真的在接 AMLL 变量（否则这条扫描就是空转）");
+  const adapter = read("src/renderer/features/lyrics/amll-adapter.ts");
+  assert.match(adapter, /style\.setProperty\(AMLL_COLOR_VAR, color\)/, "适配层只写那一个已验证的颜色变量");
+  // 只看代码：注释里写"不写 cssText"是在说明纪律，不是违规
+  const adapterCode = adapter.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  assert.doesNotMatch(adapterCode, /cssText|setAttribute\(\s*["']style["']/, "不许拼 CSS 文本（注入面）");
 });
 
 test("令牌定义只在 styles.css；渲染层不得重新定义设计令牌", () => {

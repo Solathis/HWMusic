@@ -111,6 +111,10 @@ let desktopConfig = { ...DEFAULT_LYRICS_CONFIG };
 let desktopRevision = 0;
 let settingsData = {};
 let dragCalls = 0;
+/** R45B：官方 startResizeDragging 的方向记录（缩放手柄"真的调了官方 API"按它判）。 */
+const resizeCalls = [];
+/** R45B：每次 core_lyrics_configure 的补丁（窗口尺寸保存与"锁定后不保存"按它判）。 */
+const configureCalls = [];
 const mediaActions = [];
 /**
  * R45A3：库列表分页的夹具。三件事必须能在真浏览器里量到：
@@ -210,6 +214,7 @@ mockIPC(async (command, args) => {
     }
   }
   if (command === "plugin:window|start_dragging") { dragCalls += 1; return; }
+  if (command === "plugin:window|start_resize_dragging") { resizeCalls.push(args.value ?? null); return; }
   if (command === "core_get_tray_available") return true;
   if (command === "core_login_chrome") return { theme: currentTheme };
   if (command === "core_lyrics_document") return emit("core:event", { channel: "lyrics:document", payload: args.document });
@@ -220,6 +225,7 @@ mockIPC(async (command, args) => {
   }
   if (command === "core_lyrics_configure") {
     if ((!args.restoreIfPristine || desktopRevision === 0) && Object.keys(args.config).length) {
+      configureCalls.push({ ...args.config });
       desktopConfig = { ...desktopConfig, ...args.config }; desktopRevision += 1;
       await emit("core:event", { channel: "lyrics:state", payload: { config: desktopConfig, revision: desktopRevision, visible: false } });
     }
@@ -252,6 +258,9 @@ function Guard() {
       },
       setDesktop,
       dragCount: () => dragCalls,
+      resizeCalls: () => resizeCalls.slice(),
+      configureCalls: () => configureCalls.map((patch) => ({ ...patch })),
+      resetConfigureCalls: () => { configureCalls.length = 0; },
       mediaActions: () => mediaActions.slice(),
       /** R45A3：库列表分页的调用记录（频道/页号/页大小/关键字），"一页只取一次"按它判。 */
       libraryCalls: () => libraryCalls.slice(),
@@ -632,9 +641,9 @@ function startServer(dir) {
   });
 }
 
-/** 裁到文字 Range；与隐藏同一文字后的像素比较，不能把背景/表格误算成歌词。 */
-async function textPixels(page, selector, theme, file) {
-  const box = await page.locator(selector).first().evaluate(async (element) => {
+/** 文字 Range 的稳定外框（等 12 帧不动才算数：AMLL 的弹簧动画会让它一直漂）。 */
+async function stableTextBox(page, selector) {
+  return page.locator(selector).first().evaluate(async (element) => {
     const range = document.createRange();
     range.selectNodeContents(element);
     let previous = "";
@@ -653,6 +662,11 @@ async function textPixels(page, selector, theme, file) {
     }
     return box;
   }).catch(() => null);
+}
+
+/** 裁到文字 Range；与隐藏同一文字后的像素比较，不能把背景/表格误算成歌词。 */
+async function textPixels(page, selector, theme, file) {
+  const box = await stableTextBox(page, selector);
   if (!box || box.width <= 0 || box.height <= 0) return { ink: 0, changed: 0, box };
   const target = page.locator(selector).first();
   const visible = await page.screenshot({ clip: box, path: file, type: "png" });
@@ -676,6 +690,80 @@ async function textPixels(page, selector, theme, file) {
   return { ink, changed, box };
 }
 
+/**
+ * R45B：量「墨色 vs 背景」的亮度差（只统计与"隐藏文字"不同的像素，所以背景不参与）。
+ *
+ * 为什么要它：桌面歌词窗是**透明窗**，官方组件还带 `mix-blend-mode: plus-lighter`，
+ * 所以"字是深的还是浅的"取决于下面是桌面壁纸——截图里只能确定"字与背景差多少"。
+ * 于是这一项问的是可读性本身（墨色亮度 vs 背景亮度 ≥ 40），而不是"必须比某条阈值深"。
+ */
+async function inkContrast(page, selector, file) {
+  const box = await stableTextBox(page, selector);
+  if (!box || box.width <= 0 || box.height <= 0) return { changed: 0, inkMean: null, backdropMean: null, contrast: 0, box };
+  const target = page.locator(selector).first();
+  const visible = await page.screenshot({ clip: box, path: file, type: "png" });
+  let hidden;
+  try {
+    await target.evaluate((element) => { element.style.visibility = "hidden"; });
+    hidden = await page.screenshot({ clip: box, type: "png" });
+  } finally {
+    await target.evaluate((element) => { element.style.removeProperty("visibility"); });
+  }
+  const a = await sharp(visible).removeAlpha().raw().toBuffer();
+  const b = await sharp(hidden).removeAlpha().raw().toBuffer();
+  const luminance = (buffer, index) => buffer[index] * 0.299 + buffer[index + 1] * 0.587 + buffer[index + 2] * 0.114;
+  let changed = 0;
+  let inkSum = 0;
+  let backdropSum = 0;
+  const inkSumRgb = [0, 0, 0];
+  for (let i = 0; i < a.length; i += 3) {
+    if (Math.max(Math.abs(a[i] - b[i]), Math.abs(a[i + 1] - b[i + 1]), Math.abs(a[i + 2] - b[i + 2])) < 40) continue;
+    changed += 1;
+    inkSum += luminance(a, i);
+    backdropSum += luminance(b, i);
+    inkSumRgb[0] += a[i];
+    inkSumRgb[1] += a[i + 1];
+    inkSumRgb[2] += a[i + 2];
+  }
+  const inkMean = changed > 0 ? Math.round(inkSum / changed) : 0;
+  const backdropMean = changed > 0 ? Math.round(backdropSum / changed) : 0;
+  return {
+    changed,
+    inkMean,
+    backdropMean,
+    contrast: Math.abs(inkMean - backdropMean),
+    inkRgb: changed > 0 ? inkSumRgb.map((value) => Math.round(value / changed)) : null,
+    box,
+  };
+}
+
+/** 兼容旧名字：主窗舞台那几项仍然用"深/浅两类像素"的口径（不透明舞台，含 canvas）。 */
+async function inkColor(page, selector, file) {
+  const box = await stableTextBox(page, selector);
+  if (!box || box.width <= 0 || box.height <= 0) return { count: 0, mean: null, box };
+  const target = page.locator(selector).first();
+  const visible = await page.screenshot({ clip: box, path: file, type: "png" });
+  let hidden;
+  try {
+    await target.evaluate((element) => { element.style.visibility = "hidden"; });
+    hidden = await page.screenshot({ clip: box, type: "png" });
+  } finally {
+    await target.evaluate((element) => { element.style.removeProperty("visibility"); });
+  }
+  const a = await sharp(visible).removeAlpha().raw().toBuffer();
+  const b = await sharp(hidden).removeAlpha().raw().toBuffer();
+  let count = 0;
+  const sum = [0, 0, 0];
+  for (let i = 0; i < a.length; i += 3) {
+    if (Math.max(Math.abs(a[i] - b[i]), Math.abs(a[i + 1] - b[i + 1]), Math.abs(a[i + 2] - b[i + 2])) < 40) continue;
+    count += 1;
+    sum[0] += a[i];
+    sum[1] += a[i + 1];
+    sum[2] += a[i + 2];
+  }
+  return { count, box, mean: count > 0 ? sum.map((value) => Math.round(value / count)) : null };
+}
+
 export async function checkDesktopSurface(page, guardDir, add) {
   const desktop = page.getByTestId("lyrics-window");
   await page.evaluate(() => window.__guard.desktopDocument());
@@ -687,9 +775,10 @@ export async function checkDesktopSurface(page, guardDir, add) {
     await page.setViewportSize({ width: 960, height: 160 });
     await page.evaluate(() => window.__guard.configureDesktop({ mode: "desktop", style: "panel", color: "contrast", locked: false }));
     await page.waitForTimeout(700);
-    const pixels = await textPixels(page, '[data-testid="lyrics-window"] [class*="lyricMainLine"][class*="active"]', theme, path.join(guardDir, `${theme}-panel-contrast.png`));
+    // R45B：桌面歌词窗是透明窗 + `plus-lighter`，所以可读性看"墨色与背景的亮度差"，不看绝对的深浅
+    const pixels = await inkContrast(page, '[data-testid="lyrics-window"] [class*="lyricMainLine"][class*="active"]', path.join(guardDir, `${theme}-panel-contrast.png`));
     const rawColor = await page.evaluate(() => window.__guard.desktopConfig().color);
-    add(`${theme}-panel-contrast-ink`, pixels.ink > 60 && pixels.changed > 60 && rawColor === "contrast", JSON.stringify({ ...pixels, rawColor }));
+    add(`${theme}-panel-contrast-ink`, pixels.changed > 60 && pixels.contrast > 40 && rawColor === "contrast", JSON.stringify({ ...pixels, rawColor }));
     await page.setViewportSize({ width: 960, height: 44 });
     for (const style of ["clean", "panel"]) {
       for (const showControls of [true, false]) {
@@ -703,6 +792,555 @@ export async function checkDesktopSurface(page, guardDir, add) {
   }
   await page.setViewportSize({ width: 960, height: 160 });
   await page.evaluate(() => window.__guard.configureDesktop({ mode: "desktop", style: "clean", color: "foreground", showControls: true }));
+}
+
+/** 桌面歌词窗的默认起点（每一项断言前都先归位：前面的用例会一路改配置）。 */
+const DESKTOP_BASELINE = {
+  mode: "desktop", layout: "horizontal", style: "clean", color: "foreground", customColor: "",
+  locked: false, showControls: true, size: "lg", enableBlur: true, enableScale: true, enableSpring: true,
+};
+
+/**
+ * R45B：桌面歌词的**交互**验收（锁定 / 缩放 / 竖排 / 逐字 / 颜色）。
+ *
+ * 每一项都钉一个"看起来做了、其实没做"的地方：
+ * 1. 锁定时图标是 **Lock**（此前反了）、无障碍名称说清"已锁定"、按压态为 true；
+ * 2. 锁定后窗口里**只剩**解锁按钮，且不悬停时不可见；悬停后可见且真的可点；
+ * 3. 解锁后拖动柄/媒体/外观/缩放柄全部回来，媒体动作仍只发一次；
+ * 4. 右下角缩放柄调用官方 `startResizeDragging("SouthEast")`（mock 计数），锁定/任务栏时连按钮都不存在；
+ * 5. 尺寸稳定 250ms 后保存 DIP 宽高；锁定时不再保存（Rust 那边窗口也不可缩放）；
+ * 6. 竖版是**真竖排**：同一列的字符 x 相同、y 严格递增（横排对照则 x 递增）——不是窄窗换行；
+ * 7. 竖版下切到第二行仍是官方组件在排版，当前行整行都在播放器范围内；
+ * 8. **最小窗口 240×120**（Rust 里写的下限）里当前行仍整行可读、墨迹真的画在窗口里；
+ *    真滚轮往书写方向滚，被裁到窗口外的另一行能滚进来，超大的滚轮被钳住（不会越界滚到屏外）；
+ * 9. 行级 LRC 推导出逐字词（一个字一个 span，行级 LRC 只会有 1 个），播放推进时行内像素变化；
+ * 10. 自定义颜色真的改到了 AMLL 的像素上（墨色变绿），清空后回到设计令牌。
+ */
+export async function checkDesktopInteraction(page, guardDir, add) {
+  const desktop = page.getByTestId("lyrics-window");
+  const activeLine = '[data-testid="lyrics-window"] [class*="lyricMainLine"][class*="active"]';
+  const configure = (patch) => page.evaluate((next) => window.__guard.configureDesktop(next), patch);
+  /**
+   * 量当前行每个字的几何。
+   *
+   * `slack`：字形框是**字符的 em 盒**（不是墨迹），首字的 em 盒会比行盒顶多探出约 1.5px
+   * （字体度量那点 leading），墨迹仍在窗口里——所以「最小窗口整行可读」那条给 2px 容差，
+   * 其余用例仍按 1px 严判。RED 时那 7 个字全在窗口上方 80px 之外，2px 容差一点都不放水。
+   */
+  const charGeometry = (slack = 1) => page.evaluate((pad) => {
+    const stage = document.querySelector('[data-testid="lyrics-window"]');
+    const player = stage?.querySelector(".amll-lyric-player");
+    const line = stage?.querySelector('[class*="lyricMainLine"][class*="active"]');
+    const playerRect = player?.getBoundingClientRect();
+    /**
+     * 每个字的**字形框**（`Range` 选中文字本身），不是 span 的盒子：
+     * AMLL 的每个词 span 带 `margin:-1em; padding:1em`，盒子比字形大 2em，
+     * 拿盒子判"是否在窗口内"会把贴着边的一列误判成越界。
+     */
+    const chars = [...(line?.querySelectorAll("span") ?? [])]
+      .filter((span) => span.children.length === 0 && (span.textContent ?? "").length === 1)
+      .map((span) => {
+        const range = document.createRange();
+        range.selectNodeContents(span);
+        const rect = range.getBoundingClientRect();
+        return {
+          text: span.textContent,
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+          inside: playerRect
+            ? rect.left >= playerRect.left - pad && rect.right <= playerRect.right + pad
+              && rect.top >= playerRect.top - pad && rect.bottom <= playerRect.bottom + pad
+            : false,
+        };
+      });
+    /**
+     * 书写模式读**行内容**（竖排真正的落点），也读播放器（横版对照时两者相同）。
+     * R45B fix2：竖排必须写在行内容上——写在播放器上会让官方按 `blockSize` 量出来的
+     * "行高"变成"一行有多少列那么宽"，当前行就被推到窗口外（见 ⑦c）。
+     */
+    const lineStyle = line ? getComputedStyle(line) : null;
+    const playerStyle = player ? getComputedStyle(player) : null;
+    return {
+      chars,
+      lineCount: stage?.querySelectorAll('[class*="lyricLineWrapper"] [class*="lyricMainLine"]').length ?? 0,
+      writingMode: lineStyle?.writingMode ?? null,
+      textOrientation: lineStyle?.textOrientation ?? null,
+      playerWritingMode: playerStyle?.writingMode ?? null,
+      playerScroll: player ? { scrollW: player.scrollWidth, clientW: player.clientWidth, scrollH: player.scrollHeight, clientH: player.clientHeight, overflowX: getComputedStyle(player).overflowX } : null,
+      activeText: line?.textContent ?? "",
+      /** 每条行盒的 y（官方用 `translateY` 排版）：判断"滚轮真的动了 / 动到边界就不再动"用它。 */
+      lineTops: [...(stage?.querySelectorAll('[class*="lyricLineWrapper"]') ?? [])]
+        .map((wrapper) => Math.round(wrapper.getBoundingClientRect().y)),
+      nextLineVisible: [...(stage?.querySelectorAll('[class*="lyricLineWrapper"]') ?? [])]
+        .filter((wrapper) => !wrapper.querySelector('[class*="active"]'))
+        .some((wrapper) => [...wrapper.querySelectorAll("span")].some((span) => {
+          if (span.children.length > 0 || (span.textContent ?? "").length !== 1) return false;
+          const range = document.createRange();
+          range.selectNodeContents(span);
+          const rect = range.getBoundingClientRect();
+          return playerRect
+            ? rect.left >= playerRect.left - pad && rect.right <= playerRect.right + pad
+              && rect.top >= playerRect.top - pad && rect.bottom <= playerRect.bottom + pad
+            : false;
+        })),
+    };
+  }, slack);
+  /** 同一列的字符（x 相差 ≤2px 算一列），列内 y 必须严格递增。 */
+  const columnReport = (chars) => {
+    const columns = [];
+    for (const char of chars) {
+      const column = columns.find((entry) => Math.abs(entry.x - char.x) <= 2);
+      if (column) column.chars.push(char);
+      else columns.push({ x: char.x, chars: [char] });
+    }
+    const increasing = columns.every((column) => column.chars.every((char, index) => index === 0 || char.y > column.chars[index - 1].y));
+    const distinctX = new Set(columns.map((column) => column.x)).size;
+    const longest = Math.max(0, ...columns.map((column) => column.chars.length));
+    return { columns: columns.length, distinctX, longest, increasing };
+  };
+
+  await configure(DESKTOP_BASELINE);
+  await page.setViewportSize({ width: 960, height: 160 });
+  await page.waitForTimeout(500);
+
+  // ① 未锁：完整控制都在（拖动柄 / 媒体 / 外观 / 锁定 / 右下角缩放柄）
+  const grip = page.getByRole("button", { name: "拖动桌面歌词", exact: true });
+  const resizeGrip = page.getByTestId("lyrics-resize-grip");
+  const unlockedControls = {
+    grip: await grip.count(),
+    media: await desktop.locator('[data-testid="lyrics-controls"] button[aria-label="播放"], [data-testid="lyrics-controls"] button[aria-label="暂停"]').count(),
+    appearance: await desktop.getByRole("button", { name: "桌面歌词外观", exact: true }).count(),
+    lock: await desktop.getByRole("button", { name: "锁定桌面歌词", exact: true }).count(),
+    resize: await resizeGrip.count(),
+  };
+  add("desktop-explicit-grip", unlockedControls.grip === 1, "AMLL 子树之外有官方 startDragging 拖柄");
+  add("desktop-unlocked-full-controls", unlockedControls.media === 1 && unlockedControls.appearance === 1
+    && unlockedControls.lock === 1 && unlockedControls.resize === 1, JSON.stringify(unlockedControls));
+
+  // ② 拖动：拖柄与正文各触发一次官方 startDragging（按钮区不算拖动）
+  const dragBefore = await page.evaluate(() => window.__guard.dragCount());
+  await grip.click();
+  await desktop.locator('[class*="lyricMainLine"]').first().click();
+  const dragAfter = await page.evaluate(() => window.__guard.dragCount());
+  add("desktop-drag-grip-and-body", dragAfter === dragBefore + 2, JSON.stringify({ dragBefore, dragAfter }));
+
+  // ③ 缩放拖柄：官方 startResizeDragging("SouthEast")
+  const resizeBefore = await page.evaluate(() => window.__guard.resizeCalls());
+  await resizeGrip.click();
+  await page.waitForTimeout(150);
+  const resizeAfter = await page.evaluate(() => window.__guard.resizeCalls());
+  add("desktop-resize-grip-official-call", resizeAfter.length === resizeBefore.length + 1
+    && resizeAfter.at(-1) === "SouthEast", JSON.stringify({ resizeBefore, resizeAfter }));
+
+  // ④ 锁定：图标是 Lock、只剩一个按钮、不悬停看不见
+  await configure({ locked: true });
+  await page.mouse.move(2, 2);
+  await page.waitForTimeout(350);
+  const lockedState = await page.evaluate(() => {
+    const stage = document.querySelector('[data-testid="lyrics-window"]');
+    const slot = stage?.querySelector('[data-testid="lyrics-unlock-slot"]');
+    const unlock = slot?.querySelector("button");
+    // 「悬停才显形」是 CSS 事实：基础态 opacity 0 + 一条只在 :hover 下生效的 opacity 1 规则。
+    // 断言这两条规则**真的在样式表里**，再配一条真悬停的实测（下面 hover-reveal 那一项）。
+    // Tailwind 把 hover 变体包在 `@media (hover:hover)` 里，所以要递归进 CSSMediaRule。
+    const collect = (rules, out = []) => {
+      for (const rule of rules) {
+        if (rule.selectorText) out.push({ selector: rule.selectorText, opacity: rule.style?.opacity ?? null });
+        if (rule.cssRules) collect(rule.cssRules, out);
+      }
+      return out;
+    };
+    const rules = [...document.styleSheets].flatMap((sheet) => {
+      try { return collect(sheet.cssRules); } catch { return []; }
+    });
+    const revealRule = rules.find((rule) => rule.selector.includes("group-hover") && rule.opacity === "1");
+    const hiddenRule = rules.find((rule) => rule.selector.includes('[data-testid="lyrics-unlock-slot"]') && rule.opacity === "0");
+    return {
+      locked: stage?.getAttribute("data-lyrics-locked") ?? null,
+      buttons: stage ? stage.querySelectorAll("button").length : -1,
+      label: unlock?.getAttribute("aria-label") ?? null,
+      pressed: unlock?.getAttribute("aria-pressed") ?? null,
+      lockIcon: Boolean(unlock?.querySelector(".lucide-lock")),
+      unlockIcon: Boolean(unlock?.querySelector(".lucide-lock-open")),
+      baseOpacityZero: (slot?.className ?? "").includes("opacity-0"),
+      revealIsHoverGated: Boolean(revealRule && revealRule.selector.includes(":hover")),
+      hasBaseRule: Boolean(hiddenRule) || (slot?.className ?? "").includes("opacity-0"),
+      drag: stage ? stage.querySelectorAll('button[aria-label="拖动桌面歌词"]').length : -1,
+      media: stage ? stage.querySelectorAll('button[aria-label="播放"], button[aria-label="暂停"]').length : -1,
+      appearance: stage ? stage.querySelectorAll('button[aria-label="桌面歌词外观"]').length : -1,
+      resize: stage ? stage.querySelectorAll('[data-testid="lyrics-resize-grip"]').length : -1,
+    };
+  });
+  add("desktop-locked-shows-lock-icon", lockedState.locked === "on" && lockedState.lockIcon && !lockedState.unlockIcon
+    && lockedState.pressed === "true" && (lockedState.label ?? "").includes("已锁定"), JSON.stringify(lockedState));
+  add("desktop-locked-only-unlock", lockedState.buttons === 1 && lockedState.drag === 0 && lockedState.media === 0
+    && lockedState.appearance === 0 && lockedState.resize === 0 && lockedState.baseOpacityZero
+    && lockedState.revealIsHoverGated && lockedState.hasBaseRule, JSON.stringify(lockedState));
+  await desktop.hover();
+  await page.waitForTimeout(300);
+  const hoverReveal = await page.evaluate(() => {
+    const slot = document.querySelector('[data-testid="lyrics-unlock-slot"]');
+    const button = slot?.querySelector("button");
+    const rect = button?.getBoundingClientRect();
+    const hit = rect ? document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) : null;
+    return { opacity: slot ? Number.parseFloat(getComputedStyle(slot).opacity) : null, clickable: Boolean(hit && button.contains(hit)) };
+  });
+  add("desktop-locked-hover-reveals-unlock", hoverReveal.opacity === 1 && hoverReveal.clickable, JSON.stringify(hoverReveal));
+
+  // ⑤ 解锁：完整控制回归，媒体动作仍只发一次
+  await page.getByRole("button", { name: /已锁定桌面歌词/ }).click();
+  await page.mouse.move(2, 2);
+  await page.waitForTimeout(350);
+  const unlockedState = await page.evaluate(() => {
+    const stage = document.querySelector('[data-testid="lyrics-window"]');
+    const lock = stage?.querySelector("button[aria-pressed]");
+    return {
+      locked: stage?.getAttribute("data-lyrics-locked") ?? null,
+      grip: stage ? stage.querySelectorAll('button[aria-label="拖动桌面歌词"]').length : -1,
+      resize: stage ? stage.querySelectorAll('[data-testid="lyrics-resize-grip"]').length : -1,
+      appearance: stage ? stage.querySelectorAll('button[aria-label="桌面歌词外观"]').length : -1,
+      label: lock?.getAttribute("aria-label") ?? null,
+      lockIcon: Boolean(lock?.querySelector(".lucide-lock")),
+      unlockIcon: Boolean(lock?.querySelector(".lucide-lock-open")),
+      pressed: lock?.getAttribute("aria-pressed") ?? null,
+    };
+  });
+  add("desktop-unlocked-controls-return", unlockedState.locked === "off" && unlockedState.grip === 1
+    && unlockedState.resize === 1 && unlockedState.appearance === 1 && unlockedState.label === "锁定桌面歌词"
+    && unlockedState.unlockIcon && unlockedState.pressed === "false", JSON.stringify(unlockedState));
+  const actionsBefore = await page.evaluate(() => window.__guard.mediaActions().length);
+  await desktop.getByRole("button", { name: "播放", exact: true }).click();
+  await page.waitForFunction(() => window.__guard.snapshot().status === "playing");
+  await page.evaluate(() => window.__guard.desktopDocument());
+  const actionsAfter = await page.evaluate(() => window.__guard.mediaActions());
+  add("desktop-media-once", actionsAfter.length === actionsBefore + 1 && actionsAfter.at(-1) === "toggle", JSON.stringify(actionsAfter));
+  await page.evaluate(() => window.__guard.desktopDocument());
+
+  // ⑥ 缩放保存：稳定 250ms 后发一条带 DIP 宽高的窄命令；锁定时一条都不发
+  await page.evaluate(() => window.__guard.resetConfigureCalls());
+  await page.setViewportSize({ width: 420, height: 300 });
+  await page.waitForTimeout(800);
+  const sizeCalls = await page.evaluate(() => window.__guard.configureCalls().filter((patch) => "windowWidth" in patch || "windowHeight" in patch));
+  const savedConfig = await page.evaluate(() => window.__guard.desktopConfig());
+  add("desktop-resize-saves-dip", sizeCalls.length >= 1 && savedConfig.windowWidth === 420 && savedConfig.windowHeight === 300,
+    JSON.stringify({ sizeCalls, saved: { width: savedConfig.windowWidth, height: savedConfig.windowHeight } }));
+  await configure({ locked: true });
+  await page.waitForTimeout(300);
+  await page.evaluate(() => window.__guard.resetConfigureCalls());
+  await page.setViewportSize({ width: 500, height: 360 });
+  await page.waitForTimeout(800);
+  const lockedSizeCalls = await page.evaluate(() => window.__guard.configureCalls().filter((patch) => "windowWidth" in patch));
+  add("desktop-locked-no-resize-save", lockedSizeCalls.length === 0, JSON.stringify({ lockedSizeCalls }));
+  await configure({ locked: false });
+
+  // ⑦ 竖排：字符坐标纵向递增（同一列 x 相同），不是"窄窗内横向换行"
+  await configure({ layout: "vertical", style: "clean" });
+  await page.setViewportSize({ width: 320, height: 620 });
+  await page.waitForTimeout(1200);
+  const vertical = await charGeometry();
+  const verticalColumns = columnReport(vertical.chars);
+  add("desktop-vertical-char-geometry", vertical.writingMode === "vertical-rl" && vertical.textOrientation === "upright"
+    && vertical.chars.length >= 5 && verticalColumns.longest >= 4 && verticalColumns.increasing
+    && verticalColumns.distinctX === 1 && vertical.chars.every((char) => char.inside),
+  JSON.stringify({ ...verticalColumns, writingMode: vertical.writingMode, textOrientation: vertical.textOrientation, playerWritingMode: vertical.playerWritingMode, chars: vertical.chars, activeText: vertical.activeText }));
+  await page.screenshot({ path: path.join(guardDir, "desktop-vertical-geometry.png") });
+
+  // ⑦b 小窗（240×400，接近最小尺寸但还能读）：仍是真竖排，整行都落在播放器范围内
+  await page.setViewportSize({ width: 240, height: 400 });
+  await page.waitForTimeout(1200);
+  const small = await charGeometry();
+  const smallColumns = columnReport(small.chars);
+  add("desktop-vertical-small-window", small.chars.length >= 5 && smallColumns.increasing
+    && smallColumns.longest >= 2 && small.chars.every((char) => char.inside),
+  JSON.stringify({ ...smallColumns, playerScroll: small.playerScroll, chars: small.chars }));
+
+  /**
+   * ⑦c 最小窗口 **240×120**（Rust 里的 `MIN_WINDOW_WIDTH_DIP/MIN_WINDOW_HEIGHT_DIP`，brief 的下限）：
+   * 当前行必须**整行可读**——不许像 fix1 那样被官方排版推到窗口上方之外（裁成空白）。
+   *
+   * 这一条为什么能抓到现在这个 bug：官方按 `ResizeObserver.borderBoxSize.blockSize` 给每行量"行高"
+   * （`getEntrySize` → `LayoutCalculator.setLineHeight`），而 `blockSize` 是**在元素自己的书写模式里**
+   * 量的。播放器一旦是 `vertical-rl`，块轴就变成水平的：官方量到的"行高"其实是"一行有多少列那么宽"
+   * （240×120 实测 291px，而窗口只有 120px 高），当前行被按这个值居中 ⇒ 7 个字全在窗口上方。
+   * 修法是把竖排下沉到**行内容**上（行盒仍水平书写），官方量到的行高就恢复成"这条横带有多高"。
+   */
+  await page.setViewportSize({ width: 240, height: 120 });
+  await page.waitForTimeout(1200);
+  const minWindow = await charGeometry(2);
+  const minWindowColumns = columnReport(minWindow.chars);
+  /** 竖排的列自右向左推进（vertical-rl）：按字符顺序看，x 只许往左走，不许回跳。 */
+  const columnOrderOk = minWindow.chars.every((char, index) => index === 0 || char.x <= minWindow.chars[index - 1].x + 2);
+  const minWindowInk = await inkColor(page, activeLine, path.join(guardDir, "desktop-min-window-line.png"));
+  add("desktop-min-window-current-line", minWindow.chars.length >= 5
+    && minWindow.writingMode === "vertical-rl" && minWindowColumns.increasing && columnOrderOk
+    && minWindow.chars.every((char) => char.inside) && minWindowInk.count > 40,
+  JSON.stringify({ ...minWindowColumns, columnOrderOk, chars: minWindow.chars, ink: minWindowInk.count, playerScroll: minWindow.playerScroll }));
+  await page.screenshot({ path: path.join(guardDir, "desktop-min-window.png") });
+
+  /**
+   * ⑦d 最小窗口里的**竖向滚动**（用户等效：真滚轮，不用 `scrollTop`）。
+   *
+   * 三件事：① 240×120 装不下两行 ⇒ 另一行确实被裁在窗口外；② 往书写方向（竖排里的 y）真滚一下，
+   * 被裁的那行滚进来、行盒真的动了；③ 一次超大的滚轮不许把内容甩到无限远 —— 同样的第二次滚轮
+   * 位置不再变化（官方 `ScrollInteractionEngine` 会钳在 `beginFrame` 算出的上下界里）。
+   */
+  const playerBox = await desktop.locator(".amll-lyric-player").boundingBox();
+  const wheelOverLyrics = async (deltaY) => {
+    await page.mouse.move(playerBox.x + playerBox.width / 2, playerBox.y + playerBox.height / 2);
+    await page.mouse.wheel(0, deltaY);
+    await page.waitForTimeout(900);
+    return charGeometry(2);
+  };
+  const topsEqual = (left, right) => left.lineTops.length === right.lineTops.length
+    && left.lineTops.every((top, index) => Math.abs(top - right.lineTops[index]) <= 2);
+  const stillRest = await charGeometry(2);
+  const nudged = await wheelOverLyrics(60);
+  const hugeDownFirst = await wheelOverLyrics(4000);
+  const hugeDownAgain = await wheelOverLyrics(4000);
+  const hugeUpFirst = await wheelOverLyrics(-4000);
+  const hugeUpAgain = await wheelOverLyrics(-4000);
+  add("desktop-min-window-write-scroll", stillRest.nextLineVisible === false && nudged.nextLineVisible === true
+    && !topsEqual(stillRest, nudged) && topsEqual(hugeDownFirst, hugeDownAgain)
+    && topsEqual(hugeUpFirst, hugeUpAgain),
+  JSON.stringify({ stillRest: { tops: stillRest.lineTops, next: stillRest.nextLineVisible }, nudged: { tops: nudged.lineTops, next: nudged.nextLineVisible },
+    hugeDownFirst: hugeDownFirst.lineTops, hugeDownAgain: hugeDownAgain.lineTops, hugeUpFirst: hugeUpFirst.lineTops, hugeUpAgain: hugeUpAgain.lineTops }));
+  await page.evaluate(() => window.__guard.setTime(700));
+  await page.evaluate(() => window.__guard.desktopDocument());
+  await page.waitForTimeout(900);
+  const restored = await charGeometry(2);
+  add("desktop-min-window-scroll-restores", restored.activeText.includes("第一行")
+    && restored.chars.length >= 5 && restored.chars.every((char) => char.inside),
+  JSON.stringify({ activeText: restored.activeText, tops: restored.lineTops, chars: restored.chars }));
+  await page.setViewportSize({ width: 320, height: 620 });
+  await page.waitForTimeout(600);
+
+  /**
+   * ⑦e 最小窗口 + **特大字号（xxl 56px）**（R45B fix4）：7 个字在 240 宽里需要 ~470px，
+   * 一行最多只放得下 3 列 —— 这一档必须能**滚**才谈得上 B5（review contract B5）。
+   *
+   * 这一条问的是"用户的手能不能把它们带进视口"，不是"几何上算不算得出来"：
+   * ① 静止时窗口里**只能**有前三个字（第/一/行）；
+   * ② 在**真画出来的**原生滚动条上按下往左拖，逐格采样，7 个字都要进过视口；
+   * ③ 按下滚动条**不许**触发 Tauri `startDragging`（真窗里那一按会变成拖窗口，条就永远拖不动），
+   *    而同一容器里**滚动条之上 3px 的正文**必须照旧触发（"正文按住拖窗口"的既有行为不许被削掉）；
+   * ④ 两个方向各再拖一次越过边界，位置不再变化、也绝不越过内容边界（有界，不越界滚到屏外）；
+   * ⑤ 当前行上下文不变（仍是"第一行歌词守卫"）。
+   *
+   * 环境要求：Chromium 必须**真的画**滚动条。Playwright 默认带 `--hide-scrollbars`：条不画、
+   * `offsetHeight - clientHeight == 0`，既看不见也点不到，这条用例会直接以 `bar:0` 失败——
+   * 所以启动参数里那条 `ignoreDefaultArgs: ["--hide-scrollbars"]`（见 launchChromium）是判定的一部分。
+   *
+   * 量法与 `charGeometry` 的差别只有一处：**纵向**给到约 0.12em 的容差。56px 的字在缩窄了的横带里，
+   * em 盒顶会探出带顶 3~5px（字体行距那点 leading，墨迹仍在带内），横向仍按 2px 严判。
+   */
+  const xxlGeometry = () => page.evaluate(() => {
+    const stage = document.querySelector('[data-testid="lyrics-window"]');
+    const player = stage.querySelector(".amll-lyric-player");
+    const pr = player.getBoundingClientRect();
+    const line = stage.querySelector('[class*="lyricMainLine"][class*="active"]');
+    const lead = Math.ceil((Number.parseFloat(getComputedStyle(player).fontSize) || 16) * 0.12);
+    const chars = [...(line?.querySelectorAll("span") ?? [])]
+      .filter((span) => span.children.length === 0 && (span.textContent ?? "").length === 1)
+      .map((span) => {
+        const range = document.createRange();
+        range.selectNodeContents(span);
+        const rect = range.getBoundingClientRect();
+        const insideX = rect.left >= pr.left - 2 && rect.right <= pr.right + 2;
+        const insideY = rect.top >= pr.top - lead && rect.bottom <= pr.bottom + lead;
+        return {
+          text: span.textContent, x: Math.round(rect.x), y: Math.round(rect.y),
+          w: Math.round(rect.width), h: Math.round(rect.height), insideX, insideY, inside: insideX && insideY,
+        };
+      });
+    return {
+      chars, activeText: line?.textContent ?? "",
+      scroll: {
+        scrollW: player.scrollWidth, clientW: player.clientWidth, scrollLeft: player.scrollLeft,
+        scrollH: player.scrollHeight, clientH: player.clientHeight,
+        /** 滚动条真的占掉的那条厚度（0 = 浏览器没画条，或这东西压根不可滚）。 */
+        bar: player.offsetHeight - player.clientHeight, barX: player.offsetWidth - player.clientWidth,
+      },
+      /** 滚动条那条**实际命中带**：横向条贴播放器底边，纵向条贴右边（都按条真占了多厚算）。 */
+      strip: {
+        top: pr.top + player.clientHeight, height: player.offsetHeight - player.clientHeight,
+        left: pr.left + player.clientWidth, width: player.offsetWidth - player.clientWidth,
+      },
+      playerBox: { x: pr.x, y: pr.y, w: pr.width, h: pr.height },
+    };
+  });
+  await configure({ size: "xxl", layout: "vertical" });
+  await page.setViewportSize({ width: 240, height: 120 });
+  await page.waitForTimeout(1200);
+  const xxlRest = await xxlGeometry();
+  const xxlRestVisible = xxlRest.chars.filter((char) => char.inside).map((char) => char.text);
+  const seenByPointer = new Set(xxlRestVisible);
+  const xxlScrolls = [xxlRest.scroll.scrollLeft];
+  const sampleInto = async () => {
+    const state = await xxlGeometry();
+    state.chars.forEach((char) => { if (char.inside) seenByPointer.add(char.text); });
+    xxlScrolls.push(state.scroll.scrollLeft);
+    return state;
+  };
+  /**
+   * 在滚动条那条带上按下 → 逐格拖到另一个 x → 松开；**每一步都采样**（12px 一格，56px 的字不会跳过去）。
+   * 落点记在返回值里，供"再拖一次越过边界不许动"判。
+   */
+  const barMidY = xxlRest.strip.top + Math.max(1, xxlRest.strip.height) / 2;
+  const dragBar = async (fromRatio, toRatio, steps) => {
+    const box = xxlRest.playerBox;
+    const fromX = box.x + box.w * fromRatio;
+    const toX = box.x + box.w * toRatio;
+    await page.mouse.move(fromX, barMidY);
+    await page.waitForTimeout(120);
+    await page.mouse.down();
+    for (let step = 1; step <= steps; step += 1) {
+      await page.mouse.move(fromX + ((toX - fromX) * step) / steps, barMidY);
+      await page.waitForTimeout(80);
+      await sampleInto();
+    }
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+    return xxlGeometry();
+  };
+  const barDragsBefore = await page.evaluate(() => window.__guard.dragCount());
+  // 往左：RTL 滚动容器的"往后看"，把左边那几列拖进视口（fix3 控制实验证明这条路在 headless 里也能动）
+  const afterLeftDrag = await dragBar(0.6, 0.1, 12);
+  // 再往左：拇指这时贴到左端，继续往左顶到底
+  const afterMoreLeft = await dragBar(0.2, 0.02, 8);
+  // 越过左边界再拖一次：位置不许再变（有界，不越界滚到屏外）
+  const afterPastLeft = await dragBar(0.1, 0, 5);
+  await page.screenshot({ path: path.join(guardDir, "desktop-min-window-xxl-scrolled.png") });
+  // 往右：拖回行首（第/一/行）
+  const afterRightDrag = await dragBar(0.2, 0.95, 14);
+  // 越过右边界再拖一次：位置不许再变
+  const afterMoreRight = await dragBar(0.85, 0.99, 8);
+  const xxlDragEventsOnBar = (await page.evaluate(() => window.__guard.dragCount())) - barDragsBefore;
+  const xxlAfterDrags = await xxlGeometry();
+  const leftmost = Math.min(...xxlScrolls);
+  const rightmost = Math.max(...xxlScrolls);
+  /** 内容边界（RTL 下 scrollLeft 是负数）：越界 = 滚到内容之外，B5 明令不许。 */
+  const contentMin = xxlRest.scroll.clientW - xxlRest.scroll.scrollW;
+  const neverBeyond = xxlScrolls.every((value) => value >= contentMin - 2 && value <= 2);
+  /** 越过左/右边界的那一次拖动都不许再改变位置。 */
+  const bounded = Math.abs(afterPastLeft.scroll.scrollLeft - afterMoreLeft.scroll.scrollLeft) <= 2
+    && Math.abs(afterMoreRight.scroll.scrollLeft - afterRightDrag.scroll.scrollLeft) <= 2 && neverBeyond;
+  // 对照：正文（滚动条之上 3px）按下仍要开始拖窗口 —— 免得"整块歌词区不许拖"这种过度豁免混过去
+  const contentDragBefore = await page.evaluate(() => window.__guard.dragCount());
+  await page.mouse.move(xxlRest.playerBox.x + xxlRest.playerBox.w / 2, Math.max(xxlRest.playerBox.y + 2, xxlRest.strip.top - 3));
+  await page.mouse.down();
+  await page.waitForTimeout(120);
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const contentDragEvents = (await page.evaluate(() => window.__guard.dragCount())) - contentDragBefore;
+  add("desktop-min-window-xxl-reach", xxlRest.chars.length === 7
+    && xxlRestVisible.join("") === "第一行"
+    && seenByPointer.size === 7
+    && xxlRest.scroll.bar > 0 && xxlRest.scroll.scrollW > xxlRest.scroll.clientW
+    && leftmost <= contentMin + 2 && rightmost >= -2
+    && bounded && xxlDragEventsOnBar === 0 && contentDragEvents === 1
+    && afterLeftDrag.activeText.includes("第一行") && xxlAfterDrags.activeText.includes("第一行"),
+  JSON.stringify({
+    rest: xxlRestVisible, seenByPointer: [...seenByPointer], seenByScrolls: { leftmost, rightmost, contentMin },
+    atRest: xxlRest.chars, scroll: xxlRest.scroll, strip: xxlRest.strip,
+    landed: { left: afterLeftDrag.scroll.scrollLeft, moreLeft: afterMoreLeft.scroll.scrollLeft,
+      pastLeft: afterPastLeft.scroll.scrollLeft, right: afterRightDrag.scroll.scrollLeft,
+      moreRight: afterMoreRight.scroll.scrollLeft },
+    xxlDragEventsOnBar, contentDragEvents, activeText: xxlAfterDrags.activeText,
+  }));
+  await page.screenshot({ path: path.join(guardDir, "desktop-min-window-xxl.png") });
+  await configure({ size: "lg" });
+  await page.setViewportSize({ width: 320, height: 620 });
+  await page.waitForTimeout(900);
+
+  // ⑧ 横排对照：同一行 x 递增、y 相同（证明竖排不是"哪边都这样"）
+  await configure({ layout: "horizontal" });
+  await page.setViewportSize({ width: 960, height: 160 });
+  await page.waitForTimeout(1000);
+  const horizontal = await charGeometry();
+  const horizontalColumns = columnReport(horizontal.chars);
+  const sameRow = horizontal.chars.length >= 5 && horizontal.chars.every((char, index) => index === 0
+    || (char.x > horizontal.chars[index - 1].x && Math.abs(char.y - horizontal.chars[0].y) <= 2));
+  add("desktop-horizontal-char-geometry", horizontal.writingMode === "horizontal-tb" && sameRow
+    && horizontalColumns.distinctX === horizontal.chars.length && horizontalColumns.longest === 1,
+  JSON.stringify({ writingMode: horizontal.writingMode, columns: horizontalColumns, chars: horizontal.chars }));
+
+  // ⑨ 官方组件仍在排版当前行（竖版切到第二行，整行都在播放器范围内）
+  await configure({ layout: "vertical" });
+  await page.setViewportSize({ width: 320, height: 620 });
+  await page.waitForTimeout(900);
+  await page.evaluate(() => window.__guard.setTime(3300));
+  await page.evaluate(() => window.__guard.desktopDocument());
+  await page.waitForTimeout(900);
+  const secondLine = await charGeometry();
+  add("desktop-vertical-current-line-visible", secondLine.activeText.includes("第二行") && secondLine.lineCount >= 2
+    && secondLine.chars.length >= 5 && secondLine.chars.every((char) => char.inside),
+  JSON.stringify({ activeText: secondLine.activeText, lineCount: secondLine.lineCount, playerScroll: secondLine.playerScroll, chars: secondLine.chars }));
+  await page.evaluate(() => window.__guard.setTime(700));
+  await page.evaluate(() => window.__guard.desktopDocument());
+  await page.waitForTimeout(600);
+
+  // ⑩ 逐字：行级 LRC 推导出"一个字一个词"（行级 LRC 在 AMLL 里只会是 1 个词）
+  const wordSpans = await desktop.locator('[class*="lyricMainLine"][class*="active"] span').evaluateAll((nodes) =>
+    nodes.filter((node) => node.children.length === 0 && (node.textContent ?? "").length === 1).map((node) => node.textContent));
+  add("desktop-karaoke-per-char-words", wordSpans.length >= 5 && wordSpans.join("") === "第一行歌词守卫",
+    JSON.stringify({ wordSpans }));
+  const karaokeBox = await stableTextBox(page, activeLine);
+  const karaokeShot = async (timeMs, file) => {
+    await page.evaluate((ms) => window.__guard.setTime(ms), timeMs);
+    await page.evaluate(() => window.__guard.desktopDocument());
+    await page.waitForTimeout(700);
+    return page.screenshot(karaokeBox ? { clip: karaokeBox, path: path.join(guardDir, file) } : { path: path.join(guardDir, file) });
+  };
+  const early = await karaokeShot(300, "desktop-karaoke-early.png");
+  const late = await karaokeShot(2600, "desktop-karaoke-late.png");
+  const highlightDiff = pixelDiffRatio(await sharp(early).raw().toBuffer(), await sharp(late).raw().toBuffer());
+  add("desktop-karaoke-highlight-progress", Boolean(karaokeBox) && highlightDiff > 0.02,
+    `逐字高亮推进：行内像素差异 ${(highlightDiff * 100).toFixed(2)}%`);
+  await page.evaluate(() => window.__guard.setTime(700));
+  await page.evaluate(() => window.__guard.desktopDocument());
+  await page.waitForTimeout(500);
+
+  // ⑪ 自定义颜色：真的改到官方组件消费的像素上；清空回设计令牌
+  await configure({ layout: "horizontal", style: "clean", color: "foreground" });
+  await page.setViewportSize({ width: 960, height: 160 });
+  await page.waitForTimeout(700);
+  const tokenInk = await inkColor(page, activeLine, path.join(guardDir, "desktop-color-token.png"));
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await configure({ customColor: "#00dd00" });
+  await page.waitForTimeout(800);
+  const customInk = await inkColor(page, activeLine, path.join(guardDir, "desktop-color-custom.png"));
+  const customStored = await page.evaluate(() => window.__guard.desktopConfig().customColor);
+  add("desktop-custom-color-pixels", customStored === "#00dd00" && customInk.count > 40
+    && customInk.mean[1] > customInk.mean[0] + 60 && customInk.mean[1] > customInk.mean[2] + 60,
+  JSON.stringify({ tokenInk: tokenInk.mean, customInk: customInk.mean, customStored }));
+  await configure({ customColor: "" });
+  await page.waitForTimeout(700);
+  const restoredInk = await inkColor(page, activeLine, path.join(guardDir, "desktop-color-restored.png"));
+  const restoredStored = await page.evaluate(() => window.__guard.desktopConfig().customColor);
+  add("desktop-custom-color-restored", restoredStored === "" && restoredInk.count > 40
+    && !(restoredInk.mean[1] > restoredInk.mean[0] + 60 && restoredInk.mean[1] > restoredInk.mean[2] + 60),
+  JSON.stringify({ restoredInk: restoredInk.mean, restoredStored }));
+
+  // ⑫ 重挂载：旧 query 仍按权威配置显示（配置回读优先于查询串初值）
+  await configure({ layout: "vertical", style: "panel" });
+  await page.waitForTimeout(300);
+  await page.evaluate(() => window.__guard.setDesktop(false));
+  await desktop.waitFor({ state: "detached" });
+  await page.evaluate(() => window.__guard.setDesktop(true));
+  await desktop.waitFor();
+  await page.waitForTimeout(600);
+  add("desktop-old-query-authoritative-ready", await desktop.getAttribute("data-lyrics-layout") === "vertical"
+    && await desktop.locator('[data-slot="card"]').count() === 1, "重挂载旧 query，受限 configure 回读最新 config");
+  await configure({ ...DESKTOP_BASELINE });
+
+  // ⑬ 空态宿主同样可拖
+  await page.evaluate(() => window.__guard.desktopDocument("empty"));
+  const emptyDragBefore = await page.evaluate(() => window.__guard.dragCount());
+  await desktop.getByRole("status").click();
+  add("desktop-empty-drag", await page.evaluate((count) => window.__guard.dragCount() === count + 1, emptyDragBefore), "空态宿主同样可拖");
+  await page.evaluate(() => window.__guard.desktopDocument());
 }
 
 /**
@@ -1013,7 +1651,16 @@ function pixelDiffRatio(a, b) {
 async function launchChromium(candidates, log) {
   const failures = [];
   for (const candidate of candidates) {
-    const options = { args: ["--enable-unsafe-swiftshader", "--use-angle=swiftshader"] };
+    /**
+     * R45B fix4：**真画滚动条**。
+     *
+     * Playwright 默认给 Chromium 带 `--hide-scrollbars`：滚动条不画、`offsetHeight - clientHeight == 0`，
+     * 于是"用户拖原生滚动条"这件事在守卫里根本无从发生（fix3 的控制实验：隐藏时 `barSpace 0`、
+     * 拖条不动；去掉之后 `barSpace 12`、RTL 条真能拖）。真窗是 WebView2，滚动条是画出来的，
+     * 所以这里去掉那个默认参数——⑦e 的可达性判定就是靠"按下真条、真拖"。
+     * 副作用为零：本仓只有竖排小窗（xxl）才会溢出出条，其余用例量到的几何不受影响。
+     */
+    const options = { args: ["--enable-unsafe-swiftshader", "--use-angle=swiftshader"], ignoreDefaultArgs: ["--hide-scrollbars"] };
     if (candidate.executablePath) options.executablePath = candidate.executablePath;
     if (candidate.channel) options.channel = candidate.channel;
     try {
@@ -1449,64 +2096,28 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     const earlyDocument = await page.getByTestId("lyrics-window").textContent();
     add("desktop-early-document", earlyDocument?.includes("第一行歌词守卫"), "早于 React 挂载的文档丢失后，就绪握手须补回当前快照");
     const desktop = page.getByTestId("lyrics-window");
-    const grip = page.getByRole("button", { name: "拖动桌面歌词", exact: true });
-    add("desktop-explicit-grip", await grip.count() === 1, "AMLL 子树之外有官方 startDragging 拖柄");
-    if (await grip.count()) {
-      const before = await page.evaluate(() => window.__guard.dragCount());
-      await grip.click();
-      const line = desktop.locator('[class*="lyricMainLine"]').first();
-      await line.click();
-      const after = await page.evaluate(() => window.__guard.dragCount());
-      await page.getByRole("button", { name: "锁定桌面歌词", exact: true }).click();
-      const lockedCount = await page.evaluate(() => window.__guard.dragCount());
-      await line.click();
-      add("desktop-child-drag-and-button-exclusion", after === before + 2 && lockedCount === after, JSON.stringify({ before, after, lockedCount }));
-      add("desktop-lock-stops-drag", await grip.isDisabled() && await page.evaluate((count) => window.__guard.dragCount() === count, after), "锁仅禁拖，非整窗点透");
-      const actionsBefore = await page.evaluate(() => window.__guard.mediaActions().length);
-      await page.getByRole("button", { name: "播放", exact: true }).click();
-      await page.waitForFunction(() => window.__guard.snapshot().status === "playing");
-      await page.evaluate(() => window.__guard.desktopDocument());
-      const actionsAfter = await page.evaluate(() => window.__guard.mediaActions());
-      add("desktop-locked-media-once", actionsAfter.length === actionsBefore + 1 && actionsAfter.at(-1) === "toggle", JSON.stringify(actionsAfter));
-      await page.getByRole("button", { name: "解锁桌面歌词", exact: true }).click();
-      await page.getByRole("button", { name: "桌面歌词外观", exact: true }).click();
-      await page.getByRole("menuitemradio", { name: "面板", exact: true }).click();
-      await page.getByRole("button", { name: "桌面歌词外观", exact: true }).click();
-      await page.getByRole("menuitemradio", { name: "竖版", exact: true }).click();
-      await page.setViewportSize({ width: 320, height: 620 });
-      await page.waitForTimeout(700);
-      const verticalInk = await textPixels(page, '[data-testid="lyrics-window"] [class*="lyricMainLine"][class*="active"]', "dark", path.join(guardDir, "desktop-vertical.png"));
-      const verticalContent = await desktop.locator(".amll-lyric-player").boundingBox();
-      add("desktop-panel-vertical", await desktop.locator('[data-slot="card"]').count() === 1 && await desktop.getAttribute("data-lyrics-layout") === "vertical" && verticalContent?.height > 400 && verticalInk.changed > 60, JSON.stringify({ verticalContent, verticalInk }));
-      await page.evaluate(() => window.__guard.configureDesktop({ enableBlur: false, enableScale: false, enableSpring: false }));
-      await page.evaluate(() => window.__guard.desktopPlaying(true));
-      await page.waitForTimeout(900);
-      const official = await desktop.locator(".amll-lyric-player").evaluate((element) => ({
-        noSpring: element.className.includes("disableSpring"),
-        transformed: [...element.querySelectorAll('[class*="lyricLine"]')].filter((node) => node.querySelector('[class*="lyricMainLine"]')).every((node) => {
-          const transform = getComputedStyle(node).transform;
-          return transform === "none" || Math.abs(new DOMMatrixReadOnly(transform).a - 1) < .001;
-        }),
-        noBlur: [...element.querySelectorAll('[class*="lyricLineWrapper"]')].filter((node) => node.textContent.trim()).every((node) => !getComputedStyle(node).filter.includes("blur")),
-      }));
-      await page.evaluate(() => window.__guard.configureDesktop({ enableScale: true }));
-      await page.waitForTimeout(1200);
-      const scaled = await desktop.locator('.amll-lyric-player [class*="lyricLine"]').evaluateAll((nodes) => nodes.filter((node) => node.querySelector('[class*="lyricMainLine"]')).some((node) => new DOMMatrixReadOnly(getComputedStyle(node).transform).a < .995));
-      add("desktop-official-performance", official.noSpring && official.transformed && official.noBlur && scaled, JSON.stringify({ ...official, scaled }));
-      await page.evaluate(() => window.__guard.desktopPlaying(false));
-      await page.evaluate(() => window.__guard.setDesktop(false));
-      await desktop.waitFor({ state: "detached" });
-      await page.evaluate(() => window.__guard.setDesktop(true));
-      await desktop.waitFor();
-      await page.waitForTimeout(500);
-      add("desktop-old-query-authoritative-ready", await desktop.getAttribute("data-lyrics-layout") === "vertical" && await desktop.locator('[data-slot="card"]').count() === 1, "重挂载旧 query，受限 configure 回读最新 config");
-      await page.evaluate(() => window.__guard.configureDesktop({ ...window.__guard.desktopConfig(), layout: "horizontal", style: "clean", enableBlur: true, enableScale: true, enableSpring: true }));
-      await page.evaluate(() => window.__guard.desktopDocument("empty"));
-      const emptyCount = await page.evaluate(() => window.__guard.dragCount());
-      await desktop.getByRole("status").click();
-      add("desktop-empty-drag", await page.evaluate((count) => window.__guard.dragCount() === count + 1, emptyCount), "空态宿主同样可拖");
-      await page.evaluate(() => window.__guard.desktopDocument());
-    }
+    await checkDesktopInteraction(page, guardDir, add);
+    /**
+     * 官方演出开关（R44 起的既有覆盖，R45B 保留）：还能真的关掉弹簧/模糊、还能真的做缩放。
+     * 放在交互验收之后：它要一段"播放中"的稳定画面。
+     */
+    await page.evaluate(() => window.__guard.configureDesktop({ enableBlur: false, enableScale: false, enableSpring: false }));
+    await page.evaluate(() => window.__guard.desktopPlaying(true));
+    await page.waitForTimeout(900);
+    const official = await desktop.locator(".amll-lyric-player").evaluate((element) => ({
+      noSpring: element.className.includes("disableSpring"),
+      transformed: [...element.querySelectorAll('[class*="lyricLine"]')].filter((node) => node.querySelector('[class*="lyricMainLine"]')).every((node) => {
+        const transform = getComputedStyle(node).transform;
+        return transform === "none" || Math.abs(new DOMMatrixReadOnly(transform).a - 1) < .001;
+      }),
+      noBlur: [...element.querySelectorAll('[class*="lyricLineWrapper"]')].filter((node) => node.textContent.trim()).every((node) => !getComputedStyle(node).filter.includes("blur")),
+    }));
+    await page.evaluate(() => window.__guard.configureDesktop({ enableScale: true }));
+    await page.waitForTimeout(1200);
+    const scaled = await desktop.locator('.amll-lyric-player [class*="lyricLine"]').evaluateAll((nodes) => nodes.filter((node) => node.querySelector('[class*="lyricMainLine"]')).some((node) => new DOMMatrixReadOnly(getComputedStyle(node).transform).a < .995));
+    add("desktop-official-performance", official.noSpring && official.transformed && official.noBlur && scaled, JSON.stringify({ ...official, scaled }));
+    await page.evaluate(() => window.__guard.desktopPlaying(false));
+    await page.evaluate(() => window.__guard.configureDesktop({ enableBlur: true, enableScale: true, enableSpring: true }));
     await page.setViewportSize({ width: 960, height: 160 });
     for (const theme of ["light", "dark"]) {
       await page.evaluate((choice) => window.__guard.setHostTheme(choice), theme);
@@ -1520,12 +2131,12 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       await page.waitForFunction((choice) => document.documentElement.classList.contains(choice)
         && document.querySelector('[data-testid="lyrics-window"]')?.textContent.includes("第一行歌词守卫"), theme);
       await page.waitForTimeout(900);
-      const pixels = await textPixels(page, '[data-testid="lyrics-window"] [class*="lyricMainLine"][class*="active"]', theme, path.join(guardDir, `${theme}-desktop-line.png`));
-      add(`${theme}-desktop-text-pixels`, pixels.ink > 60, JSON.stringify(pixels));
+      const pixels = await inkContrast(page, '[data-testid="lyrics-window"] [class*="lyricMainLine"][class*="active"]', path.join(guardDir, `${theme}-desktop-line.png`));
+      add(`${theme}-desktop-text-pixels`, pixels.changed > 60 && pixels.contrast > 40, JSON.stringify(pixels));
       for (const status of ["empty", "failed"]) {
         await page.evaluate((value) => window.__guard.desktopDocument(value), status);
         await page.getByTestId("lyrics-window").getByRole("status").waitFor();
-        const notice = await textPixels(page, '[data-testid="lyrics-window"] [role="status"]', theme, path.join(guardDir, `${theme}-desktop-${status}.png`));
+        const notice = await inkContrast(page, '[data-testid="lyrics-window"] [role="status"]', path.join(guardDir, `${theme}-desktop-${status}.png`));
         add(`${theme}-desktop-${status}`, notice.changed > 30, JSON.stringify(notice));
       }
     }

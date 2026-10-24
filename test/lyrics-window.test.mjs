@@ -39,12 +39,14 @@ import {
   estimateTimeMs,
   fontStepLabel,
   importPlanOf,
+  isCustomColor,
   lyricsConfigFromSearch,
   lyricsStatusFromFailure,
   modeLabel,
   normalizeLyricsConfig,
   progressOf,
   reanchorProgress,
+  resizableEnabled,
   shouldPushProgress,
   themeFromSearch,
 } from "../src/renderer/features/lyrics/lyrics-window.mjs";
@@ -511,7 +513,11 @@ test("命令名：五条具名命令共享真源、注册与最小 capability �
   assert.doesNotMatch(hostApi, /["']core_lyrics_[a-z]+["']/);
   const permission = JSON.parse(read("src-tauri/capabilities/lyrics.json"));
   assert.deepEqual(permission.windows, ["lyrics"]);
-  assert.deepEqual(permission.permissions, ["core:event:default", "core:window:allow-start-dragging"]);
+  assert.deepEqual(
+    permission.permissions,
+    // R45B：右下角拖柄调官方 startResizeDragging ⇒ 只加这一条窗口权限（不放开 ACL，不提权）
+    ["core:event:default", "core:window:allow-start-dragging", "core:window:allow-start-resize-dragging"],
+  );
   assert.deepEqual(JSON.parse(read("src-tauri/capabilities/main.json")).windows, ["main"]);
   const rust = rustProduction(rustSource("lyrics_window.rs"));
   for (const [name, values] of [["LYRICS_LAYOUTS", ["horizontal","vertical"]], ["LYRICS_STYLES", ["clean","panel"]], ["LYRICS_CONTROL_ACTIONS", ["toggle","previous","next"]]]) {
@@ -537,9 +543,9 @@ test("Rust：五条具名命令都 async、正确来源守卫且注册", () => {
   }
 });
 
-test("Rust：建窗属性一次到位（无边框/透明/无阴影/置顶/不进任务栏/不可缩放/不聚焦/隐藏后 show）", () => {
+test("Rust：建窗属性一次到位（无边框/透明/无阴影/置顶/不进任务栏/按锁定可缩放/不聚焦/隐藏后 show）", () => {
   const rust = rustProduction(rustSource("lyrics_window.rs"));
-  const builder = rust.slice(rust.indexOf("WebviewWindowBuilder::new"), rust.indexOf("WebviewWindowBuilder::new") + 1600);
+  const builder = rust.slice(rust.indexOf("WebviewWindowBuilder::new"), rust.indexOf("WebviewWindowBuilder::new") + 1800);
 
   for (const [call, why] of [
     [".decorations(false)", "无边框"],
@@ -547,12 +553,15 @@ test("Rust：建窗属性一次到位（无边框/透明/无阴影/置顶/不进
     [".shadow(false)", "无阴影"],
     [".always_on_top(desktop_topmost(config))", "仅桌面置顶"],
     [".skip_taskbar(true)", "不进任务栏"],
-    [".resizable(false)", "不可缩放"],
+    // R45B：缩放资格按配置算（未锁的桌面窗可拖大小；锁定/任务栏不可），最小尺寸 240×120
+    [".resizable(resizable_enabled(config))", "可缩放资格按配置算（锁定/任务栏不可）"],
+    [".min_inner_size(MIN_WINDOW_WIDTH_DIP, MIN_WINDOW_HEIGHT_DIP)", "最小尺寸由窗口层兜住"],
     [".focused(false)", "不抢焦点"],
     [".visible(false)", "先建出来是隐藏的（防闪默认样式，按配置再 show）"],
   ]) {
     assert.ok(builder.includes(call), `歌词窗必须 ${call}（${why}）`);
   }
+  assert.match(rust, /window\.set_resizable\(resizable_enabled\(config\)\)/, "锁定配置落下去时也要收回缩放资格");
   assert.match(builder, /WebviewUrl::App\(/, "歌词窗加载的是应用内的 lyrics.html");
   assert.match(rust, /lyrics\.html\?/, "入口就是 lyrics-main.tsx 那一份（R1 已建双入口），配置经查询串带过去");
   assert.match(builder, /data_directory\(/, "独立 webview 数据目录（与主窗分开）");
@@ -1250,4 +1259,210 @@ test("playback:lyrics 处理器：{trackId} → 协议层 getLyrics（文本只�
   const source = stripComments(read("src/host/playback-handlers.mjs"));
   assert.doesNotMatch(source, /console\./, "处理器不许有 console 出口");
   assert.doesNotMatch(source, /writeFile|node:fs/, "不许有任何持久化出口");
+});
+
+// ---------------------------------------------------------------------------
+// 10. R45B：歌词颜色 / 窗口尺寸 / 锁定交互 / 竖排 / 逐字
+// ---------------------------------------------------------------------------
+
+test("R45B 配置：customColor 只认 #RRGGBB（其余一律落回上一个合法值）", () => {
+  assert.equal(DEFAULT_LYRICS_CONFIG.customColor, "", "默认不用自定义色（走设计令牌）");
+  assert.equal(isCustomColor("#a1b2c3"), true);
+  assert.equal(isCustomColor("#A1B2C3"), true, "大写 hex 同样合法");
+  for (const bad of ["#fff", "fff", "#12345", "#1234567", "#12345g", "# a1b2c", "red", "rgb(0,0,0)", "", null, 42, {}, true]) {
+    assert.equal(isCustomColor(bad), false, `不算合法 #RRGGBB：${JSON.stringify(bad)}`);
+  }
+
+  const base = { ...DEFAULT_LYRICS_CONFIG, customColor: "#102030" };
+  assert.equal(normalizeLyricsConfig({ customColor: "#ff8800" }, base).customColor, "#ff8800", "合法值照收");
+  for (const bad of ["#fff", "tomato", 123, null, {}, []]) {
+    assert.equal(
+      normalizeLyricsConfig({ customColor: bad }, base).customColor,
+      "#102030",
+      `坏值不许覆盖上一个合法值：${JSON.stringify(bad)}`,
+    );
+  }
+  assert.equal(normalizeLyricsConfig({ customColor: "" }, base).customColor, "", "空串 = 恢复主题色");
+  assert.deepEqual(normalizeLyricsConfig({}, base), base, "空补丁仍然是纯读");
+
+  // 查询串初值（Rust 拼 %23 出来，URLSearchParams 解回 #）
+  assert.equal(lyricsConfigFromSearch("?customColor=%23A1B2C3").customColor, "#A1B2C3");
+  assert.equal(lyricsConfigFromSearch("?customColor=red").customColor, "", "认不出就落默认");
+  assert.equal(lyricsConfigFromSearch("?customColor=").customColor, "");
+});
+
+test("R45B 配置：windowWidth/windowHeight 是 DIP 正整数或 null（0/负/字符串/Infinity 都不算）", () => {
+  assert.equal(DEFAULT_LYRICS_CONFIG.windowWidth, null, "没拖过就是 null（不是 0）");
+  assert.equal(DEFAULT_LYRICS_CONFIG.windowHeight, null);
+
+  const sized = normalizeLyricsConfig({ windowWidth: 360, windowHeight: 480 });
+  assert.equal(sized.windowWidth, 360);
+  assert.equal(sized.windowHeight, 480);
+  assert.equal(normalizeLyricsConfig({ windowWidth: 359.6 }).windowWidth, 360, "DIP 存整像素");
+
+  const base = { ...DEFAULT_LYRICS_CONFIG, windowWidth: 320, windowHeight: 620 };
+  for (const bad of [0, -10, "320", Number.NaN, Number.POSITIVE_INFINITY, {}, true, []]) {
+    const next = normalizeLyricsConfig({ windowWidth: bad, windowHeight: bad }, base);
+    assert.equal(next.windowWidth, 320, `windowWidth 坏值不覆盖：${String(bad)}`);
+    assert.equal(next.windowHeight, 620, `windowHeight 坏值不覆盖：${String(bad)}`);
+  }
+  // null 是「没有自定义尺寸」这个**有意义**的值（Rust 换方向时就是用 null 清掉上一方向的尺寸）
+  const cleared = normalizeLyricsConfig({ windowWidth: null, windowHeight: null }, base);
+  assert.equal(cleared.windowWidth, null);
+  assert.equal(cleared.windowHeight, null);
+  assert.deepEqual(lyricsConfigFromSearch("?windowWidth=320&windowHeight=620"), { ...DEFAULT_LYRICS_CONFIG, windowWidth: 320, windowHeight: 620 });
+  assert.deepEqual(lyricsConfigFromSearch("?windowWidth=&windowHeight=abc"), DEFAULT_LYRICS_CONFIG, "空/坏值落默认（null）");
+});
+
+test("R45B 纯逻辑：锁定隐藏全部控制、只有悬停/聚焦才给解锁；可缩放只在未锁的桌面窗", () => {
+  const base = DEFAULT_LYRICS_CONFIG;
+  assert.equal(resizableEnabled(base), true, "未锁的桌面窗可以拖拽缩放");
+  assert.equal(resizableEnabled({ ...base, locked: true }), false, "锁定不可缩放");
+  assert.equal(resizableEnabled({ ...base, mode: "taskbar" }), false, "任务栏那一条不可缩放");
+  // 拖动与缩放是两条不同的资格：点透禁拖动，但不该把缩放开着
+  assert.equal(resizableEnabled({ ...base, clickThrough: true }), true, "点透只影响拖动，缩放能力仍在配置上");
+});
+
+test("R45B 会话说明与事实一致：竖排是逐字竖排、行级逐字是推导、锁定只留悬停解锁", () => {
+  assert.match(LYRICS_SESSION_NOTICE, /竖排/, "说明里要讲竖排");
+  assert.doesNotMatch(LYRICS_SESSION_NOTICE, /并非中文竖排|不是.*竖排/, "旧的「并非中文竖排」已不成立");
+  assert.match(LYRICS_SESSION_NOTICE, /推导/, "行级 LRC 的逐字时间必须如实说成推导");
+  assert.match(LYRICS_SESSION_NOTICE, /悬停/, "锁定后的交互（悬停只给解锁）要写清楚");
+  assert.doesNotMatch(LYRICS_SESSION_NOTICE, /敬请期待|即将上线/, "禁画饼");
+});
+
+test("R45B Rust 与渲染层同步：三个新字段进 payload/persisted/query，且校验拒绝坏值", () => {
+  const rust = rustProduction(rustSource("lyrics_window.rs"));
+  for (const key of ["customColor", "windowWidth", "windowHeight"]) {
+    assert.match(rust, new RegExp(`"${key}"`), `Rust 侧必须认识 ${key}`);
+  }
+  const payload = rust.slice(rust.indexOf("pub fn payload("), rust.indexOf("pub fn persisted("));
+  const persisted = rust.slice(rust.indexOf("pub fn persisted("), rust.indexOf("pub fn restored("));
+  const query = rust.slice(rust.indexOf("pub fn query("), rust.indexOf("pub fn ", rust.indexOf("pub fn query(") + 20));
+  for (const [name, body] of [["payload", payload], ["persisted", persisted], ["query", query]]) {
+    for (const key of ["customColor", "windowWidth", "windowHeight"]) {
+      assert.match(body, new RegExp(key), `${name} 必须带上 ${key}`);
+    }
+  }
+  // 校验：合法 hex/正数/null 收，坏值拒（拒掉 = 保留上一次合法值）
+  const validate = rust.slice(rust.indexOf("pub fn validate_configure("), rust.indexOf("pub fn control_payload("));
+  assert.match(validate, /"customColor"/, "validate 要认识 customColor");
+  assert.match(validate, /"windowWidth"/, "validate 要认识 windowWidth");
+  assert.match(validate, /"windowHeight"/, "validate 要认识 windowHeight");
+  assert.match(validate, /is_null\(\)/, "窗口尺寸可以用 null 清空");
+  assert.match(rust, /fn is_hex_color|fn custom_color_ok/, "合法 hex 的判定在 Rust 侧也要有一个真源函数");
+  // 保留键数一致：DEFAULT_LYRICS_CONFIG 的每个字面键都在 persisted 里
+  for (const key of Object.keys(DEFAULT_LYRICS_CONFIG)) {
+    assert.match(persisted, new RegExp(`"${key}"`), `落盘合同必须包含 ${key}`);
+  }
+});
+
+test("R45B 歌词窗：Lock 图标表示已锁、悬停只留解锁、缩放拖柄只给未锁桌面、颜色与逐字走纯函数/适配层", () => {
+  const source = read("src/renderer/LyricsWindow.tsx");
+  const code = stripComments(source);
+
+  // 锁定语义：locked ⇒ Lock（不是 Unlock）；动作名说清当前状态
+  assert.match(code, /config\.locked\s*\?\s*<Lock\b/, "locked 时主图标必须是 Lock（此前是反的）");
+  assert.match(code, /:\s*<Unlock\b/, "未锁时给 Unlock（表示可以锁）");
+  assert.match(code, /已锁定/, "无障碍名称要说清「已锁定」");
+  assert.match(code, /aria-pressed=\{config\.locked\}/, "锁定是按压态开关");
+  // 悬停只给解锁：group + group-hover/focus-within 的显隐
+  assert.match(code, /group\/locked|className="group/, "锁定时要有一个 hover 容器");
+  assert.match(code, /group-hover(?:\/locked)?:opacity-100/, "悬停才显示解锁按钮");
+  assert.match(code, /group-focus-within(?:\/locked)?:opacity-100|focus-within:opacity-100/, "键盘聚焦同样能看见解锁按钮");
+  // 锁定后隐藏：拖动柄、媒体、外观、缩放柄都在「未锁」那一支里
+  assert.match(code, /config\.locked \? lockedControls :/, "锁定态只渲染解锁槽，完整控制在另一支");
+  // 缩放：官方 startResizeDragging + GripDiagonal，且只在 resizableEnabled 时渲染
+  assert.match(code, /resizableEnabled\(/, "缩放资格来自纯逻辑模块（不在这里另写判定）");
+  assert.match(code, /canResize \?/, "缩放拖柄按资格挂载（锁定/任务栏连按钮都不存在）");
+  assert.match(code, /startResizeDragging\("SouthEast"\)/, "缩放拖柄调用官方 startResizeDragging");
+  assert.match(code, /MoveDiagonal2/, "右下角用 Lucide 的 MoveDiagonal2（brief 点名的 GripDiagonal 在本仓钉住的 lucide-react 0.468.0 里不存在，且不许加依赖）");
+  // 自定义颜色：经适配层的 scoped 变量覆盖，不在组件里拼 CSS 文本
+  assert.match(code, /applyCustomColor/, "自定义颜色经 amll-adapter 的 scoped 变量覆盖");
+  assert.doesNotMatch(code, /--amll-/, "AMLL 变量的接线点仍然只有 css 与适配层");
+  assert.doesNotMatch(code, /style=\{\{/, "不许内联视觉样式");
+  assert.doesNotMatch(code, /cssText|setAttribute\("style"/, "不许注入 CSS 文本");
+  // 逐字：行级推导由适配层的纯函数做，组件只消费
+  assert.match(code, /withKaraokeWords/, "逐字高亮来自 amll-adapter 的纯函数");
+  assert.doesNotMatch(code, /\.words\b|words\.map/, "组件仍不自己渲染歌词文本");
+  // 窗口尺寸：resize 稳定 250ms 后保存 DIP
+  assert.match(code, /addEventListener\("resize"/, "窗尺寸变化要监听");
+  assert.match(source, /250/, "稳定 250ms 才保存（拖动过程中不许刷配置）");
+});
+
+test("R45B 竖版 CSS：真竖排只作用于 vertical 布局（横版/任务栏/主窗面板都不受影响）", () => {
+  const css = read("src/renderer/amll-theme.css");
+  // 只扫规则，不扫注释（注释里解释 writing-mode 是什么，那不是"给全局加了竖排"）
+  const rules = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  const at = rules.indexOf('[data-lyrics-layout="vertical"]');
+  assert.ok(at > 0, "竖排规则必须在 amll-theme.css 里（AMLL 变量的两个接线点之一）");
+  const vertical = rules.slice(at);
+  assert.match(vertical, /writing-mode:\s*vertical-rl/, "竖版必须是真竖排（writing-mode），不是窄窗换行");
+  assert.match(vertical, /text-orientation:\s*upright/, "逐字直立（不是把整行旋转 90°）");
+  assert.match(vertical, /overflow-x:\s*auto/, "沿书写方向（竖排下是 x 轴）允许滚动");
+  // 官方组件的换行是按"宽度"算的：竖排里那个宽度是列的厚度，照它折会变成"一列一两个字"。
+  assert.match(vertical, /max-height:\s*100cqh/, "一行的高度限在窗口高度内（竖排的折列轴）");
+  assert.match(vertical, /container-type:\s*size/, "100cqh 需要播放器自己是尺寸容器");
+  assert.match(vertical, /br\s*\{[^}]*display:\s*none/, "官方按宽度插的 <br> 在竖排下不显示（改由浏览器按高度折列）");
+  assert.doesNotMatch(rules.slice(0, at), /writing-mode/, "竖排规则不许出现在全局作用域");
+  assert.doesNotMatch(
+    rules,
+    /(^|\})\s*\.amll-lyric-player\s*\{[^}]*writing-mode/m,
+    "不能直接给 .amll-lyric-player 加竖排：主窗歌词面板共用这个类",
+  );
+  assert.doesNotMatch(vertical, /<|getContext\(/, "仍然只是 CSS：没有自绘歌词");
+  /**
+   * R45B fix2：竖排必须落在**行内容**上，不能落在播放器上。
+   *
+   * 官方给每行量高用的是 `ResizeObserver.borderBoxSize.blockSize`（在元素自己的书写模式里量），
+   * 再拿这一个"行高"在 y 轴上排所有行、算滚动边界。播放器一旦是 `vertical-rl`，块轴变成水平的，
+   * 量到的"行高"就成了"一行有多少列那么宽"（240×120 实测 291px > 窗口 120px），当前行被整体推到
+   * 窗口上方之外——这正是 fix2 要修的裁切。所以这条守卫钉住"竖排写在 `[class*="lyricMainLine"]` 上"，
+   * 也钉住"行内容自己的文本方向仍是 ltr"（块起边靠右由行盒的 rtl 负责，别把字序倒过来）。
+   */
+  const mainLineRule = vertical.slice(vertical.indexOf('[class*="lyricMainLine"]'));
+  assert.match(mainLineRule, /writing-mode:\s*vertical-rl/, "竖排要写在行内容（lyricMainLine）上：行盒保持水平书写，官方量到的行高才是真的");
+  assert.match(mainLineRule, /direction:\s*ltr/, "行内文本方向不许被 rtl 带倒（竖排仍是「从上到下」）");
+  assert.match(vertical, /\[class\*="lyricLine"\]\s*\{[^}]*direction:\s*rtl/, "行盒的块起边靠右（竖排列自右向左），放不下时行首留在窗口里");
+});
+
+
+test("R45B fix4 竖版小窗：溢出交给播放器的原生滚动条，而滚动条那一条不拖窗口（其余歌词区照旧可拖）", () => {
+  /**
+   * 这一条钉的是 fix4 的**最小面**：
+   * - CSS 只给竖排播放器（`[data-lyrics-layout="vertical"]`）加"溢出几何 + 细条"，全局作用域一个字节不动；
+   * - 组件只放过"按在播放器原生滚动条那一条上"的 mousedown，**且不 preventDefault**（否则原生拖条被取消），
+   *   不放宽整块歌词区（正文按住拖窗口的行为必须原样保留，浏览器侧由 ⑦e 的正文对照点证）。
+   */
+  const css = read("src/renderer/amll-theme.css");
+  const rules = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  const at = rules.indexOf('[data-lyrics-layout="vertical"]');
+  assert.ok(at > 0, "fix4 的几何也必须在 amll-theme.css 的竖排作用域里");
+  const vertical = rules.slice(at);
+  assert.match(vertical, /\.amll-lyric-player\s*\{[^}]*direction:\s*rtl/, "竖排播放器要是 rtl 滚动容器：块起边在右，溢出朝左才滚得到");
+  assert.match(vertical, /\[class\*="lyricLineWrapper"\]\s*>\s*\[class\*="lyricLine"\]\s*\{[^}]*width:\s*max-content/,
+    "行盒按内容宽度撑开，溢出才会落在播放器里（官方 containment 才没东西可裁）");
+  assert.match(vertical, /::-webkit-scrollbar\s*\{[^}]*height:\s*6px/, "滚动条画成细条：84px 高的横带里经典条会吃掉 17px");
+  assert.doesNotMatch(rules.slice(0, at), /max-content|webkit-scrollbar/, "fix4 的几何不许出现在全局作用域（横版/任务栏/主窗面板都不受影响）");
+
+  const code = stripComments(read("src/renderer/LyricsWindow.tsx"));
+  assert.match(code, /lyricScrollbarHit/, "滚动条命中判定要是一个有名字的判据，不是散在 startDrag 里的裸坐标比较");
+  assert.match(code, /closest<HTMLElement>\("\.amll-lyric-player"\)/, "只认播放器自己的滚动条，不放大到整块歌词区");
+  assert.match(code, /offsetHeight - player\.clientHeight/, "条厚取它真占掉的那一条（offsetHeight - clientHeight）");
+  assert.match(code, /if \(!grip && lyricScrollbarHit\([^)]*\)\) return\s*\n\s*event\.preventDefault\(\)/,
+    "命中滚动条时先 return：不许 preventDefault，否则原生拖条被取消");
+  assert.match(code, /onMouseDownCapture=\{startDrag\}/, "宿主仍在 capture 阶段接管拖动（既有行为不变）");
+});
+
+
+test("R45B 设置页：颜色选择器 + 恢复主题色（只写合法 hex，清空回令牌）", () => {
+  const page = read("src/renderer/pages.tsx");
+  const settings = page.slice(page.indexOf("export function SettingsPage("));
+  assert.match(settings, /type="color"/, "设置页要有原生颜色选择器");
+  assert.match(settings, /恢复主题色/, "要能一键回到主题色");
+  assert.match(settings, /customColor/, "颜色写的是 customColor 字段（不是第二份颜色配置）");
+  assert.match(settings, /isCustomColor/, "合法 hex 判定来自纯逻辑模块");
+  assert.match(settings, /aria-label="自定义歌词颜色"/, "颜色选择器要有可读的名称");
+  // 不允许在这里自己写 hex 正则（唯一真源在 lyrics-window.mjs）
+  assert.doesNotMatch(settings, /0-9a-fA-F\]\{6\}|\[0-9a-f\]\{6\}/, "不许在页面里另抄一份 hex 正则");
 });

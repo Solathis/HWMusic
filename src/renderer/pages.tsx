@@ -126,6 +126,7 @@ import {
   LYRICS_SESSION_NOTICE,
   colorTokenLabel,
   fontStepLabel,
+  isCustomColor,
   modeLabel,
   taskbarStatusText,
 } from "./features/lyrics/lyrics-window.mjs"
@@ -1053,6 +1054,8 @@ export function SettingsPage({
   }
 
   const busy = saving || testing
+  /** 已存档的自定义歌词颜色（`#RRGGBB`）；没选过/坏值就是 `null`（= 用设计令牌）。 */
+  const customColorValue = isCustomColor(lyrics?.config.customColor) ? lyrics!.config.customColor : null
 
   return (
     <div className="m-4 flex max-w-3xl flex-col gap-4" data-testid="settings-page">
@@ -1366,6 +1369,37 @@ export function SettingsPage({
                       </SelectGroup>
                     </SelectContent>
                   </Select>
+                  {/*
+                    R45B：自定义颜色 = 原生颜色输入（`type=color`）+ 「恢复主题色」。
+                    只写合法的六位 hex（判定来自 lyrics-window.mjs 的 isCustomColor，页面不另抄正则）；
+                    清空 = 回到上面选的设计令牌。落盘仍由 Rust 拥有（这里只发一条窄配置命令）。
+                    输入框是**非受控**的（`defaultValue` + 按存档值换 `key`）：`type=color` 的受控值
+                    必须始终是一个合法色值，而「还没选过」这件事不该由页面编一个色值出来
+                    （仓里的规矩是渲染层不写裸色值，颜色一律来自令牌或用户自己选的那个）。
+                  */}
+                  <div className="flex items-center gap-2">
+                    <Input
+                      key={customColorValue ?? "theme"}
+                      id="lyrics-custom-color"
+                      type="color"
+                      aria-label="自定义歌词颜色"
+                      className="h-8 w-14 shrink-0 p-0"
+                      defaultValue={customColorValue ?? undefined}
+                      disabled={lyrics === null}
+                      onChange={(event) => {
+                        const value = event.target.value
+                        if (!isCustomColor(value)) return
+                        lyrics?.updateConfig({ customColor: value })
+                      }}
+                    />
+                    <Button variant="ghost" size="sm" disabled={!customColorValue}
+                      onClick={() => lyrics?.updateConfig({ customColor: "" })}>
+                      恢复主题色
+                    </Button>
+                  </div>
+                  {customColorValue ? (
+                    <p className="text-xs text-muted-foreground">{`使用自定义颜色 ${customColorValue}`}</p>
+                  ) : null}
                 </div>
 
                 <div className="flex flex-col justify-end gap-2">

@@ -146,6 +146,51 @@ pub const TASKBAR_MAX_FONT_PX: u32 = 20;
 /// 只认设计令牌，绝不接受任意色值（`#fff`、`rgb(...)` 一律落回上一个合法值）。
 pub const LYRICS_COLOR_TOKENS: &[&str] = &["foreground", "muted", "primary", "contrast"];
 
+/// 自定义歌词颜色（R45B）：`#` + 6 位十六进制（与渲染层 `CUSTOM_COLOR_PATTERN` 同一口径）。
+///
+/// 为什么不是"任意 CSS 色值"：这个值会被写进官方 AMLL 组件消费的 CSS 变量，
+/// 能写色值就能写 `url(...)`/`;}`——六位 hex 是唯一"写成什么都只是一块颜色"的形状。
+pub fn is_hex_color(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 7 && bytes[0] == b'#' && bytes[1..].iter().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// 自定义颜色合法（空串 = 用设计令牌）。
+pub fn custom_color_ok(value: &str) -> bool {
+    value.is_empty() || is_hex_color(value)
+}
+
+/// 自定义颜色写进查询串：`#` 必须转义（`#` 在 URL 里是 fragment 分隔符，原样写会把后面全吃掉）。
+pub fn encode_custom_color(value: &str) -> String {
+    if !is_hex_color(value) {
+        return String::new();
+    }
+    format!("%23{}", &value[1..])
+}
+
+/// 桌面窗的最小尺寸（DIP）：比这更小就没法显示一行/一列歌词了（简报：240×120）。
+pub const MIN_WINDOW_WIDTH_DIP: f64 = 240.0;
+pub const MIN_WINDOW_HEIGHT_DIP: f64 = 120.0;
+/// 尺寸的绝对上限（DIP）：真正的上限是工作区，这里只是拦掉"明显是坏值"的数。
+pub const MAX_WINDOW_DIP: f64 = 100_000.0;
+
+/// 把一次改尺寸归一成 `Option<Option<f64>>`：`None` = 这次补丁没提这个键（不动），
+/// `Some(None)` = 明确清空，`Some(Some(v))` = 取整并夹进 [min, MAX_WINDOW_DIP]。
+///
+/// 为什么钳最小：`null` 之外的坏值（0/负数/NaN）已经在下面被丢掉了，而"小于 240×120"是
+/// 用户**确实**拖不到的状态（窗口本身有 `min_inner_size`），留在配置里只会让下次恢复出个怪尺寸。
+fn size_patch(patch: &serde_json::Map<String, Value>, key: &str, min: f64) -> Option<Option<f64>> {
+    match patch.get(key) {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(value) => value
+            .as_f64()
+            .filter(|size| size.is_finite() && *size > 0.0)
+            .map(|size| Some(size.round().clamp(min, MAX_WINDOW_DIP))),
+    }
+}
+
+
 /// 默认字号档位。
 pub const DEFAULT_LYRICS_SIZE: &str = "lg";
 /// 默认颜色令牌。
@@ -162,6 +207,11 @@ pub struct LyricsConfig {
     pub style: String,
     pub size: String,
     pub color: String,
+    /// 自定义歌词颜色（`#RRGGBB`；空串 = 用 `color` 选的设计令牌）。R45B 新增。
+    pub custom_color: String,
+    /// 桌面窗的 DIP 尺寸（未锁定时拖拽缩放后保存；`None` = 用该方向的默认尺寸）。R45B 新增。
+    pub window_width: Option<f64>,
+    pub window_height: Option<f64>,
     pub locked: bool,
     pub click_through: bool,
     pub enable_blur: bool,
@@ -178,6 +228,9 @@ impl Default for LyricsConfig {
             style: "clean".into(),
             size: DEFAULT_LYRICS_SIZE.to_string(),
             color: DEFAULT_LYRICS_COLOR.to_string(),
+            custom_color: String::new(),
+            window_width: None,
+            window_height: None,
             locked: false,
             click_through: false,
             enable_blur: true,
@@ -213,6 +266,11 @@ impl LyricsConfig {
             if let Some(value) = patch.get(key).and_then(Value::as_str).filter(|v| allowed.contains(v)) { *target = value.into(); }
         }
         if let Some(value) = patch.get("size").and_then(Value::as_str).filter(|v| LYRICS_FONT_STEPS.iter().any(|(id, _)| id == v)) { next.size = value.into(); }
+        // R45B：自定义颜色（空串 = 回设计令牌）；坏形状不覆盖上一个合法值
+        if let Some(value) = patch.get("customColor").and_then(Value::as_str).filter(|v| custom_color_ok(v)) { next.custom_color = value.into(); }
+        // R45B：窗口 DIP 尺寸（`null` = 没有自定义尺寸；小数取整并夹进最小尺寸）
+        if let Some(size) = size_patch(patch, "windowWidth", MIN_WINDOW_WIDTH_DIP) { next.window_width = size; }
+        if let Some(size) = size_patch(patch, "windowHeight", MIN_WINDOW_HEIGHT_DIP) { next.window_height = size; }
         for (key, target) in [
             ("locked", &mut next.locked), ("clickThrough", &mut next.click_through),
             ("enableBlur", &mut next.enable_blur), ("enableScale", &mut next.enable_scale),
@@ -221,17 +279,34 @@ impl LyricsConfig {
         next
     }
 
+    /// 自定义尺寸（两个分量都得有；缺一个就当没有——半个尺寸不是尺寸）。
+    pub fn custom_size(&self) -> Option<Size> {
+        match (self.window_width, self.window_height) {
+            (Some(width), Some(height)) => Some(Size { width, height }),
+            _ => None,
+        }
+    }
+
+    /// 清掉自定义尺寸（方向/模式切换时用：上一方向的尺寸不属于新方向）。
+    pub fn without_custom_size(mut self) -> LyricsConfig {
+        self.window_width = None;
+        self.window_height = None;
+        self
+    }
+
     pub fn payload(&self) -> Value {
         json!({
             "mode": self.mode.as_str(), "layout": self.layout, "style": self.style,
             "size": self.size, "color": self.color, "locked": self.locked,
+            "customColor": self.custom_color, "windowWidth": self.window_width,
+            "windowHeight": self.window_height,
             "clickThrough": self.click_through, "enableBlur": self.enable_blur,
             "enableScale": self.enable_scale, "enableSpring": self.enable_spring,
             "showControls": self.show_controls, "effectiveSize": self.effective_size(),
         })
     }
 
-    /// **落盘合同**：只有 `DEFAULT_LYRICS_CONFIG` 那 11 个字面键。
+    /// **落盘合同**：只有 `DEFAULT_LYRICS_CONFIG` 那 14 个字面键。
     ///
     /// 刻意与 [`LyricsConfig::payload`] 分开：`effectiveSize` 是派生值（由 mode+size 算出来的），
     /// taskbar 的附着/可见/revision/dirty/saveError 是运行时状态——把它们写进 `settings.json`
@@ -240,6 +315,8 @@ impl LyricsConfig {
         json!({
             "mode": self.mode.as_str(), "layout": self.layout, "style": self.style,
             "size": self.size, "color": self.color, "locked": self.locked,
+            "customColor": self.custom_color, "windowWidth": self.window_width,
+            "windowHeight": self.window_height,
             "clickThrough": self.click_through, "enableBlur": self.enable_blur,
             "enableScale": self.enable_scale, "enableSpring": self.enable_spring,
             "showControls": self.show_controls,
@@ -253,15 +330,47 @@ impl LyricsConfig {
 
     pub fn query(&self) -> String {
         format!(
-            "mode={}&size={}&color={}&locked={}&clickThrough={}&layout={}&style={}&enableBlur={}&enableScale={}&enableSpring={}&showControls={}",
-            self.mode.as_str(), self.size, self.color, u8::from(self.locked), u8::from(self.click_through),
+            "mode={}&size={}&color={}&customColor={}&windowWidth={}&windowHeight={}&locked={}&clickThrough={}&layout={}&style={}&enableBlur={}&enableScale={}&enableSpring={}&showControls={}",
+            self.mode.as_str(), self.size, self.color, encode_custom_color(&self.custom_color),
+            dip_param(self.window_width), dip_param(self.window_height),
+            u8::from(self.locked), u8::from(self.click_through),
             self.layout, self.style, u8::from(self.enable_blur), u8::from(self.enable_scale),
             u8::from(self.enable_spring), u8::from(self.show_controls),
         )
     }
 }
 
+/// 查询串里的 DIP 尺寸：没有就留空（渲染层把空串当"没有自定义尺寸"，不是 0）。
+fn dip_param(value: Option<f64>) -> String {
+    value.map(|size| format!("{}", size.round() as i64)).unwrap_or_default()
+}
+
 pub fn desktop_topmost(config: &LyricsConfig) -> bool { config.mode == LyricsMode::Desktop }
+
+/// 拖拽缩放的资格（R45B）：**仅未锁的桌面窗**（渲染层 `resizableEnabled` 是同一口径）。
+///
+/// 任务栏那一条是原生宿主摆的，锁定意味着"这一块不该再被误拖大小"——两条都不可缩放。
+pub fn resizable_enabled(config: &LyricsConfig) -> bool {
+    config.mode == LyricsMode::Desktop && !config.locked
+}
+
+/// 一次配置补丁的**归一结果**（纯函数）：布局/方向切换时，上一方向的自定义尺寸不再沿用。
+///
+/// 为什么要有这一条：竖版拖成 320×620、切回横版时若继续套用那个尺寸，用户看到的是一条
+/// 又窄又高的横版条——上一方向的自定义尺寸不属于新方向。反过来（补丁里明确带了尺寸）
+/// 就按补丁来：那是"设尺寸"这条动作本身，不是方向切换的副产物。
+pub fn normalized_patch(current: &LyricsConfig, patch: &Value) -> LyricsConfig {
+    let next = current.apply_patch(patch);
+    let geometry_changed = next.mode != current.mode || next.layout != current.layout;
+    let patch_sets_size = patch
+        .as_object()
+        .is_some_and(|object| object.contains_key("windowWidth") || object.contains_key("windowHeight"));
+    if geometry_changed && !patch_sets_size {
+        next.without_custom_size()
+    } else {
+        next
+    }
+}
 
 pub fn click_through_enabled(config: &LyricsConfig) -> bool {
     config.click_through || config.mode == LyricsMode::Taskbar
@@ -469,7 +578,8 @@ impl LyricsWindowState {
         let (previous, snapshot, changed) = {
             let mut state = lock(&self.config);
             let current = state.config.clone();
-            let next = current.apply_patch(patch);
+            // R45B：方向/模式切换时把上一方向的自定义尺寸一起清掉（见 `normalized_patch`）
+            let next = normalized_patch(&current, patch);
             let changed = next != current;
             if changed { state.config = next; state.revision += 1; }
             (current, state.clone(), changed)
@@ -796,6 +906,10 @@ pub fn validate_configure(label: &str, patch: &Value, retry_save: Option<bool>, 
             "style" => value.as_str().is_some_and(|v| LYRICS_STYLES.contains(&v)),
             "color" => value.as_str().is_some_and(|v| LYRICS_COLOR_TOKENS.contains(&v)),
             "size" => value.as_str().is_some_and(|v| LYRICS_FONT_STEPS.iter().any(|(id, _)| *id == v)),
+            // R45B：自定义颜色只收空串或 `#RRGGBB`；窗口尺寸只收 null 或有限正数
+            "customColor" => value.as_str().is_some_and(custom_color_ok),
+            "windowWidth" | "windowHeight" => value.is_null()
+                || value.as_f64().is_some_and(|size| size.is_finite() && size > 0.0),
             "locked" | "clickThrough" | "enableBlur" | "enableScale" | "enableSpring" | "showControls" => value.is_boolean(),
             _ => false,
         };
@@ -979,7 +1093,10 @@ fn build_lyrics_window<R: Runtime>(
     .shadow(false)
     .always_on_top(desktop_topmost(config))
     .skip_taskbar(true)
-    .resizable(false)
+    // R45B：桌面窗未锁定时可拖拽缩放（右下角拖柄调官方 startResizeDragging）；
+    // 锁定与任务栏模式下不可缩放——这是"锁定后功能键全部隐藏"的窗口层那一半。
+    .resizable(resizable_enabled(config))
+    .min_inner_size(MIN_WINDOW_WIDTH_DIP, MIN_WINDOW_HEIGHT_DIP)
     .focused(false)
     .visible(false)
     .data_directory(lyrics_data);
@@ -1046,11 +1163,16 @@ fn build_lyrics_window<R: Runtime>(
 #[derive(Debug, PartialEq)]
 pub enum WindowEffect {
     Geometry(Size, Point),
+    /// **只改尺寸、不动位置**（R45B）：用户拖拽缩放后保存的 DIP 尺寸落到窗口上，并夹进工作区。
+    /// 刻意与 [`WindowEffect::Geometry`] 分开：颜色/锁/演出/尺寸这些变化都不许让窗口跳位。
+    Size(Size),
     ClickThrough(bool),
 }
 
 pub fn geometry_plan(area: Rect, config: &LyricsConfig, scale: f64, current: Option<Point>) -> (Size, Point) {
     let wanted = if config.mode == LyricsMode::Taskbar { TASKBAR_SIZE }
+        // R45B：用户拖过的尺寸优先（它是 DIP，按缩放比换成物理像素后再夹进工作区）
+        else if let Some(size) = config.custom_size() { size }
         else if config.layout == "vertical" { Size { width: 320.0, height: 620.0 } }
         else { DESKTOP_SIZE };
     let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
@@ -1063,9 +1185,20 @@ pub fn geometry_plan(area: Rect, config: &LyricsConfig, scale: f64, current: Opt
 
 pub fn apply_window_effects(previous: Option<&LyricsConfig>, config: &LyricsConfig, area: Rect, scale: f64, current: Option<Point>, mut apply: impl FnMut(WindowEffect)) {
     if config.mode == LyricsMode::Taskbar { return; }
-    if previous.is_none_or(|old| old.mode != config.mode || old.layout != config.layout) {
+    let geometry = previous.is_none_or(|old| old.mode != config.mode || old.layout != config.layout);
+    if geometry {
         let (size, point) = geometry_plan(area, config, scale, current);
         apply(WindowEffect::Geometry(size, point));
+    } else if let (Some(old), Some(size)) = (previous.and_then(LyricsConfig::custom_size), config.custom_size()) {
+        // 只有"自定义尺寸变了"才动尺寸；方向切换那一支已经把尺寸清空（见 `normalized_patch`），
+        // 所以这里不会跟 Geometry 抢同一帧。
+        if old != size {
+            let factor = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+            apply(WindowEffect::Size(Size {
+                width: (size.width * factor).min(area.width).max(1.0),
+                height: (size.height * factor).min(area.height).max(1.0),
+            }));
+        }
     }
     if previous.is_none_or(|old| click_through_enabled(old) != click_through_enabled(config)) {
         apply(WindowEffect::ClickThrough(click_through_enabled(config)));
@@ -1075,13 +1208,19 @@ pub fn apply_window_effects(previous: Option<&LyricsConfig>, config: &LyricsConf
 fn apply_config<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<R>, previous: Option<&LyricsConfig>, config: &LyricsConfig) -> Result<(), CoreError> {
     if config.mode == LyricsMode::Taskbar { return Ok(()); }
     let geometry = previous.is_none_or(|old| old.mode != config.mode || old.layout != config.layout);
-    let area = if geometry { work_area(app, previous.is_some() && config.mode == LyricsMode::Desktop)? } else { Rect { x:0.0, y:0.0, width:1.0, height:1.0 } };
+    let resized = !geometry && previous.and_then(LyricsConfig::custom_size) != config.custom_size() && config.custom_size().is_some();
+    let area = if geometry || resized { work_area(app, previous.is_some() && config.mode == LyricsMode::Desktop)? } else { Rect { x:0.0, y:0.0, width:1.0, height:1.0 } };
     let current = window.outer_position().ok().map(|p| Point {x: p.x.into(), y: p.y.into()});
     let mut result = Ok(());
+    // R45B：可缩放资格是窗口属性（锁定 = 不可拖大小）。失败只留痕：它是增强，不该让配置应用失败。
+    if let Err(source) = window.set_resizable(resizable_enabled(config)) {
+        log::warn!("歌词窗的缩放资格没能应用（{source}）：锁定态仍由渲染层不显示缩放拖柄兜住");
+    }
     apply_window_effects(previous, config, area, window.scale_factor().unwrap_or(1.0), if previous.is_some() { current } else { None }, |effect| {
         let applied = match effect {
             WindowEffect::Geometry(size, point) => window.set_size(PhysicalSize::new(size.width.round() as u32, size.height.round() as u32))
                 .and_then(|_| window.set_position(PhysicalPosition::new(point.x.round() as i32, point.y.round() as i32))),
+            WindowEffect::Size(size) => window.set_size(PhysicalSize::new(size.width.round() as u32, size.height.round() as u32)),
             WindowEffect::ClickThrough(through) => window.set_ignore_cursor_events(through),
         };
         if let Err(source) = applied { result = Err(CoreError::new("internal", format!("歌词窗属性更新失败：{source}"))); }
@@ -1923,7 +2062,9 @@ mod tests {
             ".shadow(false)",
             ".always_on_top(desktop_topmost(config))",
             ".skip_taskbar(true)",
-            ".resizable(false)",
+            // R45B：可缩放资格按配置算（桌面未锁才可拖大小；锁定与任务栏不可）
+            ".resizable(resizable_enabled(config))",
+            ".min_inner_size(MIN_WINDOW_WIDTH_DIP, MIN_WINDOW_HEIGHT_DIP)",
             ".focused(false)",
             ".visible(false)",
             ".data_directory(",
@@ -1975,7 +2116,7 @@ mod tests {
         LyricsConfig::default().apply_patch(&patch)
     }
 
-    /// 落盘合同恰好是 11 个字面键：不含 `effectiveSize`（派生值）与 taskbar/revision/visible/dirty。
+    /// 落盘合同恰好是 14 个字面键：不含 `effectiveSize`（派生值）与 taskbar/revision/visible/dirty。
     #[test]
     fn r44e_the_persisted_contract_is_exactly_the_config_keys() {
         let persisted = LyricsConfig::default().persisted();
@@ -1984,6 +2125,8 @@ mod tests {
         let mut expected = vec![
             "mode", "layout", "style", "size", "color", "locked", "clickThrough",
             "enableBlur", "enableScale", "enableSpring", "showControls",
+            // R45B：歌词颜色与窗口尺寸也是用户配置（要落盘、要重启恢复）
+            "customColor", "windowWidth", "windowHeight",
         ];
         expected.sort_unstable();
         assert_eq!(keys, expected, "只写合同 config 字段");
@@ -2353,6 +2496,137 @@ mod tests {
             Some(state.config()),
             "被受理的那一笔必须在队列里（否则就是复审说的 frozen gap）"
         );
+    }
+
+    /// R45B：自定义颜色 / 窗口 DIP 尺寸的形状校验与往返（坏值不覆盖上一个合法值）。
+    #[test]
+    fn r45b_custom_color_and_window_size_are_validated_and_round_trip() {
+        assert!(is_hex_color("#a1b2c3"));
+        assert!(is_hex_color("#A1B2C3"));
+        for bad in ["#fff", "fff", "#12345", "#1234567", "#12345g", "red", "rgb(0,0,0)", " #a1b2c3"] {
+            assert!(!is_hex_color(bad), "{bad} 不是合法的六位 hex");
+            assert!(!custom_color_ok(bad), "{bad} 不该被接受");
+        }
+        assert!(custom_color_ok(""), "空串 = 用设计令牌，合法");
+
+        let base = LyricsConfig::default();
+        let painted = base.apply_patch(&json!({"customColor": "#FF8800"}));
+        assert_eq!(painted.custom_color, "#FF8800", "合法值原样收（大小写不折叠）");
+        assert_eq!(painted.apply_patch(&json!({"customColor": "#fff"})).custom_color, "#FF8800", "坏值不覆盖");
+        assert_eq!(painted.apply_patch(&json!({"customColor": ""})).custom_color, "", "清空回设计令牌");
+
+        let sized = base.apply_patch(&json!({"windowWidth": 359.6, "windowHeight": 480.0}));
+        assert_eq!(sized.window_width, Some(360.0), "DIP 存整像素");
+        assert_eq!(sized.window_height, Some(480.0));
+        assert_eq!(sized.custom_size(), Some(Size { width: 360.0, height: 480.0 }));
+        for bad in [json!(0.0), json!(-10.0), json!("320"), json!({}), json!(true)] {
+            let next = sized.apply_patch(&json!({"windowWidth": bad}));
+            assert_eq!(next.window_width, Some(360.0), "尺寸坏值不覆盖上一个合法值：{bad}");
+        }
+        assert_eq!(sized.apply_patch(&json!({"windowWidth": null})).window_width, None, "null = 清掉自定义尺寸");
+        let small = base.apply_patch(&json!({"windowWidth": 100.0, "windowHeight": 50.0}));
+        assert_eq!(
+            (small.window_width, small.window_height),
+            (Some(MIN_WINDOW_WIDTH_DIP), Some(MIN_WINDOW_HEIGHT_DIP)),
+            "最小尺寸 240×120（比这更小的窗口连一列歌词都放不下）"
+        );
+
+        // 落盘合同 / 回执 / 查询串三处都带上，且往返一字不差
+        let config = sized.apply_patch(&json!({"customColor": "#ff8800"}));
+        let persisted = config.persisted();
+        for key in ["customColor", "windowWidth", "windowHeight"] {
+            assert!(persisted.get(key).is_some(), "{key} 必须在落盘合同里");
+        }
+        assert_eq!(LyricsConfig::restored(Some(&persisted)), config, "落盘往返一字不差");
+        assert_eq!(LyricsConfig::restored(Some(&config.payload())), config, "回执往返一字不差（effectiveSize 是派生值）");
+        let query = config.query();
+        assert!(query.contains("customColor=%23ff8800"), "`#` 必须转义（否则查询串在那里就断成 fragment）：{query}");
+        assert!(query.contains("windowWidth=360"), "{query}");
+        assert!(query.contains("windowHeight=480"), "{query}");
+        assert!(
+            base.query().contains("customColor=&windowWidth=&windowHeight="),
+            "没有自定义值时参数留空（渲染层把空串当「没有」而不是 0）：{}",
+            base.query()
+        );
+    }
+
+    /// R45B：方向/模式切换不再沿用上一方向的自定义尺寸（一个纯函数说得清）。
+    #[test]
+    fn r45b_switching_layout_or_mode_drops_the_previous_custom_size() {
+        let sized = LyricsConfig::default().apply_patch(&json!({
+            "layout": "vertical", "windowWidth": 360.0, "windowHeight": 620.0
+        }));
+        assert_eq!(normalized_patch(&sized, &json!({"layout": "horizontal"})).custom_size(), None, "切回横版用横版默认尺寸");
+        assert_eq!(normalized_patch(&sized, &json!({"color": "primary"})).custom_size(), sized.custom_size(), "改颜色不动尺寸");
+        assert_eq!(normalized_patch(&sized, &json!({"locked": true})).custom_size(), sized.custom_size(), "锁定不动尺寸");
+        let both = normalized_patch(&sized, &json!({"layout": "horizontal", "windowWidth": 500.0, "windowHeight": 200.0}));
+        assert_eq!(
+            both.custom_size(),
+            Some(Size { width: 500.0, height: 200.0 }),
+            "补丁自己带了尺寸就按补丁来（那是「设尺寸」这个动作）"
+        );
+        assert_eq!(normalized_patch(&sized, &json!({"mode": "taskbar"})).custom_size(), None, "切任务栏同样丢掉");
+
+        // 运行状态的配置接受走的正是这条归一：一次 configure 之后尺寸已经清掉
+        let state = LyricsWindowState::default();
+        state.configure(&json!({"windowWidth": 420.0, "windowHeight": 300.0}));
+        let (_, snapshot, changed) = state.configure(&json!({"layout": "vertical"}));
+        assert!(changed);
+        assert_eq!(snapshot.config.custom_size(), None, "方向切换后运行配置里不再留着上一方向的尺寸");
+    }
+
+    /// R45B：自定义尺寸是 DIP，按缩放比换成物理像素并夹进工作区；尺寸变化只改尺寸不动位置。
+    #[test]
+    fn r45b_custom_size_is_dip_scaled_clamped_and_never_moves_the_window() {
+        let area = Rect { x: -1920.0, y: 0.0, width: 1920.0, height: 1040.0 };
+        let sized = LyricsConfig::default().apply_patch(&json!({"windowWidth": 360.0, "windowHeight": 480.0}));
+        let (size, point) = geometry_plan(area, &sized, 2.0, None);
+        assert_eq!(size, Size { width: 720.0, height: 960.0 }, "DIP × 缩放比 = 物理像素");
+        assert!(point.x >= area.x && point.x + size.width <= area.x + area.width, "位置仍夹在工作区内：{point:?}");
+        assert!(point.y >= area.y && point.y + size.height <= area.y + area.height, "{point:?}");
+
+        let huge = sized.apply_patch(&json!({"windowWidth": 4000.0, "windowHeight": 4000.0}));
+        let (clamped, _) = geometry_plan(area, &huge, 1.0, None);
+        assert_eq!(clamped, Size { width: 1920.0, height: 1040.0 }, "超出工作区的自定义尺寸被夹回工作区");
+
+        let current = Some(Point { x: 40.0, y: 200.0 });
+        let mut effects = Vec::new();
+        apply_window_effects(Some(&sized), &sized.apply_patch(&json!({"windowWidth": 500.0})), area, 1.0, current, |effect| effects.push(effect));
+        assert_eq!(
+            effects,
+            vec![WindowEffect::Size(Size { width: 500.0, height: 480.0 })],
+            "用户拖出来的尺寸只改尺寸——不许给 Geometry（那会连位置一起重算 = 跳位）"
+        );
+        for patch in [
+            json!({"color": "primary"}),
+            json!({"locked": true}),
+            json!({"style": "panel"}),
+            json!({"enableSpring": false}),
+            json!({"customColor": "#ff8800"}),
+            json!({"size": "xl"}),
+        ] {
+            let next = sized.apply_patch(&patch);
+            let mut quiet = Vec::new();
+            apply_window_effects(Some(&sized), &next, area, 1.0, current, |effect| quiet.push(effect));
+            assert!(quiet.is_empty(), "颜色/锁/样式/演出/字号/自定义色都不许产生窗口效果：{patch} → {quiet:?}");
+        }
+    }
+
+    /// R45B：缩放资格 = 未锁的桌面窗（锁定与任务栏两条都不可缩）。
+    #[test]
+    fn r45b_resize_is_only_available_while_the_desktop_window_is_unlocked() {
+        let base = LyricsConfig::default();
+        assert!(resizable_enabled(&base));
+        assert!(!resizable_enabled(&base.apply_patch(&json!({"locked": true}))), "锁定不可缩放");
+        assert!(!resizable_enabled(&base.apply_patch(&json!({"mode": "taskbar"}))), "任务栏那条不可缩放");
+        assert!(resizable_enabled(&base.apply_patch(&json!({"clickThrough": true}))), "点透只禁拖动，不禁缩放");
+        // 建窗与配置应用两处都按同一个判定走（窗口属性不能有第二份口径）
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs"))
+            .expect("要能读到自己的源码");
+        let production = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        assert!(production.contains(".resizable(resizable_enabled(config))"), "建窗时就按资格设可缩放");
+        assert!(production.contains("window.set_resizable(resizable_enabled(config))"), "锁定后要收回缩放资格");
+        assert!(production.contains(".min_inner_size(MIN_WINDOW_WIDTH_DIP, MIN_WINDOW_HEIGHT_DIP)"), "最小尺寸由窗口层兜住");
     }
 
     /// 唯一写者的形状：本模块不自己写 `settings.json`，写盘走内部 `settings:set`。

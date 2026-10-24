@@ -64,6 +64,36 @@ export const LYRICS_STYLES = ["clean", "panel"];
 export const LYRICS_SETTING_KEY = "lyricsWindow";
 
 /**
+ * 自定义歌词颜色（R45B）：**只认 `#RRGGBB`**，空串 = 用设计令牌（`data-lyrics-color`）。
+ *
+ * 为什么不让任意 CSS 色值进来：这个值会被写进官方 AMLL 组件消费的那个颜色变量
+ * （唯一接线点在 `amll-theme.css`；用户指定的颜色由 `amll-adapter.ts` 做一次 scoped 覆盖），
+ * 能写色值就能写 `url(...)`/`expression(...)`/`;}...`——六位 hex 是唯一"写成什么都只是一块颜色"
+ * 的形状。两侧（Rust `is_hex_color`）同一口径。
+ */
+export const CUSTOM_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
+
+/** 这个值是不是合法的 `#RRGGBB`（唯一真源；配置归一、设置页、适配层都用它）。 */
+export function isCustomColor(value) {
+  return typeof value === "string" && CUSTOM_COLOR_PATTERN.test(value);
+}
+
+/** 归一自定义颜色：合法就原样（大小写不折叠，用户输入什么样就是什么样），其余回空串。 */
+export function normalizeCustomColor(value) {
+  return isCustomColor(value) ? value : "";
+}
+
+/** 窗口尺寸（DIP）的合法范围：0/负数/非有限值都不是"尺寸"，超大值钳到工作区时再说。 */
+export const MAX_DIP_SIZE = 100000;
+
+/** 一个 DIP 分量：有限正数（只认真正的数字）、取整；其余回 `null`（不猜，字符串也不算）。 */
+export function normalizeDipSize(value) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  return Math.min(Math.round(value), MAX_DIP_SIZE);
+}
+
+
+/**
  * 持久化失败的**代码 → 人话**（R44e）。
  *
  * Rust 的保存任务只报稳定的代码（`settings_write_failed` / `settings_write_unconfirmed`），
@@ -82,12 +112,42 @@ export function saveErrorText(code) {
   return LYRICS_SAVE_ERRORS[code] ?? LYRICS_SAVE_ERROR_DEFAULT;
 }
 
+/**
+ * 桌面歌词配置的形状（渲染层这一侧的唯一真源；Rust 侧 `LyricsConfig` 是镜像副本）。
+ *
+ * 为什么要写这个 typedef：`windowWidth: null` 在纯 JS 里会被推成 `null` 字面量类型，
+ * 于是 `configure({ windowWidth: 320 })` 在 TS 里就是"把数字塞进 null"——而它明明是
+ * `number | null`。类型写在这里，组件与设置页就不用各写一份断言。
+ *
+ * @typedef {object} LyricsConfig
+ * @property {string} mode desktop | taskbar
+ * @property {string} layout horizontal | vertical
+ * @property {string} style clean | panel
+ * @property {string} size 字号档位 id（见 LYRICS_FONT_STEPS）
+ * @property {string} color 设计令牌 id（见 LYRICS_COLOR_TOKENS）
+ * @property {string} customColor `#RRGGBB` 或空串（空 = 用 `color` 的令牌）
+ * @property {number | null} windowWidth 桌面窗 DIP 宽（null = 该方向的默认尺寸）
+ * @property {number | null} windowHeight 桌面窗 DIP 高
+ * @property {boolean} locked
+ * @property {boolean} clickThrough
+ * @property {boolean} enableBlur
+ * @property {boolean} enableScale
+ * @property {boolean} enableSpring
+ * @property {boolean} showControls
+ */
+
+/** @type {LyricsConfig} */
 export const DEFAULT_LYRICS_CONFIG = {
   mode: "desktop",
   layout: "horizontal",
   style: "clean",
   size: "lg",
   color: "foreground",
+  /** 自定义歌词颜色（`#RRGGBB`；空串 = 用 `color` 选的令牌）。R45B 新增。 */
+  customColor: "",
+  /** 桌面窗的 DIP 尺寸（未锁定时拖拽缩放后由 Rust 保存；null = 用该方向的默认尺寸）。R45B 新增。 */
+  windowWidth: null,
+  windowHeight: null,
   locked: false,
   clickThrough: false,
   enableBlur: true,
@@ -112,7 +172,7 @@ export const LYRICS_STATUS = {
 };
 
 export const LYRICS_SESSION_NOTICE =
-  "桌面歌词配置会保存并在重启后恢复。锁定只禁拖动，媒体按钮和解锁仍可用；点透后请从主窗设置关闭点透。竖版为窄高滚动窗，并非中文竖排。任务栏歌词（Beta）仅 Windows 实验内嵌，可能随系统版本失效；无安全空白、自动隐藏或权限不符时停显，不会退为贴边浮窗。请从主窗切回桌面模式恢复拖动与控制。";
+  "桌面歌词配置会保存并在重启后恢复。锁定后只留悬停（或键盘聚焦）出现的解锁按钮：拖动柄、媒体按钮、外观与右下角缩放柄都隐藏，解锁后完整控制回归。点透后请从主窗设置关闭点透。竖版是官方 AMLL 组件上的 writing-mode 逐字竖排（不是把一整行横排折成窄窗）；窗口小到放不下时沿书写方向滚动，当前行保持可见。行级 LRC 的逐字时间是按行时长推导的（不是服务端精确卡拉 OK），词级源原样使用。任务栏歌词（Beta）仅 Windows 实验内嵌，可能随系统版本失效；无安全空白、自动隐藏或权限不符时停显，不会退为贴边浮窗。请从主窗切回桌面模式恢复拖动与控制。";
 
 export const TASKBAR_REASONS = ["disabled", "waiting", "attached", "no_space", "uia_unknown", "timeout", "access_denied", "shell_unavailable", "auto_hide", "dpi_mismatch", "stale", "attach_failed", "unsupported", "destroy_failed"];
 
@@ -163,9 +223,15 @@ export function normalizeLyricsConfig(patch, base = DEFAULT_LYRICS_CONFIG) {
   const next = { ...DEFAULT_LYRICS_CONFIG };
   const enums = { mode: LYRICS_MODES, layout: LYRICS_LAYOUTS, style: LYRICS_STYLES,
     size: LYRICS_FONT_STEPS.map((step) => step.id), color: LYRICS_COLOR_TOKENS.map((token) => token.id) };
+  const valid = (key, value) => {
+    if (key === "customColor") return typeof value === "string" && (value === "" || isCustomColor(value));
+    if (key === "windowWidth" || key === "windowHeight") return value === null || normalizeDipSize(value) !== null;
+    if (enums[key]) return enums[key].includes(value);
+    return typeof value === "boolean";
+  };
+  const settled = (key, value) => (key === "windowWidth" || key === "windowHeight" ? (value === null ? null : normalizeDipSize(value)) : value);
   for (const [key, fallback] of Object.entries(DEFAULT_LYRICS_CONFIG)) {
-    const valid = (value) => typeof fallback === "boolean" ? typeof value === "boolean" : enums[key].includes(value);
-    next[key] = valid(source[key]) ? source[key] : valid(current[key]) ? current[key] : fallback;
+    next[key] = valid(key, source[key]) ? settled(key, source[key]) : valid(key, current[key]) ? settled(key, current[key]) : fallback;
   }
   return next;
 }
@@ -191,6 +257,17 @@ export function dragRegionEnabled(config) {
   return normalized.mode === "desktop" && !normalized.locked && !normalized.clickThrough;
 }
 
+/**
+ * 拖拽缩放的资格（R45B）：**仅未锁的桌面窗**。
+ *
+ * 与拖动资格分开写：点透会禁拖动（窗口收不到鼠标），但不该把"能不能缩放"这件事也顺手关掉
+ * ——锁定与任务栏才是缩放的两条禁线（Rust 侧 `resizable_enabled` 是同一口径）。
+ */
+export function resizableEnabled(config) {
+  const normalized = normalizeLyricsConfig({}, config);
+  return normalized.mode === "desktop" && !normalized.locked;
+}
+
 /** 点透开关：桌面尊重用户选项，内嵌 Beta 始终点透。 */
 export function clickThroughEnabled(config) {
   const normalized = normalizeLyricsConfig({}, config);
@@ -210,8 +287,15 @@ export function lyricsConfigFromSearch(search) {
   for (const [key, fallback] of Object.entries(DEFAULT_LYRICS_CONFIG)) {
     if (!params.has(key)) continue;
     const value = params.get(key);
-    if (typeof fallback !== "boolean") patch[key] = value;
-    else if (value === "1" || value === "0") patch[key] = value === "1";
+    if (typeof fallback === "boolean") {
+      if (value === "1" || value === "0") patch[key] = value === "1";
+    } else if (key === "windowWidth" || key === "windowHeight") {
+      // 尺寸是数字：空串/坏值都不算（落 `null` = 该方向的默认尺寸）
+      const size = Number(value);
+      if (value !== "" && Number.isFinite(size)) patch[key] = size;
+    } else {
+      patch[key] = value;
+    }
   }
   return normalizeLyricsConfig(patch);
 }

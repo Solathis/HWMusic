@@ -24,6 +24,7 @@ import {
   parseAmllLyrics,
   readLrcOffsetMs,
   shiftLyricLines,
+  withKaraokeWords,
 } from "../src/renderer/features/lyrics/amll-adapter.ts";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -170,6 +171,137 @@ test("纯函数：shift 与合并都在纯函数里（面板不做这类加工�
   assert.equal(merged.lines.length, 1);
   assert.equal(merged.merged, 1);
   assert.equal(merged.lines[0].translatedLyric, "甲");
+});
+
+// ---------------------------------------------------------------------------
+// R45B：逐字高亮（`withKaraokeWords`）
+//
+// 口径（简报 B6）：**词级源原样使用；行级 LRC 的逐字时间是按行时长线性推导的**，
+// 不是服务端精确卡拉 OK。所以这一组测试钉的是"推导怎么分"，不是"唱得准不准"。
+// ---------------------------------------------------------------------------
+
+/** 把「词」列成 `[文本, 起, 止]` 三元组，断言读起来就是一张表。 */
+const wordTable = (line) => line.words.map((word) => [word.word, word.startTime, word.endTime]);
+
+test("逐字推导（中文）：行级 LRC 每个字一个词，时间线性，末字正好收在行尾", () => {
+  const [line] = parseAmllLyrics("[00:00.00]一二三四五\n[00:05.00]下一行").lines;
+  const [karaoke] = withKaraokeWords([line]);
+
+  assert.deepEqual(wordTable(karaoke), [
+    ["一", 0, 1000],
+    ["二", 1000, 2000],
+    ["三", 2000, 3000],
+    ["四", 3000, 4000],
+    ["五", 4000, 5000],
+  ]);
+  assert.equal(karaoke.startTime, 0, "行时间不动（改时间轴不是这件事的职责）");
+  assert.equal(karaoke.endTime, 5000);
+  assert.equal(lyricLineText(karaoke), "一二三四五", "拼回去还是原来那一行");
+});
+
+test("逐字推导（英文/标点/空格）：按 code point 切，拼接后与原行逐字相等", () => {
+  const text = "Hello, world!";
+  const line = { words: [{ word: text, startTime: 1000, endTime: 3400 }], translatedLyric: "", romanLyric: "", isBG: false, isDuet: false, startTime: 1000, endTime: 3400 };
+  const [karaoke] = withKaraokeWords([line]);
+
+  assert.equal(karaoke.words.length, Array.from(text).length, "一个 code point 一个词");
+  assert.equal(lyricLineText(karaoke), text, "空格与标点都在（不吞字、不重排）");
+  assert.equal(karaoke.words[0].startTime, 1000, "首词起 = 行起");
+  assert.equal(karaoke.words.at(-1).endTime, 3400, "末词止 = 行止（总时长一毫秒不差）");
+  for (const [, start, end] of wordTable(karaoke)) {
+    assert.ok(Number.isInteger(start) && Number.isInteger(end), `词时间是整数毫秒：${start}/${end}`);
+    assert.ok(end >= start, `词区间不许倒挂：${start}..${end}`);
+  }
+  for (let index = 1; index < karaoke.words.length; index += 1) {
+    assert.equal(karaoke.words[index].startTime, karaoke.words[index - 1].endTime, "相邻词首尾相接（没有洞）");
+  }
+});
+
+test("逐字推导（emoji）：代理对不被劈成半个字", () => {
+  const line = { words: [{ word: "歌🙂唱", startTime: 0, endTime: 3000 }], translatedLyric: "", romanLyric: "", isBG: false, isDuet: false, startTime: 0, endTime: 3000 };
+  const [karaoke] = withKaraokeWords([line]);
+
+  assert.equal(karaoke.words.length, 3, "🙂 是一个 code point（不是两个 UTF-16 单元）");
+  assert.deepEqual(karaoke.words.map((word) => word.word), ["歌", "🙂", "唱"]);
+  for (const word of karaoke.words) {
+    assert.equal(Array.from(word.word).length, 1, `每个词都是完整的字：${JSON.stringify(word.word)}`);
+  }
+  assert.equal(lyricLineText(karaoke), "歌🙂唱");
+});
+
+test("已有词级时间**原样保留**：不重切、不改时间", () => {
+  const line = {
+    words: [
+      { word: "逐", startTime: 0, endTime: 300, romanWord: "zhu" },
+      { word: "字", startTime: 300, endTime: 700 },
+      { word: "高亮", startTime: 700, endTime: 1600 },
+    ],
+    translatedLyric: "per-char", romanLyric: "zhuzi", isBG: false, isDuet: false, startTime: 0, endTime: 1700,
+  };
+  const [karaoke] = withKaraokeWords([line]);
+  assert.deepEqual(karaoke.words, line.words, "词级源就是精确的那一份：一个词都不许重切");
+  assert.equal(karaoke.endTime, 1700);
+});
+
+test("逐字推导保留译文/音译/背景/对唱与行时间，只换 words", () => {
+  const line = { words: [{ word: "君の名", startTime: 500, endTime: 1500 }], translatedLyric: "你的名字", romanLyric: "kimi no na", isBG: true, isDuet: true, startTime: 500, endTime: 1500 };
+  const [karaoke] = withKaraokeWords([line]);
+
+  assert.equal(karaoke.translatedLyric, "你的名字", "译文不许丢");
+  assert.equal(karaoke.romanLyric, "kimi no na", "音译不许丢");
+  assert.equal(karaoke.isBG, true);
+  assert.equal(karaoke.isDuet, true);
+  assert.equal(karaoke.startTime, 500);
+  assert.equal(karaoke.endTime, 1500);
+  assert.equal(karaoke.words.length, 3);
+});
+
+test("坏时间/空行不伪造逐字：不是有限区间就原样留给 AMLL", () => {
+  const cases = [
+    { words: [{ word: "没有终点", startTime: 0, endTime: Number.POSITIVE_INFINITY }] },
+    { words: [{ word: "坏起点", startTime: Number.NaN, endTime: 1000 }] },
+    { words: [{ word: "零长", startTime: 1000, endTime: 1000 }] },
+    { words: [{ word: "倒挂", startTime: 2000, endTime: 1000 }] },
+    { words: [{ word: "", startTime: 0, endTime: 1000 }] },
+    { words: [], startTime: 0, endTime: 1000 },
+  ];
+  for (const partial of cases) {
+    const line = { translatedLyric: "", romanLyric: "", isBG: false, isDuet: false, startTime: 0, endTime: 1000, ...partial };
+    const [karaoke] = withKaraokeWords([line]);
+    assert.deepEqual(karaoke.words, line.words.map((word) => ({ ...word })), `不该伪造逐字：${JSON.stringify(partial.words)}`);
+  }
+});
+
+test("不修改入参：AMLL 的铁律（传进去的数组与内容不得再改）", () => {
+  const line = { words: [{ word: "不改我", startTime: 0, endTime: 2000 }], translatedLyric: "", romanLyric: "", isBG: false, isDuet: false, startTime: 0, endTime: 2000 };
+  const input = [line];
+  const before = JSON.stringify(input);
+  const result = withKaraokeWords(input);
+
+  assert.equal(JSON.stringify(input), before, "入参一个字段都没动");
+  assert.notEqual(result, input, "返回的是新数组");
+  assert.notEqual(result[0], line, "行也是新对象");
+  assert.notEqual(result[0].words, line.words, "词数组也是新的");
+  assert.notEqual(result[0].words[0], line.words[0], "词对象也是新的");
+  assert.deepEqual(withKaraokeWords(result)[0].words, result[0].words, "幂等：已经逐字的不再重切");
+  assert.deepEqual(withKaraokeWords(null), []);
+  assert.deepEqual(withKaraokeWords("nope"), []);
+});
+
+test("逐字推导覆盖整行区间：不同时长下都是首词起=行起、末词止=行止、单调", () => {
+  for (const [startTime, endTime] of [[0, 1234], [700, 800], [15300, 41234]]) {
+    const line = { words: [{ word: "abcdefg七", startTime, endTime }], translatedLyric: "", romanLyric: "", isBG: false, isDuet: false, startTime, endTime };
+    const [karaoke] = withKaraokeWords([line]);
+    assert.equal(karaoke.words[0].startTime, startTime, `${startTime}..${endTime} 的起点`);
+    assert.equal(karaoke.words.at(-1).endTime, endTime, `${startTime}..${endTime} 的终点`);
+    let previous = startTime;
+    for (const [, start, end] of wordTable(karaoke)) {
+      assert.ok(start >= previous, "词起点单调不减");
+      assert.ok(end >= start);
+      previous = end;
+    }
+    assert.equal(lyricLineText(karaoke), "abcdefg七");
+  }
 });
 
 test("禁止自绘解析：必须复用 AMLL 官方 parseLrc，不得自带时间戳正则", () => {

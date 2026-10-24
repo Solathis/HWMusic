@@ -48,3 +48,102 @@
 .amll-lyrics-stage[data-lyrics-color="contrast"] {
   --amll-lp-color: var(--background);
 }
+
+/*
+ * R45B：竖版 = 官方 AMLL 组件上的**真竖排**。
+ *
+ * 一句话：竖排落在**一行之内**（一行 = 一条横带，带里是从上到下的列，列自右向左），
+ * 播放器自己仍保持水平书写。这不是"把一整行横排折进窄窗"——那是 R45 之前的假竖版。
+ *
+ * 为什么 `writing-mode` 只能加在行内容上、不能加在 `.amll-lyric-player` 上（R45B fix2 的关键）：
+ * 官方组件给自己的每一行量高用的是 `ResizeObserver.borderBoxSize.blockSize`（`getEntrySize` →
+ * `LayoutCalculator.setLineHeight`），并把这一个"行高"拿去在 **y 轴**上排所有行、算滚动边界。
+ * `blockSize` 是**在元素自己的书写模式里**量的：播放器一旦是 `vertical-rl`，所谓块轴就变成水平的
+ * ——官方量到的"行高"其实是一行有多少列那么宽（240×120 实测：行高 = 291px，而窗口只有 120px 高），
+ * 于是当前行被按 291 高居中排版、整体推到窗口上方之外，屏幕上一条歌词都看不见（fix2 的 RED 证据：
+ * 240×120 竖排、7 个字全部 y=-31、`inside=false`）。把竖排下沉到行内容上，行盒仍是水平书写，
+ * 官方量到的"行高"就恢复成"这一条横带有多高"= 竖排列的真实高度，排版/居中/滚动边界全部自洽。
+ *
+ * 逐条说明：
+ * - `writing-mode: vertical-rl` + `text-orientation: upright`：文字沿垂直方向**逐字直立**排列，
+ *   列自右向左推进（不是把整行旋转 90°）。
+ * - `max-height: 100cqh`（`container-type: size` 在播放器上）：一列最多和窗口一样高，超出的字
+ *   **折到左边下一列**。于是"当前行"的高度永远不超过播放器 ⇒ 只要列宽的总和放得下，整行就在窗口里。
+ * - `margin: 0; padding: 0`（只覆盖官方给主行的 `-1em/1em` 那对儿）：那 1em 竖排时是**列的内边距**，
+ *   84px 高的窗里它吃掉 56px，每列只剩 1 个字——7 个字的行会被撑成 7 列 235px 宽，反而放不下。
+ *   词内 span 自己的 `-1em/1em` 保留（那是逐字遮罩的背景连续性），只撤主行这一层。
+ * - `direction: rtl` 在行盒上、`direction: ltr` 在行内容上：竖排的**块起边在右**，列从行盒右端开始
+ *   往左排；`rtl` 只用来把行盒摆到右边（块级盒按父级的内联方向靠起边），文字本身仍是
+ *   `direction: ltr` 的"从上到下"，不会被倒过来。放不下时至少**行首**在窗口里，不会整行跑到左边去。
+ * - `br { display: none }`：官方的平衡换行是按**宽度**量的（`LineBalancer` 用 `getBoundingClientRect`
+ *   的 width）。竖排下那个"宽度"是列的厚度，照它插 `<br>` 会把一行切成每列一两个字，
+ *   于是"竖排"看起来像横排。让官方那两个 `<br>` 不显示，改由浏览器按窗口**高度**折列。
+ *   只动显示，不动官方 DOM，也不改它的测量代码。
+ * - `overflow-x: auto` / `overflow-y: hidden`：y 轴留给官方自己的滚动（官方用 `translateY` 排版、
+ *   自己接管滚轮并钳在 `beginFrame` 算的上下界里），再给它一条 y 滚动条只会互相打架。
+ *   x 是竖排的块轴（见下面 fix4 的两条规则）：窗口宽度装不下所有列时，播放器自己就是滚动容器，
+ *   底边出现浏览器原生的横向滚动条，用户用鼠标拖它就能看到剩下的列。
+ * - `direction: rtl`（fix4，只加在**播放器**这一层）：竖排的块起边在右，行首天然落在窗口右边、
+ *   溢出朝左。只有 rtl 滚动容器才能把"朝左的溢出"变成可滚的：`scrollLeft` 从 0 走到负值，
+ *   按行首在右、行尾在左的顺序露出后面的字。行盒上的那条 `direction: rtl` 照旧保留（两者不冲突）。
+ * - 行盒 `width: max-content`（fix4）：官方行盒带 `contain: content` + `content-visibility: auto`，
+ *   行盒自己按窗口宽度折行 ⇒ 溢出被它自己裁掉，播放器量到 `scrollWidth == clientWidth`（fix2 的残留）。
+ *   把行盒按内容宽度撑开后，行盒自己不再"溢出"，官方那两层 containment 就没东西可裁，溢出落到
+ *   播放器（240×120 + xxl 实测 `scrollWidth 502 / clientWidth 240`），滚动条才有意义。
+ *   宽度是 `max-content`，所以横版、任务栏、主窗面板（这条选择器都命中不到）一个字节不受影响。
+ * - `::-webkit-scrollbar` 只给竖排播放器画**细条**（6px）：84px 高的横带里 Windows 经典条会吃掉
+ *   17px（五分之一窗口），细条是"能看见、能拖、又不把歌词挤没"的那一档。颜色写 `currentColor`
+ *   （= `--amll-lp-color`），所以本文件仍然不出现任何色值。
+ * - 选择器只挂在 `[data-lyrics-layout="vertical"]` 上：横版（默认）与任务栏（Rust 强制 horizontal）
+ *   一个字节都受影响不到；主窗歌词面板共用 `.amll-lyrics-stage`，同样不受影响
+ *   （那条 data 属性只有桌面歌词窗的 vertical 模式才有）。
+ *
+ * 官方组件的排版/测量/滚动仍是它自己的事：这里只加标准 CSS 布局属性，没有自绘歌词。
+ */
+.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player {
+  /* fix4：块起边在右 ⇒ 溢出朝左，只有 rtl 滚动容器能把它变成"可滚到的"（见上面的说明） */
+  direction: rtl;
+  container-type: size;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+/* fix4：行盒按内容宽度撑开，把溢出交还给播放器（不碰官方 containment，不自绘） */
+.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player
+  [class*="lyricLineWrapper"] > [class*="lyricLine"] {
+  width: max-content;
+  min-width: 0;
+  max-width: none;
+}
+/* fix4：细滚动条（颜色走 currentColor，仍然不写色值） */
+.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player::-webkit-scrollbar {
+  height: 6px;
+  width: 6px;
+}
+.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player::-webkit-scrollbar-thumb {
+  /* 半透明走 color-mix（`opacity` 在滚动条伪元素上不生效，实测条会画成实心 currentColor）；
+     上一行是给不支持 color-mix 的运行时留的实心 currentColor 兜底，宁可实心也不许"条看不见" */
+  background: currentColor;
+  background: color-mix(in srgb, currentColor 45%, transparent);
+  border-radius: 99px;
+}
+.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player::-webkit-scrollbar-track {
+  background: transparent;
+}
+.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player [class*="lyricMainLine"] {
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+  direction: ltr;
+  margin: 0;
+  padding: 0;
+  max-height: 100cqh;
+}
+.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player [class*="lyricMainLine"] br {
+  display: none;
+}
+/* 行盒（wrapper / line）的块起边摆到右边；翻译/音译这些行内文本仍按从左到右（竖排下 = 从上到下） */
+.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player [class*="lyricLine"] {
+  direction: rtl;
+}
+.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player [class*="lyricSubLine"] {
+  direction: ltr;
+}
