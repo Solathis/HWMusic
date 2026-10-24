@@ -3,23 +3,32 @@ import { MotionConfig } from "framer-motion"
 import { useEffect, useRef } from "react"
 import type { KeyboardEvent as ReactKeyboardEvent } from "react"
 import { createPortal } from "react-dom"
-import { Disc3Icon, ListMusicIcon, PauseIcon, PlayIcon, SkipBackIcon, SkipForwardIcon, VolumeXIcon, XIcon } from "lucide-react"
+import { CaptionsIcon, ChevronDownIcon, Disc3Icon, ListMusicIcon, PauseIcon, PlayIcon, SkipBackIcon, SkipForwardIcon, VolumeXIcon } from "lucide-react"
 
 import { Avatar, AvatarFallback } from "./components/ui/avatar"
+import { Alert, AlertDescription } from "./components/ui/alert"
+import { Button } from "./components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "./components/ui/dropdown-menu"
 import { AmllBackground, useAlbumImage } from "./AmllBackground.tsx"
 import { AmllLyricsPanel } from "./AmllLyricsPanel.tsx"
+import { lyricsToggleView } from "./components.tsx"
 import { lyricsNoticeText, playbackModeLabel } from "./features/playback/playback-state.mjs"
 import { PLAYBACK_MODES } from "./features/playback/player.mjs"
 import { formatDuration, trackAlbumOf, trackArtistsOf, trackCoverUrlOf, trackNameOf } from "./features/library/track-fields.mjs"
 import type { PlayerRuntime } from "./features/playback/player-runtime.ts"
 import type { PlayerState } from "./features/playback/use-player.ts"
+import type { LyricsWindowBinding } from "./use-lyrics-window.ts"
 
 export interface PlaybackStageProps {
   open: boolean
   runtime: PlayerRuntime
   state: PlayerState
   onClose: () => void
+  /**
+   * 桌面/任务栏歌词的快捷开关（R45C）：与播放栏**同一个** binding（外壳那一份），
+   * 这里只读状态、只转一次 `setVisible`。不传 = 不渲染这枚按钮。
+   */
+  lyrics?: LyricsWindowBinding | null
 }
 
 function sliderKeyValue(event: ReactKeyboardEvent<HTMLDivElement>, value: number, max: number, step: number): number | null {
@@ -34,9 +43,10 @@ function sliderKeyValue(event: ReactKeyboardEvent<HTMLDivElement>, value: number
   }
 }
 
-export function PlaybackStage({ open, runtime, state, onClose }: PlaybackStageProps) {
+export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: PlaybackStageProps) {
   const coverUrl = trackCoverUrlOf(state.track)
   const coverImage = useAlbumImage(open ? coverUrl : null)
+  const lyricsView = lyricsToggleView(lyrics)
   const seekOwner = useRef<number | null>(null)
   useEffect(() => {
     if (!open) return undefined
@@ -115,6 +125,13 @@ export function PlaybackStage({ open, runtime, state, onClose }: PlaybackStagePr
         <MediaButton className="size-14" aria-label={playing ? "暂停" : "播放"} disabled={!hasTrack} onClick={() => void player.toggle()}>
           {playing ? <PauseIcon className="size-8" /> : <PlayIcon className="size-8" />}
         </MediaButton>
+        {/* R45C：播放按钮**右侧**的同一意图开关（语义来自 components.tsx 的 lyricsToggleView，
+            取反交给 binding 的意图机——渲染快照在同一次任务里连点两次时是旧的） */}
+        {lyricsView === null ? null : (
+          <MediaButton className="size-10" aria-label={lyricsView.label} aria-pressed={lyricsView.on} data-testid="stage-lyrics-toggle" onClick={() => lyrics?.toggleVisible("playback-stage")}>
+            <CaptionsIcon className="size-5" />
+          </MediaButton>
+        )}
         <MediaButton className="size-10" aria-label="下一首" disabled={!hasTrack} onClick={() => void player.next()}><SkipForwardIcon /></MediaButton>
       </div>
       <div className="flex items-center gap-2">
@@ -152,6 +169,22 @@ export function PlaybackStage({ open, runtime, state, onClose }: PlaybackStagePr
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+      {/*
+        R45C：开关失败就在**沉浸页这枚按钮下面**说清（原因 + 下一步 + 重试/关掉）。
+        它挂在官方布局的 `controlsSlot` 里（我们自己那一列），不另起浮层、不弹 toast；
+        `toggleErrorSurface` 保证同一个失败只在这一面印一句（播放栏那份不会同时冒出来）。
+      */}
+      {lyrics?.toggleError && lyrics.toggleErrorSurface === "playback-stage" ? (
+        <Alert variant="destructive" className="flex flex-wrap items-center gap-2 py-2 text-left" data-testid="stage-lyrics-toggle-error">
+          <AlertDescription className="min-w-0 flex-1">{lyrics.toggleError}</AlertDescription>
+          <Button variant="outline" size="sm" data-testid="stage-lyrics-toggle-retry" onClick={() => lyrics?.retryToggle?.()}>
+            重试
+          </Button>
+          <Button variant="ghost" size="sm" data-testid="stage-lyrics-toggle-dismiss" onClick={() => lyrics?.dismissToggleError?.()}>
+            知道了
+          </Button>
+        </Alert>
+      ) : null}
     </div>
   )
   const musicControls = <div className="isolate flex min-w-0 flex-col gap-4">{info}{controls}</div>
@@ -194,8 +227,13 @@ export function PlaybackStage({ open, runtime, state, onClose }: PlaybackStagePr
             </div>
           )}
         />
-        <div className="absolute right-4 top-2">
-          <MediaButton className="size-8 motion-reduce:animate-none! motion-reduce:transition-none! motion-reduce:duration-0! motion-reduce:[&_*]:animate-none! motion-reduce:[&_*]:transition-none! motion-reduce:[&_*]:duration-0!" aria-label="关闭歌词" onClick={onClose}><XIcon className="size-4" /></MediaButton>
+        {/*
+          R45C：收起从右上角叉号搬到**顶部中央**的下拉箭头（用户要求）。
+          几何居中靠 `left-1/2 -translate-x-1/2`（与播放栏控件组同一条做法）：
+          右侧放一枚叉号在沉浸页里像是"关掉这首歌"，而它只是回到主界面。
+        */}
+        <div className="absolute top-2 left-1/2 -translate-x-1/2">
+          <MediaButton className="size-8 motion-reduce:animate-none! motion-reduce:transition-none! motion-reduce:duration-0! motion-reduce:[&_*]:animate-none! motion-reduce:[&_*]:transition-none! motion-reduce:[&_*]:duration-0!" aria-label="收起歌词" onClick={onClose}><ChevronDownIcon className="size-4" /></MediaButton>
         </div>
       </div>
     </MotionConfig>,

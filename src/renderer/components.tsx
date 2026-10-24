@@ -19,6 +19,7 @@
 import { useState } from "react"
 import type { ComponentType } from "react"
 import {
+  CaptionsIcon,
   HeartIcon,
   ListMusicIcon,
   MusicIcon,
@@ -75,6 +76,7 @@ import {
 } from "./features/playback/playback-state.mjs"
 import type { PlayerRuntime } from "./features/playback/player-runtime.ts"
 import type { PlayerState } from "./features/playback/use-player.ts"
+import type { LyricsWindowBinding } from "./use-lyrics-window.ts"
 
 /** 空态：一句话（文案来自纯逻辑模块，克制且不冒充）。 */
 export function EmptyState({ text }: { text: string }) {
@@ -366,6 +368,14 @@ export interface PlayerBarProps {
    * 不传就是不接（按钮语义不变，也不会出现"点了没反应"的死区——那时整块只是不可点）。
    */
   onOpenStage?: () => void
+  /**
+   * 桌面/任务栏歌词的快捷开关（R45C）：播放栏与沉浸页**共用外壳那一个** binding
+   * （`useLyricsWindow` 的唯一实例），这里只读状态、只转一次 `setVisible`。
+   *
+   * 不传 = 不渲染这枚按钮：没有歌词窗接线时放一个按下去什么都不发生的图标，
+   * 比没有按钮更糟（用户会以为是自己点错了）。
+   */
+  lyrics?: LyricsWindowBinding | null
 }
 
 /** 播放模式 → 图标（四种模式的取值唯一真源是 player.mjs 的 PLAYBACK_MODES）。 */
@@ -376,9 +386,38 @@ const MODE_ICONS = {
   shuffle: ShuffleIcon,
 }
 
-export function PlayerBar({ runtime, state, onOpenStage }: PlayerBarProps) {
+/**
+ * 歌词快捷开关的**唯一语义**（R45C）：播放栏与沉浸页都读它，不许各写一份。
+ *
+ * 两条判据，都有理由：
+ * 1. **状态取 `requestedVisible ?? visible`**：`visible` 是宿主的回执（它此刻真的开着），
+ *    `requestedVisible` 是"我们请求它开着"（binding 里已把**待定意图**排在它前面）。
+ *    点下去到回执回来之间有一小段，用回执会让按钮先弹回原状再翻过来（看起来像点了没反应）。
+ *    设置页那个 Switch 用的也是这一条。
+ * 2. **标签说模式**：同一个图标在桌面模式是"桌面歌词"，在任务栏模式是"任务栏歌词"——
+ *    用户看不见歌词窗挂在哪里，只能靠这句话。
+ *
+ * **这里刻意不产出"下一次该发什么"**：目标态由 binding 的意图机决定（`toggleVisible`）。
+ * 渲染快照里的 `!on` 在"同一个任务里连点两次"时是陈旧的——那正是 R45C 要修的那个 bug。
+ *
+ * 没有 binding 时返回 `null`（没有语义），而不是"假装它是关着的"。
+ */
+export function lyricsToggleView(lyrics?: LyricsWindowBinding | null): {
+  on: boolean
+  mode: "desktop" | "taskbar"
+  label: string
+} | null {
+  if (lyrics === null || lyrics === undefined) return null
+  const on = (lyrics.requestedVisible ?? lyrics.visible) === true
+  const mode = lyrics.config?.mode === "taskbar" ? "taskbar" : "desktop"
+  const surface = mode === "taskbar" ? "任务栏歌词" : "桌面歌词"
+  return { on, mode, label: `${on ? "隐藏" : "显示"}${surface}` }
+}
+
+export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: PlayerBarProps) {
   const [dragMs, setDragMs] = useState<number | null>(null)
   const player = runtime.player
+  const lyricsView = lyricsToggleView(lyrics)
 
   const playing = state.status === "playing"
   const hasTrack = state.track !== null
@@ -406,6 +445,24 @@ export function PlayerBar({ runtime, state, onOpenStage }: PlayerBarProps) {
       data-state={state.status}
       data-testid="player-bar"
     >
+      {/*
+        R45C：开关失败就**在按下去的这一条上**说清（原因 + 下一步），带「重试」与「知道了」两条路。
+        不另弹 toast、也不把这件事只留在设置页：用户按的是这里，答案就该出现在这里。
+        `toggleErrorSurface` 保证同一个失败只在**一处**印：沉浸页发起的那次由沉浸页说，
+        播放栏不重复；反过来从设置页/别处发起的（`null`）由这条常驻的播放栏兜住。
+        失败文案来自 binding（`toggleError`，由纯函数 `toggleFailureText` 生成，原始错误只在日志里）。
+      */}
+      {lyrics?.toggleError && lyrics.toggleErrorSurface !== "playback-stage" ? (
+        <Alert variant="destructive" className="flex flex-wrap items-center gap-2 py-2" data-testid="lyrics-toggle-error">
+          <AlertDescription className="min-w-0 flex-1">{lyrics.toggleError}</AlertDescription>
+          <Button variant="outline" size="sm" data-testid="lyrics-toggle-retry" onClick={() => lyrics?.retryToggle?.()}>
+            重试
+          </Button>
+          <Button variant="ghost" size="sm" data-testid="lyrics-toggle-dismiss" onClick={() => lyrics?.dismissToggleError?.()}>
+            知道了
+          </Button>
+        </Alert>
+      ) : null}
       {/*
         三区布局（R40 用户要求"控件居中"）：
         左 = 封面 + 曲目信息（min-w-0 + truncate，窄窗先牺牲它）；中 = 播放控件组；
@@ -482,6 +539,23 @@ export function PlayerBar({ runtime, state, onOpenStage }: PlayerBarProps) {
           >
             {playing ? <PauseIcon /> : <PlayIcon />}
           </Button>
+          {/*
+            R45C：播放按钮**右侧**的歌词快捷开关。状态/标签只来自 `lyricsToggleView`，
+            点击只转一次 `toggleVisible()`——取反由 binding 的意图机决定（同一个任务里连点两次
+            也不会把同一个 `true` 发两遍），它不新建运行时，也不自己记一份"我以为开着"。
+          */}
+          {lyricsView === null ? null : (
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label={lyricsView.label}
+              aria-pressed={lyricsView.on}
+              data-testid="player-lyrics-toggle"
+              onClick={() => lyrics?.toggleVisible("player-bar")}
+            >
+              <CaptionsIcon />
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="icon"

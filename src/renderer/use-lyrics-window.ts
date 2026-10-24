@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { getLyricsBridge } from "./features/lyrics/lyrics-bridge.mjs"
+import { createLyricsToggleIntent, toggleFailureText } from "./features/lyrics/lyrics-toggle-intent.mjs"
 import {
   DEFAULT_LYRICS_CONFIG,
   LYRICS_STATUS,
@@ -12,16 +13,46 @@ import { trackArtistsOrNull, trackDurationOf, trackNameOrNull } from "./features
 import type { PlayerRuntime } from "./features/playback/player-runtime.ts"
 import type { PlayerState } from "./features/playback/use-player.ts"
 
+/** 开关是从哪一面按的（决定失败提示印在哪里；不在播放面上的失败只进日志）。 */
+export type LyricsToggleSurface = "player-bar" | "playback-stage"
+
 export interface LyricsWindowBinding {
   /** Rust 运行权威配置的投影（持久化由 Rust 的保存任务拥有，桥只读回状态）。 */
   config: typeof DEFAULT_LYRICS_CONFIG
   /** 歌词窗此刻是不是开着（宿主回执里的观测值，不是"我们请求它开着"）。 */
   visible: boolean
+  /**
+   * "我们请求它开着"：**待定意图优先**（见 [`toggleVisible`]），否则是宿主回执里的值。
+   *
+   * 为什么不是直接用宿主的 `requestedVisible`：点下去到回执回来之间有一段真空，
+   * 那段时间里按钮必须已经翻过去（否则第二次点击会按旧状态再算一次同一个目标）。
+   */
   requestedVisible?: boolean
   runtimeRevision?: number
   taskbar?: { supported: boolean; attached: boolean; reason: string }
-  /** 开/关桌面歌词窗。 */
+  /** 开/关桌面歌词窗（设置页的 Switch 与托盘广播走它；目标态由调用方给）。 */
   setVisible: (next: boolean) => void
+  /**
+   * 切换桌面/任务栏歌词窗（播放栏与沉浸页那两枚快捷开关走它）。
+   *
+   * **取反由意图机决定，不由渲染快照决定**：同一个任务里连点两次时，第二次拿到的渲染状态
+   * 还是第一次之前的那一份；意图机记得最后一次意图（`pending`），所以第二次仍然取反
+   * ——两条命令是"开、关"，不是"开、开"（见 `features/lyrics/lyrics-toggle-intent.mjs`）。
+   *
+   * `surface` 说明是哪一面按的：失败时那句话只印在那一面（同一个失败在界面上只有一句）。
+   */
+  toggleVisible: (surface?: LyricsToggleSurface) => void
+  /**
+   * 上一次开关失败的人话（原因 + 下一步）；`null` = 没有失败。
+   * 播放栏与沉浸页在**发起面**直接显示它（不另弹 toast，也不只写 console）。
+   */
+  toggleError: string | null
+  /** 失败是从哪一面发起的（`null` = 设置页/托盘，或没有失败）。 */
+  toggleErrorSurface: LyricsToggleSurface | null
+  /** 重试最后那一次开关意图（失败之后的「重试」）。 */
+  retryToggle: () => void
+  /** 关掉失败提示（不发命令、不改窗口）。 */
+  dismissToggleError: () => void
   /** 改配置（字号/颜色/模式/锁定/点透）。 */
   updateConfig: (patch: Partial<typeof DEFAULT_LYRICS_CONFIG>) => void
   saveError?: string | null
@@ -58,6 +89,43 @@ export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): Lyr
   /** 播放状态的最新值：rAF 进度泵读它（不把状态放进 effect 依赖，否则每帧重订阅）。 */
   const stateRef = useRef(state)
   stateRef.current = state
+
+  /** 宿主状态的最新值：意图机按它算"当前是开还是关"（异步回执里读，不能用渲染闭包）。 */
+  const statusRef = useRef(windowStatus)
+  statusRef.current = windowStatus
+
+  /**
+   * 开关的待定意图（R45C）：`pending` 是"最后一次点击想让它变成什么"，`error` 是失败人话。
+   *
+   * 为什么状态在这里、而不在按钮里：播放栏与沉浸页是**两枚按钮、同一个歌词窗**。意图放在
+   * binding 这一层，两枚按钮才共享同一条"还没回执的意图"，也不会各自记一份"我以为开着"。
+   */
+  const [toggleState, setToggleState] = useState<{
+    pending: boolean | null
+    error: string | null
+    surface: string | null
+  }>({
+    pending: null,
+    error: null,
+    surface: null,
+  })
+  const intentRef = useRef<ReturnType<typeof createLyricsToggleIntent> | null>(null)
+  if (intentRef.current === null) {
+    intentRef.current = createLyricsToggleIntent({
+      send: async (target: boolean) => {
+        try {
+          return await bridge.setVisible(target)
+        } catch (cause) {
+          // 诊断留在日志里（不含歌名/账号/签名 URL）：界面只拿一句人话，见 toggleFailureText
+          log("桌面歌词开关失败：", cause)
+          throw cause
+        }
+      },
+      onChange: (next: { pending: boolean | null; error: string | null; surface: string | null }) => setToggleState(next),
+      failureText: (target: boolean) => toggleFailureText(target, statusRef.current.config?.mode),
+    })
+  }
+  const intent = intentRef.current
 
   useEffect(() => bridge.observe(setWindowStatus, () => stateRef.current), [bridge])
 
@@ -107,9 +175,37 @@ export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): Lyr
     return () => cancelAnimationFrame(handle)
   }, [bridge, visible])
 
+  /**
+   * 开关：`setVisible` / `toggleVisible` 都只经过意图机（唯一主人），不各自发 IPC。
+   *
+   * `toggleVisible` 在这里用**意图机的待定目标**取反，而不是读渲染闭包里的 `on`：
+   * 同一任务里的第二次点击拿到的渲染状态还是第一次之前那一份（React 还没重渲染），
+   * 按它取反就会把同一个 `true` 再发一遍（brief 明确要修的那件事）。
+   */
+  /**
+   * 开关：`setVisible` / `toggleVisible` 都只经过意图机（唯一主人），不各自发 IPC。
+   *
+   * `toggleVisible` 的"当前状态"读的是**意图机自己的 pending**（同步、权威），不是渲染闭包里的
+   * `toggleState.pending`：同一个任务里连点两次时，React 还没把第一次的状态渲染回来，
+   * 读渲染值会拿到旧的那一份，于是第二次又把同一个 `true` 发出去（浏览器守卫抓到的正是这个）。
+   */
   const setVisible = useCallback((next: boolean) => {
-    void bridge.setVisible(next).catch((cause: unknown) => log("桌面歌词开关失败：", cause))
-  }, [bridge])
+    void intent.request(next)
+  }, [intent])
+
+  const toggleVisible = useCallback((surface?: LyricsToggleSurface) => {
+    const { pending } = intent.snapshot()
+    const current = pending ?? statusRef.current.requestedVisible ?? statusRef.current.visible
+    void intent.request(!current, surface ?? null)
+  }, [intent])
+
+  const retryToggle = useCallback(() => {
+    void intent.retry()
+  }, [intent])
+
+  const dismissToggleError = useCallback(() => {
+    intent.dismiss()
+  }, [intent])
 
   const updateConfig = useCallback((patch: Partial<typeof DEFAULT_LYRICS_CONFIG>) => {
     void bridge.applyConfig(patch).catch((cause: unknown) => log("歌词窗配置没能应用：", cause))
@@ -144,7 +240,41 @@ export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): Lyr
   )
 
   return useMemo(
-    () => ({ config, visible, requestedVisible, taskbar, setVisible, updateConfig, saveError, retrySave, canImport: trackId !== null, importFile }),
-    [config, visible, requestedVisible, taskbar, setVisible, updateConfig, saveError, retrySave, trackId, importFile],
+    () => ({
+      config,
+      visible,
+      // 待定目标优先于宿主的 requestedVisible：点下去那一刻按钮就该翻过去
+      requestedVisible: toggleState.pending ?? requestedVisible,
+      taskbar,
+      setVisible,
+      toggleVisible,
+      toggleError: toggleState.error,
+      toggleErrorSurface: (toggleState.surface as LyricsToggleSurface | null) ?? null,
+      retryToggle,
+      dismissToggleError,
+      updateConfig,
+      saveError,
+      retrySave,
+      canImport: trackId !== null,
+      importFile,
+    }),
+    [
+      config,
+      visible,
+      toggleState.pending,
+      toggleState.error,
+      toggleState.surface,
+      requestedVisible,
+      taskbar,
+      setVisible,
+      toggleVisible,
+      retryToggle,
+      dismissToggleError,
+      updateConfig,
+      saveError,
+      retrySave,
+      trackId,
+      importFile,
+    ],
   )
 }

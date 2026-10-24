@@ -89,13 +89,15 @@ export function chromiumCandidates({ env = process.env } = {}) {
 
 /** 守卫页面的挂载源码（生成物，不入库）；只在 Tauri IPC 边界提供夹具。 */
 export function harnessSource() {
-  return `import { StrictMode, useEffect, useState } from "react";
+  return `import { StrictMode, useEffect, useState, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 
 import { LibraryShell } from "../../src/renderer/App.tsx";
 import { LyricsWindow } from "../../src/renderer/LyricsWindow.tsx";
+import { PlayerBar } from "../../src/renderer/components.tsx";
+import { PlaybackStage } from "../../src/renderer/playback-stage.tsx";
 import { TooltipProvider } from "../../src/renderer/components/ui/tooltip.tsx";
 import { getPlayerRuntime } from "../../src/renderer/features/playback/player-runtime.ts";
 import { DEFAULT_LYRICS_CONFIG } from "../../src/renderer/features/lyrics/lyrics-window.mjs";
@@ -116,6 +118,20 @@ const resizeCalls = [];
 /** R45B：每次 core_lyrics_configure 的补丁（窗口尺寸保存与"锁定后不保存"按它判）。 */
 const configureCalls = [];
 const mediaActions = [];
+/** R45C：core_lyrics_toggle 的请求次数与每次的意图（"一次点击只发一次"按它判）。 */
+const lyricsToggles = [];
+/**
+ * R45C：每一次 core_lyrics_toggle 的时间戳与当时的夹具延迟。
+ *
+ * 为什么要时间戳：简报点名"快速双击要发生在**第一次回执之前**"——两枚点击都落在
+ * 夹具的延迟窗口里，这条记录才是证据（光有点击次数证明不了"回执还没回来"）。
+ */
+const toggleLog = [];
+/**
+ * R45C：开关夹具的行为（延迟多久回执 / 拒绝几次）。
+ * failTimes 递减到 0 之后恢复正常——"被拒绝一次再重试成功"就是靠它造的。
+ */
+let togglePlan = { delayMs: 0, failTimes: 0 };
 /**
  * R45A3：库列表分页的夹具。三件事必须能在真浏览器里量到：
  * - 一页只取一次（每次 core_call 的频道/页号记进 libraryCalls）；
@@ -231,13 +247,38 @@ mockIPC(async (command, args) => {
     }
     return { config: desktopConfig, revision: desktopRevision, visible: false };
   }
-  if (command === "core_lyrics_toggle") return { config: desktopConfig, revision: desktopRevision, visible: args.checked };
+  if (command === "core_lyrics_toggle") {
+    const checked = args.checked === true;
+    lyricsToggles.push(checked);
+    toggleLog.push({ checked, atMs: Math.round(performance.now()), delayMs: togglePlan.delayMs });
+    const delayMs = togglePlan.delayMs;
+    // 回执延迟：让"点下去到回执回来"这段真空真的存在（快速双击就发生在这里面）
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    if (togglePlan.failTimes > 0) {
+      togglePlan = { ...togglePlan, failTimes: togglePlan.failTimes - 1 };
+      throw { kind: "internal", message: "守卫夹具：这一次歌词开关被故意拒绝" };
+    }
+    return { config: desktopConfig, revision: desktopRevision, visible: checked, requestedVisible: checked };
+  }
   throw new Error("未提供守卫命令：" + command);
 }, { shouldMockEvents: true });
 const runtime = getPlayerRuntime();
 
 function Guard() {
   const [desktop, setDesktop] = useState(false);
+  /**
+   * R45C：?surface=no-lyrics 挂的是**不带 lyrics binding** 的播放栏 + 沉浸页。
+   *
+   * 为什么另起一页而不是塞进主页面：LibraryShell 永远会造一份 binding（那是它的职责），
+   * 而这一项要证的正是"没有 binding 时组件不崩、也不出现按了没反应的死按钮"——
+   * 只有一个**真的不传** lyrics 的挂载点才量得到。
+   */
+  const surface = new URLSearchParams(location.search).get("surface");
+  const live = useSyncExternalStore(
+    (listener) => runtime.player.subscribe(listener),
+    () => runtime.player.snapshot(),
+    () => runtime.player.snapshot(),
+  );
   useEffect(() => {
     window.__guard = {
       snapshot: () => runtime.player.snapshot(),
@@ -262,6 +303,12 @@ function Guard() {
       configureCalls: () => configureCalls.map((patch) => ({ ...patch })),
       resetConfigureCalls: () => { configureCalls.length = 0; },
       mediaActions: () => mediaActions.slice(),
+      lyricsToggles: () => lyricsToggles.slice(),
+      /** R45C：每次开关请求的时间戳（"第二次点击发生在第一次回执之前"照它判）。 */
+      toggleLog: () => toggleLog.map((entry) => ({ ...entry })),
+      /** R45C：改开关夹具（延迟多久回执、拒绝几次）。 */
+      setTogglePlan: (patch) => { togglePlan = { ...togglePlan, ...(patch ?? {}) }; },
+      resetLyricsToggles: () => { lyricsToggles.length = 0; toggleLog.length = 0; },
       /** R45A3：库列表分页的调用记录（频道/页号/页大小/关键字），"一页只取一次"按它判。 */
       libraryCalls: () => libraryCalls.slice(),
       resetLibraryCalls: () => { libraryCalls.length = 0; },
@@ -303,6 +350,16 @@ function Guard() {
       },
     };
   }, []);
+  if (surface === "no-lyrics") {
+    return (
+      <TooltipProvider>
+        <div className="h-full w-full" data-testid="no-binding-surface">
+          <PlayerBar runtime={runtime} state={live} onOpenStage={() => {}} />
+          <PlaybackStage open runtime={runtime} state={live} onClose={() => {}} />
+        </div>
+      </TooltipProvider>
+    );
+  }
   return desktop ? <LyricsWindow /> : (
     <TooltipProvider>
       <div className="h-full w-full" data-shell="app-shell">
@@ -523,6 +580,288 @@ export async function checkStartupGate(page, port, guardDir, add) {
     JSON.stringify(loggedIn),
   );
 }
+
+/**
+ * R45C：播放栏 / 沉浸页的快捷歌词开关与沉浸页收起（真组件 + 真 IPC 边界的**行为**验收）。
+ *
+ * 钉 brief C 节 + fix1 的六件事（都不看结构，只看行为）：
+ * 1. 歌词窗关着时点一下能开：恰好一条 `core_lyrics_toggle(true)`；
+ * 2. **回执被延迟**时快速双击：第二次点击必须取反（`true` → `false`），不是再发一个 `true`。
+ *    两条请求的时间戳都落在夹具延迟窗口里，这就是"第二次点击发生在第一次回执之前"的证据
+ *    （原来那版 150ms 间隔的连点证明不了这件事——回执早就回来了）；
+ * 3. 两种模式：任务栏模式的标签说"任务栏歌词"，点击照样只发一条；
+ * 4. 开关被拒绝：**发起面**出现一句可操作的话（原因 + 下一步）与「重试」/「知道了」，
+ *    没有第二条 toast；重试之后恢复（窗口真的开起来）；
+ * 5. 沉浸页那枚开关失败：提示在沉浸页，播放栏不重复印同一句；
+ * 6. 收起按钮在顶部中央、可点、不压官方控件；菜单打开时 ESC 先关菜单（舞台留着），
+ *    再按一次才关舞台。
+ */
+export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
+  await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await page.evaluate(() => window.__guard.ready());
+  await page.waitForFunction(() => window.__guard.snapshot().lyrics.status === "ready" && window.__guard.snapshot().durationMs > 0);
+
+  /** 播放栏那枚开关的状态 + 当前所有开关请求 + 提示/ toast 的数量（一次采样看完）。 */
+  const barState = () => page.evaluate(() => {
+    const button = document.querySelector('[data-testid="player-lyrics-toggle"]');
+    return {
+      exists: Boolean(button),
+      label: button?.getAttribute("aria-label") ?? null,
+      pressed: button?.getAttribute("aria-pressed") ?? null,
+      requests: window.__guard.toggleLog(),
+      error: document.querySelector('[data-testid="lyrics-toggle-error"]')?.textContent?.trim() ?? null,
+      toasts: document.querySelectorAll('[data-sonner-toast]').length,
+    };
+  });
+  const plan = (patch) => page.evaluate((value) => window.__guard.setTogglePlan(value), patch);
+
+  // ——— ① 歌词窗关着也能开：一次点击 = 一条 true ———
+  await plan({ delayMs: 0, failTimes: 0 });
+  await page.evaluate(() => window.__guard.resetLyricsToggles());
+  const closed = await barState();
+  await page.getByTestId("player-lyrics-toggle").click();
+  await page.waitForFunction(() => window.__guard.toggleLog().length === 1
+    && document.querySelector('[data-testid="player-lyrics-toggle"]')?.getAttribute("aria-pressed") === "true");
+  const opened = await barState();
+  add("playback-hidden-window-opens", closed.exists && closed.label === "显示桌面歌词" && closed.pressed === "false"
+    && opened.requests.length === 1 && opened.requests[0].checked === true
+    && opened.pressed === "true" && opened.label === "隐藏桌面歌词",
+    JSON.stringify({ closed: { label: closed.label, pressed: closed.pressed }, opened: { label: opened.label, pressed: opened.pressed, requests: opened.requests } }));
+
+  // 关回去（等它落定），准备从"关着"开始测双击
+  await page.getByTestId("player-lyrics-toggle").click();
+  await page.waitForFunction(() => window.__guard.toggleLog().at(-1)?.checked === false);
+
+  // ——— ② 回执延迟 350ms 时的快速双击：第二次取反，不是两个 true ———
+  await page.evaluate(() => { window.__guard.resetLyricsToggles(); window.__guard.setTogglePlan({ delayMs: 350, failTimes: 0 }); });
+  await page.evaluate(() => {
+    const button = document.querySelector('[data-testid="player-lyrics-toggle"]');
+    // 同一个任务里连点两下：React 还没重渲染，意图机必须自己取反（不是读渲染快照）
+    button.click();
+    button.click();
+  });
+  const immediate = await barState();
+  add("playback-double-click-before-reply-inverts",
+    immediate.requests.length === 2
+      && immediate.requests[0].checked === true && immediate.requests[1].checked === false
+      && Math.abs(immediate.requests[1].atMs - immediate.requests[0].atMs) < 100
+      && immediate.requests.every((entry) => entry.delayMs === 350)
+      && immediate.pressed === "false",
+    JSON.stringify({ immediate }));
+  await page.waitForTimeout(1400);
+  const settled = await barState();
+  add("playback-double-click-settles-off",
+    settled.requests.length === 2 && settled.pressed === "false" && settled.label === "显示桌面歌词" && settled.error === null,
+    JSON.stringify({ settled: { pressed: settled.pressed, label: settled.label, error: settled.error, requests: settled.requests.length } }));
+
+  // ——— ③ 两种模式：任务栏模式的标签说任务栏歌词，点击照样只发一条 ———
+  await page.evaluate(() => window.__guard.configureDesktop({ mode: "taskbar" }));
+  await page.waitForFunction(() => document.querySelector('[data-testid="player-lyrics-toggle"]')?.getAttribute("aria-label") === "显示任务栏歌词");
+  await page.evaluate(() => { window.__guard.resetLyricsToggles(); window.__guard.setTogglePlan({ delayMs: 0, failTimes: 0 }); });
+  await page.getByTestId("player-lyrics-toggle").click();
+  await page.waitForFunction(() => window.__guard.toggleLog().length === 1);
+  const taskbar = await barState();
+  add("playback-taskbar-mode-label",
+    taskbar.label === "隐藏任务栏歌词" && taskbar.requests.length === 1 && taskbar.requests[0].checked === true,
+    JSON.stringify({ label: taskbar.label, requests: taskbar.requests }));
+  await page.getByTestId("player-lyrics-toggle").click();
+  await page.waitForFunction(() => window.__guard.toggleLog().at(-1)?.checked === false);
+  await page.evaluate(() => window.__guard.configureDesktop({ mode: "desktop" }));
+  await page.waitForFunction(() => document.querySelector('[data-testid="player-lyrics-toggle"]')?.getAttribute("aria-label") === "显示桌面歌词");
+  await page.evaluate(() => window.__guard.resetLyricsToggles());
+
+  // ——— ④ 被拒绝：发起面一句可操作的话（原因 + 下一步 + 重试/关掉），没有第二条 toast ———
+  await plan({ delayMs: 0, failTimes: 1 });
+  await page.getByTestId("player-lyrics-toggle").click();
+  await page.getByTestId("lyrics-toggle-error").waitFor();
+  const failure = await barState();
+  const actionable = await page.evaluate(() => {
+    const box = document.querySelector('[data-testid="lyrics-toggle-error"]');
+    return {
+      retry: Boolean(box?.querySelector('[data-testid="lyrics-toggle-retry"]')),
+      dismiss: Boolean(box?.querySelector('[data-testid="lyrics-toggle-dismiss"]')),
+      barCopy: document.querySelectorAll('[data-testid="lyrics-toggle-error"]').length,
+      rawErrorLeak: (box?.textContent ?? "").includes("守卫夹具"),
+    };
+  });
+  add("playback-toggle-failure-actionable",
+    failure.requests.length === 1 && failure.pressed === "false"
+      && (failure.error ?? "").includes("桌面歌词") && (failure.error ?? "").includes("重试")
+      && (failure.error ?? "").includes("设置页")
+      && actionable.retry && actionable.dismiss && actionable.barCopy === 1
+      && failure.toasts === 0 && !actionable.rawErrorLeak,
+    JSON.stringify({ failure: { error: failure.error, pressed: failure.pressed, toasts: failure.toasts }, actionable }));
+  await page.screenshot({ path: path.join(guardDir, "r45c-toggle-failure.png") });
+
+  await page.getByTestId("lyrics-toggle-retry").click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="lyrics-toggle-error"]') === null
+    && document.querySelector('[data-testid="player-lyrics-toggle"]')?.getAttribute("aria-pressed") === "true");
+  const recovered = await barState();
+  add("playback-toggle-failure-recovers",
+    recovered.requests.length === 2 && recovered.requests[1].checked === true
+      && recovered.pressed === "true" && recovered.error === null && recovered.toasts === 0,
+    JSON.stringify({ requests: recovered.requests, pressed: recovered.pressed, error: recovered.error }));
+  await page.getByTestId("player-lyrics-toggle").click();
+  await page.waitForFunction(() => window.__guard.toggleLog().at(-1)?.checked === false);
+
+  // ——— ⑤ 失败那句能关掉，且关掉不等于重试（不发命令） ———
+  await plan({ delayMs: 0, failTimes: 1 });
+  await page.evaluate(() => window.__guard.resetLyricsToggles());
+  await page.getByTestId("player-lyrics-toggle").click();
+  await page.getByTestId("lyrics-toggle-error").waitFor();
+  await page.getByTestId("lyrics-toggle-dismiss").click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="lyrics-toggle-error"]') === null);
+  const dismissed = await barState();
+  add("playback-toggle-failure-dismissible",
+    dismissed.requests.length === 1 && dismissed.pressed === "false" && dismissed.error === null,
+    JSON.stringify({ requests: dismissed.requests.length, pressed: dismissed.pressed }));
+
+  // ——— ⑥ 沉浸页：收起按钮几何/不压官方控件，菜单 ESC 分层，开关失败在沉浸页说 ———
+  await plan({ delayMs: 0, failTimes: 0 });
+  await page.evaluate(() => window.__guard.resetLyricsToggles());
+  await page.getByRole("button", { name: "歌词", exact: true }).click();
+  const stage = page.getByTestId("playback-stage");
+  await stage.waitFor();
+  await page.waitForTimeout(700);
+  const closeGeometry = await stage.evaluate((element) => {
+    const button = element.querySelector('button[aria-label="收起歌词"]');
+    if (!button) return null;
+    const b = button.getBoundingClientRect();
+    const center = b.x + b.width / 2;
+    const hit = document.elementFromPoint(center, b.y + b.height / 2);
+    const controls = document.querySelector('[data-testid="playback-stage-player"]')?.getBoundingClientRect();
+    const overlapsControls = controls
+      ? !(b.right <= controls.left || b.left >= controls.right || b.bottom <= controls.top || b.top >= controls.bottom)
+      : true;
+    return { center: Math.round(center), viewportCenter: Math.round(innerWidth / 2), top: Math.round(b.y), clickable: Boolean(hit && button.contains(hit)), overlapsControls };
+  });
+  add("playback-stage-close-centered",
+    Boolean(closeGeometry) && closeGeometry.clickable && !closeGeometry.overlapsControls
+      && Math.abs(closeGeometry.center - closeGeometry.viewportCenter) <= 2 && closeGeometry.top <= 16,
+    JSON.stringify(closeGeometry));
+
+  await stage.getByRole("button", { name: /^播放模式：/ }).click();
+  const menu = page.locator('[role="menu"]').first();
+  await menu.waitFor();
+  const menuLayering = await page.evaluate(() => {
+    const menuNode = document.querySelector('[role="menu"]');
+    const button = document.querySelector('[data-testid="playback-stage"] button[aria-label="收起歌词"]');
+    if (!menuNode || !button) return { ok: false };
+    const m = menuNode.getBoundingClientRect();
+    const b = button.getBoundingClientRect();
+    const hit = document.elementFromPoint(m.x + m.width / 2, m.y + m.height / 2);
+    return {
+      ok: Boolean(hit && menuNode.contains(hit)),
+      overlapsClose: !(b.right <= m.left || b.left >= m.right || b.bottom <= m.top || b.top >= m.bottom),
+    };
+  });
+  await page.keyboard.press("Escape");
+  await menu.waitFor({ state: "detached" });
+  add("playback-stage-menu-layering",
+    menuLayering.ok && !menuLayering.overlapsClose && await stage.isVisible(),
+    JSON.stringify(menuLayering));
+  add("playback-stage-menu-escape-keeps-stage", await stage.isVisible(), "菜单开着时 ESC 先关菜单，舞台留着");
+
+  // Sheet 打开时：收起按钮不压上层（Sheet 走的是官方 portal/z 层），ESC 先关 Sheet
+  const queueTrigger = page.getByRole("button", { name: "播放队列", exact: true });
+  await queueTrigger.focus();
+  await queueTrigger.press("Enter");
+  const sheet = page.locator('[data-slot="sheet-content"]');
+  await sheet.waitFor();
+  const sheetLayering = await page.evaluate(() => {
+    const content = document.querySelector('[data-slot="sheet-content"]');
+    const button = document.querySelector('[data-testid="playback-stage"] button[aria-label="收起歌词"]');
+    if (!content || !button) return { ok: false };
+    const s = content.getBoundingClientRect();
+    const b = button.getBoundingClientRect();
+    const hit = document.elementFromPoint(s.x + s.width / 2, s.y + s.height / 2);
+    return {
+      ok: Boolean(hit && content.contains(hit)),
+      overlapsClose: !(b.right <= s.left || b.left >= s.right || b.bottom <= s.top || b.top >= s.bottom),
+    };
+  });
+  await page.keyboard.press("Escape");
+  await sheet.waitFor({ state: "detached" });
+  add("playback-stage-sheet-layering",
+    sheetLayering.ok && !sheetLayering.overlapsClose && await stage.isVisible(),
+    JSON.stringify(sheetLayering));
+
+  await page.keyboard.press("Escape");
+  add("playback-stage-escape-closes", await stage.count() === 0, "没有上层弹窗时 ESC 关闭舞台");
+
+  await page.getByRole("button", { name: "歌词", exact: true }).click();
+  await stage.waitFor();
+  await page.waitForTimeout(600);
+  await plan({ delayMs: 0, failTimes: 1 });
+  await page.evaluate(() => window.__guard.resetLyricsToggles());
+  await stage.getByTestId("stage-lyrics-toggle").click();
+  await page.getByTestId("stage-lyrics-toggle-error").waitFor();
+  const stageFailure = await page.evaluate(() => {
+    const box = document.querySelector('[data-testid="stage-lyrics-toggle-error"]');
+    return {
+      text: box?.textContent?.trim() ?? "",
+      retry: Boolean(box?.querySelector('[data-testid="stage-lyrics-toggle-retry"]')),
+      dismiss: Boolean(box?.querySelector('[data-testid="stage-lyrics-toggle-dismiss"]')),
+      barCopy: document.querySelectorAll('[data-testid="lyrics-toggle-error"]').length,
+      toasts: document.querySelectorAll('[data-sonner-toast]').length,
+    };
+  });
+  add("playback-stage-toggle-failure-actionable",
+    stageFailure.text.includes("桌面歌词") && stageFailure.text.includes("重试") && stageFailure.text.includes("设置页")
+      && stageFailure.retry && stageFailure.dismiss && stageFailure.barCopy === 0 && stageFailure.toasts === 0,
+    JSON.stringify(stageFailure));
+  await stage.getByTestId("stage-lyrics-toggle-retry").click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="stage-lyrics-toggle-error"]') === null
+    && document.querySelector('[data-testid="stage-lyrics-toggle"]')?.getAttribute("aria-pressed") === "true");
+  const stageRecovered = await page.evaluate(() => ({
+    requests: window.__guard.toggleLog(),
+    pressed: document.querySelector('[data-testid="stage-lyrics-toggle"]')?.getAttribute("aria-pressed"),
+  }));
+  add("playback-stage-toggle-failure-recovers",
+    stageRecovered.requests.length === 2 && stageRecovered.requests[1].checked === true && stageRecovered.pressed === "true",
+    JSON.stringify(stageRecovered));
+  await stage.getByTestId("stage-lyrics-toggle").click();
+  await page.waitForFunction(() => window.__guard.toggleLog().at(-1)?.checked === false);
+  await plan({ delayMs: 0, failTimes: 0 });
+  await page.keyboard.press("Escape");
+  await stage.waitFor({ state: "detached" });
+}
+
+/**
+ * R45C：没有 `lyrics` binding 时，播放栏与沉浸页都不出现死按钮、也不崩。
+ *
+ * 挂在另一份**真的不传 lyrics** 的挂载点上（`?surface=no-lyrics`），因为 `LibraryShell`
+ * 永远会造 binding——在它里面证明不了"没有 binding 会怎样"。
+ */
+export async function checkNoBindingSurface(page, port, add) {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto(`http://127.0.0.1:${port}/index.html?surface=no-lyrics`, { waitUntil: "load" });
+  await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+  await page.evaluate(() => window.__guard.ready());
+  await page.waitForFunction(() => window.__guard.snapshot().durationMs > 0);
+  await page.waitForTimeout(500);
+  const surface = await page.evaluate(() => {
+    const playButtons = (root) => [...document.querySelectorAll(`${root} button`)]
+      .filter((button) => ["播放", "暂停"].includes(button.getAttribute("aria-label") ?? "")).length;
+    return {
+      bar: document.querySelectorAll('[data-testid="player-bar"]').length,
+      stage: document.querySelectorAll('[data-testid="playback-stage"]').length,
+      barToggles: document.querySelectorAll('[data-testid="player-lyrics-toggle"]').length,
+      stageToggles: document.querySelectorAll('[data-testid="stage-lyrics-toggle"]').length,
+      barPlay: playButtons('[data-testid="player-bar"]'),
+      stagePlay: playButtons('[data-testid="playback-stage"]'),
+      lyricsWindow: document.querySelectorAll('[data-testid="lyrics-window"]').length,
+    };
+  });
+  add("playback-no-binding-no-dead-button",
+    surface.bar === 1 && surface.stage === 1 && surface.barToggles === 0 && surface.stageToggles === 0
+      && surface.barPlay === 1 && surface.stagePlay === 1 && surface.lyricsWindow === 0,
+    JSON.stringify(surface));
+}
+
 
 /**
  * R45A3（复审）：歌单详情的**真协议边界**夹具说明。
@@ -1825,6 +2164,29 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       await page.getByRole("textbox", { name: "搜索关键字", exact: true }).fill("保留页面状态");
       await page.getByTestId("favorites-scroll-root").evaluate((element) => { element.scrollTop = 180; });
       const scrollTop = await page.getByTestId("favorites-scroll-root").evaluate((element) => element.scrollTop);
+      const barToggle = page.getByTestId("player-lyrics-toggle");
+      const barToggleLabel = await barToggle.getAttribute("aria-label");
+      const togglesBeforeBar = await page.evaluate(() => window.__guard.lyricsToggles().length);
+      await barToggle.click();
+      await page.waitForTimeout(150);
+      const afterBarToggle = await page.evaluate(() => window.__guard.lyricsToggles());
+      await page.getByTestId("player-lyrics-toggle").click();
+      await page.waitForTimeout(150);
+      const afterBarToggleBack = await page.evaluate(() => window.__guard.lyricsToggles());
+      add(`${theme}-bar-lyrics-toggle-once`, afterBarToggle.length === togglesBeforeBar + 1
+        && afterBarToggleBack.length === togglesBeforeBar + 2 && afterBarToggleBack.at(-1) === false,
+      JSON.stringify({ barToggleLabel, before: togglesBeforeBar, after: afterBarToggle, back: afterBarToggleBack }));
+      add(`${theme}-bar-lyrics-toggle-geometry`, await page.evaluate(() => {
+        const bar = document.querySelector('[data-testid="player-bar"]');
+        const toggle = bar?.querySelector('[data-testid="player-lyrics-toggle"]');
+        const play = bar?.querySelector('button[aria-label="播放"], button[aria-label="暂停"]');
+        const next = bar?.querySelector('button[aria-label="下一首"]');
+        if (!toggle || !play || !next) return { ok: false };
+        const t = toggle.getBoundingClientRect();
+        const p = play.getBoundingClientRect();
+        const n = next.getBoundingClientRect();
+        return { ok: t.left >= p.right - 1 && t.right <= n.left + 1, toggle: { left: Math.round(t.left), right: Math.round(t.right) }, play: Math.round(p.right), next: Math.round(n.left) };
+      }).then((geometry) => geometry.ok).catch(() => false), "播放按钮与下一首之间就是那枚歌词开关（DOM/几何同序）");
       await page.getByRole("button", { name: "歌词", exact: true }).click();
       await page.mouse.move(0, 0);
       await page.waitForTimeout(1000);
@@ -1833,6 +2195,34 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
         document.elementFromPoint(x, y)?.closest('[data-testid="playback-stage"]')));
       add(`${theme}-full-coverage`, box?.x === 0 && box?.y === 0 && box?.width === 1280 && box?.height === 800 && covered, `舞台 ${JSON.stringify(box)}，四角命中舞台=${covered}`);
       add(`${theme}-background`, await stage.locator('[data-testid="amll-background"] canvas').count() > 0, "完整舞台内使用官方背景画布");
+      /**
+       * R45C：收起按钮在**顶部中央**（几何居中而不是靠内容宽度凑），并且不压住官方控件；
+       * 沉浸页与播放栏的歌词开关各点一次只发一次 `core_lyrics_toggle`。
+       */
+      const closeGeometry = await stage.evaluate((element) => {
+        const button = element.querySelector('button[aria-label="收起歌词"]');
+        if (!button) return null;
+        const b = button.getBoundingClientRect();
+        const center = b.x + b.width / 2;
+        const hit = document.elementFromPoint(center, b.y + b.height / 2);
+        return { center: Math.round(center), viewportCenter: Math.round(innerWidth / 2), top: Math.round(b.y), clickable: Boolean(hit && button.contains(hit)) };
+      });
+      add(`${theme}-stage-close-centered`, Boolean(closeGeometry) && closeGeometry.clickable
+        && Math.abs(closeGeometry.center - closeGeometry.viewportCenter) <= 2 && closeGeometry.top <= 16,
+      JSON.stringify(closeGeometry));
+      const stageToggle = stage.getByTestId("stage-lyrics-toggle");
+      const stageToggleLabel = await stageToggle.getAttribute("aria-label");
+      const togglesBeforeStage = await page.evaluate(() => window.__guard.lyricsToggles().length);
+      await stageToggle.click();
+      await page.waitForTimeout(150);
+      const afterStageToggle = await page.evaluate(() => window.__guard.lyricsToggles());
+      await stage.getByTestId("stage-lyrics-toggle").click();
+      await page.waitForTimeout(150);
+      const afterStageToggleBack = await page.evaluate(() => window.__guard.lyricsToggles());
+      add(`${theme}-stage-lyrics-toggle-once`, afterStageToggle.length === togglesBeforeStage + 1
+        && afterStageToggle.at(-1) === true && afterStageToggleBack.length === togglesBeforeStage + 2
+        && afterStageToggleBack.at(-1) === false,
+      JSON.stringify({ stageToggleLabel, before: togglesBeforeStage, after: afterStageToggle, back: afterStageToggleBack }));
       const unnamedButtons = await stage.locator("button").evaluateAll((buttons) => buttons.filter((button) =>
         button.getBoundingClientRect().width > 0 && !button.getAttribute("aria-label") && !button.textContent?.trim()).length);
       add(`${theme}-no-unwired-controls`, unnamedButtons === 0, `未接线/无名称的可见按钮 ${unnamedButtons} 个`);
@@ -1902,7 +2292,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       await stage.getByRole("button", { name: "暂停", exact: true }).click();
       await page.evaluate(() => window.__guard.setTime(700));
 
-      await stage.getByRole("button", { name: "关闭歌词", exact: true }).click();
+      await stage.getByRole("button", { name: "收起歌词", exact: true }).click();
       const retained = await page.getByRole("textbox", { name: "搜索关键字", exact: true }).inputValue() === "保留页面状态"
         && await page.getByTestId("favorites-scroll-root").evaluate((element) => element.scrollTop) === scrollTop;
       add(`${theme}-page-retained`, retained, "关闭后搜索输入与收藏滚动位置未丢失");
@@ -2043,7 +2433,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       await page.emulateMedia({ reducedMotion: "reduce" });
       await stage.getByRole("button", { name: "播放", exact: true }).click();
       const reducedMotion = await stage.evaluate((element) => {
-        const candidates = [element, ...element.querySelectorAll('[data-testid="playback-stage-cover"], [data-testid="playback-stage-cover"] *, [data-testid="playback-stage-player"] *, button[aria-label="关闭歌词"], button[aria-label="关闭歌词"] *')];
+        const candidates = [element, ...element.querySelectorAll('[data-testid="playback-stage-cover"], [data-testid="playback-stage-cover"] *, [data-testid="playback-stage-player"] *, button[aria-label="收起歌词"], button[aria-label="收起歌词"] *')];
         const nonzero = (value) => value.split(",").some((duration) => Number.parseFloat(duration) > 0);
         const offenders = candidates.filter((node) => {
           const style = getComputedStyle(node);
@@ -2073,7 +2463,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       const fallback = await stage.getByTestId("playback-stage-cover-fallback").count();
       const fallbackInk = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-cover-fallback-line.png`));
       add(`${theme}-cover-fallback`, fallback === 1 && fallbackInk.ink > 60, JSON.stringify({ fallback, ink: fallbackInk.ink }));
-      await stage.getByRole("button", { name: "关闭歌词", exact: true }).click();
+      await stage.getByRole("button", { name: "收起歌词", exact: true }).click();
       await page.getByRole("button", { name: "播放队列", exact: true }).click();
       await page.locator('[data-slot="sheet-content"]').waitFor();
       await page.locator('[data-slot="sheet-close"]').click();
@@ -2085,6 +2475,11 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     }
 
     await page.evaluate(() => window.__guard.restoreLyrics());
+    /**
+     * R45C：播放栏/沉浸页快捷开关的真行为（延迟 IPC 下的双击、拒绝后恢复、两种模式、菜单层级）。
+     * 放在两轮主题之后、分页之前：它自己重新载入主页，只碰播放栏与沉浸页。
+     */
+    await checkPlaybackLyricsToggle(page, port, guardDir, add);
     /**
      * R45A3：库列表触底分页（真滚轮 + 真 IPC 计数）。放在两轮主题之后、桌面歌词之前：
      * 它会把主界面导航到歌单/专辑/歌手/历史/搜索，之后的桌面窗验收本来就要重挂整个壳。
@@ -2141,6 +2536,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       }
     }
     await checkDesktopSurface(page, guardDir, add);
+    /** R45C：没有 lyrics binding 的挂载点（另一页，见 checkNoBindingSurface 的说明）。 */
+    await checkNoBindingSurface(page, port, add);
     add("no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,
       `console error ${consoleErrors.length} 条、pageerror ${pageErrors.length} 条${[...consoleErrors, ...pageErrors].slice(0, 3).map((text) => `\n      ${text.slice(0, 200)}`).join("")}`);
   } finally {

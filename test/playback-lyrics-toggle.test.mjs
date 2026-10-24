@@ -1,0 +1,315 @@
+/**
+ * R45C：播放栏 / 沉浸页的「桌面歌词 / 任务栏歌词」快捷开关，以及沉浸页顶部中央的收起按钮。
+ *
+ * 钉的五件事（简报 C 节 + fix1）：
+ * 1. 语义只有一份（`lyricsToggleView`）：状态取自 `requestedVisible ?? visible`，标签随
+ *    **当前模式**说"显示/隐藏桌面歌词"或"显示/隐藏任务栏歌词"；
+ * 2. **待定意图只有一个主人**（`features/lyrics/lyrics-toggle-intent.mjs`）：第一次点击到
+ *    宿主回执之间的那段时间里，第二次点击必须**取反**（不是把同一个 `true` 再发一次），
+ *    回执/失败才会清掉它；
+ * 3. 失败要在**发起面**给一句可操作的话（原因 + 下一步），有重试/关掉两条路，原始错误只进日志；
+ * 4. 没有 `lyrics` binding 时**不渲染**（不出现"点了没反应"的死按钮）；
+ * 5. 沉浸页的关闭从右上角叉号改成**顶部中央的 ChevronDown**，ESC 照旧。
+ *
+ * 真点击（延迟 IPC 下的快速双击、被拒绝后重试、两种模式、无 binding、菜单层级）由
+ * `scripts/test-browser.mjs` 的完整组合回归验证。
+ *
+ * 先写先看红。
+ */
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { resolve } from "node:path";
+
+import { build } from "esbuild";
+
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const read = (relative) => readFileSync(`${repoRoot}${relative}`, "utf8");
+
+/** 只扫代码，不扫注释（注释里写"右上角"是说明文字）。 */
+function stripComments(source) {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+}
+
+const COMPONENTS = "src/renderer/components.tsx";
+const STAGE = "src/renderer/playback-stage.tsx";
+const APP = "src/renderer/App.tsx";
+const HOOK = "src/renderer/use-lyrics-window.ts";
+
+const outDir = resolve(".tmp/r45c-toggle");
+await mkdir(outDir, { recursive: true });
+const bundle = async (name, source) => {
+  const path = resolve(outDir, `${name}.mjs`);
+  await build({
+    stdin: { contents: source, resolveDir: repoRoot, loader: "tsx" },
+    outfile: path,
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    target: "node22",
+    jsx: "automatic",
+    packages: "external",
+    logLevel: "warning",
+  });
+  return import(pathToFileURL(path).href);
+};
+
+/** 显式 deferred：测试要精确控制"回执什么时候回来"。 */
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+test("R45C 语义：状态取 requestedVisible ?? visible，标签随模式", async () => {
+  const { lyricsToggleView } = await bundle("toggle-view", `export { lyricsToggleView } from "./src/renderer/components.tsx";`);
+  const binding = (config, extra = {}) => ({ config: { mode: "desktop", ...config }, visible: false, setVisible() {}, ...extra });
+
+  assert.deepEqual(lyricsToggleView(binding({})), { on: false, mode: "desktop", label: "显示桌面歌词" });
+  assert.deepEqual(lyricsToggleView(binding({}, { visible: true })), { on: true, mode: "desktop", label: "隐藏桌面歌词" });
+  assert.deepEqual(lyricsToggleView(binding({ mode: "taskbar" })), { on: false, mode: "taskbar", label: "显示任务栏歌词" });
+  assert.deepEqual(lyricsToggleView(binding({ mode: "taskbar" }, { visible: true })), { on: true, mode: "taskbar", label: "隐藏任务栏歌词" });
+
+  // requestedVisible 是"我们请求它开着"，比宿主回执更早、更准（点下去那一刻就该翻状态）
+  assert.deepEqual(lyricsToggleView(binding({}, { visible: false, requestedVisible: true })), { on: true, mode: "desktop", label: "隐藏桌面歌词" });
+  assert.deepEqual(lyricsToggleView(binding({}, { visible: true, requestedVisible: false })), { on: false, mode: "desktop", label: "显示桌面歌词" });
+
+  // 没有 binding = 没有语义（调用点据此不渲染），而不是"假装它是关着的"
+  assert.equal(lyricsToggleView(null), null);
+  assert.equal(lyricsToggleView(undefined), null);
+  assert.equal(lyricsToggleView(binding({ mode: "floating" })).label, "显示桌面歌词", "认不出的模式按桌面说");
+});
+
+test("R45C 待定意图：迟到的回执之前再点一次必须取反（不是重复发 true）", async () => {
+  const { createLyricsToggleIntent } = await import(
+    pathToFileURL(resolve(repoRoot, "src/renderer/features/lyrics/lyrics-toggle-intent.mjs")).href
+  );
+
+  const sent = [];
+  const gates = [];
+  const seen = [];
+  const intent = createLyricsToggleIntent({
+    send: (target) => {
+      sent.push(target);
+      const gate = deferred();
+      gates.push(gate);
+      return gate.promise;
+    },
+    onChange: (snapshot) => seen.push({ ...snapshot }),
+  });
+
+  const first = intent.request(true);
+  // **同一个任务里**再点一次：渲染还没来得及把新状态交回按钮，意图机必须自己取反
+  const second = intent.request(false);
+  assert.deepEqual(sent, [true, false], "第二次点击取反待定目标，不重复提交同一个 true");
+  assert.equal(intent.snapshot().pending, false, "待定目标是最后那一次点击的意图");
+
+  gates[0].resolve({ visible: true });
+  await first;
+  assert.equal(intent.snapshot().pending, false, "旧回执不许把新意图清掉");
+
+  gates[1].resolve({ visible: false });
+  await second;
+  assert.equal(intent.snapshot().pending, null, "最后那一次回执到了才清掉待定目标");
+  assert.equal(intent.snapshot().error, null);
+  assert.ok(seen.length >= 3, "每次意图变化都要通知界面（按钮状态跟着待定目标走）");
+});
+
+test("R45C 失败：一句可操作的话（原因/下一步）、重试能恢复、能关掉", async () => {
+  const { createLyricsToggleIntent, toggleFailureText } = await import(
+    pathToFileURL(resolve(repoRoot, "src/renderer/features/lyrics/lyrics-toggle-intent.mjs")).href
+  );
+
+  let refuse = true;
+  const sent = [];
+  const intent = createLyricsToggleIntent({
+    send: async (target) => {
+      sent.push(target);
+      if (refuse) {
+        refuse = false;
+        throw { kind: "internal", message: "宿主原始错误：不得出现在界面文案里" };
+      }
+      return { visible: target };
+    },
+  });
+
+  await intent.request(true, "player-bar");
+  const failed = intent.snapshot();
+  assert.equal(failed.pending, null, "失败之后不留下一个永远待定的开关");
+  assert.equal(failed.surface, "player-bar", "记住是哪一面按的（失败只印在那一面）");
+  assert.equal(typeof failed.error, "string");
+  assert.match(failed.error, /桌面歌词/, "说清是哪个歌词（模式）");
+  assert.match(failed.error, /重试/, "给下一步：重试");
+  assert.match(failed.error, /设置页/, "仍然失败时的下一步");
+  assert.doesNotMatch(failed.error, /宿主原始错误/, "原始错误只进日志，不糊到界面");
+
+  await intent.retry();
+  assert.deepEqual(sent, [true, true], "重试只重发最后那一个意图");
+  assert.equal(intent.snapshot().error, null, "重试成功后提示消失");
+  assert.equal(intent.snapshot().pending, null);
+  assert.equal(intent.snapshot().surface, null, "成功之后不再挂着某一面");
+
+  // 关掉提示：不再有 error，也不发任何命令
+  refuse = true;
+  await intent.request(false);
+  assert.notEqual(intent.snapshot().error, null);
+  const before = sent.length;
+  intent.dismiss();
+  assert.equal(intent.snapshot().error, null, "用户可以直接关掉这句话");
+  assert.equal(sent.length, before, "关掉提示不是重试");
+
+  // 模式说清楚：任务栏那句不能还在说桌面歌词
+  assert.match(toggleFailureText(true, "taskbar"), /任务栏歌词/);
+  assert.match(toggleFailureText(false, "desktop"), /关上/);
+  assert.doesNotMatch(toggleFailureText(true, "taskbar"), /桌面歌词/);
+});
+
+test("R45C 播放栏：播放按钮右侧一枚 Captions 开关；没有 lyrics 就不渲染", async () => {
+  const { render } = await bundle("bar", `
+    import { renderToStaticMarkup } from "react-dom/server";
+    import { PlayerBar } from "./src/renderer/components.tsx";
+    import { createPlayer } from "./src/renderer/features/playback/player.mjs";
+
+    export function render(lyrics) {
+      const player = createPlayer({
+        audio: { setSource() {}, play: async () => {}, pause() {}, setCurrentTime() {}, setVolume() {}, setMuted() {}, on: () => () => {} },
+        resolveUrl: async () => ({}),
+        guardUrl: () => null,
+      });
+      player.setQueue([{ id: "1", name: "真实标题", artists: "艺人" }]);
+      const state = player.snapshot();
+      return renderToStaticMarkup(<PlayerBar runtime={{ player }} state={state} onOpenStage={() => {}} lyrics={lyrics} />);
+    }`);
+
+  const binding = (config = {}, extra = {}) => ({ config: { mode: "desktop", ...config }, visible: false, requestedVisible: false, setVisible() {}, toggleVisible() {}, ...extra });
+
+  for (const absent of [undefined, null]) {
+    const markup = render(absent);
+    assert.doesNotMatch(markup, /player-lyrics-toggle|桌面歌词|任务栏歌词/, "没有 lyrics binding 时开关不渲染（不做死按钮）");
+  }
+
+  const desktop = render(binding({}, { visible: true, requestedVisible: true }));
+  const toggle = desktop.match(/<button[^>]*data-testid="player-lyrics-toggle"[^>]*>/)?.[0];
+  assert.ok(toggle, "播放栏要有这枚开关（测试锚点 player-lyrics-toggle）");
+  assert.match(toggle, /aria-label="隐藏桌面歌词"/, "状态来自 requestedVisible ?? visible");
+  assert.match(toggle, /aria-pressed="true"/, "开着的状态要可读（不是只有颜色）");
+  assert.match(desktop, /lucide-captions/, "图标是 lucide 的 Captions（不自绘）");
+
+  // DOM 顺序 = 视觉顺序：播放 → 这枚开关 → 下一首
+  const playAt = desktop.indexOf('aria-label="播放"');
+  const toggleAt = desktop.indexOf('data-testid="player-lyrics-toggle"');
+  const nextAt = desktop.indexOf('aria-label="下一首"');
+  assert.ok(playAt > -1 && toggleAt > -1 && nextAt > -1, "三个锚点都要在标记里");
+  assert.ok(playAt < toggleAt, "开关必须在播放按钮**右侧**（播放在前）");
+  assert.ok(toggleAt < nextAt, "开关紧挨着播放按钮（在下一首之前）");
+
+  const taskbar = render(binding({ mode: "taskbar" }));
+  assert.match(taskbar, /aria-label="显示任务栏歌词"/, "任务栏模式的标签说的是任务栏歌词");
+  assert.match(taskbar, /aria-pressed="false"/, "关着时 pressed 为 false");
+
+  // 失败时：在**发起面**就有一句话 + 重试 + 关掉；不是只留在 console/设置页
+  const failed = render(binding({}, {
+    toggleErrorSurface: "player-bar",
+    toggleError: "桌面歌词没能打开：宿主没有确认这次操作。请点「重试」再发一次；仍然失败时到设置页确认歌词窗可用。",
+    retryToggle() {}, dismissToggleError() {},
+  }));
+  assert.match(failed, /data-testid="lyrics-toggle-error"/, "播放栏要有这句失败提示（发起面）");
+  assert.match(failed, /宿主没有确认这次操作/, "原因说清楚");
+  assert.match(failed, /data-testid="lyrics-toggle-retry"/, "有重试");
+  assert.match(failed, /data-testid="lyrics-toggle-dismiss"/, "能关掉");
+  assert.equal(render(binding({})).includes("lyrics-toggle-error"), false, "没失败时不出现这句提示");
+
+  // 同一个失败只印一处：从沉浸页发起的那次不在播放栏里再冒一遍；
+  // 从设置页/别处发起的（surface = null）由这条常驻的播放栏兜住，不会只剩日志。
+  const elsewhere = render(binding({}, {
+    toggleErrorSurface: "playback-stage",
+    toggleError: "桌面歌词没能打开：宿主没有确认这次操作。请点「重试」再发一次；仍然失败时到设置页确认歌词窗可用。",
+    retryToggle() {}, dismissToggleError() {},
+  }));
+  assert.equal(elsewhere.includes("lyrics-toggle-error"), false, "发起面在沉浸页时，播放栏不重复同一句话");
+  const fromSettings = render(binding({}, {
+    toggleErrorSurface: null,
+    toggleError: "桌面歌词没能关上：宿主没有确认这次操作。请点「重试」再发一次；仍然失败时到设置页关闭桌面歌词。",
+    retryToggle() {}, dismissToggleError() {},
+  }));
+  assert.match(fromSettings, /data-testid="lyrics-toggle-error"/, "非播放面发起的失败也由常驻播放栏说，不只写日志");
+});
+
+test("R45C 播放栏/沉浸页：一次点击只发一次 toggle，且不自建运行时", () => {
+  const components = stripComments(read(COMPONENTS));
+  const stage = stripComments(read(STAGE));
+  const hook = stripComments(read(HOOK));
+
+  for (const [relative, source] of [[COMPONENTS, components], [STAGE, stage]]) {
+    assert.match(source, /lyricsToggleView\(lyrics\)/, `${relative} 的标签/状态必须来自唯一语义（lyricsToggleView）`);
+    assert.equal(
+      [...source.matchAll(/\.toggleVisible\(/g)].length,
+      1,
+      `${relative} 的点击只转一次 toggleVisible（意图机是唯一主人）`,
+    );
+    assert.equal(
+      [...source.matchAll(/\.setVisible\(/g)].length,
+      0,
+      `${relative} 不许自己算目标态（渲染快照里的"下一页"在同一次任务里可能是旧的）`,
+    );
+  }
+  assert.match(stage, /<MediaButton[^>]*aria-label=\{lyricsView\.label\}/, "沉浸页那枚开关是官方 MediaButton");
+  assert.equal([...stage.matchAll(/lyricsView === null \? null :/g)].length, 1, "没有 binding 时不在沉浸页渲染它");
+  assert.equal([...components.matchAll(/lyricsView === null \? null :/g)].length, 1, "播放栏同理");
+
+  for (const [relative, source] of [[COMPONENTS, components], [STAGE, stage]]) {
+    assert.doesNotMatch(source, /createLyricsBridge|new PlayerRuntime|getLyricsBridge\(/, `${relative} 不新建歌词运行时/桥（那是单例）`);
+  }
+
+  // 失败提示：两个发起面都要有，且同一个失败只印在发起面（不额外弹 toast）
+  assert.match(components, /data-testid="lyrics-toggle-error"/);
+  assert.match(stage, /data-testid="stage-lyrics-toggle-error"/);
+  assert.match(components, /lyrics\.toggleErrorSurface !== "playback-stage"/, "播放栏不重复沉浸页发起的那次失败");
+  assert.match(stage, /lyrics\.toggleErrorSurface === "playback-stage"/, "沉浸页只认自己发起的那次失败");
+  for (const source of [components, stage]) {
+    assert.match(source, /lyrics\?\.retryToggle\?\.\(\)/);
+    assert.match(source, /lyrics\?\.dismissToggleError\?\.\(\)/);
+    assert.doesNotMatch(source, /sonner|toast\(/, "失败不许再弹一条 toast（同一件事只在一个地方说）");
+  }
+
+  // 待定意图的主人只有 hook 里那一个（桥的开关只有一个发送点）
+  assert.match(hook, /createLyricsToggleIntent/, "hook 用唯一意图机");
+  assert.match(hook, /toggleState\.pending \?\?/, "binding 投影的 requestedVisible 让待定目标优先于权威回执");
+  assert.equal([...hook.matchAll(/bridge\.setVisible\(/g)].length, 1, "桥的开关只有一处发送");
+  assert.match(hook, /toggleError: toggleState\.error/, "失败经 binding 交给发起面");
+  assert.match(hook, /toggleErrorSurface/, "失败发生在哪一面也经 binding 交出去");
+  assert.match(hook, /intent\.snapshot\(\)/, "取反读意图机自己的待定目标（渲染闭包在同一次任务里是旧的）");
+  assert.match(hook, /toggleVisible/, "取反由意图机决定，不由渲染快照决定");
+});
+
+test("R45C 沉浸页收起：顶部中央 ChevronDown，不再右上角叉号，ESC 照旧", () => {
+  const stage = stripComments(read(STAGE));
+
+  assert.match(
+    stage,
+    /<div className="absolute top-2 left-1\/2 -translate-x-1\/2">/,
+    "收起按钮在顶部中央（几何居中，不是靠内容宽度凑）",
+  );
+  assert.match(stage, /aria-label="收起歌词"/, "无障碍名称说清它做什么");
+  assert.match(stage, /<ChevronDownIcon/, "图标是 lucide 的 ChevronDown");
+  assert.doesNotMatch(stage, /right-4/, "右上角那处绝对定位已删");
+  assert.doesNotMatch(stage, /\bXIcon\b/, "叉号图标已不再引用");
+  assert.match(stage, /"Escape"/, "ESC 关闭保留（键盘用户不该只剩鼠标一条路）");
+  assert.match(stage, /\[role="dialog"\], \[role="alertdialog"\], \[role="menu"\]/, "上层弹窗打开时 ESC 先关弹窗");
+});
+
+test("R45C 外壳：同一份 lyrics binding 交给播放栏与沉浸页（不存在第二份状态）", () => {
+  const app = stripComments(read(APP));
+  assert.match(app, /useLyricsWindow\(runtime, playback\)/, "binding 仍来自唯一 hook");
+  const bar = app.slice(app.indexOf("<PlayerBar"), app.indexOf("<PlaybackStage"));
+  const stage = app.slice(app.indexOf("<PlaybackStage"), app.indexOf("</SidebarProvider>"));
+  assert.ok(bar.length > 0 && stage.length > 0, "要能在 App.tsx 里定位两个调用点");
+  assert.match(bar, /lyrics=\{lyrics\}/, "播放栏拿到同一个 binding");
+  assert.match(stage, /lyrics=\{lyrics\}/, "沉浸页拿到同一个 binding");
+});
