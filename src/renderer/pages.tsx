@@ -1050,7 +1050,8 @@ export function SettingsPage({
   const busy = saving || testing
 
   return (
-    <div className="m-4 flex max-w-3xl flex-col gap-4" data-testid="settings-page">
+    /* 不加宽度上限：宽屏由各标签页的 xl 两列网格分配宽度 */
+    <div className="m-4 flex flex-col gap-4" data-testid="settings-page">
       {failure !== null ? (
         <p className="text-sm text-destructive" role="alert">
           {failure}
@@ -1072,8 +1073,8 @@ export function SettingsPage({
           ))}
         </TabsList>
 
-        {/* 通用：日常使用里会被改的四件 */}
-        <TabsContent value="general" className="flex flex-col gap-4">
+        {/* 通用：日常使用里会被改的四件（宽屏两列、窄屏单列；items-start 让高矮不同的卡不互相拉齐） */}
+        <TabsContent value="general" className="grid grid-cols-1 items-start gap-4 xl:grid-cols-2">
           <Card>
             <CardHeader>
               <CardTitle>关窗行为</CardTitle>
@@ -1176,8 +1177,8 @@ export function SettingsPage({
           </Card>
         </TabsContent>
 
-        {/* 网络：连不上网时才会来看的那一类（与通用那四件没有共同前提） */}
-        <TabsContent value="network" className="flex flex-col gap-4">
+        {/* 网络：单张表单卡保持整宽，放进半栏会把主机/端口/账号字段挤窄 */}
+        <TabsContent value="network" className="grid grid-cols-1 items-start gap-4">
           <Card>
             <CardHeader>
               <CardTitle>网络与代理</CardTitle>
@@ -1277,8 +1278,8 @@ export function SettingsPage({
           </Card>
         </TabsContent>
 
-        {/* 歌词：桌面歌词窗（在哪显示）与歌词缓存/导入（从哪来）是同一件事的两半 */}
-        <TabsContent value="lyrics" className="flex flex-col gap-4">
+        {/* 歌词：桌面歌词窗口（在哪显示）+ 歌词缓存/导入（从哪来）——两半本来就可以并排看 */}
+        <TabsContent value="lyrics" className="grid grid-cols-1 items-start gap-4 xl:grid-cols-2">
           {/*
             R52：这一页只放**必须在主窗操作**的行为项——显示 / 窗口位置 / 锁定 / 鼠标穿透。
             外观（样式 / 方向 / 字号 / 效果 / 颜色）只在桌面歌词窗自己的齿轮菜单里改：同一项设置
@@ -1373,8 +1374,8 @@ export function SettingsPage({
           <LyricsCacheCard lyrics={lyrics} />
         </TabsContent>
 
-        {/* 日志：只读的诊断面板（不是设置项——理由见 SETTINGS_TABS 的注释） */}
-        <TabsContent value="log" className="flex flex-col gap-4">
+        {/* 日志：只读的诊断面板（不是设置项——理由见 SETTINGS_TABS 的注释）；终端始终整宽 */}
+        <TabsContent value="log" className="grid grid-cols-1 items-start gap-4">
           {/*
             运行日志（R39 从侧栏那个 Sheet 搬到这里）。
             展示与筛选全在 `LogTerminal` 里（编辑器样式：行号 gutter + 等宽正文 + ScrollArea，

@@ -2810,6 +2810,262 @@ export async function checkLibraryPagination(page, guardDir, add) {
   });
 }
 
+/**
+ * R66b：主内容区铺满。逐页量内容右边缘到可用区域右边缘的空白，要求不超过页面左内边距 + 8px，且无横向滚动。
+ * 1900 宽下再人为恢复 768px 上限量一次，证明判据抓得住这类缺陷；960×600 检查设置卡片回到单列。
+ * 明细写入 `.tmp/browser-guard/r66b-page-fill.json`。
+ */
+export async function checkPageFill(page, guardDir, add) {
+  const sizes = [
+    { width: 1280, height: 800 },
+    { width: 1900, height: 1000 },
+    { width: 960, height: 600 },
+  ];
+  const rows = [];
+  /** 某一步点不到东西时，报错第一行要说是哪一步（否则只剩 playwright 的 "Timeout exceeded"）。 */
+  const step = async (name, run) => {
+    try {
+      return await run();
+    } catch (cause) {
+      throw new Error(`步骤「${name}」：${String(cause?.message ?? cause).split("\n").slice(0, 2).join(" / ")}`);
+    }
+  };
+  /**
+   * 先回到主界面。守卫页面里 shell 与桌面歌词窗是**互斥**的（`desktop ? <LyricsWindow/> : <LibraryShell/>`），
+   * 而上一轮验收（桌面歌词）留下的正是后者——那个状态下连侧栏导航都不存在，点什么都只会等到超时。
+   */
+  await page.setViewportSize({ width: sizes[0].width, height: sizes[0].height });
+  await page.evaluate(() => window.__guard.setDesktop(false));
+  await page.getByTestId("main-content").waitFor();
+  await page.waitForTimeout(300);
+  // 侧栏窄轨里没有导航文案：先展开；整个关着时用官方触发器（上一轮可能把它收进窄轨/Sheet）
+  if (await page.getByTestId("sidebar-search-rail").count()) await page.getByTestId("sidebar-search-rail").click();
+  if (await page.getByRole("button", { name: "我的收藏", exact: true }).count() === 0
+    && await page.locator('[data-sidebar="trigger"]').count() > 0) {
+    await page.locator('[data-sidebar="trigger"]').first().click();
+  }
+  await page.getByRole("button", { name: "我的收藏", exact: true }).waitFor();
+  await page.waitForTimeout(200);
+  await page.evaluate(() => {
+    window.__guard.pause();
+    window.__guard.resetSettings();
+  });
+
+  /**
+   * 可用宽度取最近一层纵向滚动容器的 clientWidth（滚动条不算留白）；
+   * 对标值用页面自己的左内边距（左右应对称），不写死 16px。
+   */
+  const measure = (selector, { cards = false } = {}) => page.evaluate(({ target, withCards }) => {
+    const container = document.querySelector('[data-testid="main-content"]');
+    if (!container) return { found: false, reason: "找不到主内容区（main-content）" };
+    // 常驻页（收藏）与按视图重挂的页同时在 DOM 里：取**真的画出来**的那一份
+    const node = [...document.querySelectorAll(target)].find((candidate) => candidate.getClientRects().length > 0);
+    if (!node) return { found: false, reason: `没有可见的 ${target}` };
+    let scrollBox = node.parentElement;
+    while (scrollBox && scrollBox !== container) {
+      const style = getComputedStyle(scrollBox);
+      const scrolls = (style.overflowY === "auto" || style.overflowY === "scroll")
+        && scrollBox.scrollHeight > scrollBox.clientHeight;
+      if (scrolls) break;
+      scrollBox = scrollBox.parentElement;
+    }
+    let usable;
+    if (scrollBox === null || scrollBox === container) {
+      const rect = container.getBoundingClientRect();
+      usable = { left: rect.left, width: container.clientWidth };
+    } else {
+      usable = { left: scrollBox.getBoundingClientRect().left, width: scrollBox.clientWidth };
+    }
+    const usableRight = usable.left + usable.width;
+    const box = node.getBoundingClientRect();
+    // 设置页：页面根铺满、里面那张卡却很窄 = 同一种"没铺满"（有人把宽度上限加回卡片上）
+    const cardNodes = withCards
+      ? [...node.querySelectorAll('[data-slot="card"]')].filter((child) => child.getClientRects().length > 0)
+      : [];
+    const cardRight = cardNodes.length === 0
+      ? null
+      : Math.max(...cardNodes.map((child) => child.getBoundingClientRect().right));
+    return {
+      found: true,
+      usableWidth: Math.round(usable.width),
+      contentWidth: Math.round(box.width),
+      leftInset: Math.round(box.left - usable.left),
+      rightBlank: Math.round(usableRight - box.right),
+      cardBlank: cardRight === null ? null : Math.round(usableRight - cardRight),
+      cards: cardNodes.length,
+      overflowX: container.scrollWidth - container.clientWidth,
+      documentOverflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    };
+  }, { target: selector, withCards: cards });
+
+  const visit = async (size, label, selector, options) => {
+    const measured = await measure(selector, options);
+    rows.push({ viewport: `${size.width}x${size.height}`, page: label, ...measured });
+    return measured;
+  };
+  /** 判据：右侧空白 ≤ 页面左侧内边距 + 8px，且没有横向滚动。 */
+  const filled = (row) => row.found === true && row.rightBlank <= row.leftInset + 8
+    && (row.cardBlank === null || row.cardBlank === undefined || row.cardBlank <= row.leftInset + 8)
+    && row.overflowX <= 0 && row.documentOverflowX <= 0;
+  const brief = (list) => list.map((row) => `${row.page} 左${row.leftInset}/右${row.rightBlank}`).join(" · ");
+
+  /** 设置页当前可见标签里的卡片排布（第一行两张卡在同一 top = 两列）。 */
+  const cardLayout = () => page.evaluate(() => {
+    const pane = document.querySelector('[data-testid="settings-page"]');
+    if (!pane) return { found: false };
+    const cards = [...pane.querySelectorAll('[data-slot="card"]')].filter((node) => node.getClientRects().length > 0);
+    const tops = cards.map((node) => Math.round(node.getBoundingClientRect().top));
+    return {
+      found: true,
+      cards: cards.length,
+      rows: new Set(tops).size,
+      twoColumns: tops.length >= 2 && Math.abs(tops[0] - tops[1]) < 2,
+    };
+  });
+
+  const openSettings = async () => {
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByTestId("settings-page").waitFor();
+    await page.waitForTimeout(250);
+  };
+  const openTab = async (label) => {
+    await page.getByTestId("settings-page").getByRole("tab", { name: label, exact: true }).click();
+    await page.waitForTimeout(250);
+  };
+  const SETTINGS_TABS_UNDER_TEST = ["通用", "网络", "歌词", "日志"];
+  const layoutAt = {};
+  /** 每个尺寸一次的控制实验（见下面的"人为恢复 max-w-3xl"）。 */
+  const controls = [];
+
+  for (const size of sizes) {
+    await page.setViewportSize({ width: size.width, height: size.height });
+    await page.waitForTimeout(250);
+    const measured = [];
+
+    // ① 我的收藏（常驻页：切走只是 hidden）
+    await step(`${size.width} 我的收藏`, async () => {
+      await page.getByRole("button", { name: "我的收藏", exact: true }).click();
+      await page.getByTestId("favorites-page").waitFor();
+      await page.waitForTimeout(250);
+    });
+    measured.push(await visit(size, "我的收藏", '[data-testid="favorites-page"]'));
+    if (size.width === 1900) await page.screenshot({ path: path.join(guardDir, "r66b-favorites-1900.png") });
+
+    // ② 我的歌单（歌单网格自己带 p-4）
+    await step(`${size.width} 我的歌单`, async () => {
+      await page.getByRole("button", { name: "我的歌单", exact: true }).click();
+      await page.getByTestId("playlist-grid").waitFor();
+      await page.waitForTimeout(250);
+    });
+    measured.push(await visit(size, "我的歌单", '[data-testid="playlist-grid"]'));
+
+    // ②b 歌单详情（同一套内容区；简报只点名了五个页面，这一页顺手一起量，免得"其它页也白"没依据）
+    await step(`${size.width} 歌单详情`, async () => {
+      await page.getByTestId("playlist-grid").getByRole("button", { name: "打开", exact: true }).first().click();
+      await page.getByTestId("playlist-detail").waitFor();
+      await page.waitForTimeout(400);
+    });
+    measured.push(await visit(size, "歌单详情", '[data-testid="playlist-detail"]'));
+
+    // ③ 播放历史（曲目表：外层 px-4）
+    await step(`${size.width} 播放历史`, async () => {
+      await page.getByRole("button", { name: "播放历史", exact: true }).click();
+      await page.waitForFunction(() => [...document.querySelectorAll('[data-testid="track-table"]')]
+        .some((node) => node.getClientRects().length > 0 && node.querySelectorAll("tbody tr").length > 0));
+      await page.waitForTimeout(200);
+    });
+    measured.push(await visit(size, "播放历史", '[data-testid="track-table"]'));
+
+    // ④ 搜索结果（同一个曲目表，走的是另一条视图）
+    await step(`${size.width} 搜索结果`, async () => {
+      const box = page.getByRole("textbox", { name: "搜索关键字" });
+      await box.fill("守卫");
+      await box.press("Enter");
+      await page.waitForFunction(() => document.body.textContent.includes("搜索守卫曲目 1"), null, { timeout: 15_000 });
+      await page.waitForTimeout(300);
+    });
+    measured.push(await visit(size, "搜索结果", '[data-testid="track-table"]'));
+
+    // ⑤ 设置 4 个标签（报告里要的是每一类自己的排布）
+    await step(`${size.width} 设置页`, async () => {
+      await openSettings();
+      for (const label of SETTINGS_TABS_UNDER_TEST) {
+        await openTab(label);
+        measured.push(await visit(size, `设置/${label}`, '[data-testid="settings-page"]', { cards: true }));
+        if (label === "通用" || label === "歌词") layoutAt[`${size.width}-${label}`] = await cardLayout();
+      }
+    });
+
+    /**
+     * 控制实验（每个尺寸一次）：把旧的 `max-w-3xl` **人为塞回去**，同一套口径必须量出右侧空白。
+     * 只有这一步能证明判据抓得住原来那个缺陷——不然"改完是绿的"也可能只是判据太松。
+     */
+    await openTab("通用");
+    const before = await measure('[data-testid="settings-page"]', { cards: true });
+    const injected = await page.evaluate(() => {
+      const pane = document.querySelector('[data-testid="settings-page"]');
+      if (!pane) return false;
+      pane.dataset.guardMaxWidth = "1";
+      pane.style.maxWidth = "768px";
+      return true;
+    });
+    await page.waitForTimeout(200);
+    const control = await measure('[data-testid="settings-page"]', { cards: true });
+    if (size.width === 1900) await page.screenshot({ path: path.join(guardDir, "r66b-settings-before-maxw3xl.png") });
+    await page.evaluate(() => {
+      const pane = document.querySelector('[data-testid="settings-page"]');
+      if (!pane) return;
+      pane.style.maxWidth = "";
+      delete pane.dataset.guardMaxWidth;
+    });
+    await page.waitForTimeout(200);
+    const after = await measure('[data-testid="settings-page"]', { cards: true });
+    if (size.width === 1900) await page.screenshot({ path: path.join(guardDir, "r66b-settings-after-filled.png") });
+    controls.push({ size, before, control, after, injected });
+    rows.push({ viewport: `${size.width}x${size.height}`, page: "设置/通用（人为恢复 max-w-3xl）", ...control });
+
+    const bad = measured.filter((row) => !filled(row));
+    add(`r66b-fill-${size.width}`, bad.length === 0,
+      `${size.width}×${size.height} 主内容区可用 ${measured[0]?.usableWidth ?? "?"}px；`
+        + `${bad.length === 0 ? "全部页面铺满、无横向滚动" : "未铺满：" + JSON.stringify(bad)}`
+        + `\n      ${brief(measured)}`);
+  }
+
+  /**
+   * 控制实验的判据：人为恢复 `max-w-3xl` 之后，内容宽度必须正好被钳在 768（窗口够宽时）——
+   * 右空白也就等于"可用宽度 − 左内边距 − 768"。960 宽时可用宽度只有 704，768 根本钳不到，
+   * 所以那一档的期望值是"两侧各留 16"；真正的"旧缺陷复现"由 1280/1900 两档给出（各 > 200px）。
+   */
+  const controlMatches = (entry) => {
+    const expectedWidth = Math.min(768, entry.control.usableWidth - 32);
+    return entry.injected === true
+      && entry.control.contentWidth === expectedWidth
+      && entry.control.rightBlank === entry.control.usableWidth - entry.control.leftInset - expectedWidth
+      && filled(entry.before) && filled(entry.after)
+      && entry.after.rightBlank === entry.before.rightBlank;
+  };
+  add("r66b-fill-metric-catches-maxw3xl",
+    controls.length === sizes.length && controls.every(controlMatches)
+      && controls.filter((entry) => entry.control.rightBlank > 200).length >= 2,
+    controls.map((entry) => `${entry.size.width}：旧上限右空白 ${entry.control.rightBlank}px（内容 ${entry.control.contentWidth}，左内边距 ${entry.control.leftInset}）→ 现在 ${entry.after.rightBlank}px`).join("；"));
+
+  // 宽屏两列 / 窄屏单列（只在守卫里有意义：单列回归会让长卡横贯 1800px）
+  const wide = layoutAt["1900-通用"];
+  const wideLyrics = layoutAt["1900-歌词"];
+  const narrow = layoutAt["960-通用"];
+  add("r66b-settings-card-columns",
+    wide?.found === true && wide.twoColumns && wideLyrics?.twoColumns === true
+      && narrow?.found === true && narrow.twoColumns === false,
+    JSON.stringify({ "1900 通用": wide, "1900 歌词": wideLyrics, "960 通用": narrow }));
+
+  await writeFile(path.join(guardDir, "r66b-page-fill.json"), `${JSON.stringify(rows, null, 2)}\n`, "utf8");
+
+  // 收尾：回收藏页、复位设置（后面的用例从干净状态开始）
+  await page.getByRole("button", { name: "我的收藏", exact: true }).click();
+  await page.getByTestId("favorites-page").waitFor();
+  await page.setViewportSize({ width: 1280, height: 800 });
+}
+
 function fixtureAudio() {
   const samples = 8000 * 12;
   const wav = Buffer.alloc(44 + samples * 2);
@@ -3479,6 +3735,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
         await popupPage.close();
       }
     });
+    /** R66b：主内容区宽度。会遍历各主页面并切换窗口尺寸，所以排在倒数第二（下一项自己 goto）。 */
+    await checked("r66b-page-fill", () => checkPageFill(page, guardDir, add));
     /** R45C：没有 lyrics binding 的挂载点（另一页，见 checkNoBindingSurface 的说明）。 */
     await checkNoBindingSurface(page, port, add);
     add("no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,
