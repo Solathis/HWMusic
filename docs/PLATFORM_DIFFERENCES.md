@@ -69,7 +69,13 @@
   `tray_by_id(TRAY_ID)`）才 `prevent_close + hide`，托盘不可用仍回退退出；`minimize` 则是
   `prevent_close + window.minimize()`，不依赖托盘，主窗 `skip_taskbar=false` 保留任务栏入口。
   `quit` 异步收 sidecar 后退出整个应用（包含歌词与登录辅助窗），不只关闭主窗。失败保留可恢复主窗。
-  新 minimize/quit 原生行为需控制器重启复验；Linux/macOS 仍未经真机验证。
+  **R44e（正常退出的顺序，跨平台一致）**：先做**可失败**的保存准备（冻结新写 → 等在飞的写/主题事务 →
+  歌词最后一笔排空（失败至多一次重试）→ 主题 uncertain 重存 → `settings:get` 写队列屏障 → 校验盘上文档），
+  成功才进入不可逆清理（D 的 detach/收尸 → `shutdown_core` → `app.exit`）。任何一步失败/超时都保窗可重试。
+  **Windows 专有的一步**：准备成功之后、最终排队退出之前，对本应用**自己的**窗口发 `WM_CANCELMODE`
+  （`PostMessage`、不用键盘注入、不碰 foreign HWND），因为 own 系统菜单/拖动模态会阻塞排队的 `app.exit`
+  （控制器现场：8 秒未退，取消后 169ms 退出）。非 Windows 这一步是空实现。
+  新 minimize/quit 与上述退出顺序的原生行为需控制器重启复验；Linux/macOS 仍未经真机验证。
 - **菜单 id 前缀 `tray:` 与图标 id `"tray"` 是两件事**：前者是跨模块契约（判据 `action_for`），后者只是一个句柄名。
 - **图标清晰度**：只验证了内嵌字节是合法多尺寸 ico 且能被 `Image::from_bytes` 解码
   （用例 `the_embedded_icon_decodes`）；**Windows 高 DPI 下的实际缩放表现未实测**。
