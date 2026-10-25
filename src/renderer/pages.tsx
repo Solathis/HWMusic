@@ -120,19 +120,11 @@ import { VIEW, createView, viewParam } from "./features/library/views.mjs"
 import { THEME_CHOICES, themeLabel } from "./features/theme/theme.mjs"
 import { useThemeChoice } from "./features/theme/use-theme-choice.ts"
 import {
-  LYRICS_COLOR_TOKENS,
-  LYRICS_FONT_STEPS,
   LYRICS_MODES,
-  LYRICS_SESSION_NOTICE,
-  colorTokenLabel,
-  fontStepLabel,
-  isCustomColor,
   modeLabel,
   taskbarStatusText,
 } from "./features/lyrics/lyrics-window.mjs"
-import { DEFAULT_PLAYER_LYRICS } from "./features/lyrics/player-lyrics.mjs"
 import type { LyricsWindowBinding } from "./use-lyrics-window.ts"
-import type { PlayerLyricsBinding } from "./use-player-lyrics.ts"
 
 /**
  * 页大小（收藏页有自己的常量）：与协议层默认的 50 同档。
@@ -847,13 +839,6 @@ export interface SettingsPageProps {
    */
   lyrics?: LyricsWindowBinding | null
   /**
-   * 播放器歌词的颜色（R50）：由外壳的 `usePlayerLyrics` 交下来。
-   *
-   * 它与上面那份 `lyrics` binding **没有关系**：桌面歌词的颜色住在 `lyricsWindow`（Rust 保留键），
-   * 播放器歌词的颜色住在普通 settings 键 `playerLyrics`。缺省 `null` = 外壳还没挂上。
-   */
-  playerLyrics?: PlayerLyricsBinding | null
-  /**
    * 运行日志（R39）：由外壳的 `useNoticeLog()` 交下来。
    *
    * 订阅留在外壳是**必须的**，不是风格问题：`app:notice` 是广播，没人订阅那一刻的提示就丢了，
@@ -905,7 +890,6 @@ export function SettingsPage({
   queue = null,
   trayAvailable = TRAY_AVAILABLE,
   lyrics = null,
-  playerLyrics = null,
   notices = [],
 }: SettingsPageProps) {
   const [form, setForm] = useState(() => proxyFormFromSettings(null))
@@ -1064,21 +1048,6 @@ export function SettingsPage({
   }
 
   const busy = saving || testing
-  /**
-   * 播放器歌词的颜色改动（R50）：乐观更新在 hook 里，失败会回滚并抛回来——
-   * 这一层只负责把那句话放到页面级提示里（与其它设置的失败提示同一处）。
-   */
-  async function updatePlayerLyrics(patch: Partial<PlayerLyricsBinding["config"]>) {
-    if (playerLyrics === null) return
-    setFailure(null)
-    try {
-      await playerLyrics.updateConfig(patch)
-    } catch (error) {
-      setFailure(settingsFailureText(error))
-    }
-  }
-  /** 已存档的播放器歌词自定义颜色（`#RRGGBB`）；没选过/坏值就是 `null`（= 用设计令牌）。 */
-  const playerCustomColor = isCustomColor(playerLyrics?.config.customColor) ? playerLyrics!.config.customColor : null
 
   return (
     <div className="m-4 flex max-w-3xl flex-col gap-4" data-testid="settings-page">
@@ -1311,82 +1280,18 @@ export function SettingsPage({
         {/* 歌词：桌面歌词窗（在哪显示）与歌词缓存/导入（从哪来）是同一件事的两半 */}
         <TabsContent value="lyrics" className="flex flex-col gap-4">
           {/*
-            R50：播放器歌词的颜色**自己一份**（普通 settings 键 `playerLyrics`）。
-            R45B 起它借的是桌面歌词的 `customColor`，于是"把桌面歌词改绿"会顺手把主窗也染绿。
-            桌面歌词窗的颜色在它自己的外观面板（齿轮菜单）里改，这里不再出现那些控件
-            （同一份配置有两个改法的入口，用户会以为哪里都能改对）。
+            R52：这一页只放**必须在主窗操作**的行为项——显示 / 窗口位置 / 锁定 / 鼠标穿透。
+            外观（样式 / 方向 / 字号 / 效果 / 颜色）只在桌面歌词窗自己的齿轮菜单里改：同一项设置
+            有两个入口，用户会以为两边都该改得对，而其中一处迟早会落后。主窗设置不代管那扇窗的外观，
+            任务栏歌词的设置后续在设置页单独给（不与桌面歌词共用）。
+            沉浸式歌词（播放器歌词）的颜色**不可改**：`AmllLyricsPanel` 恒用 AMLL 默认 + 主题令牌。
           */}
           <Card>
             <CardHeader>
-              <CardTitle>播放器歌词</CardTitle>
-              <CardDescription>主界面沉浸歌词的颜色。桌面歌词窗有自己的外观设置，两者互不影响。</CardDescription>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-3">
-              <div className="flex flex-col gap-1">
-                <Label htmlFor="player-lyrics-color">颜色</Label>
-                <Select
-                  value={playerLyrics?.config.color ?? DEFAULT_PLAYER_LYRICS.color}
-                  disabled={playerLyrics === null}
-                  onValueChange={(value) => void updatePlayerLyrics({ color: value })}
-                >
-                  <SelectTrigger id="player-lyrics-color" className="w-full max-w-xs">
-                    {/* 标签直接写进 SelectValue：radix 没展开过内容时拿不到选项文案（R10 的同一个坑） */}
-                    <SelectValue>{colorTokenLabel(playerLyrics?.config.color)}</SelectValue>
-                  </SelectTrigger>
-                  <SelectContent position="popper" align="start" sideOffset={4}>
-                    <SelectGroup>
-                      {LYRICS_COLOR_TOKENS.map((token) => (
-                        <SelectItem key={token.id} value={token.id}>
-                          {colorTokenLabel(token.id)}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-                {/*
-                  自定义颜色 = 原生颜色输入（`type=color`）+ 「恢复主题色」。
-                  只写合法的六位 hex（判定来自 lyrics-window.mjs 的 isCustomColor，页面不另抄正则）；
-                  清空 = 回到上面选的设计令牌。落盘走 `settings:set` 的 `playerLyrics` 普通键。
-                  输入框是**非受控**的（`defaultValue` + 按存档值换 `key`）：`type=color` 的受控值
-                  必须始终是一个合法色值，而「还没选过」这件事不该由页面编一个色值出来。
-                */}
-                <div className="flex items-center gap-2">
-                  <Input
-                    key={playerCustomColor ?? "theme"}
-                    id="player-lyrics-custom-color"
-                    type="color"
-                    aria-label="播放器歌词自定义颜色"
-                    className="h-8 w-14 shrink-0 p-0"
-                    defaultValue={playerCustomColor ?? undefined}
-                    disabled={playerLyrics === null}
-                    onChange={(event) => {
-                      const value = event.target.value
-                      if (!isCustomColor(value)) return
-                      void updatePlayerLyrics({ customColor: value })
-                    }}
-                  />
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={!playerCustomColor}
-                    onClick={() => void updatePlayerLyrics({ customColor: "" })}
-                  >
-                    恢复主题色
-                  </Button>
-                </div>
-                {playerCustomColor ? (
-                  <p className="text-xs text-muted-foreground">{`使用自定义颜色 ${playerCustomColor}`}</p>
-                ) : null}
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
               <CardTitle>桌面歌词</CardTitle>
-              <CardDescription>桌面上的独立歌词窗（无边框、置顶、可拖可锁）。颜色与自定义颜色在歌词窗自己的外观菜单里改。</CardDescription>
+              <CardDescription>桌面上的独立歌词窗：在哪显示、怎么拖。</CardDescription>
             </CardHeader>
-            <CardContent className="flex flex-col gap-3">
+            <CardContent className="flex flex-col gap-4">
               <div className="flex items-center gap-2">
                 <Switch
                   id="lyrics-visible"
@@ -1397,110 +1302,70 @@ export function SettingsPage({
                 <Label htmlFor="lyrics-visible">显示桌面歌词</Label>
               </div>
 
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="flex flex-col gap-1">
-                  <Label htmlFor="lyrics-mode">窗口位置</Label>
-                  <Select
-                    value={lyrics?.config.mode ?? LYRICS_MODES[0]}
+              <div className="flex flex-col gap-1">
+                <Label htmlFor="lyrics-mode">窗口位置</Label>
+                <Select
+                  value={lyrics?.config.mode ?? LYRICS_MODES[0]}
+                  disabled={lyrics === null}
+                  onValueChange={(value) => lyrics?.updateConfig({ mode: value })}
+                >
+                  <SelectTrigger id="lyrics-mode" className="w-full max-w-xs">
+                    {/* 标签直接写进 SelectValue：radix 在没展开过内容时拿不到选项文案（R10 的同一个坑） */}
+                    <SelectValue>{modeLabel(lyrics?.config.mode)}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent position="popper" align="start" sideOffset={4}>
+                    <SelectGroup>
+                      {LYRICS_MODES.map((mode) => (
+                        <SelectItem key={mode} value={mode}>
+                          {modeLabel(mode)}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                {/* Beta 标记 + Rust 报的那一句状态（认不出按"已停显"说，界面不出现空串） */}
+                {lyrics?.config.mode === "taskbar" ? (
+                  <div role="status" className="flex flex-wrap items-center gap-2">
+                    <Badge variant="secondary">Beta</Badge>
+                    <span className="text-xs text-muted-foreground">{taskbarStatusText(lyrics.taskbar)}</span>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="lyrics-locked"
+                    checked={lyrics?.config.locked === true}
                     disabled={lyrics === null}
-                    onValueChange={(value) => lyrics?.updateConfig({ mode: value })}
-                  >
-                    <SelectTrigger id="lyrics-mode" className="w-full max-w-xs">
-                      {/* 标签直接写进 SelectValue：radix 在没展开过内容时拿不到选项文案（R10 的同一个坑） */}
-                      <SelectValue>{modeLabel(lyrics?.config.mode)}</SelectValue>
-                    </SelectTrigger>
-                    <SelectContent position="popper" align="start" sideOffset={4}>
-                      <SelectGroup>
-                        {LYRICS_MODES.map((mode) => (
-                          <SelectItem key={mode} value={mode}>
-                            {modeLabel(mode)}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
+                    onCheckedChange={(checked) => lyrics?.updateConfig({ locked: checked })}
+                  />
+                  <Label htmlFor="lyrics-locked">锁定位置</Label>
                 </div>
-
-                <div className="flex flex-col gap-1">
-                  <Label htmlFor="lyrics-size">字号</Label>
-                  <Select
-                    value={lyrics?.config.size ?? LYRICS_FONT_STEPS[0].id}
+                <div className="flex flex-wrap items-center gap-2">
+                  <Switch
+                    id="lyrics-click-through"
+                    checked={lyrics?.config.clickThrough === true}
                     disabled={lyrics === null}
-                    onValueChange={(value) => lyrics?.updateConfig({ size: value })}
-                  >
-                    <SelectTrigger id="lyrics-size" className="w-full max-w-xs">
-                      <SelectValue>{fontStepLabel(lyrics?.config.size)}</SelectValue>
-                    </SelectTrigger>
-                    <SelectContent position="popper" align="start" sideOffset={4}>
-                      <SelectGroup>
-                        {LYRICS_FONT_STEPS.map((step) => (
-                          <SelectItem key={step.id} value={step.id}>
-                            {fontStepLabel(step.id)}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="flex flex-col justify-end gap-2">
-                  <div className="flex items-center gap-2">
-                    <Switch
-                      id="lyrics-locked"
-                      checked={lyrics?.config.locked === true}
-                      disabled={lyrics === null}
-                      onCheckedChange={(checked) => lyrics?.updateConfig({ locked: checked })}
-                    />
-                    <Label htmlFor="lyrics-locked">锁定（不可拖动）</Label>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Switch
-                      id="lyrics-click-through"
-                      checked={lyrics?.config.clickThrough === true}
-                      disabled={lyrics === null}
-                      onCheckedChange={(checked) => lyrics?.updateConfig({ clickThrough: checked })}
-                    />
-                    <Label htmlFor="lyrics-click-through">鼠标穿透</Label>
-                  </div>
+                    onCheckedChange={(checked) => lyrics?.updateConfig({ clickThrough: checked })}
+                  />
+                  <Label htmlFor="lyrics-click-through">鼠标穿透</Label>
+                  {/* 点透之后鼠标事件不再落到那扇窗上：这里是唯一的关闭处（一句话，不讲原理） */}
+                  <span className="text-xs text-muted-foreground">开启后需在这里关闭</span>
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-end gap-3">
-                <div className="flex flex-col gap-1">
-                  <Label htmlFor="lyrics-layout">方向</Label>
-                  <Select value={lyrics?.config.layout ?? "horizontal"} disabled={lyrics === null || lyrics.config.mode === "taskbar"}
-                    onValueChange={(layout) => lyrics?.updateConfig({ layout })}>
-                    <SelectTrigger id="lyrics-layout" className="w-full max-w-xs"><SelectValue /></SelectTrigger>
-                    <SelectContent position="popper" align="start" sideOffset={4}><SelectGroup><SelectItem value="horizontal">横版</SelectItem><SelectItem value="vertical">竖版（窄高滚动）</SelectItem></SelectGroup></SelectContent>
-                  </Select>
-                </div>
-                <div className="flex flex-col gap-1">
-                  <Label htmlFor="lyrics-style">样式</Label>
-                  <Select value={lyrics?.config.style ?? "clean"} disabled={lyrics === null} onValueChange={(style) => lyrics?.updateConfig({ style })}>
-                    <SelectTrigger id="lyrics-style" className="w-full max-w-xs"><SelectValue /></SelectTrigger>
-                    <SelectContent position="popper" align="start" sideOffset={4}><SelectGroup><SelectItem value="clean">透明</SelectItem><SelectItem value="panel">面板</SelectItem></SelectGroup></SelectContent>
-                  </Select>
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-3">
-                {([['enableBlur', '模糊'], ['enableScale', '缩放'], ['enableSpring', '弹簧动画'], ['showControls', '媒体按钮']] as const).map(([key, label]) => (
-                  <div key={key} className="flex items-center gap-2">
-                    <Switch id={`lyrics-${key}`} checked={lyrics?.config[key] !== false} disabled={lyrics === null}
-                      onCheckedChange={(checked) => lyrics?.updateConfig({ [key]: checked })} />
-                    <Label htmlFor={`lyrics-${key}`}>{label}</Label>
-                  </div>
-                ))}
-              </div>
-              <p className="text-xs text-muted-foreground">{LYRICS_SESSION_NOTICE}</p>
-              {lyrics?.config.mode === "taskbar" ? <div role="status" className="flex flex-wrap items-center gap-2">
-                <Badge variant="secondary">Beta</Badge>
-                <span className="text-sm text-muted-foreground">{taskbarStatusText(lyrics.taskbar)}</span>
-              </div> : null}
-              {lyrics?.saveError ? <Alert>
-                <AlertTitle>桌面歌词配置未保存</AlertTitle>
-                <AlertDescription>{lyrics.saveError}</AlertDescription>
-                <AlertAction><Button variant="outline" size="sm" onClick={lyrics.retrySave}>重试保存</Button></AlertAction>
-              </Alert> : null}
+              {lyrics?.saveError ? (
+                <Alert>
+                  <AlertTitle>桌面歌词配置未保存</AlertTitle>
+                  <AlertDescription>{lyrics.saveError}</AlertDescription>
+                  <AlertAction>
+                    <Button variant="outline" size="sm" onClick={lyrics.retrySave}>
+                      重试保存
+                    </Button>
+                  </AlertAction>
+                </Alert>
+              ) : null}
             </CardContent>
           </Card>
 

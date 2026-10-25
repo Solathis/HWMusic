@@ -1675,7 +1675,6 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `LYRICS_FONT_STEPS` / `TASKBAR_MAX_FONT_PX` | `sm16/md20/lg28/xl40/xxl56` / `20` | `src/renderer/features/lyrics/lyrics-window.mjs` ↔ `src-tauri/src/lyrics_window.rs` | R12：字号档位与任务栏模式上限（两侧一张表，由 `test/lyrics-window.test.mjs` 逐条钉住；CSS 的 rem 规则在 `amll-theme.css`） |
 | `LYRICS_COLOR_TOKENS` | `foreground`/`muted`/`primary`/`contrast` | 同上（TS 为真源、Rust 为镜像） | R12：歌词颜色的令牌档位（只认设计令牌，绝不接受任意色值） |
 | `MIN_PROGRESS_INTERVAL_MS` | `100` | `src/renderer/features/lyrics/lyrics-window.mjs` | R12：进度节流窗口（rAF 每帧调 `pushProgress`，只有该推的才出 IPC） |
-| `LYRICS_SESSION_NOTICE` | 配置保存/锁与点透说明 | `src/renderer/features/lyrics/lyrics-window.mjs` | R44c：重启恢复、锁不禁媒体、点透从主窗恢复、竖版非中文竖排 |
 | `SHORTCUT_BINDINGS` | 5 动作 / 主组合 + 备选链 | `src-tauri/src/shortcuts.rs` | R13：全局快捷键的唯一真源（媒体三键无备选；两条提示型组合各有 2 条备选）。每个组合都必须能被 `global-hotkey` 解析、且不许两个动作抢同一个组合（内联单测钉住） |
 | `ShortcutState` | 生效组合快照 | `src-tauri/src/shortcuts.rs` | R13：`setup` 里登记成托管状态（设置页后续可读；本任务只记 + 提示，不做 UI） |
 | `HUAWEI_QR_ENDPOINTS` | 见 §1.8（建单/轮询/CAS 换码三条 + **R31 的两条**：`deviceFingerPath`、`portalLoginPath`） | `src/main/qr-login.mjs` | R16 立、**R31 增补两条**：二维码登录的端点表（探针确认值；协议层 `src/protocols/qr-login.mjs` 仍只收注入，不写死 URL）。R31 增补的两条来自新探针：`/CAS/IDM_W/ajaxHandler/dev`（指纹换 `sid` = deviceID 的来源）与 `/CAS/portal/loginAuth.html`（画着二维码的那张页，也是建单/轮询的 Referer） |

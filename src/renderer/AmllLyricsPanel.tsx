@@ -10,13 +10,17 @@
  * 为什么 `seekGeneration` 来自状态机而不是"比较这一帧与上一帧的进度差"：差值判跳转
  * 会把"卡了一下"也当成拖动（歌词被重排一次，看起来像抽了一下）。seek 是**动作**，
  * 让发起动作的那一层标出来最准。
+ *
+ * R52：**沉浸式歌词禁止改色**。这一面不再收任何颜色 prop，也不再写 `data-lyrics-color`：
+ * 颜色恒为 AMLL 官方默认变量 + `amll-theme.css` 里 `.amll-lyrics-stage` 的令牌基线（`--foreground`），
+ * 歌曲主题色仍由背景渲染（`AmllBackground`）负责。改色能力只留给桌面歌词窗。
  */
 import { LyricPlayer } from "@applemusic-like-lyrics/react"
 import type { LyricLine } from "@applemusic-like-lyrics/lyric"
 import { useEffect, useMemo, useRef, useState } from "react"
 
 import { createLyricSync } from "./features/lyrics/lyric-sync.mjs"
-import { applyCustomColor, withKaraokeWords } from "./features/lyrics/amll-adapter.ts"
+import { withKaraokeWords } from "./features/lyrics/amll-adapter.ts"
 import type { PlayerRuntime } from "./features/playback/player-runtime.ts"
 
 export interface AmllLyricsPanelProps {
@@ -26,28 +30,12 @@ export interface AmllLyricsPanelProps {
   playing: boolean
   /** 状态机里的跳转信号：变了就通知进度泵（200ms 窗口在 lyric-sync 里） */
   seekGeneration: number
-  /**
-   * 颜色令牌（R50）：`foreground` / `muted` / `primary` / `contrast`。
-   *
-   * 写进根节点的 `data-lyrics-color`，真正的颜色变量映射只在 `amll-theme.css`（唯一接线点）。
-   * 值来自**播放器歌词**自己那份配置（`playerLyrics`），不再是桌面歌词窗的 `config.color`
-   * ——两边各有各的颜色。
-   */
-  color?: string
-  /**
-   * 自定义歌词颜色（R46）：`#RRGGBB` 或空串。
-   *
-   * 空串 = 用上面那个令牌；非空时由适配层的 `applyCustomColor` 在**这一面**的容器上做一次
-   * scoped 变量覆盖——与桌面歌词窗走的是同一个函数，但值来自各自的配置（R50 起不再共用）。
-   */
-  customColor?: string
 }
 
-export function AmllLyricsPanel({ runtime, lines, playing, seekGeneration, color = "foreground", customColor = "" }: AmllLyricsPanelProps) {
+export function AmllLyricsPanel({ runtime, lines, playing, seekGeneration }: AmllLyricsPanelProps) {
   const player = runtime.player
   const [frame, setFrame] = useState({ time: 0, isSeeking: false })
   const syncRef = useRef<ReturnType<typeof createLyricSync> | null>(null)
-  const stageRef = useRef<HTMLDivElement | null>(null)
 
   // 进度泵：挂载就开跑，卸载就停帧（后台页不留 rAF）
   useEffect(() => {
@@ -83,21 +71,8 @@ export function AmllLyricsPanel({ runtime, lines, playing, seekGeneration, color
    */
   const playerLines = useMemo(() => withKaraokeWords(lines), [lines])
 
-  /**
-   * R46：自定义颜色只写在**这一个容器**上（一次 scoped 变量覆盖，变量名与写法都在适配层）。
-   * 空值就撤掉覆盖回设计令牌——与桌面歌词窗完全同一条路（`applyCustomColor`）。
-   */
-  useEffect(() => {
-    applyCustomColor(stageRef.current, customColor)
-  }, [customColor])
-
   return (
-    <div
-      ref={stageRef}
-      className="amll-lyrics-stage absolute inset-0 isolate"
-      data-testid="amll-lyrics-panel"
-      data-lyrics-color={color}
-    >
+    <div className="amll-lyrics-stage absolute inset-0 isolate" data-testid="amll-lyrics-panel">
       <LyricPlayer
         lyricLines={playerLines}
         currentTime={frame.time}

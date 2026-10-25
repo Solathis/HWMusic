@@ -132,15 +132,17 @@ test("关窗行为下拉：受控值 + 自绘标签（radix 在内容没展开�
 test("设置 Select 调用点：popper/start/4 + SelectGroup，触发器响应式，不改选中语义", () => {
   const source = settingsPageSource();
   const contents = [...source.matchAll(/<SelectContent\b([^>]*)>([\s\S]*?)<\/SelectContent>/g)];
-  assert.equal(contents.length, 7, "关窗、主题、歌词位置/字号/颜色/方向/样式均覆盖");
+  // R52（有意更改）：7 → 3。字号/颜色/方向/样式四个下拉搬进 R51 的桌面歌词外观弹出窗，
+  // 设置页只剩关窗行为、主题、窗口位置这三处。
+  assert.equal(contents.length, 3, "关窗、主题、歌词窗口位置三处");
   for (const [, props, body] of contents) {
     assert.match(props, /position="popper"/, "弹层不能 item-aligned 盖住 trigger");
     assert.match(props, /align="start"/);
     assert.match(props, /sideOffset=\{4\}/);
-    assert.match(body, /^\s*<SelectGroup>[\s\S]*<SelectItem[\s\S]*<\/SelectGroup>\s*$/);
+    assert.match(body, /^\s*<SelectGroup>[\s\S]*<SelectItem[\s\S]*<\/SelectGroup>\s*$/, "选项包在 SelectGroup 里（与其它下拉同一条纪律）");
   }
   const triggers = [...source.matchAll(/<SelectTrigger\b[^>]*className="([^"]+)"/g)];
-  assert.equal(triggers.length, 7);
+  assert.equal(triggers.length, 3);
   for (const [, classes] of triggers) assert.match(classes, /\bw-full max-w-xs\b/);
   assert.doesNotMatch(source, /aria-selected|data-state=\{/, "选中态交给 Radix，不根据焦点伪造 aria");
 });

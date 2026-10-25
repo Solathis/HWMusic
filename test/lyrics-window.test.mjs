@@ -29,7 +29,6 @@ import {
   LYRICS_COLOR_TOKENS,
   LYRICS_FONT_STEPS,
   LYRICS_MODES,
-  LYRICS_SESSION_NOTICE,
   LYRICS_STATUS,
   MIN_PROGRESS_INTERVAL_MS,
   TASKBAR_MAX_FONT_PX,
@@ -932,12 +931,28 @@ test("进度重锚：窗从隐藏变可见时把锚点挪到当下（不许一�
 });
 
 test("配置提示与档位标签可读", () => {
-  assert.ok(LYRICS_SESSION_NOTICE.trim());
-  assert.ok(!/敬请期待|即将上线/.test(LYRICS_SESSION_NOTICE), "禁画饼");
   for (const step of LYRICS_FONT_STEPS) assert.ok(fontStepLabel(step.id).trim() !== "");
   for (const token of LYRICS_COLOR_TOKENS) assert.ok(colorTokenLabel(token.id).trim() !== "");
   for (const mode of LYRICS_MODES) assert.ok(modeLabel(mode).trim() !== "");
   assert.equal(fontStepLabel("nope"), fontStepLabel(DEFAULT_LYRICS_CONFIG.size), "认不出的档位按默认说");
+  /**
+   * R52（有意更改）：`LYRICS_SESSION_NOTICE` 那段"会话内说明"整段删除。
+   *
+   * 它是设置页卡片下的一整段解释性长文（重启恢复 / 锁定交互 / 点透 / 竖排 / 逐字推导 / 任务栏
+   * Beta 全在里面）。用户要求"界面提示词克制：不显示冗余说明段落"，必要的状态改成控件旁一行
+   * （任务栏 Beta 只有一枚 Badge + `taskbarStatusText` 一句，点透只有"开启后需在这里关闭"）。
+   * 这条用例改成**反向钉子**：这段文案不许再回来。
+   */
+  assert.equal(
+    read("src/renderer/features/lyrics/lyrics-window.mjs").includes("LYRICS_SESSION_NOTICE"),
+    false,
+    "会话说明长段落已删除（R52 的文案克制）",
+  );
+  assert.equal(
+    read("src/renderer/pages.tsx").includes("LYRICS_SESSION_NOTICE"),
+    false,
+    "设置页也不再引用它",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -1276,10 +1291,17 @@ test("主窗接线：App 用 use-lyrics-window 的 hook，且设置页有桌面�
 
   const page = read("src/renderer/pages.tsx");
   const settings = page.slice(page.indexOf("export function SettingsPage("));
-  assert.match(settings, /桌面歌词/, "设置页要有桌面歌词一节（否则字号颜色没法调）");
-  assert.match(settings, /LYRICS_SESSION_NOTICE/, "会话内说明文案来自纯逻辑模块（不在这里另写一份）");
-  for (const helper of ["LYRICS_MODES", "LYRICS_FONT_STEPS", "LYRICS_COLOR_TOKENS"]) {
-    assert.match(settings, new RegExp(helper), `选项来自纯逻辑模块 ${helper}（不另抄一份清单）`);
+  /**
+   * R52（有意更改）：设置页的「歌词」标签只剩**一张**桌面歌词卡。
+   *
+   * 字号/颜色/方向/样式/效果那些控件只在 R51 的弹出窗（`lyrics-settings`）里，而打开那扇窗的唯一
+   * 入口是歌词窗自己的齿轮（R52 收尾：设置页的「外观设置」按钮与该接线一起删除）。所以断言从
+   * "选项清单在页面里"改成"页面只认模式词表 + 不认那些控件 id"。
+   */
+  assert.match(settings, /桌面歌词/, "设置页要有桌面歌词一节");
+  assert.match(settings, /LYRICS_MODES/, "窗口位置选项来自纯逻辑模块（不另抄一份清单）");
+  for (const gone of ["LYRICS_FONT_STEPS", "LYRICS_COLOR_TOKENS", "fontStepLabel", "colorTokenLabel", "coreLyricsSettingsOpen"]) {
+    assert.equal(settings.includes(gone), false, `${gone} 只在弹出窗里用（设置页不再出现那些控件/入口）`);
   }
   assert.match(page, /from\s+"\.\/components\/ui\/switch"/, "开关走 shadcn 原语");
 });
@@ -1405,14 +1427,20 @@ test("R45B 纯逻辑：锁定隐藏全部控制、只有悬停/聚焦才给解�
   assert.equal(resizableEnabled({ ...base, clickThrough: true }), true, "点透只影响拖动，缩放能力仍在配置上");
 });
 
-test("R45B/R46 会话说明与事实一致：竖排是逐字竖排、行级逐字是推导、锁定只留悬停解锁", () => {
-  assert.match(LYRICS_SESSION_NOTICE, /竖排/, "说明里要讲竖排");
-  assert.doesNotMatch(LYRICS_SESSION_NOTICE, /并非中文竖排|不是.*竖排/, "旧的「并非中文竖排」已不成立");
-  assert.match(LYRICS_SESSION_NOTICE, /CJK 直立/, "R46：竖排方向要说清楚（CJK 直立、拉丁与数字旋转，不是全 upright）");
-  assert.doesNotMatch(LYRICS_SESSION_NOTICE, /逐字直立/, "旧的「逐字直立」会把拉丁字母也说成直立（R46 已改成 mixed）");
-  assert.match(LYRICS_SESSION_NOTICE, /推导/, "行级 LRC 的逐字时间必须如实说成推导");
-  assert.match(LYRICS_SESSION_NOTICE, /悬停/, "锁定后的交互（悬停只给解锁）要写清楚");
-  assert.doesNotMatch(LYRICS_SESSION_NOTICE, /敬请期待|即将上线/, "禁画饼");
+test("R52 设置页文案克制：不再有解释性长段落，只有控件旁的一行状态", () => {
+  const settings = read("src/renderer/pages.tsx").slice(read("src/renderer/pages.tsx").indexOf("export function SettingsPage("));
+  const lyricsPane = settings.slice(settings.indexOf('<TabsContent value="lyrics"'), settings.indexOf("</TabsContent>", settings.indexOf('<TabsContent value="lyrics"')));
+  assert.ok(lyricsPane.length > 100, "歌词页要能找到");
+  // 卡片描述一句话；控件旁提示各一行、且没有长段落（>80 字的说明文字一律不许）
+  const paragraphs = [...lyricsPane.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/g)].map((found) => found[1].trim());
+  assert.deepEqual(paragraphs, [], "歌词页里不许再有 <p> 说明段落");
+  // R52 收尾：设置页不再有「外观设置」入口，所以这里只剩点透那一句提示
+  for (const hint of ["开启后需在这里关闭"]) {
+    assert.ok(lyricsPane.includes(hint), `必要提示要在控件旁：${hint}`);
+  }
+  for (const chatter of ["互不影响", "并非中文竖排", "重启后恢复", "推导", "敬请期待", "外观设置"]) {
+    assert.equal(lyricsPane.includes(chatter), false, `解释性/画饼/外观入口文案不许回来：${chatter}`);
+  }
 });
 
 test("R45B Rust 与渲染层同步：三个新字段进 payload/persisted/query，且校验拒绝坏值", () => {
@@ -1554,17 +1582,26 @@ test("R45B fix4 竖版小窗：溢出交给播放器的原生滚动条，而滚�
 });
 
 
-test("R45B 设置页：颜色选择器 + 恢复主题色（只写合法 hex，清空回令牌）", () => {
+/**
+ * R52（**有意删除 R45B/R50 的设置页取色器用例**）：主窗设置页不再有任何颜色控件。
+ *
+ * 用户要求"沉浸式歌词禁止修改颜色"，而桌面歌词的颜色只在外观弹出窗里改（R51 搬过去的那一份，
+ * 锚点 `lyrics-appearance-color` 由 `test/lyrics-settings-popup.test.mjs` 与浏览器守卫钉住）。
+ * 这条改成反向钉子：三样东西一个都不许回到设置页——原生取色器、"恢复主题色"、`customColor` 字段。
+ */
+test("R52 设置页没有颜色控件（沉浸页禁止改色，桌面歌词颜色只在弹出窗里改）", () => {
   const page = read("src/renderer/pages.tsx");
   const settings = page.slice(page.indexOf("export function SettingsPage("));
-  assert.match(settings, /type="color"/, "设置页要有原生颜色选择器");
-  assert.match(settings, /恢复主题色/, "要能一键回到主题色");
-  assert.match(settings, /customColor/, "颜色写的是 customColor 字段（不是第二份颜色配置）");
-  assert.match(settings, /isCustomColor/, "合法 hex 判定来自纯逻辑模块");
-  // R50：设置页上的这枚取色器现在是**播放器歌词**那一枚（桌面歌词的颜色只在桌面窗的外观菜单里改）
-  assert.match(settings, /aria-label="播放器歌词自定义颜色"/, "颜色选择器要有可读的名称");
-  // 不允许在这里自己写 hex 正则（唯一真源在 lyrics-window.mjs）
-  assert.doesNotMatch(settings, /0-9a-fA-F\]\{6\}|\[0-9a-f\]\{6\}/, "不许在页面里另抄一份 hex 正则");
+  for (const gone of ['type="color"', "恢复主题色", "customColor", "isCustomColor"]) {
+    assert.equal(settings.includes(gone), false, `设置页不许再有 ${gone}`);
+  }
+  assert.equal(/0-9a-fA-F\]\{6\}|\[0-9a-f\]\{6\}/.test(settings), false, "也不许自己抄 hex 正则（本来就不该有）");
+
+  // 颜色控件仍在弹出窗里（删除的是"设置页那一份"，不是能力本身）
+  const popup = read("src/renderer/LyricsSettingsPopup.tsx");
+  assert.match(popup, /type="color"/, "桌面歌词的取色器在弹出窗里");
+  assert.match(popup, /恢复主题色/, "一键回主题色也在那里");
+  assert.match(popup, /isCustomColor/, "合法 hex 判定仍来自纯逻辑模块");
 });
 
 /**

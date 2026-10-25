@@ -11,6 +11,9 @@
  *   "一个档位一条规则"的写法；档位的 px 值在 features/lyrics/lyrics-window.mjs（钳制与文案用），
  *   两边的对应关系由 test/lyrics-window.test.mjs 钉住（16px = 1rem）。
  * - `[data-lyrics-color]`：颜色令牌档位，一律映射到 styles.css 里的设计令牌（不接受任意色值）。
+ *
+ * R52：主窗**沉浸式歌词禁止改色**——`AmllLyricsPanel` 不写 `data-lyrics-color`、不写任何
+ * 自定义颜色覆盖，落到它就是上面这条基线（`--foreground`）。颜色档位只剩桌面歌词窗一个使用者。
  */
 .amll-lyrics-stage {
   --amll-lp-color: var(--foreground);

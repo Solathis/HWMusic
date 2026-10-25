@@ -102,7 +102,6 @@ import {
 } from "./features/auth/account.mjs"
 import { usePlayer } from "./features/playback/use-player.ts"
 import { useLyricsWindow } from "./use-lyrics-window.ts"
-import { usePlayerLyrics } from "./use-player-lyrics.ts"
 import {
   NAV_LIST_TESTID,
   SIDEBAR_VIEWS,
@@ -282,14 +281,6 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
    * 以及进度推送。数据链与主窗里的歌词面板**共用同一份行**（`player.setLyrics`）。
    */
   const lyrics = useLyricsWindow(runtime, playback)
-  /**
-   * 播放器歌词的外观（R50）：**与桌面歌词那份配置分开**。
-   *
-   * 桌面歌词的颜色住在 Rust 的 `lyricsWindow`（落盘归 Rust 的保存任务），播放器歌词的颜色
-   * 住在普通 settings 键 `playerLyrics`（`settings:set`）——改一边不该动另一边。
-   * 外壳持这一份，设置页与沉浸页拿到的是同一个 binding。
-   */
-  const playerLyrics = usePlayerLyrics()
 
   const navigate = useCallback((next: unknown) => {
     setView(normalizeView(next))
@@ -462,7 +453,6 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
             queue={playback}
             trayAvailable={trayAvailable ?? TRAY_AVAILABLE}
             lyrics={lyrics}
-            playerLyrics={playerLyrics}
             notices={notices}
           />
         )
@@ -642,7 +632,6 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
         state={playback}
         onClose={() => setStageOpen(false)}
         lyrics={lyrics}
-        playerLyrics={playerLyrics.config}
       />
     </SidebarProvider>
   )

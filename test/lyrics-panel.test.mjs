@@ -209,35 +209,42 @@ test("外壳：App 挂载运行时、队列面板真实数据、歌词开关与�
 });
 
 /**
- * R46：主窗沉浸页的**逐字着色**与**自定义颜色**。
+ * R46 的逐字着色保留，颜色那条**在 R52 被有意删除**（见下面第二条用例）。
  *
  * R45B 只把逐字推导接到了桌面歌词窗：主窗 `AmllLyricsPanel` 送进去的是行级 `lines`
  * （每行 1 个词），官方 `LyricPlayer` 因此只做整行渐变——同一首歌在两个面上看起来差一代。
- * R46 把两个接线点都搬到适配层那一份实现上：`withKaraokeWords`（逐字）与
- * `applyCustomColor`（颜色），组件不自己造第二份。
+ * R46 把逐字接线搬到适配层那一份实现上（`withKaraokeWords`），组件不自己造第二份。
  */
-test("R46 主窗面板：withKaraokeWords 逐字 + 自定义颜色 scoped 覆盖（与桌面歌词窗同一适配层）", () => {
+test("R46 主窗面板：withKaraokeWords 逐字（组件不自己渲染歌词文本）", () => {
   const panel = stripComments(read("src/renderer/AmllLyricsPanel.tsx"));
   assert.match(panel, /withKaraokeWords/, "主窗面板也要把行级 LRC 推导成逐字词（否则官方只做整行渐变）");
   assert.match(panel, /useMemo\(\(\) => withKaraokeWords\(lines\), \[lines\]\)/,
     "推导结果按 lines 记忆：每帧新建数组会让官方反复重排");
   assert.match(panel, /lyricLines=\{playerLines\}/, "传给官方组件的是推导后的行");
-  assert.match(panel, /customColor/, "颜色来自 props（binding 里的唯一配置）");
-  assert.match(panel, /applyCustomColor\(/, "颜色走适配层的 scoped 变量覆盖（唯一接线点）");
-  assert.match(panel, /applyCustomColor\([a-zA-Z]+\.current, customColor\)/, "覆盖写在舞台容器上（只影响这一面）");
   assert.doesNotMatch(panel, /--amll-/, "组件里仍不出现 AMLL 变量名");
   assert.doesNotMatch(panel, /style\.setProperty|cssText/, "不自己拼 CSS 文本");
   assert.doesNotMatch(panel, /\.words\b|words\.map/, "仍不自己渲染歌词文本（逐字着色是官方组件的事）");
+});
+
+/**
+ * R52：**沉浸式歌词禁止改色**（有意删除 R50 的 `playerLyrics` 那一整套）。
+ *
+ * 用户要求："沉浸式歌词禁止修改颜色。" 所以这一面一个颜色入口都不留：
+ * - 面板不收颜色 prop、不写 `data-lyrics-color`、不调 `applyCustomColor`；
+ * - 沉浸页不读任何配置就为了拿颜色（R50 那条 `playerLyrics` 接线整段删除）；
+ * - 颜色恒为 `amll-theme.css` 里 `.amll-lyrics-stage` 的令牌基线（`--foreground`）与 AMLL 官方默认。
+ */
+test("R52 沉浸式歌词不改色：面板没有颜色 prop / data-lyrics-color / applyCustomColor", () => {
+  const panel = stripComments(read("src/renderer/AmllLyricsPanel.tsx"));
+  assert.doesNotMatch(panel, /customColor/, "面板不再有自定义颜色（沉浸页禁止改色）");
+  assert.doesNotMatch(panel, /applyCustomColor/, "面板不调适配层的颜色覆盖（那是桌面歌词窗的事）");
+  assert.doesNotMatch(panel, /data-lyrics-color/, "面板不写颜色令牌档位");
+  assert.doesNotMatch(panel, /\bcolor\?:/, "props 里不再有 color 字段");
+  assert.doesNotMatch(panel, /playerLyrics|use-player-lyrics/, "与 R50 的播放器歌词配置彻底断开");
 
   const stage = stripComments(read(STAGE));
-  /**
-   * R50（有意更改）：沉浸页不再把**桌面歌词**的 `customColor` 交给面板。
-   *
-   * R45B 接线的是 `lyrics?.config.customColor`（Rust 那份桌面歌词配置），于是改桌面歌词颜色
-   * 会顺手改掉主窗——两件事被绑成一件。现在主窗吃的是普通 settings 键 `playerLyrics`
-   * （`usePlayerLyrics`），桌面窗仍吃它自己的 `lyricsWindow`。
-   */
-  assert.match(stage, /customColor=\{playerLyrics/, "沉浸页把**播放器歌词**的自定义颜色交给面板");
-  assert.match(stage, /color=\{playerLyrics/, "颜色令牌也来自播放器歌词那份配置");
-  assert.doesNotMatch(stage, /lyrics\?\.config\.customColor/, "不再引用桌面歌词的 customColor（R50 的分离点）");
+  assert.doesNotMatch(stage, /customColor|\bcolor=\{/, "沉浸页不再把任何颜色交给面板");
+  assert.doesNotMatch(stage, /playerLyrics|use-player-lyrics/, "沉浸页不认识播放器歌词配置（R50 的接线已删）");
+  assert.match(stage, /<AmllLyricsPanel\s+runtime=\{runtime\}\s+lines=\{state\.lyrics\.lines\}/,
+    "面板只收运行时/行/播放态/跳转信号这四样");
 });

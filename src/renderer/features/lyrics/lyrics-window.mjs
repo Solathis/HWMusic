@@ -171,9 +171,6 @@ export const LYRICS_STATUS = {
   failed: "failed",
 };
 
-export const LYRICS_SESSION_NOTICE =
-  "桌面歌词配置会保存并在重启后恢复。锁定后只留悬停（或键盘聚焦）出现的解锁按钮：拖动柄、媒体按钮、外观与右下角缩放柄都隐藏，解锁后完整控制回归。点透后请从主窗设置关闭点透。竖版是官方 AMLL 组件上的 writing-mode 竖排（不是把一整行横排折成窄窗）：方向按 Unicode 默认——CJK 直立、拉丁与数字旋转；窗口小到放不下时沿书写方向滚动，当前行保持可见。行级 LRC 的逐字时间是按行时长推导的（不是服务端精确卡拉 OK），词级源原样使用。任务栏歌词（Beta）仅 Windows 实验内嵌，可能随系统版本失效；无安全空白、自动隐藏或权限不符时停显，不会退为贴边浮窗。请从主窗切回桌面模式恢复拖动与控制。";
-
 export const TASKBAR_REASONS = ["disabled", "waiting", "attached", "no_space", "uia_unknown", "timeout", "access_denied", "shell_unavailable", "auto_hide", "dpi_mismatch", "stale", "attach_failed", "unsupported", "destroy_failed"];
 
 export function taskbarStatusText(status) {

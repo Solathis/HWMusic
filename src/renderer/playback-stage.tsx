@@ -17,7 +17,6 @@ import { PLAYBACK_MODES } from "./features/playback/player.mjs"
 import { formatDuration, trackAlbumOf, trackArtistsOf, trackCoverUrlOf, trackNameOf } from "./features/library/track-fields.mjs"
 import type { PlayerRuntime } from "./features/playback/player-runtime.ts"
 import type { PlayerState } from "./features/playback/use-player.ts"
-import type { PlayerLyricsConfig } from "./use-player-lyrics.ts"
 import type { LyricsWindowBinding } from "./use-lyrics-window.ts"
 
 export interface PlaybackStageProps {
@@ -30,14 +29,6 @@ export interface PlaybackStageProps {
    * 这里只读状态、只转一次 `setVisible`。不传 = 不渲染这枚按钮。
    */
   lyrics?: LyricsWindowBinding | null
-  /**
-   * 播放器歌词自己的外观（R50）：**主窗面板不读桌面歌词的配置**。
-   *
-   * R45B 起这里传的是 `lyrics.config.customColor`——把播放器歌词和桌面歌词绑成了一件，
-   * 改桌面颜色会顺手改掉主窗。现在两件事各有各的配置：这个 prop 来自普通 settings 键
-   * `playerLyrics`（`usePlayerLyrics`），桌面歌词窗仍读自己的 `lyricsWindow`。
-   */
-  playerLyrics?: PlayerLyricsConfig | null
 }
 
 function sliderKeyValue(event: ReactKeyboardEvent<HTMLDivElement>, value: number, max: number, step: number): number | null {
@@ -52,7 +43,7 @@ function sliderKeyValue(event: ReactKeyboardEvent<HTMLDivElement>, value: number
   }
 }
 
-export function PlaybackStage({ open, runtime, state, onClose, lyrics = null, playerLyrics = null }: PlaybackStageProps) {
+export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: PlaybackStageProps) {
   const coverUrl = trackCoverUrlOf(state.track)
   const coverImage = useAlbumImage(open ? coverUrl : null)
   const lyricsView = lyricsToggleView(lyrics)
@@ -239,8 +230,6 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null, pl
                   lines={state.lyrics.lines}
                   playing={playing}
                   seekGeneration={state.seekGeneration}
-                  color={playerLyrics?.color ?? "foreground"}
-                  customColor={playerLyrics?.customColor ?? ""}
                 />
               ) : null}
               {notice === null ? null : (
