@@ -1068,7 +1068,7 @@ nonce=…, created=…[, token=…]`，见 §1.5.1 ②）；`snsUserID`（收藏
 | 响应没有 `result` 时仍是老形态 | 兼容 `{code:"0", data}` 信封与直给对象（手工注入的响应/网关包装） |
 | 收藏**没有可信总数字段** | 总数 = **完整分页后 ID 去重**；接口上报的 `totalCount`/`totalNum` 只作 `reportedTotal` 记录，绝不当真值。`total` 只在分页走完（`stopReason="exhausted"`）才有值，未走完为 `null`；"已加载 N 首"用 `loadedCount` |
 | 分页到底的判据 | 收藏/歌单发现：**整页返回 = 可能还有下一页**（真接口不发 `hasMore`）；搜索：`hasNextPage === "1"`；历史：不分页（参考只验证了一条查询） |
-| **歌单详情：整表响应 + 本地切片**（R45A3 fix1；缓存边界见 fix2；在途/失败/整页重复见 fix3） | 2026-10-23 真机只读取证：`library:playlist-detail` 请求 `start=0&limit=50`，服务端**一次回整张歌单**（1623 条）且不认窗口。处置：`getPlaylistDetail` 把**首屏那一次响应**（能自证是整张歌单时：`received > pageSize`，或首页条数 ≠ `pageSize`）按 `kind + playlistId` 记进**API 实例私有内存缓存**（上限 4 张、不落盘/不进设置/不进日志/不跨进程），后续页按 `(page-1)×pageSize` **本地切片**，`hasMore = end < total`，歌单元信息沿用第一页那份。**缓存边界（R45A3 fix2，复审 Important）**：① 第一页不论解析到哪条 kind、不论形状，都先把这张歌单**所有** kind 的旧条目一起失效；② 后续页（`kind="auto"`）**只认这张歌单最近一次解析到的端点**，不按 `owned`→`collected` 的固定顺序撞运气——否则"页 1 由公开端点解析、页 2 切到上一轮那份自建列表"会让同一张歌单的两页来自两条不同路由；③ 会话身份（`token`/`snsUserID` 的散列指纹）一变就**整张清空**，不跨账号复用（指纹只在内存里做变更检测，不落盘、不进日志）。应答额外带 `pageSource`（`"local-slice"` / `"server"`）与 `available`（这一页背后那份响应的条数）。**如实口径**：页 2+ **不发网络请求**，但也**不减少任何字节**——整份已经在第一页下载过（界面文案见 `playlistLocalSliceNoticeText`，明说这两点）。服务端若真的按 `start`/`limit` 分页（形状是整页返回或后续页给一小段），照旧走网络分页并标 `pageSource:"server"`，不被本地切片吞掉。**在途竞态与边界（R45A3 fix3，复审 Important + Minor）**：④ 每次请求都记下开始时的**会话指纹 + 这张歌单第一页的代次**，`await` 回来后两者都对得上才许写缓存/交回调用方；对不上就整条作废并回结构化 `stale_response`（迟到的旧会话响应绝不写缓存、绝不交回——否则新会话的第 2 页会从上一个账号那份列表里切）；两样都只是**进程内存内的不透明比较值**（FNV-1a 散列 + 自增序号），不写进缓存数据、日志、设置或任何文件；⑤ 第一页的失效点挪到**发起之前**：失败与空响应同样让这张歌单所有 kind 的旧条目失效（旧实现失败/空时提前 return，页 2 会读出上一轮那份）；⑥ "恰好一整页"这一档分不清"服务端真分页"与"服务端忽略窗口每次回同一份"：记住整页响应的归一化 ID 序列（含顺序），下一份整页序列**完全相同**而窗口起点不同 → 收敛成 `hasMore:false`、`songs:[]`、`pageSource:"server-repeat"`（`available` 只报这一份响应的条数，**不冒充总数**），避免触底加载反复取同一页；每页内容不同的真分页（如 120 首 → 三页各不同）不受影响。**R45A fix4**：`kind:"auto"` 的第一页若被判为服务端分页，记录该页解析出的 `owned`/`collected` 端点；后续页固定只请求它，失败原样返回而不回退另一端点拼接歌单。路由记忆有界（`max(playlistCacheLimit×4, 8)`），新第一页尝试与会话变化时清理；页 2+ 缺少有效记忆返回结构化 `invalid_response`，要求重取第一页。整表响应仍优先命中既有本地切片缓存。列表时长的 `qualityIdOf` 只接受非负整数或不含空白的纯数字字符串（例如 `0`/`1`/`17`），拒绝负数、小数及非法值。`server-repeat` 会一路保留到分页状态并在歌单详情显示“服务端重复返回同一页，已停止继续加载；…请重新打开歌单后再试”，不把该页 `available` 当作歌单总数，也不显示误导性的到底数量。 |
+| **歌单详情：整表响应 + 本地切片**（R45A3 fix1；缓存边界见 fix2；在途/失败/整页重复见 fix3） | 2026-10-23 真机只读取证：`library:playlist-detail` 请求 `start=0&limit=50`，服务端**一次回整张歌单**（1623 条）且不认窗口。处置：`getPlaylistDetail` 把**首屏那一次响应**（能自证是整张歌单时：`received > pageSize`，或首页条数 ≠ `pageSize`）按 `kind + playlistId` 记进**API 实例私有内存缓存**（上限 4 张、不落盘/不进设置/不进日志/不跨进程），后续页按 `(page-1)×pageSize` **本地切片**，`hasMore = end < total`，歌单元信息沿用第一页那份。**缓存边界（R45A3 fix2，复审 Important）**：① 第一页不论解析到哪条 kind、不论形状，都先把这张歌单**所有** kind 的旧条目一起失效；② 后续页（`kind="auto"`）**只认这张歌单最近一次解析到的端点**，不按 `owned`→`collected` 的固定顺序撞运气——否则"页 1 由公开端点解析、页 2 切到上一轮那份自建列表"会让同一张歌单的两页来自两条不同路由；③ 会话身份（`token`/`snsUserID` 的散列指纹）一变就**整张清空**，不跨账号复用（指纹只在内存里做变更检测，不落盘、不进日志）。应答额外带 `pageSource`（`"local-slice"` / `"server"`）与 `available`（这一页背后那份响应的条数）。**如实口径**：页 2+ **不发网络请求**，但也**不减少任何字节**——整份已经在第一页下载过（R55 起界面不再显示这句说明；分页边界的只读取证见 §2.3.3）。**R55**：整表已在内存时第一页额外带 `fullSongs`（整张歌单），「播放全部」「加入队列」因此作用于全部曲目；`pageSource:"server"` 的形状没有整表，动作退回已加载的那批。服务端若真的按 `start`/`limit` 分页（形状是整页返回或后续页给一小段），照旧走网络分页并标 `pageSource:"server"`，不被本地切片吞掉。**在途竞态与边界（R45A3 fix3，复审 Important + Minor）**：④ 每次请求都记下开始时的**会话指纹 + 这张歌单第一页的代次**，`await` 回来后两者都对得上才许写缓存/交回调用方；对不上就整条作废并回结构化 `stale_response`（迟到的旧会话响应绝不写缓存、绝不交回——否则新会话的第 2 页会从上一个账号那份列表里切）；两样都只是**进程内存内的不透明比较值**（FNV-1a 散列 + 自增序号），不写进缓存数据、日志、设置或任何文件；⑤ 第一页的失效点挪到**发起之前**：失败与空响应同样让这张歌单所有 kind 的旧条目失效（旧实现失败/空时提前 return，页 2 会读出上一轮那份）；⑥ "恰好一整页"这一档分不清"服务端真分页"与"服务端忽略窗口每次回同一份"：记住整页响应的归一化 ID 序列（含顺序），下一份整页序列**完全相同**而窗口起点不同 → 收敛成 `hasMore:false`、`songs:[]`、`pageSource:"server-repeat"`（`available` 只报这一份响应的条数，**不冒充总数**），避免触底加载反复取同一页；每页内容不同的真分页（如 120 首 → 三页各不同）不受影响。**R45A fix4**：`kind:"auto"` 的第一页若被判为服务端分页，记录该页解析出的 `owned`/`collected` 端点；后续页固定只请求它，失败原样返回而不回退另一端点拼接歌单。路由记忆有界（`max(playlistCacheLimit×4, 8)`），新第一页尝试与会话变化时清理；页 2+ 缺少有效记忆返回结构化 `invalid_response`，要求重取第一页。整表响应仍优先命中既有本地切片缓存。列表时长的 `qualityIdOf` 只接受非负整数或不含空白的纯数字字符串（例如 `0`/`1`/`17`），拒绝负数、小数及非法值。`server-repeat` 会一路保留到分页状态并在歌单详情显示“服务端重复返回同一页，已停止继续加载；…请重新打开歌单后再试”，不把该页 `available` 当作歌单总数，也不显示误导性的到底数量。 |
 | 歌单发现**必须翻页** | 歌曲与歌单混在一个列表里，首页很可能整页都是歌。判停条件照参考：短页、**这一页没带来任何新条目**（`fresh === 0`，新条目含歌曲）、或触到保守上限（10 页 × 200 条）。触到上限 → `hasMore: true`（如实说"没扫完"） |
 | **`contentID` 等线上字段名** | 归一化成内部形状：`contentID→id`、`contentName→name`、`artistNamePairs/artistName→singer`、`albumID/albumName→albumId/albumName`、`picture.*→coverUrl`、`duration→duration`、`totalCount→count`、`contentType→kind`（4/5/7）。**渲染层一行都不用改**（它的读取兜底表认的就是 `id`/`name`/…） |
 | 无 ID 的条目 | 如实丢弃并计数（`skipped`），**绝不编 ID**（列表里出现删不掉的幽灵行比少一行糟得多） |
@@ -1143,6 +1143,25 @@ AMLL 面板挂载、无提示行——即 R38 的第 2 档在真机上确实生�
 第 3 档的实测结论是"播放响应里没有歌词字段"，第 4 档取决于播放响应有没有给专辑 id
 （见上面的诊断日志）——**都不是可以靠猜字段绕过去的**（不发明端点、不编地址）。
 
+#### 2.3.3 歌单详情与收藏的分页边界（R55 只读取证）
+
+2026-10-26 用 `.tmp/live-data` 的已登录会话经 `core_call` 只读探测（16 次请求，间隔 ≥1 秒；只记条数与首末 ID 的 SHA-256 前 8 位）。**歌单详情端点不能分页**：
+
+| 端点 | 请求参数 | 结果 | 返回条数 | 首/末条 ID 哈希 |
+|---|---|---|---|---|
+| `GET /music-userbehavior-service/v1/service/playlist/detail/all` | `playListID=<1623 首的歌单>`、`start=0&limit=50` | ok | 服务端回 **1623**（`available=1623`；页面只看前 50 = 本地切片） | `f93c4ad3` / `03979923` |
+| 同上 | `start=0&limit=1` | ok | **1623**（`limit` 被忽略） | `f93c4ad3` / `03979923` |
+| 同上（22 首的歌单） | `start=0&limit=22` | ok，`pageSource:"server"` | 22（`received == limit`，这一档不判整表） | `1d32c247` / `c56759e6` |
+| 同上 | `start=22&limit=22`（第 2 页，真发网络） | ok，`pageSource:"server-repeat"` | 服务端**原样再回同一页**（22）⇒ `start` 被忽略 | `1d32c247` / `c56759e6` |
+| 同上（端点 URL 追加查询参数，经 `settings.data.musicEndpoints.playlistDetail` 覆盖，副本数据根） | `start=0&limit=50&pageNum=1&pageSize=50&offset=50` | ok | **1623**，与基线逐字节同形 ⇒ 这些参数名同样无效 | `f93c4ad3` / `03979923` |
+| 同上 | `start=0&limit=1623` | HTTP 400（`limit` 有上限，调大不是出路） | — | — |
+
+参考实现（`.tmp/reference-repo/src/music.mjs` 的 `playlistDetail`）也是同一组 `start`/`limit`，没有别的分页参数可用 ⇒ **"一次取回 + 本地切片"是唯一可行形状**，维持不变。历史端点（`recentlyplayed/query`）同样不分页。
+
+R55 由此把整张歌单在**第一页**一并交出：应答额外带 `fullSongs`（整表已在内存时才有；后续页不重复带），渲染层据此让「播放全部」「加入队列」作用于整张歌单。`start`/`limit` 真被服务端认下的形状（`pageSource:"server"`）没有整表，两个动作退回已加载的那批。
+
+**收藏首页为空（R55 核查结论）**：`library:favorites`（`start=0&limit=50&contentTypes:["1"]`）回 ok、**0 条**、`hasMore:false`；同一会话 `library:history` 回 **200** 条 ⇒ **不是会话问题**。同一个端点在歌单发现那次扫描里（`contentTypes:["1","4","5","7"]`、`limit=50`）只回 **2** 条、且**两条都是歌单**（`scanned == playlists == 2`）⇒ 这份收藏流里没有任何 `contentType=1` 的条目，`contentTypes:["1"]` 的写法也与参考实现一致（字符串形式在同一端点工作正常）⇒ **不是探测参数问题**。结论：该账号确实没有收藏歌曲，界面显示空态是如实的；本条不需要改代码。残留未验：`contentTypes` 的数字类型无法经 `library:*` 通道传入（处理器只透 `page`/`pageSize`），故只验过字符串数组。
+
 ### 2.4 CDN 域（已确认可达）
 
 | 域 | probe 实测 | 用途 |
@@ -1164,7 +1183,7 @@ Rust 镜像见 §3 的 parity 钉）：
 |---|---|---|---|
 | `library:favorites` | `{page, pageSize}` | `{page, pageSize, songs, skipped, reportedTotal, hasMore}` | **应答里没有 `total`**：收藏没有可信总数，总数由渲染层把页拼完后去重得出，未走完就是"已加载 N 首" |
 | `library:playlists` | `{page, pageSize}` | `{playlists, hasMore, scanned}` | 歌单元信息。R32 起**协议层会翻页扫完**（歌曲与歌单混在一个列表里，见 §2.3），`hasMore=true` = 触到保守上限没扫完 |
-| `library:playlist-detail` | `{playlistId, page, pageSize}` | `{playlistId, playlist, songs, hasMore}` | 缺 `playlistId` → `invalid_payload`；`playlist` 是歌单元信息（自建/收藏两条路由自动分派，见 §2.3） |
+| `library:playlist-detail` | `{playlistId, page, pageSize}` | `{playlistId, playlist, songs, hasMore, pageSource, available[, fullSongs]}` | 缺 `playlistId` → `invalid_payload`；`playlist` 是歌单元信息（自建/收藏两条路由自动分派，见 §2.3）；整表已在内存时第一页额外带 `fullSongs`（整张歌单，R55），后续页不带 |
 | `library:search` | `{keyword, page, pageSize}` | `{songs, skipped, reportedTotal, hasMore}` | 空关键字 → `invalid_payload`（不把坏参数透给协议层） |
 | `library:album` / `library:artist` | `{albumId}` / `{artistId}` | `{songs, detail}` | 缺 id → `invalid_payload`；`detail` 是端点的原始回包（`getAlbum`/`getArtist` 原样透出，供后续页面取专辑/歌手元信息） |
 | `library:history` | `{page, pageSize}` | `{songs, skipped, reportedTotal, hasMore}` | 播放历史；`hasMore` 恒为 `false`（参考只验证了一条查询，不承诺无限翻页） |
@@ -2114,3 +2133,16 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
   3. **sidecar 侧收口**：`auth-manager.announce()` 一旦播"已登录"就停掉在跑的二维码会话
      （停轮询 + 作废待兑换的尝试）——restore / 扫码 / 网页三条来源由此共用一处。
   4. 登录协议本身**一行未动**（端点、建单/轮询/换码、DPAPI 信封全部照旧）。
+- 2026-10-26（Task R55）：**歌单/历史的说明文案删掉 + 歌单详情整表交给动作**。
+  1. **删三句说明文案**（用户要求）：`playlistPartialNoticeText`（"这一页只加载了前 N 首…"）、
+     `playlistLocalSliceNoticeText`（"服务端一次返回整张歌单…"）、`localRevealNoticeText`
+     （"后端一次返回 N 首（1 次网络请求…）…已显示 N 首"）连同常量 `PLAYLIST_SLICE_NOTICE_TESTID`、
+     页面渲染与测试锚点一起删除；保留"已加载 N 首 / 继续向下滚动"与 `server-repeat` 的停止原因。
+     歌手页与历史页不再挂状态行。
+  2. **整张歌单随第一页交出**：`library:playlist-detail` 第一页在整表已在内存时额外带 `fullSongs`
+     （后续页不带），渲染层让「播放全部」「加入队列」作用于整张歌单；`pageSource:"server"` 时没有整表，
+     动作退回已加载的那批。
+  3. **只读核查（§2.3.3）**：歌单详情端点不认 `start`/`limit`，也不认 `pageNum`/`pageSize`/`offset`
+     （`limit=1623` 反而 HTTP 400）⇒ 服务端不能分页，维持"一次取回 + 本地切片"；参考实现也只有 `start`/`limit`。
+  4. **收藏首页为空已查清**：同一会话历史 200 条、同一端点扫描 `contentTypes:["1","4","5","7"]` 只回 2 条
+     且都是歌单 ⇒ 不是会话/参数问题，该账号确实没有收藏歌曲（界面上是如实空态）。

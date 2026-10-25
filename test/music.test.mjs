@@ -1394,6 +1394,45 @@ test("歌单详情：服务端真的认 start/limit 时退回网络分页（不�
   assert.equal(page3.data.hasMore, false, "最后一页不足一页 → 没有更多");
 });
 
+test("R55：整表响应时第一页额外交出整张歌单（两个动作作用于全部曲目），后续页与真分页都不带", async () => {
+  const items = Array.from({ length: 120 }, (_value, index) => wireSong(`t${index + 1}`));
+  const { fetchImpl } = scriptedFetch(() => jsonResponse(okBody({
+    playListInfoEx: {
+      playListInfo: { contentID: "P-1", contentName: "整表歌单", totalCount: "120" },
+      playListSongInfoList: items,
+    },
+  })));
+  const api = apiOf({ fetchImpl });
+
+  const page1 = await api.getPlaylistDetail("P-1", { page: 1, pageSize: 50 });
+  assert.equal(page1.data.songs.length, 50, "渲染仍只拿第一页那 50 首");
+  assert.equal(page1.data.fullSongs.length, 120, "整份已在内存：第一页把整张歌单交出去");
+  assert.deepEqual(
+    page1.data.fullSongs.map((song) => song.id),
+    items.map((song) => song.contentID),
+    "整表就是服务端那一份（顺序与条数不变）",
+  );
+
+  const page2 = await api.getPlaylistDetail("P-1", { page: 2, pageSize: 50 });
+  assert.equal(page2.data.fullSongs, undefined, "后续页不重复交整表（页面只在第一页记一次）");
+
+  const paged = scriptedFetch((url) => {
+    const query = new URL(url).searchParams;
+    const start = Number(query.get("start") ?? 0);
+    const limit = Number(query.get("limit") ?? 50);
+    return jsonResponse(okBody({
+      playListInfoEx: {
+        playListInfo: { contentID: "P-2", contentName: "真分页的歌单", totalCount: "120" },
+        playListSongInfoList: items.slice(start, start + limit),
+      },
+    }));
+  });
+  const honest = apiOf({ fetchImpl: paged.fetchImpl });
+  const firstPaged = await honest.getPlaylistDetail("P-2", { page: 1, pageSize: 50 });
+  assert.equal(firstPaged.data.pageSource, "server");
+  assert.equal(firstPaged.data.fullSongs, undefined, "服务端真分页：没有整表可交（动作退回已加载的那批）");
+});
+
 test("歌单删除：只走 playlistDelete 端点（不得用收藏端点冒充成功）、不自动重试", async () => {
   const { calls, fetchImpl } = scriptedFetch(() => jsonResponse(okBody()));
   const api = apiOf({ fetchImpl });

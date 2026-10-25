@@ -359,11 +359,12 @@ test("R40 搜索布局：入口只有侧栏那个常驻框，搜索页里没有�
   assert.match(searchPage, /viewParam\(view, "keyword"\)/, "检索词从视图参数读（不自己存一份）");
   assert.match(searchPage, /libraryEmptyText\(view, \{ searched: true \}\)/, "「查无所获」那一档照旧");
 
-  // 歌单详情页（R40 第 2 项）：头部 + 两个动作 + 表格，且动作只作用于已加载的曲目
+  // 歌单详情页（R40 第 2 项；R55 起两个动作作用于整张歌单）：
+  // 头部 + 两个动作 + 表格，说明"只加载了一部分"的那句文案已整条删除
   const detail = pages.slice(pages.indexOf("export function PlaylistDetailPage"), pages.indexOf("// 搜索：结果"));
   assert.match(detail, /PLAYLIST_PLAY_ALL_LABEL/, "「播放全部」的文案来自纯逻辑模块");
   assert.match(detail, /PLAYLIST_ENQUEUE_LABEL/, "「加入队列」同理");
-  assert.match(detail, /playlistPartialNoticeText/, "分页没走完要有一句说明（不把已加载说成全部）");
+  assert.doesNotMatch(detail, /playlistPartialNoticeText/, "R55：说明文案不再渲染");
   assert.match(detail, /<AmllBackground/, "头部底景用 AMLL 官方流体背景");
   assert.match(
     detail,

@@ -2709,9 +2709,9 @@ export async function checkDesktopLyricsScrim(page, guardDir, add) {
  * 2. 没有用户手势时**一页都不多取**（不许自动连拉）；
  * 3. 触底只发一次第 2 页：请求在途期间再滚三次也被吞掉（正在请求不重复发）；
  * 4. 每页完成后要用户再次接近底部才取第 3 页；没有下一页之后哨兵消失、不再催滚动；
- * 5. "播放全部"只把**已加载**的 50 首放进队列；
+ * 5. "播放全部"把**整张歌单**（120 首）放进队列——整表已在内存，不再只作用于已渲染的 50 首；
  * 6. 专辑页第一次失败给出可点的重试，第二次成功（失败不自动重试、也不丢页面）；
- * 7. 换关键词时旧查询的迟到响应被丢掉；歌手/历史后端不分页，只本地分批且明说"1 次网络请求"。
+ * 7. 换关键词时旧查询的迟到响应被丢掉；歌手/历史后端不分页，只本地分批（R55 起不挂说明文案）。
  *
  * 滚动都是**真滚轮**（`page.mouse.wheel`）：程序化改 scrollTop 证明不了"用户滚到底"这件事。
  */
@@ -2788,17 +2788,17 @@ export async function checkLibraryPagination(page, guardDir, add) {
    *
    * 关键在夹具的形状：`library:playlist-detail` 的 IPC 走的是**真协议层**（`guardMusicApi`），
    * 它背后的假上游**永远忽略 `start`/`limit`、每次都回整张 120 首**（真接口的实测行为）。
-   * 所以下面这两个数字不可能来自"夹具替我们分好了页"：
+   * 所以下面这个数字不可能来自"夹具替我们分好了页"：
    * - `playlistFetches()` = 假上游被调用的次数 → 整份只取一次网络；
-   * - 界面那句话说的 `pageSource=local-slice` → 这一页是本地切片（不是服务端分页）。
+   *
+   * 那句"服务端一次返回整张歌单…"的说明**不再显示**（锚点与文案一起删，R55）。
    */
-  const sliceNotice = ((await page.getByTestId("playlist-local-slice").textContent().catch(() => "")) ?? "").trim();
+  const sliceNoticeCount = await page.getByTestId("playlist-local-slice").count();
   const firstFetches = await page.evaluate(() => window.__guard.playlistFetches());
   add("pagination-first-page-is-local-slice", firstFetches.length === 1
-    && sliceNotice.includes("本地切片") && sliceNotice.includes("120 首")
-    && sliceNotice.includes("不再发网络请求") && sliceNotice.includes("不减少流量")
-    && sliceNotice.includes("已显示 50 首"),
-  JSON.stringify({ fetches: firstFetches.length, sliceNotice }));
+    && sliceNoticeCount === 0
+    && !detailText.includes("本地切片") && !detailText.includes("整张歌单（"),
+  JSON.stringify({ fetches: firstFetches.length, sliceNoticeCount }));
 
   // ② 没人动它就不许自己取第 2 页（"不无限自动连续请求"）
   await page.waitForTimeout(800);
@@ -2806,12 +2806,33 @@ export async function checkLibraryPagination(page, guardDir, add) {
   add("pagination-no-auto-chain", idleCalls.length === 1 && (await rowCount()) === 50,
     JSON.stringify({ pages: idleCalls.map((call) => call.page) }));
 
-  // ③ "播放全部"只作用于**已加载**的 50 首（不许把队列当成整张歌单）
+  // ③ R55："播放全部"作用于**整张歌单**（120 首），不是已渲染的那 50 首
   await page.getByRole("button", { name: "播放全部", exact: true }).click();
-  await page.waitForFunction(() => window.__guard.queueLength() === 50, null, { timeout: 5000 }).catch(() => {});
+  await page.waitForFunction((total) => window.__guard.queueLength() === total, PAGINATION_FIXTURE.total, { timeout: 5000 }).catch(() => {});
   const queued = await page.evaluate(() => window.__guard.queueLength());
   await page.evaluate(() => window.__guard.pause());
-  add("pagination-play-all-loaded-only", queued === 50, `队列 ${queued} 首（页面只加载了 50 首）`);
+  add("pagination-play-all-whole-playlist", queued === PAGINATION_FIXTURE.total,
+    `队列 ${queued} 首（整张歌单 ${PAGINATION_FIXTURE.total} 首，页面只渲染了 50 行）`);
+  await page.screenshot({ path: path.join(guardDir, "r55-playlist-detail.png") });
+  const queueState = () => page.evaluate(() => {
+    const state = window.__guard.snapshot();
+    return { length: state.entries.length, index: state.index, name: state.track?.name ?? null };
+  });
+
+  /**
+   * ③b R55 修订：双击一行与「播放全部」同一基准——整表在内存就是整张表。
+   * 双击第 3 行必须排出 120 首、当前曲目是第 3 首（用已显示的 50 行当队列，
+   * "下一首"会在第 50 首处断掉，而界面上已没有任何一句话提这件事）。
+   */
+  await table.locator("tbody tr").nth(2).dblclick();
+  await page.waitForFunction((total) => {
+    const state = window.__guard.snapshot();
+    return state.index === 2 && state.entries.length === total;
+  }, PAGINATION_FIXTURE.total, { timeout: 5000 }).catch(() => {});
+  const dblClickQueue = await queueState();
+  await page.evaluate(() => window.__guard.pause());
+  add("pagination-dblclick-whole-playlist", dblClickQueue.length === PAGINATION_FIXTURE.total
+    && dblClickQueue.index === 2 && dblClickQueue.name === "歌单曲目 3", JSON.stringify(dblClickQueue));
 
   // ④ 滚动根就是应用内容区那一层（不是页面自己造的滚动容器）
   const root = await page.evaluate(() => {
@@ -2874,10 +2895,9 @@ export async function checkLibraryPagination(page, guardDir, add) {
    * 页 2/页 3 只切不发请求。若哪天有人把缓存删了（或让页面自己切片），这里的数字会立刻变 3。
    */
   const finalFetches = await page.evaluate(() => window.__guard.playlistFetches());
-  const exhaustedNotice = ((await page.getByTestId("playlist-local-slice").textContent().catch(() => "")) ?? "").trim();
   add("pagination-pages-2-3-one-network-fetch", finalFetches.length === 1
-    && exhaustedNotice.includes("已显示 120 首"),
-  JSON.stringify({ fetches: finalFetches.length, exhaustedNotice }));
+    && (await page.getByTestId("playlist-local-slice").count()) === 0,
+  JSON.stringify({ fetches: finalFetches.length }));
 
   // ⑥c 服务端重复整页：停止原因可见，不把本页数量冒充歌单总数
   await page.getByRole("button", { name: "我的歌单", exact: true }).click();
@@ -2908,14 +2928,13 @@ export async function checkLibraryPagination(page, guardDir, add) {
     && (await failure.count()) === 0 && (await rowCount()) === 50,
   JSON.stringify({ failureText: failureText.slice(0, 30), albumCalls: albumCalls.map((call) => call.page) }));
 
-  // ⑧ 歌手页：后端不分页（一次响应 120 首），本地每批 50，且状态行明说"1 次网络请求"
+  // ⑧ 歌手页：后端不分页（一次响应 120 首），本地每批 50，且不再挂说明文案（R55）
   await table.getByRole("button", { name: "守卫艺人", exact: true }).first().click();
   await visibleRowsIn(50);
   const artistStatus = await statusText();
   const artistCalls = await callsOf("library:artist");
   add("pagination-local-reveal-first-batch", artistCalls.length === 1 && (await rowCount()) === 50
-    && artistStatus.includes("后端一次返回 120 首") && artistStatus.includes("1 次网络请求")
-    && artistStatus.includes("不减少流量") && artistStatus.includes("已显示 50 首"),
+    && artistStatus === "" && (await page.getByTestId("list-pagination-status").count()) === 0,
   JSON.stringify({ artistCalls: artistCalls.length, artistStatus }));
   await wheelContent(20000);
   await visibleRowsIn(100);
@@ -2924,7 +2943,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
   add("pagination-local-reveal-no-extra-network", artistCallsAfter === 1 && artistRevealed >= 100,
     `揭示 ${artistRevealed} 条，网络请求 ${artistCallsAfter} 次`);
 
-  // ⑨ 历史页：同一类（本地分批），一次响应就是全部
+  // ⑨ 历史页：同一类（本地分批），一次响应就是全部；R55 起不再挂说明文案
   // 先回到顶部：内容区滚到底的位置会被下一张列表继承，哨兵一挂上就在视口里 → 会立刻再揭示一批
   // （那是本地揭示、不是网络请求；但"首屏 50 条"这件事要在同一基线上量）
   await scrollToTop();
@@ -2932,7 +2951,35 @@ export async function checkLibraryPagination(page, guardDir, add) {
   await visibleRowsIn(50);
   const historyStatus = await statusText();
   add("pagination-history-local-batch", (await callsOf("library:history")).length === 1
-    && (await rowCount()) === 50 && historyStatus.includes("1 次网络请求"), JSON.stringify({ historyStatus }));
+    && (await rowCount()) === 50 && historyStatus === "",
+  JSON.stringify({ historyStatus }));
+  await page.screenshot({ path: path.join(guardDir, "r55-playlist-history.png") });
+
+  // ⑨b R55 修订：历史页双击第 2 行 → 队列是本页整份历史（120），当前曲目是第 2 首
+  await table.locator("tbody tr").nth(1).dblclick();
+  await page.waitForFunction((total) => {
+    const state = window.__guard.snapshot();
+    return state.index === 1 && state.entries.length === total;
+  }, PAGINATION_FIXTURE.total, { timeout: 5000 }).catch(() => {});
+  const historyQueue = await queueState();
+  await page.evaluate(() => window.__guard.pause());
+  add("pagination-dblclick-history-whole-list", historyQueue.length === PAGINATION_FIXTURE.total
+    && historyQueue.index === 1 && historyQueue.name === "历史曲目 2", JSON.stringify(historyQueue));
+
+  /**
+   * ⑨c R55 修订反向项：收藏页是**服务端真分页**的来源，只有已加载的那批是已知的。
+   * 双击第 2 行时队列仍等于已加载条数（行为不变，不许顺手把"未加载"当成"有"）。
+   */
+  await page.getByRole("button", { name: "我的收藏", exact: true }).click();
+  await page.getByTestId("favorites-page").waitFor();
+  await visibleRowsIn(36);
+  const favoritesRows = await rowCount();
+  await table.locator("tbody tr").nth(1).dblclick();
+  await page.waitForFunction(() => window.__guard.snapshot().index === 1, null, { timeout: 5000 }).catch(() => {});
+  const favoritesQueue = await queueState();
+  await page.evaluate(() => window.__guard.pause());
+  add("pagination-dblclick-favorites-loaded-only", favoritesRows === 36
+    && favoritesQueue.length === favoritesRows && favoritesQueue.index === 1, JSON.stringify({ ...favoritesQueue, favoritesRows }));
 
   // ⑩ 换关键词：旧查询的迟到响应必须被丢掉（新结果里不许混进旧词的行）
   await scrollToTop();

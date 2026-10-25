@@ -26,7 +26,6 @@ import {
   playlistDetailTitleOf,
   playlistIdOf,
   playlistNameOf,
-  playlistPartialNoticeText,
   playlistSongCountOf,
 } from "../src/renderer/features/library/playlist-fields.mjs";
 import {
@@ -249,7 +248,7 @@ test("歌单投影：名字/曲目数/封面地址的兜底；拿不到的曲目
   assert.equal(playlistSongCountOf({ songCount: -3 }), null);
 });
 
-test("R40 歌单详情头部：标题/元信息/「只加载了一部分」的说明（不把已加载说成全部）", () => {
+test("R40 歌单详情头部：标题 + 元信息（R55 删掉「只加载了一部分」的说明）", () => {
   // 标题：接口那份优先，其次视图参数带过来的名字，两个都没有才是兜底
   assert.equal(playlistDetailTitleOf({ name: "接口的名字" }, "卡片的名字"), "接口的名字");
   assert.equal(playlistDetailTitleOf({}, "卡片的名字"), "卡片的名字", "接口没给就用卡片带来的（界面不显示空标题）");
@@ -262,11 +261,6 @@ test("R40 歌单详情头部：标题/元信息/「只加载了一部分」的�
   assert.equal(playlistDetailMetaText(null, 50, true), "已加载 50 首", "没有总数就不说「共」");
   assert.equal(playlistDetailMetaText(null, 0, false), "已加载 0 首");
   assert.equal(playlistDetailMetaText({ songCount: "abc" }, 3, false), "已加载 3 首", "坏总数按没有总数处理");
-
-  // 「只加载了一部分」的说明：必须说出来（否则用户以为"播放全部"是整张歌单）
-  assert.match(playlistPartialNoticeText(50), /前 50 首/);
-  assert.match(playlistPartialNoticeText(50), /已加载/);
-  assert.match(playlistPartialNoticeText(3), /^这一页只加载了前 3 首/);
 
   // 两个按钮的文案只有这一处真源
   assert.equal(PLAYLIST_PLAY_ALL_LABEL, "播放全部");

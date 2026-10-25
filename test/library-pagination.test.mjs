@@ -9,9 +9,11 @@
  * 3. **失败可重试、但不自动重试**：失败不清空已加载内容，也不让哨兵自动打请求风暴；
  * 4. **竞态**：换查询 / 切页后，旧查询迟到的响应按 generation 丢掉，不许覆盖新查询；
  * 5. **无 hasMore 不再观察**（哨兵直接不挂）；
- * 6. **歌手/历史后端不分页**：本地分批显示，文案必须明说"只有一次网络请求、分批显示不减少流量"；
+ * 6. **歌手/历史后端不分页**：一次响应、本地分批显示（R55 起不再挂说明文案）；
  * 7. **滚动根是应用内容区那一层**（`findScrollRoot` 从哨兵往上找真正的 `overflow-y:auto/scroll`
  *    祖先），不是页面自己再造一个滚动容器（那会被 no-self-visual 的例外集合抓住）。
+ * 8. **R55**：三句说明文案（"只加载了前 N 首"/"服务端一次返回整张歌单"/"后端一次返回 N 首"）
+ *    整条路径删除；整表已在内存时状态里带整张歌单，两个按钮因此作用于整张歌单。
  *
  * 先写先看红。
  */
@@ -27,7 +29,7 @@ import {
   PAGINATION_ROOT_MARGIN,
   PAGINATION_SENTINEL_TESTID,
   PAGINATION_SOURCE,
-  PLAYLIST_SLICE_NOTICE_TESTID,
+  activationQueueOf,
   applyFailure,
   applyPage,
   beginPage,
@@ -37,11 +39,9 @@ import {
   hasRevealableItems,
   isInitialPaging,
   loadedTracksText,
-  localRevealNoticeText,
   markSentinelAway,
   nextPageOf,
   paginationNoticeText,
-  playlistLocalSliceNoticeText,
   resetPagination,
   retryPagination,
   revealMore,
@@ -222,13 +222,25 @@ test("文案：服务端分页说「已加载 N 首」，走完了不再催用�
   assert.doesNotMatch(done, /继续向下滚动/, "已经没有下一页了还让人滚，就是撒谎");
 });
 
-test("文案：歌手/历史本地分批必须明说「只有一次网络请求」，且不许假称省流量", () => {
-  const text = localRevealNoticeText({ items: new Array(120).fill(song("x")), batch: 50, revealed: 50 });
-  assert.match(text, /后端一次返回 120 首/);
-  assert.match(text, /已显示 50 首/);
-  assert.match(text, /1 次网络请求/, "后端不分页：要把「网络只请求了一次」说出来");
-  assert.doesNotMatch(text, /节省|省流量|省字节|省内存/, "分批显示不减少任何字节，不许假称省流量");
-  assert.match(text, /不减少流量/, "反过来说：必须自己讲清楚分批显示不省流量（这句是简报点名的边界）");
+/**
+ * R55：三句说明性文案（"这一页只加载了前 N 首…"、"服务端一次返回整张歌单…"、
+ * "后端一次返回 N 首（1 次网络请求…），已显示 N 首"）不再显示。
+ * 删的是**整条路径**：函数、常量、渲染、锚点一起走，不留死代码。
+ */
+test("R55：三句说明文案连同函数/常量/渲染/锚点一起删掉（不留死代码）", () => {
+  const paginationSource = read("src/renderer/features/library/pagination.mjs");
+  for (const gone of ["localRevealNoticeText", "playlistLocalSliceNoticeText", "PLAYLIST_SLICE_NOTICE_TESTID"]) {
+    assert.ok(!paginationSource.includes(gone), `pagination.mjs 不该再有 ${gone}`);
+  }
+  assert.ok(
+    !read("src/renderer/features/library/playlist-fields.mjs").includes("playlistPartialNoticeText"),
+    "playlist-fields.mjs 不该再有 playlistPartialNoticeText",
+  );
+
+  const pages = read("src/renderer/pages.tsx");
+  for (const gone of ["这一页只加载了", "服务端一次返回整张歌单", "后端一次返回", "不再发网络请求", "不减少流量", "已显示 "]) {
+    assert.ok(!pages.includes(gone), `页面不该再出现「${gone}」`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -301,31 +313,99 @@ test("滚动根：从哨兵往上找真正的 overflow-y:auto/scroll 祖先（�
 });
 
 /**
- * R45A3 fix1（复审 Important）：歌单详情那个端点**一次回整张歌单**（真机 1623 条），
- * 所以这几页是**本地切片**而不是网络分页。界面必须如实说出来——
- * 既要说清"滚动只是切片、不再发请求"，也**不许**暗示"省了流量"（字节一个都没少）。
+ * R55：整张歌单已经在内存里（`pageSource="local-slice"`）时，页面拿得到整表：
+ * 「播放全部」「加入队列」因此作用于**整张歌单**，不是已渲染的那 50 首。
+ * 整表只认第一页那份（后续页与换查询都不许把它换掉/留到下一张歌单）。
  */
-test("文案：歌单详情整表响应的本地切片必须如实说明（不假称减少流量）", () => {
-  assert.equal(
-    playlistLocalSliceNoticeText({ source: "server", available: 120, loaded: 50 }),
-    null,
-    "服务端真分页时没有这句（那是另一种形状，别把两种混成一句）",
-  );
-  assert.equal(playlistLocalSliceNoticeText({ source: null, available: 0, loaded: 0 }), null);
-  assert.equal(playlistLocalSliceNoticeText(undefined), null);
+test("R55：整表已在内存时状态记住整张歌单，动作不再只作用于已渲染的 50 首", () => {
+  const items = Array.from({ length: 120 }, (_value, index) => song(`s${index + 1}`));
+  let state = applyPage(createPaginationState(), answer(0, items.slice(0, 50), {
+    hasMore: true,
+    pageSource: PAGINATION_SOURCE.localSlice,
+    available: 120,
+    full: items,
+  }));
+  assert.equal(state.full.length, 120, "整表在状态里（页面拿它做动作）");
+  assert.equal(state.items.length, 50, "渲染仍然只有已加载的那一页");
 
-  const text = playlistLocalSliceNoticeText({ source: "local-slice", available: 120, loaded: 50 });
-  assert.match(text, /本地切片/, "要说清这几页是怎么来的");
-  assert.match(text, /120 首/, "整份响应的条数要写出来（后面还有多少是可以算的）");
-  assert.match(text, /已显示 50 首/);
-  assert.match(text, /不再发网络请求|不再发请求/, "切片不再打网络：这句话是承诺，也是事实");
-  assert.match(text, /不减少流量/, "反过来必须自己讲清楚：整份已经下载过，切片不省字节");
-  assert.doesNotMatch(text, /节省|省流量|省字节|省内存/, "分批/切片都不减少任何字节，不许假称省流量");
+  // 后续页的响应不带整表：整表只认第一页那份，不许被后一页覆盖成 null
+  state = applyPage(state, answer(state.generation, items.slice(50, 100), {
+    hasMore: true,
+    pageSource: PAGINATION_SOURCE.localSlice,
+    available: 120,
+  }));
+  assert.equal(state.full.length, 120);
+  assert.equal(state.items.length, 100);
 
-  // 条数不明的形状也要有话说（不编数字）
-  const unknown = playlistLocalSliceNoticeText({ source: "local-slice", available: null, loaded: 50 });
-  assert.match(unknown, /整张歌单/);
-  assert.doesNotMatch(unknown, /\d+ 首（?共/);
+  // 换查询：整表跟着清空（下一张歌单不能继承上一张的曲目）
+  const reset = resetPagination(state);
+  assert.equal(reset.full, null);
+
+  // 服务端真分页（不是整表响应）：没有整表可给，动作退回已加载的那批
+  const server = applyPage(createPaginationState(), answer(0, items.slice(0, 50), {
+    hasMore: true,
+    pageSource: PAGINATION_SOURCE.server,
+    available: 50,
+  }));
+  assert.equal(server.full, null);
+});
+
+/**
+ * R55 修订：双击行的队列基准要与「播放全部」一致。
+ * 整表在内存的来源里，双击第 3 行必须排出**整张表**、当前曲目指向第 3 行。
+ */
+test("R55 修订：双击行的队列取整表，行号在整表里的位置按身份/id 找回", () => {
+  const full = Array.from({ length: 120 }, (_value, index) => song(`s${index + 1}`));
+  const items = full.slice(0, 50);
+
+  // ① 同一个数组 / 没给整表：整表就是这一批，行号即下标
+  assert.deepEqual(activationQueueOf(items, items, items[2], 2), { queue: items, index: 2 });
+  assert.deepEqual(activationQueueOf(items, undefined, items[2], 2), { queue: items, index: 2 });
+  assert.deepEqual(activationQueueOf(items, null, items[2], 2), { queue: items, index: 2 });
+
+  // ② 对象身份命中：items 是整表的切片（同一批对象），行号要换算成整表下标
+  const byIdentity = activationQueueOf(items, full, items[2], 2);
+  assert.equal(byIdentity.queue, full, "队列用整张表（不是已显示的 50 首）");
+  assert.equal(byIdentity.index, 2);
+
+  // ③ 身份不同但 id 相同（IPC 反序列化后是另一批对象）：按 trackIdOf 找回
+  const copies = items.map((item) => ({ ...item }));
+  const byId = activationQueueOf(copies, full, copies[2], 2);
+  assert.equal(byId.queue, full);
+  assert.equal(byId.index, 2, "同一首在整表里的真实位置");
+
+  // ④ 同一首出现多次：取离行号最近的那一个（历史里重复条目是有意义的）
+  const repeated = full.map((item) => ({ ...item }));
+  repeated[40] = { ...full[5] };
+  const near = activationQueueOf(repeated.slice(0, 50), repeated, { ...repeated[5] }, 45);
+  assert.equal(near.queue, repeated);
+  assert.equal(near.index, 40, "同一 id 两处：取离行号最近的那一个");
+  assert.equal(activationQueueOf(repeated.slice(0, 50), repeated, { ...repeated[5] }, 5).index, 5);
+  // 身份命中出现两次时同样取近的
+  const twice = [...full.slice(0, 50), full[5]];
+  assert.equal(activationQueueOf(full.slice(0, 50), twice, full[5], 5).index, 5);
+
+  // ⑤ 找不到（或 id 为空）：退回已显示的那批 + 行号
+  const stranger = song("不在表里");
+  assert.deepEqual(activationQueueOf(items, full, stranger, 2), { queue: items, index: 2 });
+  assert.deepEqual(activationQueueOf(items, full, { name: "没有 id" }, 3), { queue: items, index: 3 });
+  assert.deepEqual(activationQueueOf(items, full, null, 4), { queue: items, index: 4 });
+});
+
+test("R55 修订：整表来源接线（歌单详情/历史/歌手）传 queueItems，收藏与搜索不传", () => {
+  const source = read("src/renderer/pages.tsx");
+  const detail = source.slice(source.indexOf("export function PlaylistDetailPage"), source.indexOf("// 搜索：结果"));
+  const artist = source.slice(source.indexOf("export function ArtistPage"), source.indexOf("export function HistoryPage"));
+  const history = source.slice(source.indexOf("export function HistoryPage"), source.indexOf("// 设置（R10）"));
+  const search = source.slice(source.indexOf("export function SearchPage"), source.indexOf("// 专辑 / 歌手 / 播放历史"));
+
+  assert.match(source, /queueItems\?: unknown\[\]|queueItems\?: unknown\[\] \| undefined/, "BrowsableTrackList 有可选 queueItems");
+  assert.match(source, /activationQueueOf\(/, "双击行的队列由纯函数算");
+  assert.match(detail, /queueItems=\{state\.full \?\? undefined\}/, "歌单详情传整表");
+  for (const [name, slice] of [["历史页", history], ["歌手页", artist]]) {
+    assert.match(slice, /queueItems=\{resource\.data/, `${name}整份已在内存，传整表`);
+  }
+  assert.doesNotMatch(search, /queueItems=/, "搜索是服务端真分页：只有已加载的那批是已知的");
 });
 
 test("R45A fix4：server-repeat 留在分页状态，并显示停止原因但不编总数", () => {
@@ -376,19 +456,22 @@ test("分页状态：pageSource / available 跟着协议层那一页走（本地
   // 服务端分页那一页：pageSource=server，available = 这一页给到的条数
   const server = applyPage(createPaginationState(), answer(0, [song("a")], { hasMore: true, pageSource: "server", available: 1 }));
   assert.equal(server.pageSource, "server");
-  assert.equal(playlistLocalSliceNoticeText({ source: server.pageSource, available: server.available, loaded: 1 }), null);
 });
 
-test("文案锚点：本地切片的说明有固定测试锚点（浏览器守卫按它读）", () => {
-  assert.equal(PLAYLIST_SLICE_NOTICE_TESTID, "playlist-local-slice");
-});
-
-test("页面接线：歌单详情用协议层的取数方式说人话（不自造分页结论）", () => {
+test("页面接线：歌单详情的动作作用于整张歌单（整表来自协议层，不从页数猜）", () => {
   const source = read("src/renderer/pages.tsx");
-  assert.match(source, /playlistLocalSliceNoticeText/, "本地切片的说明来自纯逻辑（文案有单测）");
-  assert.match(source, /PLAYLIST_SLICE_NOTICE_TESTID/, "文案锚点来自纯逻辑常量（浏览器守卫按它读）");
+  const detail = source.slice(source.indexOf("export function PlaylistDetailPage"), source.indexOf("// 搜索：结果"));
+  assert.ok(detail.length > 0, "要能在 pages.tsx 里找到 PlaylistDetailPage");
+
   assert.match(source, /state\.pageSource/, "取数方式从分页状态读（不是页面自己猜的）");
   assert.match(source, /pageSource: payload\.pageSource/, "pageAnswerOf 把协议层的 pageSource 传下去");
+  assert.match(source, /Array\.isArray\(payload\.fullSongs\)/, "pageAnswerOf 把协议层交出的整表传下去");
+  assert.match(detail, /state\.full/, "整表从分页状态读（协议层确认整份已在内存时才有）");
+  for (const label of ["PLAYLIST_PLAY_ALL_LABEL", "PLAYLIST_ENQUEUE_LABEL"]) {
+    assert.match(detail, new RegExp(`${label}`), `${label} 的文案来自纯逻辑模块`);
+  }
+  assert.match(detail, /onPlayAll\?\.\(\w*[Ss]ongs\)/, "「播放全部」交出去的是那批曲目");
+  assert.match(detail, /onEnqueue\?\.\(\w*[Ss]ongs\)/, "「加入队列」同一份");
 });
 
 // ---------------------------------------------------------------------------
@@ -418,6 +501,6 @@ test("页面接线：歌手/历史不发分页请求（后端不分页就不要�
   for (const [name, slice] of [["歌手页", artist], ["历史页", history]]) {
     assert.doesNotMatch(slice, /page:\s*nextPageOf|nextPageOf\(/, `${name}不翻页：后端那一个接口不分页`);
     assert.match(slice, /useLocalReveal|createLocalListState/, `${name}用本地分批揭示`);
-    assert.match(slice, /localRevealNoticeText/, `${name}要明说「只有一次网络请求」`);
+    assert.match(slice, /status=""/, `${name}不再挂状态行文案（R55：那几句说明不显示）`);
   }
 });

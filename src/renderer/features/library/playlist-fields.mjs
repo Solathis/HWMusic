@@ -99,8 +99,7 @@ export function playlistDetailTitleOf(playlist, fallbackName = null) {
  *
  * - 接口上报了总数 → "共 N 首"；**只在真的分页没走完时**再补一句"已加载 M 首"
  *   （分页走完时两个数字必然相等，写两遍只是噪音）；
- * - 没有总数 → 就说已加载多少（"已加载 M 首"），不说"共"；
- * - 后面的动作按钮只作用于**已加载**的曲目——这句话由 `playlistPartialNoticeText` 说。
+ * - 没有总数 → 就说已加载多少（"已加载 M 首"），不说"共"。
  *
  * @param {unknown} playlist 协议层归一化过的歌单对象
  * @param {number} loadedCount 页面已加载的曲目条数
@@ -113,15 +112,4 @@ export function playlistDetailMetaText(playlist, loadedCount, hasMore = false) {
   if (total === null) return `已加载 ${loaded} 首`;
   if (hasMore && loaded < total) return `共 ${total} 首 · 已加载 ${loaded} 首`;
   return `共 ${total} 首`;
-}
-
-/**
- * 「只加载了一部分」的说明（分页没走完时显示）。
- *
- * 必须说：那两个按钮作用于页面手里的这批曲目，而不是整张歌单——不说就是在骗人
- * （用户点了"播放全部"，队列里却只有前 50 首）。
- */
-export function playlistPartialNoticeText(loadedCount) {
-  const loaded = Number.isInteger(loadedCount) && loadedCount >= 0 ? loadedCount : 0;
-  return `这一页只加载了前 ${loaded} 首：播放全部与加入队列都只作用于已加载的曲目。`;
 }

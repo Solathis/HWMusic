@@ -12,9 +12,10 @@
  *   一次只取一页，`hasMore` 由协议层给（页面不自己从条数猜）。
  *   走 `createPaginationState` / `beginPage` / `applyPage` / `applyFailure`。
  * - **本地分批**（歌手 / 历史）：接口**本身不分页**，一次响应就是全部。
- *   UI 每批只揭示 50 条，**不重复发网络请求**——所以文案必须明说
- *   "后端一次返回 N 首（1 次网络请求）"，**不许**说"分批减少流量"
- *   （字节一个都没少，那是假话）。走 `createLocalListState` / `revealMore`。
+ *   UI 每批只揭示 50 条，**不重复发网络请求**。走 `createLocalListState` / `revealMore`。
+ *
+ * 状态行只说"已加载 N 首"（不再解释取数方式）；歌单详情的整表曲目由协议层交到
+ * `state.full`，两个动作据此作用于**整张歌单**。
  *
  * ## 不无限连拉
  *
@@ -47,8 +48,6 @@ export const PAGINATION_SENTINEL_TESTID = "list-pagination-sentinel";
 export const PAGINATION_STATUS_TESTID = "list-pagination-status";
 export const PAGINATION_FAILURE_TESTID = "list-pagination-failure";
 export const PAGINATION_RETRY_TESTID = "list-pagination-retry";
-/** 歌单详情「整表响应 → 本地切片」那句说明的锚点（browser 守卫按它读文案）。 */
-export const PLAYLIST_SLICE_NOTICE_TESTID = "playlist-local-slice";
 
 /**
  * 协议层对这一页的取数方式（`null` = 还没取到任何一页）。
@@ -57,8 +56,8 @@ export const PLAYLIST_SLICE_NOTICE_TESTID = "playlist-local-slice";
  * - `"local-slice"`：**整张歌单已经随第一页一次取回**，这一页是本地切片（歌单详情的实测形状）；
  * - `"server-repeat"`：服务端重复返回同一页，停止继续请求但不推断歌单总数。
  *
- * 为什么要把这件事带到界面这一层：这两种形状对用户的意义不同（前者"还在取"，
- * 后者"整份已经下载过，滚动只是显示更多"）。文案不许把后者说成"省流量"——字节一个都没少。
+ * 为什么要把这件事带到界面这一层：两种形状对"动作作用于多少曲目"不同——
+ * `local-slice` 时整张歌单已在内存（`state.full`），`server` 时只有已加载的那批。
  */
 export const PAGINATION_SOURCE = Object.freeze({ server: "server", localSlice: "local-slice", serverRepeat: "server-repeat" });
 
@@ -75,6 +74,7 @@ export const PAGINATION_SOURCE = Object.freeze({ server: "server", localSlice: "
  * @property {number} generation 查询代次（换查询就 +1，旧响应据此丢弃）
  * @property {boolean} armed 是否允许再次触发（离开触发区才重新上膛）
  * @property {unknown} meta 第一页附带的信息（歌单详情的歌单元信息），只认第一页
+ * @property {unknown[]|null} full 整张列表（协议层确认整份已在内存时才给；只认第一页）
  * @property {string|null} pageSource 这一页的取数方式（`PAGINATION_SOURCE`；`null` = 还没取到）
  * @property {number} available 这一页背后那份响应的条数（本地切片时 = 整张歌单的条数）
  */
@@ -96,6 +96,7 @@ export function createPaginationState() {
     generation: 0,
     armed: true,
     meta: null,
+    full: null,
     pageSource: null,
     available: 0,
   };
@@ -168,7 +169,7 @@ export function markSentinelAway(state) {
  *
  * @param {PaginationState} state
  * @param {{generation: number, items?: unknown[], hasMore?: unknown, skipped?: unknown, meta?: unknown,
- *          pageSource?: unknown, available?: unknown}} answer
+ *          full?: unknown, pageSource?: unknown, available?: unknown}} answer
  *   协议层那一页的回执；`generation` 是发请求时的那一代（对不上就整条丢弃）。
  * @param {(item: unknown) => string|null} [keyOf] 去重键：默认按 `id`（与协议层同源）；
  *   历史/同类列表传"含播放时间"的键即可保留重复播放语义。
@@ -215,6 +216,8 @@ export function applyPage(state, answer, keyOf = trackIdOf) {
     armed: false,
     // 歌单元信息只认第一页给的那份（后面几页的 meta 不覆盖这张歌单的身份）
     meta: state.meta ?? answer?.meta ?? null,
+    // 整张歌单同理只认第一页：后续页是切片，不该把整表覆盖成空
+    full: state.full ?? (Array.isArray(answer?.full) ? answer.full : null),
     // 取数方式只认协议层给出的值（认不出就保留上一次的：绝不自己猜取数来源）
     pageSource:
       source === PAGINATION_SOURCE.localSlice ||
@@ -258,7 +261,7 @@ export function retryPagination(state) {
 // 文案（诚实的部分）
 // ---------------------------------------------------------------------------
 
-/** `已加载 N 首`——歌单详情的动作按钮只作用于这批曲目，所以这句话必须说。 */
+/** `已加载 N 首`——说的是"页面上现在有多少条"，不是"这张歌单有多少首"。 */
 export function loadedTracksText(count) {
   const loaded = Number.isInteger(count) && count >= 0 ? count : 0;
   return `已加载 ${loaded} 首`;
@@ -276,49 +279,6 @@ export function paginationNoticeText(summary) {
     return `服务端重复返回同一页，已停止继续加载；已加载 ${loaded} 首。请重新打开歌单后再试。`;
   }
   return summary?.hasMore === true ? `${loadedTracksText(loaded)}，继续向下滚动加载更多。` : loadedTracksText(loaded);
-}
-
-/**
- * 本地分批（歌手 / 历史）的状态行。
- *
- * 两句话都是必须的：
- * - "后端一次返回 N 首" —— 这个接口**不分页**，用户有权知道这不是完整翻页；
- * - "1 次网络请求 / 不减少流量" —— 分批显示只是渲染策略，**字节一个都没少**，
- *   不许把它说成"减少流量"（那是假话，也是本简报点名的边界）。
- *
- * @param {{items: unknown[], revealed: number}} state
- * @returns {string}
- */
-export function localRevealNoticeText(state) {
-  const total = Array.isArray(state?.items) ? state.items.length : 0;
-  const revealed = Number.isInteger(state?.revealed) ? Math.min(state.revealed, total) : 0;
-  return `后端一次返回 ${total} 首（1 次网络请求，分批显示不减少流量），已显示 ${revealed} 首。`;
-}
-
-/**
- * 歌单详情「整表响应 → 本地切片」的说明（R45A3 fix1）。
- *
- * 事实（2026-10-23 真机只读取证）：`library:playlist-detail` 请求 `pageSize=50`，服务端一次回了
- * **整张歌单的全部条目**——它不认 `start`/`limit`。于是界面上的"第 2 页 / 第 3 页"是**本地切片**，
- * 不是网络分页。这句话必须同时说清三件事，少一件就会误导：
- *
- * 1. **服务端的行为**：整张一次取回（不是"每次只取一页"）；
- * 2. **滚动做了什么事**：本地切片，**不再发网络请求**（这是承诺，也是事实）；
- * 3. **滚动没做什么事**：**不减少流量**——整份早就下载完了，把"分批显示"说成"省流量/省内存"
- *    是假话（简报点名的边界）。
- *
- * `source` 只认协议层给的那两个值：服务端真的按页给（`"server"`）时没有这句话，两种形状不许混成一句。
- * 条数不明（`available` 不是正整数）时**不编数字**，只说"整张歌单"。
- *
- * @param {{source?: unknown, available?: unknown, loaded?: unknown}} [summary]
- * @returns {string|null} 该说的话；`null` = 这一页不是本地切片，不必说
- */
-export function playlistLocalSliceNoticeText(summary) {
-  if (summary?.source !== PAGINATION_SOURCE.localSlice) return null;
-  const loaded = Number.isInteger(summary?.loaded) && summary.loaded >= 0 ? summary.loaded : 0;
-  const available = Number.isInteger(summary?.available) && summary.available > 0 ? summary.available : null;
-  const whole = available === null ? "服务端一次返回整张歌单（条数未给出）" : `服务端一次返回整张歌单（${available} 首）`;
-  return `${whole}：滚动只是本地切片，不再发网络请求，也不减少流量（整份已经下载过）。已显示 ${loaded} 首。`;
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +331,42 @@ export function hasRevealableItems(state) {
   const total = Array.isArray(state?.items) ? state.items.length : 0;
   const revealed = Number.isInteger(state?.revealed) ? state.revealed : 0;
   return revealed < total;
+}
+
+/** 命中里离 `row` 最近的下标（并列取靠前的）；一个都没命中回 -1。 */
+function nearestIndex(list, predicate, row) {
+  let best = -1;
+  for (let index = 0; index < list.length; index += 1) {
+    if (!predicate(list[index])) continue;
+    if (best === -1 || Math.abs(index - row) < Math.abs(best - row)) best = index;
+  }
+  return best;
+}
+
+/**
+ * 双击一行时应放进队列的列表与起始下标：整表已在内存就排整表（否则"下一首"会在
+ * 已显示的这批末尾断掉）。行对象可能不是整表里的同一引用（IPC 反序列化），
+ * 所以先按身份、再按 id 找；同一首多处出现取离行号最近的那个。
+ *
+ * @param {unknown[]} items 已显示的那批
+ * @param {unknown[]} [queueItems] 整表（缺省 = 只有这一批是已知的）
+ * @param {unknown} song 被双击的那一行
+ * @param {number} rowIndex 它在 `items` 里的下标
+ * @returns {{queue: unknown[], index: number}}
+ */
+export function activationQueueOf(items, queueItems, song, rowIndex) {
+  const visible = Array.isArray(items) ? items : [];
+  const row = Number.isInteger(rowIndex) && rowIndex >= 0 ? rowIndex : 0;
+  const fallback = { queue: visible, index: row };
+  if (!Array.isArray(queueItems) || queueItems === visible) return fallback;
+
+  const byIdentity = nearestIndex(queueItems, (entry) => entry === song, row);
+  if (byIdentity !== -1) return { queue: queueItems, index: byIdentity };
+
+  const id = trackIdOf(song);
+  if (id === null) return fallback;
+  const byId = nearestIndex(queueItems, (entry) => trackIdOf(entry) === id, row);
+  return byId === -1 ? fallback : { queue: queueItems, index: byId };
 }
 
 // ---------------------------------------------------------------------------

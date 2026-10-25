@@ -1715,6 +1715,11 @@ export function createMusicApi(options = {}) {
       pageSource: "local-slice",
       /** 这一页背后那份响应有多少首（本地切片时 = 整张歌单的条数）。只用于如实说明，不是"总数"承诺。 */
       available: entry.total,
+      /**
+       * 整张歌单：整份已在内存，第一页顺手交出去，页面据此让「播放全部」「加入队列」
+       * 作用于**全部曲目**（不是已渲染的那一页）。只随第一页给，后续页再交一遍只是白扛序列化。
+       */
+      ...(page === 1 ? { fullSongs: entry.songs } : {}),
     });
   }
 

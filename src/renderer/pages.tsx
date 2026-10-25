@@ -15,8 +15,7 @@
  *
  * R45A3（简报第 12 项"歌曲列表触底加载，不一次加载全部"）：列表分成两种，**不许混为一谈**——
  * - 歌单详情 / 搜索 / 专辑：接口真的认 `page`/`pageSize`，滚到离底 240px 取**下一页**；
- * - 歌手 / 历史：接口**本身不分页**，一次响应就是全部，UI 只本地分批揭示 50 条，
- *   而且明说"后端一次返回 N 首（1 次网络请求）"——分批显示**不减少任何字节**。
+ * - 歌手 / 历史：接口**本身不分页**，一次响应就是全部，UI 只本地分批揭示 50 条（不挂状态行）。
  * 判定（合并/去重/竞态/重试/上膛）全在 `features/library/pagination.mjs`，这里只接线。
  */
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
@@ -64,7 +63,6 @@ import {
   playlistCoverUrlOf,
   playlistDetailMetaText,
   playlistDetailTitleOf,
-  playlistPartialNoticeText,
 } from "./features/library/playlist-fields.mjs"
 import {
   APPEARANCE_NOTICE_TEXT,
@@ -95,20 +93,18 @@ import {
   PAGINATION_ROOT_MARGIN,
   PAGINATION_SENTINEL_TESTID,
   PAGINATION_STATUS_TESTID,
-  PLAYLIST_SLICE_NOTICE_TESTID,
   applyFailure,
   applyPage,
   beginPage,
   createLocalListState,
+  activationQueueOf,
   createPaginationState,
   findScrollRoot,
   hasRevealableItems,
   isInitialPaging,
-  localRevealNoticeText,
   markSentinelAway,
   nextPageOf,
   paginationNoticeText,
-  playlistLocalSliceNoticeText,
   resetPagination,
   retryPagination,
   revealMore,
@@ -216,6 +212,7 @@ function pageAnswerOf(data: unknown) {
     hasMore?: unknown
     skipped?: unknown
     playlist?: unknown
+    fullSongs?: unknown
     pageSource?: unknown
     available?: unknown
   }
@@ -226,6 +223,8 @@ function pageAnswerOf(data: unknown) {
     skipped: Number.isInteger(payload.skipped) ? (payload.skipped as number) : 0,
     // 歌单详情的歌单元信息跟着第一页过来（分页纯逻辑只认第一页那份）
     meta: payload.playlist ?? null,
+    // 整张歌单（协议层确认整份已在内存时才给）：两个动作据此作用于全部曲目
+    full: Array.isArray(payload.fullSongs) ? payload.fullSongs : null,
     // 这一页是怎么来的（`server` / `local-slice` / `server-repeat`）与背后那份响应的条数：两者都由协议层说，
     // 渲染层既不猜"这是本地切片"，也不自己数总数（R45A3 fix1）
     pageSource: payload.pageSource,
@@ -435,6 +434,7 @@ function useLocalReveal(items: unknown[]): {
  */
 function BrowsableTrackList({
   items,
+  queueItems,
   emptyText,
   navigation,
   status,
@@ -446,9 +446,11 @@ function BrowsableTrackList({
   observe = false,
 }: {
   items: unknown[]
+  /** 整表已在内存时给整份：双击某行排的是整表（不传 = 只有已显示的这批是已知的） */
+  queueItems?: unknown[]
   emptyText: string
   navigation: PageNavigationProps
-  /** 状态行：已加载 N 首（服务端分页）/ 后端一次返回 N 首（本地分批） */
+  /** 状态行：已加载 N 首（服务端分页）；空串 = 这一页不挂状态行（歌手/历史） */
   status: string
   sentinelRef: RefObject<HTMLDivElement | null>
   loading?: boolean
@@ -484,8 +486,11 @@ function BrowsableTrackList({
         <TrackTable
           songs={items}
           emptyText={emptyText}
-          // 队列要用**整张已加载列表**（只播一首会让"下一首"永远没有下一首）
-          onActivate={(song, index) => navigation.onActivateTrack(song, index, items)}
+          // 队列与「播放全部」同一个基准：整表在内存就是整张表，否则是已加载的这批
+          onActivate={(song, index) => {
+            const target = activationQueueOf(items, queueItems, song, index)
+            navigation.onActivateTrack(song, target.index, target.queue)
+          }}
           onOpenAlbum={navigation.onOpenAlbum}
           onOpenArtist={navigation.onOpenArtist}
         />
@@ -547,9 +552,10 @@ export function PlaylistsPage({
  *    官方的 `BackgroundRender`（`AmllBackground`）：封面地址交给它之前先由宿主用 `new Image()`
  *    加载成 `HTMLImageElement`——**不是 fetch**（CSP 的 `connect-src` 只有 self/ipc，
  *    字符串地址会被 AMLL 拿去 fetch 而撞墙；图片走的是 `img-src`）；
- * 2. **动作**：`播放全部` = 用**已加载**的曲目整队替换并从第一首开始（`playQueue`）；
- *    `加入队列` = 追加到队尾、不动正在播的那一首（`enqueue`）。两个都**只作用于已加载的曲目**，
- *    分页没走完时页面上有一句说明（不把"前 50 首"说成"整张歌单"）；
+ * 2. **动作**：`播放全部` = 用**整张歌单**的曲目整队替换并从第一首开始（`playQueue`）；
+ *    `加入队列` = 追加到队尾、不动正在播的那一首（`enqueue`）。歌单详情那个端点一次回整张歌单，
+ *    所以整表就在内存里（`state.full`），动作作用于全部曲目而不是已渲染的那 50 首；
+ *    服务端真按页给时没有整表，动作退回已加载的那批；
  * 3. **正文**：曲目表（沿用 `TrackTable`：双击播放、键盘可达、艺人/专辑跳转），
  *    R45A3 起滚到离底 240px 就取下一页（`LIBRARY_PLAYLIST_DETAIL` 的 `page`/`pageSize`）。
  *
@@ -570,9 +576,9 @@ export function PlaylistDetailPage({
   ...navigation
 }: {
   view: View
-  /** 播放全部：把**已加载**的曲目整队替换并播放第一首 */
+  /** 播放全部：把整张歌单的曲目整队替换并播放第一首 */
   onPlayAll?: (songs: unknown[]) => void
-  /** 加入队列：追加到队尾（不动正在播的那一首），同样只作用于已加载的曲目 */
+  /** 加入队列：追加到队尾（不动正在播的那一首），同样作用于整张歌单 */
   onEnqueue?: (songs: unknown[]) => void
 } & PageNavigationProps) {
   const playlistId = viewParam(view, "playlistId")
@@ -589,17 +595,9 @@ export function PlaylistDetailPage({
   const hasMore = state.hasMore === true
   const coverUrl = playlistCoverUrlOf(playlist)
   const title = playlistDetailTitleOf(playlist, viewParam(view, "name"))
-  const actionsDisabled = songs.length === 0
-  /**
-   * 这一页是怎么来的——**只从分页状态读**（它记的是协议层说的 `pageSource`），页面不自己猜
-   * "这就是本地切片"。歌单详情那个端点实测一次回整张歌单，所以第 2 页起是本地切片：
-   * 那句话必须说出来（含"不再发网络请求"与"不减少流量"两条），见 `playlistLocalSliceNoticeText`。
-   */
-  const sliceNotice = playlistLocalSliceNoticeText({
-    source: state.pageSource,
-    available: state.available,
-    loaded: songs.length,
-  })
+  /** 两个动作的曲目：整表在内存时就是整张歌单，否则退回已加载的那批。 */
+  const actionSongs = state.full ?? songs
+  const actionsDisabled = actionSongs.length === 0
 
   return (
     <div className="flex flex-col" data-testid="playlist-detail">
@@ -622,35 +620,26 @@ export function PlaylistDetailPage({
             <CardTitle className="truncate text-2xl">{title}</CardTitle>
             <CardDescription>{playlistDetailMetaText(playlist, songs.length, hasMore)}</CardDescription>
             <div className="flex flex-wrap items-center gap-2 pt-1">
-              <Button disabled={actionsDisabled || onPlayAll === undefined} onClick={() => onPlayAll?.(songs)}>
+              <Button disabled={actionsDisabled || onPlayAll === undefined} onClick={() => onPlayAll?.(actionSongs)}>
                 <PlayIcon />
                 {PLAYLIST_PLAY_ALL_LABEL}
               </Button>
               <Button
                 variant="secondary"
                 disabled={actionsDisabled || onEnqueue === undefined}
-                onClick={() => onEnqueue?.(songs)}
+                onClick={() => onEnqueue?.(actionSongs)}
               >
                 <ListPlusIcon />
                 {PLAYLIST_ENQUEUE_LABEL}
               </Button>
             </div>
-            {hasMore ? (
-              <p className="text-xs text-muted-foreground">{playlistPartialNoticeText(songs.length)}</p>
-            ) : null}
           </div>
         </CardContent>
       </Card>
 
-      {/* 服务端一次回整张歌单时的如实说明（本地切片 ≠ 网络分页，也 ≠ 省流量） */}
-      {sliceNotice === null ? null : (
-        <p className="mx-4 mb-2 text-xs text-muted-foreground" data-testid={PLAYLIST_SLICE_NOTICE_TESTID}>
-          {sliceNotice}
-        </p>
-      )}
-
       <BrowsableTrackList
         items={songs}
+        queueItems={state.full ?? undefined}
         emptyText={libraryEmptyText(view)}
         navigation={navigation}
         status={paginationNoticeText({ loaded: songs.length, hasMore, pageSource: state.pageSource })}
@@ -745,8 +734,7 @@ export function AlbumPage({ view, ...navigation }: { view: View } & PageNavigati
  * 歌手页：**后端不分页**（协议层 `artist` 只认 `songNum`/`albumNum`，没有 start/limit）。
  *
  * 所以这里只发**一次**请求，拿到的那一份就是全部；UI 每批揭示 50 条，哨兵每批再加 50。
- * 状态行必须明说"后端一次返回 N 首（1 次网络请求）"——分批显示**不减少任何字节**，
- * 说成"减少流量/节省请求"就是撒谎（简报点名的边界）。
+ * 不挂状态行：滚动就是显示更多，页面上不必解释取数方式。
  */
 export function ArtistPage({ view, ...navigation }: { view: View } & PageNavigationProps) {
   const artistId = viewParam(view, "artistId")
@@ -765,9 +753,10 @@ export function ArtistPage({ view, ...navigation }: { view: View } & PageNavigat
   return (
     <BrowsableTrackList
       items={visibleItemsOf(reveal.state)}
+      queueItems={resource.data ?? undefined}
       emptyText={libraryEmptyText(view)}
       navigation={navigation}
-      status={localRevealNoticeText(reveal.state)}
+      status=""
       sentinelRef={reveal.sentinelRef}
       observe={hasRevealableItems(reveal.state)}
     />
@@ -793,9 +782,10 @@ export function HistoryPage({ ...navigation }: PageNavigationProps) {
   return (
     <BrowsableTrackList
       items={visibleItemsOf(reveal.state)}
+      queueItems={resource.data ?? undefined}
       emptyText={libraryEmptyText(view)}
       navigation={navigation}
-      status={localRevealNoticeText(reveal.state)}
+      status=""
       sentinelRef={reveal.sentinelRef}
       observe={hasRevealableItems(reveal.state)}
     />
