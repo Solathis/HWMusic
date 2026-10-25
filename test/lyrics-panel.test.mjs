@@ -105,7 +105,7 @@ test("歌词舞台：定位容器 + 压暗层 + 文案来自纯逻辑模块（�
   assert.match(stage, /bg-background\//, "压暗层用设计令牌（背景之上、歌词之下）");
   assert.match(stage, /lyricsNoticeText/, "占位文案来自 playback-state.mjs（三档不混）");
   assert.doesNotMatch(stripComments(stage), /歌词来源|还没有歌词|敬请期待/, "文案不许在组件里另写一份");
-  assert.match(stage, /<MediaButton[^>]*aria-label="收起歌词"/, "沉浸页收起按钮同样来自官方 AMLL");
+  assert.match(stage, /<Button[\s\S]*?aria-label="收起歌词"/, "沉浸页收起用 shadcn Button（官方组件，不手写可点 div）");
 });
 
 /** 全应用遮挡与字迹像素由 scripts/test-browser.mjs 的完整组合回归验证。 */

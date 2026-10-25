@@ -337,6 +337,14 @@ function Guard() {
       setTime: (ms) => runtime.player.seek(ms),
       nextTrack: () => runtime.player.next(),
       prepareRepeatedQueue: () => runtime.player.playQueue([songs[0], songs[0]], 0),
+      /**
+       * R54：只把队列摆好、**不播**（恢复队列的样子）。音频一次都没装载，所以总时长只能来自
+       * 条目元数据——正是"底栏不该显示「—」"那条路径。seconds 为 null 的条目没有时长字段。
+       */
+      queueWithTrackDuration(seconds) {
+        const song = { id: "meta-" + (seconds === null ? "none" : seconds), name: "元数据时长曲目", artists: "守卫艺人" };
+        runtime.player.setQueue([seconds === null ? song : { ...song, duration: seconds }], 0);
+      },
       markRuntime() { this.markedRuntime = runtime; },
       sameRuntime: () => window.__guard.markedRuntime === getPlayerRuntime(),
       async setCoverFailure() {
@@ -901,6 +909,42 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
     JSON.stringify(closeGeometry));
 
   /**
+   * R54：收起从"顶部中央一小块"扩成**顶部一整行**：宽度≈舞台宽度、箭头居中、
+   * 行高只占顶部一条带（下面一点仍是歌词/封面，不被这一行挡住）。
+   */
+  const closeRow = await stage.evaluate((element) => {
+    const row = element.querySelector('[data-testid="playback-stage-close-row"]');
+    const icon = row?.querySelector("svg");
+    if (!row || !icon) return { ok: false, missing: true };
+    const stageRect = element.getBoundingClientRect();
+    const r = row.getBoundingClientRect();
+    const i = icon.getBoundingClientRect();
+    const below = document.elementFromPoint(r.x + r.width / 2, r.bottom + 8);
+    return {
+      rowWidth: Math.round(r.width), stageWidth: Math.round(stageRect.width), top: Math.round(r.y),
+      height: Math.round(r.height),
+      rowCenterOffset: Math.round(r.x + r.width / 2 - innerWidth / 2),
+      iconCenterOffset: Math.round(i.x + i.width / 2 - innerWidth / 2),
+      belowIsRow: Boolean(below && row.contains(below)),
+      label: row.getAttribute("aria-label"),
+      ok: true,
+    };
+  });
+  // 截图取舞台顶部一条带（箭头 + 下面露出的歌词/控件），供人工复核"整行"的观感
+  const stageTopBox = await stage.boundingBox();
+  if (stageTopBox) {
+    await page.screenshot({
+      path: path.join(guardDir, "r54-stage-close-row.png"),
+      clip: { x: stageTopBox.x, y: stageTopBox.y, width: stageTopBox.width, height: 220 },
+    });
+  }
+  add("r54-stage-close-row-full-width",
+    closeRow.ok && closeRow.stageWidth - closeRow.rowWidth <= 2 && closeRow.top <= 2
+      && Math.abs(closeRow.rowCenterOffset) <= 2 && Math.abs(closeRow.iconCenterOffset) <= 2
+      && closeRow.height <= 48 && !closeRow.belowIsRow && closeRow.label === "收起歌词",
+    JSON.stringify(closeRow));
+
+  /**
    * R50（brief 第 1 项）：传输组只剩 上一首 → 播放 → 下一首，歌词开关在**下方工具行**尾部。
    *
    * 量几何而不是标记：开关的中心既不许落在"播放与下一首之间"，也不许落在传输行的高度带里；
@@ -948,10 +992,12 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
   await menu.waitFor();
   const menuLayering = await page.evaluate(() => {
     const menuNode = document.querySelector('[role="menu"]');
-    const button = document.querySelector('[data-testid="playback-stage"] button[aria-label="收起歌词"]');
-    if (!menuNode || !button) return { ok: false };
+    const button = document.querySelector('[data-testid="playback-stage-close-row"]');
+    // 与 Sheet 那条同理：量的是箭头的可见入口，不是整行（整行横跨舞台，与浮层相交是必然的）
+    const arrow = button?.querySelector("svg");
+    if (!menuNode || !button || !arrow) return { ok: false };
     const m = menuNode.getBoundingClientRect();
-    const b = button.getBoundingClientRect();
+    const b = arrow.getBoundingClientRect();
     const hit = document.elementFromPoint(m.x + m.width / 2, m.y + m.height / 2);
     return {
       ok: Boolean(hit && menuNode.contains(hit)),
@@ -973,10 +1019,13 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
   await sheet.waitFor();
   const sheetLayering = await page.evaluate(() => {
     const content = document.querySelector('[data-slot="sheet-content"]');
-    const button = document.querySelector('[data-testid="playback-stage"] button[aria-label="收起歌词"]');
-    if (!content || !button) return { ok: false };
+    const button = document.querySelector('[data-testid="playback-stage-close-row"]');
+    // 收起入口是**整行**（横跨舞台），Sheet 是右侧抽屉，必然与行本身相交；
+    // 这里量的是"箭头这处可见入口没被上层盖住"，与 R45C 的意图一致。
+    const arrow = button?.querySelector("svg");
+    if (!content || !button || !arrow) return { ok: false };
     const s = content.getBoundingClientRect();
-    const b = button.getBoundingClientRect();
+    const b = arrow.getBoundingClientRect();
     const hit = document.elementFromPoint(s.x + s.width / 2, s.y + s.height / 2);
     return {
       ok: Boolean(hit && content.contains(hit)),
@@ -991,6 +1040,49 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
 
   await page.keyboard.press("Escape");
   add("playback-stage-escape-closes", await stage.count() === 0, "没有上层弹窗时 ESC 关闭舞台");
+
+  // R54：行内任意位置都能收起（点在行的左端，而不是箭头所在的中线上）
+  await page.getByRole("button", { name: "歌词", exact: true }).click();
+  await stage.waitFor();
+  await page.waitForTimeout(600);
+  await stage.click({ position: { x: 40, y: 20 } });
+  const closedByRow = await stage.count() === 0;
+  add("r54-stage-close-row-anywhere", closedByRow, "行的左端（远离箭头）点击同样收起沉浸页");
+
+  /**
+   * R54：底栏总时长。队列摆好但一次都没播（音频没装载）时，读数要来自条目元数据秒数；
+   * 条目也没有时长字段才是「—」，此时进度条保持禁用（范围未知）。
+   */
+  await page.evaluate(() => window.__guard.queueWithTrackDuration(184));
+  await page.waitForTimeout(200);
+  const barDuration = await page.evaluate(() => {
+    const bar = document.querySelector('[data-testid="player-bar"]');
+    const slider = bar?.querySelector('[data-slot="slider"]');
+    return {
+      total: document.querySelector('[data-testid="player-duration"]')?.textContent?.trim() ?? "",
+      durationMs: window.__guard.snapshot().durationMs,
+      sliderDisabled: slider?.hasAttribute("data-disabled") ?? true,
+      sliderMax: slider?.querySelector('[data-slot="slider-thumb"]')?.getAttribute("aria-valuemax") ?? null,
+    };
+  });
+  const durationBarBox = await page.getByTestId("player-bar").boundingBox();
+  if (durationBarBox) await page.screenshot({ path: path.join(guardDir, "r54-player-bar-duration.png"), clip: durationBarBox });
+  add("r54-player-bar-duration-from-metadata",
+    barDuration.total === "3:04" && barDuration.durationMs === 184_000 && !barDuration.sliderDisabled,
+    JSON.stringify(barDuration));
+
+  await page.evaluate(() => window.__guard.queueWithTrackDuration(null));
+  await page.waitForTimeout(200);
+  const barUnknown = await page.evaluate(() => {
+    const bar = document.querySelector('[data-testid="player-bar"]');
+    const slider = bar?.querySelector('[data-slot="slider"]');
+    return {
+      total: document.querySelector('[data-testid="player-duration"]')?.textContent?.trim() ?? "",
+      sliderDisabled: slider?.hasAttribute("data-disabled") ?? false,
+    };
+  });
+  add("r54-player-bar-unknown-duration-dash", barUnknown.total === "—" && barUnknown.sliderDisabled,
+    JSON.stringify(barUnknown));
 
   await page.getByRole("button", { name: "歌词", exact: true }).click();
   await stage.waitFor();

@@ -21,6 +21,7 @@
  */
 import { queueEntriesOf, queueRecordOf, restoredEntries, sanitizeQueueRecord } from "./queue.mjs";
 import { LYRICS_STATUS } from "../lyrics/lyrics-window.mjs";
+import { trackDurationOf } from "../library/track-fields.mjs";
 
 /** 歌词状态词表（唯一真源在 features/lyrics/lyrics-window.mjs）：认不出的值一律不写进状态。 */
 const LYRICS_STATUSES = Object.values(LYRICS_STATUS);
@@ -59,7 +60,7 @@ export const PLAYER_ERROR_KINDS = {
 export const DEFAULT_VOLUME = 1;
 
 /** 音频端口会发的事件（真实元素的适配见 audio-element.mjs）。 */
-export const PLAYER_AUDIO_EVENTS = ["ended", "error", "loadedmetadata", "timeupdate", "playing", "waiting"];
+export const PLAYER_AUDIO_EVENTS = ["ended", "error", "loadedmetadata", "durationchange", "timeupdate", "playing", "waiting"];
 
 function clamp(value, min, max) {
   if (value < min) return min;
@@ -72,6 +73,20 @@ function millisOfSeconds(value) {
   const seconds = Number(value);
   if (!Number.isFinite(seconds) || seconds < 0) return null;
   return Math.round(seconds * 1000);
+}
+
+/**
+ * 有效总时长（毫秒）：音频报的**有限正值** → 曲目元数据秒数 → 0（界面显示「—」）。
+ *
+ * 流媒体常先报 `Infinity`/`NaN`，恢复的队列在装载前没有任何读数；0 是"不知道"，不是"零秒"。
+ *
+ * @param {{duration?: unknown}|null} track
+ * @param {number} reportedMs 音频元素最近报的时长（毫秒，0 = 没报到可用值）
+ */
+export function totalDurationMsOf(track, reportedMs) {
+  if (typeof reportedMs === "number" && Number.isFinite(reportedMs) && reportedMs > 0) return Math.round(reportedMs);
+  const seconds = trackDurationOf(track);
+  return seconds === null ? 0 : Math.round(seconds * 1000);
 }
 
 function textOf(cause) {
@@ -134,6 +149,8 @@ export function createPlayer(options = {}) {
   /** 随机模式的轮换排列与游标（一轮内不重复，且"上一首"退得回去）。 */
   let order = [];
   let cursor = 0;
+  /** 音频元素最近报的时长（毫秒；0 = 没报到可用值）。有效总时长见 `totalDurationMsOf`。 */
+  let reportedDurationMs = 0;
 
   /**
    * 状态是**不可变替换**的：React 的 useSyncExternalStore 靠引用比较认变化。
@@ -369,6 +386,8 @@ export function createPlayer(options = {}) {
     if (state.mode === "shuffle" && manual) rebuildOrder(index);
 
     const activeToken = (token += 1);
+    // 新曲目没装载前，音频的读数属于上一首：清掉，让总时长退回条目元数据
+    if (!sameLoaded) reportedDurationMs = 0;
     publish({
       index,
       track: entry,
@@ -376,7 +395,12 @@ export function createPlayer(options = {}) {
       error: null,
       ...(sameLoaded
         ? {}
-        : { loaded: false, currentTimeMs: 0, durationMs: 0, status: PLAYER_STATUS.loading }),
+        : {
+            loaded: false,
+            currentTimeMs: 0,
+            durationMs: totalDurationMsOf(entry, reportedDurationMs),
+            status: PLAYER_STATUS.loading,
+          }),
     });
     persist();
 
@@ -476,6 +500,7 @@ export function createPlayer(options = {}) {
     loadedId = null;
     order = [];
     cursor = 0;
+    reportedDurationMs = 0;
     stopAudio();
     publish({
       entries,
@@ -485,7 +510,7 @@ export function createPlayer(options = {}) {
       status: PLAYER_STATUS.idle,
       loaded: false,
       currentTimeMs: 0,
-      durationMs: 0,
+      durationMs: totalDurationMsOf(index >= 0 ? entries[index] : null, 0),
       error: null,
     });
     persist();
@@ -526,10 +551,12 @@ export function createPlayer(options = {}) {
     const entries = [...state.entries, ...appended];
     // 原本空队列：索引指向新队列的第一首（状态从"没得放"变成"可以放"，但仍不自动开播）
     const index = state.index < 0 ? 0 : state.index;
+    if (state.index < 0) reportedDurationMs = 0;
     publish({
       entries,
       index,
       track: entries[index] ?? null,
+      durationMs: totalDurationMsOf(entries[index] ?? null, reportedDurationMs),
       error: null,
     });
     persist();
@@ -541,6 +568,7 @@ export function createPlayer(options = {}) {
     loadedId = null;
     order = [];
     cursor = 0;
+    reportedDurationMs = 0;
     stopAudio();
     publish({
       entries: [],
@@ -578,6 +606,7 @@ export function createPlayer(options = {}) {
     loadedId = null;
     order = [];
     cursor = 0;
+    reportedDurationMs = 0;
     publish({
       entries,
       index: clean.index,
@@ -586,7 +615,7 @@ export function createPlayer(options = {}) {
       status: PLAYER_STATUS.idle,
       loaded: false,
       currentTimeMs: 0,
-      durationMs: 0,
+      durationMs: totalDurationMsOf(entries[clean.index] ?? null, 0),
       error: null,
       restored: true,
     });
@@ -674,9 +703,17 @@ export function createPlayer(options = {}) {
   listen("error", () => {
     failPlayback(PLAYER_ERROR_KINDS.audioError, "音频播放失败（音源不可用或格式不支持）");
   });
+  /**
+   * 时长读数（`loadedmetadata` / `durationchange` 同一个处理）：流媒体常先报 `Infinity`，
+   * 之后 `durationchange` 才报真实值——只听前者就会一直停在元数据兜底上。
+   */
   listen("loadedmetadata", (payload) => {
-    const durationMs = millisOfSeconds(payload?.duration);
-    publish({ durationMs: durationMs ?? 0 });
+    reportedDurationMs = millisOfSeconds(payload?.duration) ?? 0;
+    publish({ durationMs: totalDurationMsOf(state.track, reportedDurationMs) });
+  });
+  listen("durationchange", (payload) => {
+    reportedDurationMs = millisOfSeconds(payload?.duration) ?? 0;
+    publish({ durationMs: totalDurationMsOf(state.track, reportedDurationMs) });
   });
   listen("timeupdate", (payload) => {
     const currentTimeMs = millisOfSeconds(payload?.currentTime);

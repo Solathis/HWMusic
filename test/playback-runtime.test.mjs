@@ -94,6 +94,20 @@ test("音频端口：一个实例、单位换算（毫秒↔秒）、事件转�
   assert.equal(seen.length, 1, "退订之后不再回调");
 });
 
+test("音频端口：durationchange 也带出 duration（流媒体先报 Infinity、之后才报真实值）", () => {
+  const { FakeAudio, created } = fakeAudioClass();
+  const port = createAudioElementPort({ AudioCtor: FakeAudio, log: () => {} });
+  const seen = [];
+  port.on("durationchange", (payload) => seen.push(payload));
+
+  created[0].duration = Number.POSITIVE_INFINITY;
+  created[0].dispatch("durationchange");
+  created[0].duration = 176;
+  created[0].dispatch("durationchange");
+
+  assert.deepEqual(seen, [{ duration: Number.POSITIVE_INFINITY }, { duration: 176 }]);
+});
+
 test("音频端口：没有可用的 Audio 实现时如实报错（而不是留一个半死的播放器）", () => {
   assert.throws(
     () => createAudioElementPort({ AudioCtor: undefined, globalObject: {}, log: () => {} }),

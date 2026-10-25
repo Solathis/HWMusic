@@ -241,13 +241,18 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
           )}
         />
         {/*
-          R45C：收起从右上角叉号搬到**顶部中央**的下拉箭头（用户要求）。
-          几何居中靠 `left-1/2 -translate-x-1/2`（与播放栏控件组同一条做法）：
-          右侧放一枚叉号在沉浸页里像是"关掉这首歌"，而它只是回到主界面。
+          收起 = **顶部整行**：行高只占顶部一条带，箭头居中，行内任意位置可点。
+          不用右上角叉号：在沉浸页里它像是"关掉这首歌"，而这里只是回到主界面。ESC 行为不变（见上面的 keydown）。
         */}
-        <div className="absolute top-2 left-1/2 -translate-x-1/2">
-          <MediaButton className="size-8 motion-reduce:animate-none! motion-reduce:transition-none! motion-reduce:duration-0! motion-reduce:[&_*]:animate-none! motion-reduce:[&_*]:transition-none! motion-reduce:[&_*]:duration-0!" aria-label="收起歌词" onClick={onClose}><ChevronDownIcon className="size-4" /></MediaButton>
-        </div>
+        <Button
+          variant="ghost"
+          className="absolute inset-x-0 top-0 h-10 w-full rounded-none motion-reduce:transition-none! motion-reduce:duration-0!"
+          aria-label="收起歌词"
+          data-testid="playback-stage-close-row"
+          onClick={onClose}
+        >
+          <ChevronDownIcon className="size-4" />
+        </Button>
       </div>
     </MotionConfig>,
     document.body,

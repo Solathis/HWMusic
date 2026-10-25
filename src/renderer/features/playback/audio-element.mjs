@@ -16,13 +16,14 @@
  */
 
 /** 音频元素认的事件（状态机侧同名常量见 player.mjs 的 `PLAYER_AUDIO_EVENTS`）。 */
-export const AUDIO_ELEMENT_EVENTS = ["ended", "error", "loadedmetadata", "timeupdate", "playing", "waiting"];
+export const AUDIO_ELEMENT_EVENTS = ["ended", "error", "loadedmetadata", "durationchange", "timeupdate", "playing", "waiting"];
 
 /** 事件 → 载荷：只有需要读数的两个事件带载荷（其余是"发生了什么"）。 */
 const EVENT_PAYLOAD = {
   ended: () => undefined,
   error: () => undefined,
   loadedmetadata: (element) => ({ duration: element.duration }),
+  durationchange: (element) => ({ duration: element.duration }),
   timeupdate: (element) => ({ currentTime: element.currentTime }),
   playing: () => undefined,
   waiting: () => undefined,

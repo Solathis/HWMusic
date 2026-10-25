@@ -355,17 +355,19 @@ test("R50 沉浸页：传输组只剩 上一首→播放→下一首，歌词开
   assert.match(toggleMarkup, /lyrics\?\.toggleVisible\("playback-stage"\)/);
 });
 
-test("R45C 沉浸页收起：顶部中央 ChevronDown，不再右上角叉号，ESC 照旧", () => {
+test("R54 沉浸页收起：顶部整行（宽度铺满、箭头居中），不再是中央一小块，ESC 照旧", () => {
   const stage = stripComments(read(STAGE));
 
   assert.match(
     stage,
-    /<div className="absolute top-2 left-1\/2 -translate-x-1\/2">/,
-    "收起按钮在顶部中央（几何居中，不是靠内容宽度凑）",
+    /className="absolute inset-x-0 top-0 h-10 w-full[^"]*"/,
+    "收起是顶部整行：左右贴边、只在顶部占一条带（行内任意位置都能点）",
   );
+  assert.match(stage, /<Button[\s\S]*?aria-label="收起歌词"/, "收起用 shadcn Button（官方组件，不手写可点 div）");
   assert.match(stage, /aria-label="收起歌词"/, "无障碍名称说清它做什么");
   assert.match(stage, /<ChevronDownIcon/, "图标是 lucide 的 ChevronDown");
-  assert.doesNotMatch(stage, /right-4/, "右上角那处绝对定位已删");
+  assert.doesNotMatch(stage, /absolute top-2 left-1\/2 -translate-x-1\/2/, "顶部中央那一小块已不再是收起入口");
+  assert.doesNotMatch(stage, /<div[^>]*onClick=\{onClose\}/, "可点区域不能是裸 div（键盘/无障碍都要靠按钮）");
   assert.doesNotMatch(stage, /\bXIcon\b/, "叉号图标已不再引用");
   assert.match(stage, /"Escape"/, "ESC 关闭保留（键盘用户不该只剩鼠标一条路）");
   assert.match(stage, /\[role="dialog"\], \[role="alertdialog"\], \[role="menu"\]/, "上层弹窗打开时 ESC 先关弹窗");

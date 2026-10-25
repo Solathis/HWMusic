@@ -585,7 +585,7 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
         </span>
         <Slider
           className="min-w-0 flex-1"
-          // 总长还不知道（元数据没来）时禁用进度条：拖动一个范围未知的滑块，
+          // 总长拿不到（音频没读数、条目也没有时长）时禁用进度条：拖动一个范围未知的滑块，
           // 落点是没有任何意义的；左边的读数仍然是真实进度。
           value={[durationMs > 0 ? Math.min(shownMs, durationMs) : 0]}
           max={durationMs > 0 ? durationMs : 1}
@@ -598,7 +598,7 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
           }}
           onValueCommit={() => setDragMs(null)}
         />
-        <span className="w-12 shrink-0 text-xs tabular-nums text-muted-foreground">
+        <span className="w-12 shrink-0 text-xs tabular-nums text-muted-foreground" data-testid="player-duration">
           {durationMs > 0 ? formatDuration(durationMs / 1000) : "—"}
         </span>
 

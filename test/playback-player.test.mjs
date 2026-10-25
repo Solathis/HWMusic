@@ -361,7 +361,8 @@ test("四种模式的下一首：顺序/列表循环/单曲循环/随机各自�
 
 test("进度：seek 夹在 [0, duration]；seekGeneration 递增（歌词同步靠它认「这是一次跳转」）", async () => {
   const { player, fake } = makePlayer();
-  player.setQueue(songs(1), 0);
+  // 条目和音频都没给时长：这里要的是"什么都不知道"的那条路径
+  player.setQueue([{ id: "2401", name: "无时长曲目", singer: "歌手" }], 0);
   await player.playAt(0);
 
   const negative = player.seek(-100);
@@ -684,4 +685,79 @@ test("播放代次隔离旧交互：同 id 重复条目、重播、自动循环�
   assert.ok(replaced > looped, "换队列但复用同 id 也取消旧交互");
   player.clear();
   assert.ok(player.snapshot().playbackGeneration > replaced, "清空队列作废旧交互");
+});
+
+/**
+ * R54：底栏总时长不再显示「—」。
+ *
+ * 音频报不出来（流媒体 preload=metadata 常报 Infinity/NaN，或还没加载就说 0）不是"没有时长"：
+ * 队列条目自己带秒数（`trackDurationOf`）。有效总时长 = 音频有限正值 → 曲目元数据 → 0。
+ */
+test("总时长：音频报 Infinity/NaN/0 时用曲目元数据（秒 → 毫秒）", async () => {
+  const { player, fake } = makePlayer();
+  player.setQueue([{ id: "2101", name: "元数据曲目", singer: "歌手", duration: 184 }], 0);
+  await player.playAt(0);
+
+  for (const reported of [Number.POSITIVE_INFINITY, Number.NaN, 0]) {
+    fake.emit("loadedmetadata", { duration: reported });
+    assert.equal(player.snapshot().durationMs, 184_000, `音频报 ${reported} 时用元数据时长`);
+  }
+});
+
+test("总时长：音频报有限正值时以音频为准（元数据只是兜底）", async () => {
+  const { player, fake } = makePlayer();
+  player.setQueue([{ id: "2102", name: "元数据曲目", singer: "歌手", duration: 184 }], 0);
+  await player.playAt(0);
+
+  fake.emit("loadedmetadata", { duration: 181.5 });
+  assert.equal(player.snapshot().durationMs, 181_500, "音频报的数才是真的可播范围");
+});
+
+test("总时长：durationchange 更新（先报 Infinity、之后报真实值）", async () => {
+  const { player, fake } = makePlayer();
+  player.setQueue([{ id: "2103", name: "元数据曲目", singer: "歌手", duration: 184 }], 0);
+  await player.playAt(0);
+
+  fake.emit("durationchange", { duration: Number.POSITIVE_INFINITY });
+  assert.equal(player.snapshot().durationMs, 184_000, "Infinity 不覆盖元数据");
+  fake.emit("durationchange", { duration: 176 });
+  assert.equal(player.snapshot().durationMs, 176_000, "真实值到了就以它为准");
+});
+
+test("总时长：没有任何时长来源时仍是 0（界面显示「—」，不编一个数）", async () => {
+  const { player, fake } = makePlayer();
+  player.setQueue([{ id: "2104", name: "无时长曲目", singer: "歌手" }], 0);
+  await player.playAt(0);
+  assert.equal(player.snapshot().durationMs, 0);
+
+  fake.emit("loadedmetadata", { duration: Number.NaN });
+  fake.emit("durationchange", { duration: Number.POSITIVE_INFINITY });
+  assert.equal(player.snapshot().durationMs, 0, "坏读数不冒充时长");
+});
+
+test("总时长：恢复的队列没播过也有元数据时长，seek 夹在它里面", async () => {
+  const record = {
+    ids: ["2201", "2202"],
+    index: 1,
+    metadata: [
+      { id: "2201", name: "甲", artists: "歌手", duration: 200 },
+      { id: "2202", name: "乙", artists: "歌手", duration: 245 },
+    ],
+  };
+  const { player } = makePlayer({ loadQueue: async () => record });
+  await player.restore();
+
+  assert.equal(player.snapshot().status, PLAYER_STATUS.idle, "恢复仍不自动播放");
+  assert.equal(player.snapshot().durationMs, 245_000, "恢复队列的总时长来自条目元数据");
+  assert.equal(player.seek(999_999).data.currentTimeMs, 245_000, "进度条可拖到元数据给的范围内");
+});
+
+test("总时长：换到没有元数据的曲目时，上一首的时长不残留", async () => {
+  const { player, fake } = makePlayer();
+  await player.playQueue([{ id: "2301", name: "甲", singer: "歌手", duration: 200 }, { id: "2302", name: "乙", singer: "歌手" }], 0);
+  fake.emit("loadedmetadata", { duration: 200 });
+  assert.equal(player.snapshot().durationMs, 200_000);
+
+  await player.next();
+  assert.equal(player.snapshot().durationMs, 0, "新曲目一没元数据二没读数：回到未知，不显示上一首的时长");
 });
