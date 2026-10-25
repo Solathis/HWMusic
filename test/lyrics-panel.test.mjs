@@ -207,3 +207,28 @@ test("外壳：App 挂载运行时、队列面板真实数据、歌词开关与�
   assert.match(app, /aria-label="歌词"/, "要有一个入口打开歌词舞台（否则面板永远看不见）");
   assert.doesNotMatch(app, /\bcoreCall\(/, "外壳不直接取数（R8 的边界不变）");
 });
+
+/**
+ * R46：主窗沉浸页的**逐字着色**与**自定义颜色**。
+ *
+ * R45B 只把逐字推导接到了桌面歌词窗：主窗 `AmllLyricsPanel` 送进去的是行级 `lines`
+ * （每行 1 个词），官方 `LyricPlayer` 因此只做整行渐变——同一首歌在两个面上看起来差一代。
+ * R46 把两个接线点都搬到适配层那一份实现上：`withKaraokeWords`（逐字）与
+ * `applyCustomColor`（颜色），组件不自己造第二份。
+ */
+test("R46 主窗面板：withKaraokeWords 逐字 + 自定义颜色 scoped 覆盖（与桌面歌词窗同一适配层）", () => {
+  const panel = stripComments(read("src/renderer/AmllLyricsPanel.tsx"));
+  assert.match(panel, /withKaraokeWords/, "主窗面板也要把行级 LRC 推导成逐字词（否则官方只做整行渐变）");
+  assert.match(panel, /useMemo\(\(\) => withKaraokeWords\(lines\), \[lines\]\)/,
+    "推导结果按 lines 记忆：每帧新建数组会让官方反复重排");
+  assert.match(panel, /lyricLines=\{playerLines\}/, "传给官方组件的是推导后的行");
+  assert.match(panel, /customColor/, "颜色来自 props（binding 里的唯一配置）");
+  assert.match(panel, /applyCustomColor\(/, "颜色走适配层的 scoped 变量覆盖（唯一接线点）");
+  assert.match(panel, /applyCustomColor\([a-zA-Z]+\.current, customColor\)/, "覆盖写在舞台容器上（只影响这一面）");
+  assert.doesNotMatch(panel, /--amll-/, "组件里仍不出现 AMLL 变量名");
+  assert.doesNotMatch(panel, /style\.setProperty|cssText/, "不自己拼 CSS 文本");
+  assert.doesNotMatch(panel, /\.words\b|words\.map/, "仍不自己渲染歌词文本（逐字着色是官方组件的事）");
+
+  const stage = stripComments(read(STAGE));
+  assert.match(stage, /customColor=\{lyrics\?\.config\.customColor\}/, "沉浸页把 binding 里的自定义颜色交给面板");
+});

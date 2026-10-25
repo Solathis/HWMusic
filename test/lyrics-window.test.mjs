@@ -1360,9 +1360,11 @@ test("R45B 纯逻辑：锁定隐藏全部控制、只有悬停/聚焦才给解�
   assert.equal(resizableEnabled({ ...base, clickThrough: true }), true, "点透只影响拖动，缩放能力仍在配置上");
 });
 
-test("R45B 会话说明与事实一致：竖排是逐字竖排、行级逐字是推导、锁定只留悬停解锁", () => {
+test("R45B/R46 会话说明与事实一致：竖排是逐字竖排、行级逐字是推导、锁定只留悬停解锁", () => {
   assert.match(LYRICS_SESSION_NOTICE, /竖排/, "说明里要讲竖排");
   assert.doesNotMatch(LYRICS_SESSION_NOTICE, /并非中文竖排|不是.*竖排/, "旧的「并非中文竖排」已不成立");
+  assert.match(LYRICS_SESSION_NOTICE, /CJK 直立/, "R46：竖排方向要说清楚（CJK 直立、拉丁与数字旋转，不是全 upright）");
+  assert.doesNotMatch(LYRICS_SESSION_NOTICE, /逐字直立/, "旧的「逐字直立」会把拉丁字母也说成直立（R46 已改成 mixed）");
   assert.match(LYRICS_SESSION_NOTICE, /推导/, "行级 LRC 的逐字时间必须如实说成推导");
   assert.match(LYRICS_SESSION_NOTICE, /悬停/, "锁定后的交互（悬停只给解锁）要写清楚");
   assert.doesNotMatch(LYRICS_SESSION_NOTICE, /敬请期待|即将上线/, "禁画饼");
@@ -1427,7 +1429,7 @@ test("R45B 歌词窗：Lock 图标表示已锁、悬停只留解锁、缩放拖�
   assert.match(source, /250/, "稳定 250ms 才保存（拖动过程中不许刷配置）");
 });
 
-test("R45B 竖版 CSS：真竖排只作用于 vertical 布局（横版/任务栏/主窗面板都不受影响）", () => {
+test("R45B/R46 竖版 CSS：真竖排只作用于 vertical 布局（横版/任务栏/主窗面板都不受影响）", () => {
   const css = read("src/renderer/amll-theme.css");
   // 只扫规则，不扫注释（注释里解释 writing-mode 是什么，那不是"给全局加了竖排"）
   const rules = css.replace(/\/\*[\s\S]*?\*\//g, "");
@@ -1435,10 +1437,25 @@ test("R45B 竖版 CSS：真竖排只作用于 vertical 布局（横版/任务栏
   assert.ok(at > 0, "竖排规则必须在 amll-theme.css 里（AMLL 变量的两个接线点之一）");
   const vertical = rules.slice(at);
   assert.match(vertical, /writing-mode:\s*vertical-rl/, "竖版必须是真竖排（writing-mode），不是窄窗换行");
-  assert.match(vertical, /text-orientation:\s*upright/, "逐字直立（不是把整行旋转 90°）");
+  /**
+   * R46（有意更改 R45B 的这条断言）：`upright` 会把拉丁字母也逐字直立（变成一列方块字），
+   * 与参考实现的 Unicode 默认竖排方向相反。R46 要求 **CJK 直立、拉丁/数字/标点旋转**
+   * （`mixed` 是 `text-orientation` 的初始值 = Unicode 默认竖排方向），所以这里钉 mixed。
+   * 整行仍是竖排（writing-mode），不是"把一整行旋转 90°"。
+   */
+  assert.match(vertical, /text-orientation:\s*mixed/, "Unicode 默认竖排方向：CJK 直立、拉丁旋转（不是全 upright）");
+  assert.doesNotMatch(vertical, /text-orientation:\s*upright/, "全 upright 会把拉丁字母也拉成直立方块（R46 之前的老行为）");
   assert.match(vertical, /overflow-x:\s*auto/, "沿书写方向（竖排下是 x 轴）允许滚动");
-  // 官方组件的换行是按"宽度"算的：竖排里那个宽度是列的厚度，照它折会变成"一列一两个字"。
-  assert.match(vertical, /max-height:\s*100cqh/, "一行的高度限在窗口高度内（竖排的折列轴）");
+  /**
+   * R46：`max-height: 100cqh` 是剪字的直接原因。官方给每行量的是**行盒 wrapper** 的高度
+   * （`.FmKaba_lyricLineWrapper` 有 `padding: .4em var(--lyric-line-padding-x)`），播放器又按这个
+   * 高度把当前行居中 ⇒ 行内容占满 100cqh 时 wrapper = 100cqh + 0.8em > 播放器高度，上下各被裁掉
+   * 半截（240×120 + xxl 实测：wrapper 129px / 播放器 84px，首字 em 盒探出播放器 4px）。
+   * 现在行内容给 wrapper 的上下内边距让路：`calc(100cqh - 0.8em)`。
+   */
+  assert.match(vertical, /max-height:\s*calc\(100cqh\s*-\s*0\.8em\)/,
+    "行内容的最大高度要给行盒 wrapper 的上下内边距（.4em×2）让路，否则当前行会被裁掉上下两端");
+  assert.doesNotMatch(vertical, /max-height:\s*100cqh/, "旧的 max-height:100cqh 已删（它就是剪字的原因）");
   assert.match(vertical, /container-type:\s*size/, "100cqh 需要播放器自己是尺寸容器");
   assert.match(vertical, /br\s*\{[^}]*display:\s*none/, "官方按宽度插的 <br> 在竖排下不显示（改由浏览器按高度折列）");
   assert.doesNotMatch(rules.slice(0, at), /writing-mode/, "竖排规则不许出现在全局作用域");
@@ -1502,4 +1519,58 @@ test("R45B 设置页：颜色选择器 + 恢复主题色（只写合法 hex，�
   assert.match(settings, /aria-label="自定义歌词颜色"/, "颜色选择器要有可读的名称");
   // 不允许在这里自己写 hex 正则（唯一真源在 lyrics-window.mjs）
   assert.doesNotMatch(settings, /0-9a-fA-F\]\{6\}|\[0-9a-f\]\{6\}/, "不许在页面里另抄一份 hex 正则");
+});
+
+/**
+ * R46：桌面歌词窗自己的设置面。
+ *
+ * R45B 之前这里是一个 `DropdownMenu`：菜单在 160px 高的窗里根本装不下（样式 2 项 + 方向 2 项 +
+ * 4 个复选框，`.tmp/probe/settings-lyrics.png` 抓到的是被窗口底边切断的菜单）。窗口只有 160px 高，
+ * 任何"往下长"的浮层都必然被裁，所以改成**窗口之内**的一整面设置：Sheet 用窗口高度做上限，
+ * 内容自己在里面滚，所有控件都够得着。
+ *
+ * 顺带把颜色补上（brief 第 3 项）：原生 `type=color` + 「恢复主题色」，走的仍是
+ * `customColor`/`isCustomColor` 这一条配置路（没有第二份存储）。
+ */
+test("R46 桌面歌词设置面：窗口内可滚动的 Sheet，含样式/方向/模糊/缩放/弹簧/媒体/颜色", () => {
+  const source = read("src/renderer/LyricsWindow.tsx");
+  const code = stripComments(source);
+
+  // 不再是被 160px 窗口裁掉的 DropdownMenu
+  assert.doesNotMatch(code, /DropdownMenu/, "旧的 DropdownMenu 设置面已删（它在 160px 高的窗里必被裁）");
+  assert.match(code, /from "\.\/components\/ui\/sheet"/, "设置面换成 shadcn 的 Sheet（弹层里可滚动，且是官方组件）");
+  assert.match(code, /<Sheet\b/, "要真的用 Sheet");
+  assert.match(code, /<SheetTrigger asChild>/, "外观按钮仍是触发点（asChild：不额外包一层）");
+  assert.match(code, /aria-label="桌面歌词外观"/, "触发按钮的无障碍名称不变");
+  assert.match(code, /data-testid="lyrics-appearance"/, "设置面要有测试锚点（浏览器守卫按它开面板）");
+  assert.match(code, /<SheetContent[^>]*max-h-\[100dvh\]/, "面板高度以窗口为上限（小窗里不往下长）");
+  assert.match(code, /data-testid="lyrics-appearance-scroll"/, "面板内部要有一个可滚动的正文区");
+  assert.match(code, /<ScrollArea[^>]*data-testid="lyrics-appearance-scroll"/,
+    "正文区用 shadcn ScrollArea（仓里的规矩：面板不许自搭 overflow 滚动容器，见 no-self-visual）");
+  assert.match(code, /from "\.\/components\/ui\/scroll-area"/, "ScrollArea 来自 components/ui");
+  assert.doesNotMatch(code, /overflow-[xy]-(?:auto|scroll)/, "不许在这里自搭滚动容器（页面级滚动根的例外集合里没有这个文件）");
+  assert.match(code, /min-h-0/, "滚动容器必须能收缩（flex 子项的默认 min-height:auto 会撑破窗口）");
+
+  // 控件齐全（brief 点名的七类：样式、方向、模糊、缩放、弹簧、媒体、颜色）
+  for (const label of ["透明", "面板", "横版", "竖版", "模糊", "缩放", "弹簧动画", "媒体按钮"]) {
+    assert.ok(code.includes(label), `设置面必须包含「${label}」`);
+  }
+  // 样式/方向是**按压态按钮**（在 160px 里比下拉菜单稳：菜单会被窗口底边裁掉）
+  assert.match(code, /aria-pressed=\{active\}/, "档位按钮是按压态开关（aria-pressed 可读）");
+  assert.match(code, /choiceButton\(config\.style === "clean",\s*"透明"/, "「透明」的按压态来自 config.style");
+  assert.match(code, /choiceButton\(config\.style === "panel",\s*"面板"/, "「面板」同理");
+  assert.match(code, /choiceButton\(config\.layout === "horizontal",\s*"横版"/, "「横版」的按压态来自 config.layout");
+  assert.match(code, /configure\(\{ style/, "样式走既有 configure 窄命令");
+  assert.match(code, /configure\(\{ layout/, "方向走既有 configure 窄命令");
+  assert.match(code, /config\.mode === "taskbar"/, "任务栏模式仍禁竖版（Rust 侧强制 horizontal）");
+
+  // 颜色：原生取色器 + 恢复主题色，只写合法的 #RRGGBB（判定来自纯逻辑模块）
+  assert.match(code, /type="color"/, "设置面要有原生颜色选择器");
+  assert.match(code, /aria-label="自定义歌词颜色"/, "取色器要有可读名称");
+  assert.match(code, /恢复主题色/, "要能一键回到主题色");
+  assert.match(code, /isCustomColor/, "合法 hex 判定来自 lyrics-window.mjs（页面不另抄正则）");
+  assert.match(code, /configure\(\{ customColor/, "颜色写的是同一个 customColor 字段（没有第二份存储）");
+  assert.doesNotMatch(code, /0-9a-fA-F\]\{6\}|\[0-9a-f\]\{6\}/, "不许在这里另抄一份 hex 正则");
+  assert.doesNotMatch(code, /localStorage|sessionStorage/, "设置面不许自建存储（落盘仍由 Rust 拥有）");
+  assert.doesNotMatch(code, /style=\{\{/, "不许内联视觉样式");
 });

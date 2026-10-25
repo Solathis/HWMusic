@@ -43,6 +43,16 @@ export const GUARD_DIR = ".tmp/browser-guard";
 export const FIXTURE_LRC = ["[00:00.00]第一行歌词守卫", "[00:03.00]第二行歌词守卫"].join("\n");
 
 /**
+ * R46 竖排重设计的夹具。
+ *
+ * - `R46_MIXED_LRC`：**中英混排**（CJK + 拉丁 + 数字 + 空格）。Unicode 默认竖排方向下 CJK 直立、
+ *   拉丁旋转，这条夹具是判定"到底直立还是旋转"的唯一来源；
+ * - `R46_LONG_LRC`：一行刻意很长（远超一列能装下的字数），用来量"折成多列 + 沿书写方向滚动"。
+ */
+export const R46_MIXED_LRC = ["[00:00.00]第一行歌词 2024 hey", "[00:03.00]第二行歌词 guard test line"].join("\n");
+export const R46_LONG_LRC = ["[00:00.00]这一行被刻意写得很长 hello world 2024 混排 ABCdef 0123456789 再补几个字", "[00:03.00]第二行"].join("\n");
+
+/**
  * R45A3 的库列表分页夹具（脚本与守卫页共用同一份常量，避免两边各写一套数字）。
  *
  * - `total`/`pageSize`：歌单/专辑/搜索的假后端总量与页大小（首屏只该拿到一页）；
@@ -293,6 +303,14 @@ function Guard() {
         runtime.player.seek(700);
       },
       setLyrics: (status) => runtime.player.setLyrics([], status),
+      /**
+       * R46：换成任意 LRC 文本（竖排的混排/长行几何需要中英混排的夹具）。
+       * 走的仍是**真适配层** parseAmllLyrics，不手搓 LyricLine——否则量的就不是产品路径。
+       */
+      async setLrc(text) {
+        const { parseAmllLyrics } = await import("../../src/renderer/features/lyrics/amll-adapter.ts");
+        runtime.player.setLyrics(parseAmllLyrics(text).lines, "ready");
+      },
       restoreLyrics: async () => {
         const { parseAmllLyrics } = await import("../../src/renderer/features/lyrics/amll-adapter.ts");
         runtime.player.setLyrics(parseAmllLyrics(LRC).lines, "ready");
@@ -603,6 +621,9 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
   await page.evaluate(() => { document.documentElement.className = "light"; });
   await page.evaluate(() => window.__guard.ready());
   await page.waitForFunction(() => window.__guard.snapshot().lyrics.status === "ready" && window.__guard.snapshot().durationMs > 0);
+  // R46 证据：播放栏的真实截图（传输组 模式→上一首→播放→下一首，歌词开关在尾部工具区）
+  const barBox = await page.getByTestId("player-bar").boundingBox();
+  if (barBox) await page.screenshot({ path: path.join(guardDir, "r46-player-bar-order.png"), clip: barBox });
 
   /** 播放栏那枚开关的状态 + 当前所有开关请求 + 提示/ toast 的数量（一次采样看完）。 */
   const barState = () => page.evaluate(() => {
@@ -1182,16 +1203,17 @@ export async function checkDesktopInteraction(page, guardDir, add) {
         const range = document.createRange();
         range.selectNodeContents(span);
         const rect = range.getBoundingClientRect();
+        const insideX = playerRect ? rect.left >= playerRect.left - pad && rect.right <= playerRect.right + pad : false;
+        const insideY = playerRect ? rect.top >= playerRect.top - pad && rect.bottom <= playerRect.bottom + pad : false;
         return {
           text: span.textContent,
           x: Math.round(rect.x),
           y: Math.round(rect.y),
           w: Math.round(rect.width),
           h: Math.round(rect.height),
-          inside: playerRect
-            ? rect.left >= playerRect.left - pad && rect.right <= playerRect.right + pad
-              && rect.top >= playerRect.top - pad && rect.bottom <= playerRect.bottom + pad
-            : false,
+          insideX,
+          insideY,
+          inside: insideX && insideY,
         };
       });
     /**
@@ -1201,13 +1223,28 @@ export async function checkDesktopInteraction(page, guardDir, add) {
      */
     const lineStyle = line ? getComputedStyle(line) : null;
     const playerStyle = player ? getComputedStyle(player) : null;
+    /**
+     * R46：行盒（官方量高的那个 wrapper）与播放器的纵向关系。
+     * 当前行必须被官方**居中**（wrap 中心 ≈ 播放器中心），且行盒不许比播放器高——
+     * 高出多少，上下就会被 `overflow: hidden` 裁掉多少（这就是 brief 说的"底部剪掉"）。
+     */
+    const wrapper = line?.closest('[class*="lyricLineWrapper"]');
+    const wrapperRect = wrapper?.getBoundingClientRect();
     return {
       chars,
       lineCount: stage?.querySelectorAll('[class*="lyricLineWrapper"] [class*="lyricMainLine"]').length ?? 0,
       writingMode: lineStyle?.writingMode ?? null,
       textOrientation: lineStyle?.textOrientation ?? null,
+      /** 整行有没有被 transform 旋转（"整行旋转 90°"的假竖排判定）。 */
+      lineTransform: lineStyle?.transform ?? null,
+      fontSize: playerStyle ? Number.parseFloat(playerStyle.fontSize) : null,
       playerWritingMode: playerStyle?.writingMode ?? null,
-      playerScroll: player ? { scrollW: player.scrollWidth, clientW: player.clientWidth, scrollH: player.scrollHeight, clientH: player.clientHeight, overflowX: getComputedStyle(player).overflowX } : null,
+      playerBox: playerRect ? { top: Math.round(playerRect.top), bottom: Math.round(playerRect.bottom), height: Math.round(playerRect.height) } : null,
+      wrapperBox: wrapperRect ? {
+        top: Math.round(wrapperRect.top), bottom: Math.round(wrapperRect.bottom),
+        height: Math.round(wrapperRect.height), center: Math.round(wrapperRect.top + wrapperRect.height / 2),
+      } : null,
+      playerScroll: player ? { scrollW: player.scrollWidth, clientW: player.clientWidth, scrollLeft: player.scrollLeft, scrollH: player.scrollHeight, clientH: player.clientHeight, overflowX: getComputedStyle(player).overflowX, bar: player.offsetHeight - player.clientHeight } : null,
       activeText: line?.textContent ?? "",
       /** 每条行盒的 y（官方用 `translateY` 排版）：判断"滚轮真的动了 / 动到边界就不再动"用它。 */
       lineTops: [...(stage?.querySelectorAll('[class*="lyricLineWrapper"]') ?? [])]
@@ -1380,7 +1417,7 @@ export async function checkDesktopInteraction(page, guardDir, add) {
   await page.waitForTimeout(1200);
   const vertical = await charGeometry();
   const verticalColumns = columnReport(vertical.chars);
-  add("desktop-vertical-char-geometry", vertical.writingMode === "vertical-rl" && vertical.textOrientation === "upright"
+  add("desktop-vertical-char-geometry", vertical.writingMode === "vertical-rl" && vertical.textOrientation === "mixed"
     && vertical.chars.length >= 5 && verticalColumns.longest >= 4 && verticalColumns.increasing
     && verticalColumns.distinctX === 1 && vertical.chars.every((char) => char.inside),
   JSON.stringify({ ...verticalColumns, writingMode: vertical.writingMode, textOrientation: vertical.textOrientation, playerWritingMode: vertical.playerWritingMode, chars: vertical.chars, activeText: vertical.activeText }));
@@ -1680,6 +1717,475 @@ export async function checkDesktopInteraction(page, guardDir, add) {
   await desktop.getByRole("status").click();
   add("desktop-empty-drag", await page.evaluate((count) => window.__guard.dragCount() === count + 1, emptyDragBefore), "空态宿主同样可拖");
   await page.evaluate(() => window.__guard.desktopDocument());
+
+  /**
+   * ⑭ R46 竖排重设计 · 方向：**Unicode 默认竖排方向**（CJK 直立、拉丁/数字/标点旋转）。
+   *
+   * 量法是逐字的**字形框**（`Range` 选中的那截文字，不是带 -1em/1em 的 span 盒子）：
+   * - CJK 直立 ⇒ 字形框高度 ≈ 字号（em 盒高）；
+   * - 拉丁旋转（`text-orientation: mixed`）⇒ 字形框**矮而宽**：高度只有字号的一半上下，
+   *   宽度是整条行高。`upright` 会把拉丁也拉成直立方块（高度 = 字号），一眼可辨。
+   * 同时钉住"整行没有被 transform 旋转"——那是最容易混过去的假竖排。
+   */
+  const isCjkChar = (text) => /[\u3400-\u9fff]/.test(text);
+  const isLatinChar = (text) => /[A-Za-z0-9]/.test(text);
+  /**
+   * 换夹具 + 把进度钉在**第一行**上再看。
+   *
+   * 为什么要先 `pause()`：⑤ 之后播放器是一直在播的，seek 到 700 之后进度会继续往前跑，
+   * 等几何量完（1.2s）早就越过 3000 → 量到的"当前行"会是第二行（RED 实测：`seen:"第二行"`）。
+   * 暂停 + seek + 重发文档，才是"就停在这一行上"的确定状态。
+   */
+  const showDesktopLine = async (lrc, timeMs = 700) => {
+    await page.evaluate((text) => window.__guard.setLrc(text), lrc);
+    await page.evaluate((ms) => { window.__guard.pause(); window.__guard.setTime(ms); }, timeMs);
+    await page.evaluate(() => window.__guard.desktopDocument());
+  };
+  await showDesktopLine(R46_MIXED_LRC);
+  await configure({ layout: "vertical", style: "clean", size: "lg", customColor: "" });
+  await page.setViewportSize({ width: 320, height: 620 });
+  await page.waitForTimeout(1200);
+  const mixed = await charGeometry(2);
+  const mixedCjk = mixed.chars.filter((char) => isCjkChar(char.text));
+  const mixedLatin = mixed.chars.filter((char) => isLatinChar(char.text));
+  const mixedColumns = columnReport(mixed.chars);
+  const fontSize = mixed.fontSize ?? 0;
+  add("desktop-vertical-mixed-orientation",
+    mixed.writingMode === "vertical-rl" && mixed.textOrientation === "mixed"
+      && mixed.lineTransform === "none"
+      && mixedCjk.length >= 5 && mixedLatin.length >= 5
+      && mixedCjk.every((char) => char.h >= fontSize * 0.8)
+      && mixedLatin.every((char) => char.h <= fontSize * 0.7)
+      && mixedLatin.every((char) => char.w >= fontSize * 0.8)
+      && mixedColumns.increasing && mixed.chars.every((char) => char.inside),
+    JSON.stringify({ ...mixedColumns, textOrientation: mixed.textOrientation, fontSize, writingMode: mixed.writingMode,
+      lineTransform: mixed.lineTransform, cjk: mixedCjk.slice(0, 4), latin: mixedLatin.slice(0, 4), chars: mixed.chars }));
+  await page.screenshot({ path: path.join(guardDir, "r46-vertical-mixed-320x620.png") });
+
+  /**
+   * ⑮ R46 竖排重设计 · 长行：折成多列、当前行整块落在播放器里（不剪上不剪下）、
+   * 沿**书写方向**（竖排的块轴 = 横向）溢出时有原生滚动条，且所有字都够得着、滚动有界。
+   *
+   * 关键判据（brief 第 2 项）：`wrapperBox` 是**官方用来量行高的那个行盒**。它必须
+   * ① 不高于播放器（高出来的部分会被 `overflow: hidden` 裁掉，就是"底部剪掉"）；
+   * ② 被官方居中（中心 ≈ 播放器中心，当前行可辨识）；③ 每个字的纵向范围都在播放器里。
+   */
+  await page.evaluate((lrc) => window.__guard.setLrc(lrc), R46_LONG_LRC);
+  await configure({ size: "xxl", layout: "vertical" });
+  await page.evaluate(() => { window.__guard.pause(); window.__guard.setTime(700); });
+  await page.evaluate(() => window.__guard.desktopDocument());
+  await page.waitForTimeout(1300);
+  const longLine = await charGeometry(2);
+  const longColumns = columnReport(longLine.chars);
+  /** 竖排列自右向左：按字符顺序看，x 只许往左走，不许回跳。 */
+  const longColumnOrder = longLine.chars.every((char, index) => index === 0 || char.x <= longLine.chars[index - 1].x + 2);
+  /**
+   * 官方把当前行居中用的是**内容盒**（`clientHeight`，横向滚动条占掉的那 6px 不算），
+   * 所以"居中"的参照是 `播放器顶 + clientHeight/2`（实测两者相等，误差 0px）；
+   * 行盒允许盖住滚动条那一条（`bar`），但**不许**比播放器再高——高出去的部分就是被裁掉的字。
+   */
+  const longContentHeight = longLine.playerScroll?.clientH ?? longLine.playerBox?.height ?? 0;
+  const longBar = longLine.playerScroll?.bar ?? 0;
+  const playerMid = (longLine.playerBox?.top ?? 0) + longContentHeight / 2;
+  const wrapperFits = Boolean(longLine.wrapperBox)
+    && longLine.wrapperBox.height <= longContentHeight + longBar + 2;
+  const wrapperCentered = Boolean(longLine.wrapperBox) && Math.abs(longLine.wrapperBox.center - playerMid) <= 2;
+  /** 拖动原生横条时**逐格采样**：每个字都要在某一格整块进过视口。 */
+  const barStrip = await page.evaluate(() => {
+    const player = document.querySelector('[data-testid="lyrics-window"] .amll-lyric-player');
+    const rect = player.getBoundingClientRect();
+    return { x: rect.x, y: rect.y, w: rect.width, h: rect.height,
+      stripTop: rect.top + player.clientHeight, stripH: player.offsetHeight - player.clientHeight,
+      scrollLeft: player.scrollLeft, contentMin: player.clientWidth - player.scrollWidth };
+  });
+  const seenInViewport = new Set(longLine.chars.filter((char) => char.insideX).map((char) => char.text));
+  const scrollSamples = [barStrip.scrollLeft];
+  const sampleViewport = async () => {
+    const state = await charGeometry(2);
+    state.chars.forEach((char) => { if (char.insideX) seenInViewport.add(char.text); });
+    scrollSamples.push(state.playerScroll?.scrollLeft ?? 0);
+    return state;
+  };
+  const barY = barStrip.stripTop + Math.max(1, barStrip.stripH) / 2;
+  const dragBarAcross = async (fromRatio, toRatio, steps) => {
+    const fromX = barStrip.x + barStrip.w * fromRatio;
+    const toX = barStrip.x + barStrip.w * toRatio;
+    await page.mouse.move(fromX, barY);
+    await page.waitForTimeout(120);
+    await page.mouse.down();
+    for (let step = 1; step <= steps; step += 1) {
+      await page.mouse.move(fromX + ((toX - fromX) * step) / steps, barY);
+      await page.waitForTimeout(80);
+      await sampleViewport();
+    }
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+    return charGeometry(2);
+  };
+  const afterLongDrag = await dragBarAcross(0.85, 0.05, 12);
+  const afterLongPastEdge = await dragBarAcross(0.05, 0, 5);
+  const longScrollLeft = scrollSamples.at(-1) ?? 0;
+  const longBounded = Math.abs((afterLongPastEdge.playerScroll?.scrollLeft ?? 0) - longScrollLeft) <= 2
+    && scrollSamples.every((value) => value >= (barStrip.contentMin ?? 0) - 2 && value <= 2);
+  const longChars = new Set(longLine.chars.map((char) => char.text));
+  add("desktop-vertical-long-line-columns",
+    longLine.writingMode === "vertical-rl" && longLine.chars.length >= 20
+      && longColumns.distinctX >= 3 && longColumnOrder && longColumns.increasing,
+    JSON.stringify({ columns: longColumns, order: longColumnOrder, playerScroll: longLine.playerScroll }));
+  add("desktop-vertical-long-line-not-clipped",
+    Boolean(longLine.playerBox && longLine.wrapperBox) && wrapperFits && wrapperCentered
+      && longLine.chars.every((char) => char.insideY),
+    JSON.stringify({ playerBox: longLine.playerBox, wrapperBox: longLine.wrapperBox, centered: wrapperCentered,
+      outsideY: longLine.chars.filter((char) => !char.insideY).map((char) => `${char.text}@${char.y}`), scroll: longLine.playerScroll }));
+  add("desktop-vertical-long-line-reachable-bounded",
+    (longLine.playerScroll?.bar ?? 0) > 0 && (longLine.playerScroll?.scrollW ?? 0) > (longLine.playerScroll?.clientW ?? 0)
+      && [...longChars].every((text) => seenInViewport.has(text)) && longBounded
+      && afterLongDrag.activeText.includes("这一行"),
+    JSON.stringify({ seen: [...seenInViewport].join(""), expected: [...longChars].join(""),
+      samples: { first: scrollSamples[0], last: longScrollLeft, contentMin: barStrip.contentMin }, bounded: longBounded }));
+  await page.screenshot({ path: path.join(guardDir, "r46-vertical-long-320x620.png") });
+
+  // ⑯ R46 最小窗口 240×120：混排同样不剪字（上下都不许探出播放器），仍是真竖排
+  await page.evaluate((lrc) => window.__guard.setLrc(lrc), R46_MIXED_LRC);
+  await configure({ size: "lg", layout: "vertical" });
+  await page.setViewportSize({ width: 240, height: 120 });
+  await page.evaluate(() => { window.__guard.pause(); window.__guard.setTime(700); });
+  await page.evaluate(() => window.__guard.desktopDocument());
+  await page.waitForTimeout(1200);
+  const minMixed = await charGeometry(2);
+  const minMixedColumns = columnReport(minMixed.chars);
+  const minContentHeight = minMixed.playerScroll?.clientH ?? minMixed.playerBox?.height ?? 0;
+  const minWrapperFits = Boolean(minMixed.wrapperBox)
+    && minMixed.wrapperBox.height <= minContentHeight + (minMixed.playerScroll?.bar ?? 0) + 2;
+  add("desktop-vertical-min-window-mixed-no-clip",
+    minMixed.writingMode === "vertical-rl" && minMixed.textOrientation === "mixed"
+      && minMixedColumns.increasing && minMixedColumns.distinctX >= 2
+      && minMixed.chars.length >= 10 && minMixed.chars.every((char) => char.insideY)
+      && minMixed.chars.filter((char) => char.insideX).length >= 4
+      && minWrapperFits,
+    JSON.stringify({ ...minMixedColumns, playerBox: minMixed.playerBox, wrapperBox: minMixed.wrapperBox, wrapperFits: minWrapperFits,
+      outsideY: minMixed.chars.filter((char) => !char.insideY).map((char) => `${char.text}@${char.y}`), chars: minMixed.chars }));
+  await page.screenshot({ path: path.join(guardDir, "r46-vertical-mixed-240x120.png") });
+
+  await page.evaluate(() => window.__guard.restoreLyrics());
+  await configure({ ...DESKTOP_BASELINE });
+  await page.setViewportSize({ width: 960, height: 160 });
+  await page.evaluate(() => window.__guard.desktopDocument());
+  await page.waitForTimeout(400);
+}
+
+/**
+ * R46：桌面歌词窗自己的设置面（外观面板）。
+ *
+ * 钉三件事，每一件都是 R45B 那个 DropdownMenu 做不到的：
+ * 1. **装得下**：面板被窗口高度约束（`max-h-[100dvh]`），窗口只有 160px 高时面板也不许长到窗口外；
+ * 2. **够得着**：样式/方向/模糊/缩放/弹簧/媒体/颜色**每一个控件**都能滚进视口、命中的是它自己
+ *    （不是被别的元素盖住、也不是被容器裁掉）。960×160 与 320×620 两个尺寸都量；
+ * 3. **改得动**：取色器写进 `customColor`（一条窄 configure 命令）、关掉面板再打开还在、
+ *    「恢复主题色」把覆盖撤回设计令牌，而且歌词像素真的跟着变（桌面歌词窗这一面）。
+ */
+export async function checkDesktopLyricsSettings(page, guardDir, add) {
+  const desktop = page.getByTestId("lyrics-window");
+  const configure = (patch) => page.evaluate((next) => window.__guard.configureDesktop(next), patch);
+  const activeLine = '[data-testid="lyrics-window"] [class*="lyricMainLine"][class*="active"]';
+  /** 设置面里**所有**控件（testid 是契约：缺一个就等于"够不着"）。 */
+  const CONTROLS = [
+    '[data-testid="lyrics-style-clean"]',
+    '[data-testid="lyrics-style-panel"]',
+    '[data-testid="lyrics-layout-horizontal"]',
+    '[data-testid="lyrics-layout-vertical"]',
+    '[data-testid="lyrics-window-enableBlur"]',
+    '[data-testid="lyrics-window-enableScale"]',
+    '[data-testid="lyrics-window-enableSpring"]',
+    '[data-testid="lyrics-window-showControls"]',
+    '[data-testid="lyrics-appearance-color"]',
+    '[data-testid="lyrics-appearance-color-reset"]',
+  ];
+  /**
+   * 逐个控件：滚进视口 → 它自己的矩形必须在视口里 → 中心点命中的就是它（或它的子节点）。
+   * `elementFromPoint` 是关键：几何在视口里但被别的层盖住，用户一样按不到。
+   */
+  const reachability = (selectors) => page.evaluate((list) => list.map((selector) => {
+    const node = document.querySelector(selector);
+    if (!node) return { selector, found: false };
+    node.scrollIntoView({ block: "nearest", inline: "nearest" });
+    const rect = node.getBoundingClientRect();
+    const inViewport = rect.width > 0 && rect.height > 0
+      && rect.top >= -1 && rect.left >= -1 && rect.bottom <= innerHeight + 1 && rect.right <= innerWidth + 1;
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return { selector, found: true, inViewport, clickable: Boolean(hit && (node === hit || node.contains(hit))) };
+  }), selectors);
+  const panelGeometry = () => page.evaluate(() => {
+    const panel = document.querySelector('[data-testid="lyrics-appearance-panel"]');
+    const root = document.querySelector('[data-testid="lyrics-appearance-scroll"]');
+    // shadcn ScrollArea 的滚动发生在 radix 的 viewport 上（root 自己是 overflow:hidden）
+    const viewport = root?.querySelector('[data-slot="scroll-area-viewport"]') ?? root;
+    if (!panel || !viewport) return null;
+    const rect = panel.getBoundingClientRect();
+    const scrollStyle = getComputedStyle(viewport);
+    return {
+      panel: { top: Math.round(rect.top), bottom: Math.round(rect.bottom), left: Math.round(rect.left), right: Math.round(rect.right) },
+      fits: rect.top >= -1 && rect.left >= -1 && rect.bottom <= innerHeight + 1 && rect.right <= innerWidth + 1,
+      /** 内容真的溢出时必须由它自己滚（不溢出时"不滚"是对的，不是缺陷）。 */
+      overflowing: viewport.scrollHeight > viewport.clientHeight,
+      scrollable: /auto|scroll/.test(scrollStyle.overflowY),
+      viewport: { width: innerWidth, height: innerHeight },
+    };
+  });
+  const openPanel = async () => {
+    await desktop.getByTestId("lyrics-appearance").click();
+    await page.getByTestId("lyrics-appearance-panel").waitFor();
+    await page.waitForTimeout(250);
+  };
+  const closePanel = async () => {
+    await page.keyboard.press("Escape");
+    await page.getByTestId("lyrics-appearance-panel").waitFor({ state: "detached" });
+  };
+  /** 原生取色器：走 React 认的原生 value setter + input 事件（直接改 .value 会被 React 的 tracker 吞掉）。 */
+  const setColor = (value) => page.locator('[data-testid="lyrics-appearance-color"]').evaluate((input, next) => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+    setter.call(input, next);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }, value);
+  /**
+   * 把桌面窗钉在"第一行歌词守卫 + 700ms"再看像素。
+   *
+   * 播放器在这里是**播过的**（上面 ⑤ 点过播放），不暂停的话像素会随着进度一直变，
+   * `inkContrast` 先量可见帧再量隐藏帧，两帧对不上就会把"墨色"算成噪声。
+   */
+  const paintDesktop = async () => {
+    await page.evaluate(() => { window.__guard.pause(); window.__guard.setTime(700); });
+    await page.evaluate(() => window.__guard.desktopDocument());
+    await page.waitForTimeout(700);
+  };
+
+  await configure({ ...DESKTOP_BASELINE });
+  for (const [label, viewport] of [["960x160", { width: 960, height: 160 }], ["320x620", { width: 320, height: 620 }]]) {
+    await page.setViewportSize(viewport);
+    await page.evaluate(() => window.__guard.desktopDocument());
+    await page.waitForTimeout(600);
+    await openPanel();
+    /**
+     * 先选一个自定义颜色再扫：这样「恢复主题色」是**可用**的（没选过色时它是 disabled）。
+     * disabled 的控件拿不到命中测试——那不是"够不着"，是"这一档没有意义"；
+     * 让它可用再量，才是"用户真的能按到它"。顺带在两个尺寸上都走一遍颜色往返还。
+     */
+    await setColor("#00dd00");
+    await page.waitForFunction(() => window.__guard.desktopConfig().customColor === "#00dd00");
+    const geometry = await panelGeometry();
+    const controls = await reachability(CONTROLS);
+    add(`r46-lyrics-settings-reachable-${label}`,
+      Boolean(geometry) && geometry.fits && (!geometry.overflowing || geometry.scrollable)
+        && controls.length === CONTROLS.length && controls.every((entry) => entry.found && entry.inViewport && entry.clickable),
+      JSON.stringify({ geometry, missing: controls.filter((entry) => !entry.found).map((entry) => entry.selector),
+        unreachable: controls.filter((entry) => entry.found && !(entry.inViewport && entry.clickable)) }));
+    await page.screenshot({ path: path.join(guardDir, `r46-lyrics-settings-${label}.png`) });
+    if (label === "320x620") {
+      // 面板在小窗里也必须装得下（不是"能撑出窗口靠 overflow 藏起来"）
+      add("r46-lyrics-settings-small-window-bounded", Boolean(geometry) && geometry.panel.bottom <= 621 && geometry.panel.right <= 321,
+        JSON.stringify(geometry?.panel));
+    }
+    // 「恢复主题色」真的能按：按完回到设计令牌（两个尺寸各一次）
+    await page.getByTestId("lyrics-appearance-color-reset").click();
+    await page.waitForFunction(() => window.__guard.desktopConfig().customColor === "");
+    await closePanel();
+  }
+
+  // 控件真的改配置（样式/方向/开关都走既有窄命令）
+  await page.setViewportSize({ width: 960, height: 160 });
+  await page.evaluate(() => window.__guard.desktopDocument());
+  await page.waitForTimeout(500);
+  await openPanel();
+  await page.getByTestId("lyrics-style-panel").click();
+  await page.getByTestId("lyrics-layout-vertical").click();
+  await page.getByTestId("lyrics-window-enableBlur").click();
+  await page.waitForFunction(() => {
+    const config = window.__guard.desktopConfig();
+    return config.style === "panel" && config.layout === "vertical" && config.enableBlur === false;
+  });
+  const applied = await page.evaluate(() => {
+    const config = window.__guard.desktopConfig();
+    const stage = document.querySelector('[data-testid="lyrics-window"]');
+    return { style: config.style, layout: config.layout, enableBlur: config.enableBlur,
+      attrStyle: stage?.getAttribute("data-lyrics-style"), attrLayout: stage?.getAttribute("data-lyrics-layout") };
+  });
+  add("r46-lyrics-settings-applies", applied.style === "panel" && applied.layout === "vertical"
+    && applied.enableBlur === false && applied.attrStyle === "panel" && applied.attrLayout === "vertical",
+  JSON.stringify(applied));
+  await configure({ style: "clean", layout: "horizontal", enableBlur: true });
+  await closePanel();
+  await page.waitForTimeout(400);
+
+  // 颜色：取色器 → customColor（一条窄命令）→ 关掉面板歌词像素变绿 → 再打开还是那个色 → 恢复主题色
+  await openPanel();
+  await setColor("#00dd00");
+  await page.waitForFunction(() => window.__guard.desktopConfig().customColor === "#00dd00");
+  const storedColor = await page.evaluate(() => window.__guard.desktopConfig().customColor);
+  await closePanel();
+  await paintDesktop();
+  const customInk = await inkContrast(page, activeLine, path.join(guardDir, "r46-lyrics-settings-color-custom.png"));
+  add("r46-lyrics-settings-color-roundtrip", storedColor === "#00dd00" && customInk.changed > 40
+    && customInk.inkRgb !== null && customInk.inkRgb[1] > customInk.inkRgb[0] + 40 && customInk.inkRgb[1] > customInk.inkRgb[2] + 40,
+  JSON.stringify({ storedColor, ink: customInk.inkRgb, changed: customInk.changed }));
+
+  await openPanel();
+  const reopenedColor = await page.locator('[data-testid="lyrics-appearance-color"]').inputValue();
+  await page.getByTestId("lyrics-appearance-color-reset").click();
+  await page.waitForFunction(() => window.__guard.desktopConfig().customColor === "");
+  await closePanel();
+  await paintDesktop();
+  const restoredInk = await inkContrast(page, activeLine, path.join(guardDir, "r46-lyrics-settings-color-restored.png"));
+  add("r46-lyrics-settings-color-reset",
+    reopenedColor.toLowerCase() === "#00dd00"
+      && await page.evaluate(() => window.__guard.desktopConfig().customColor) === ""
+      && restoredInk.changed > 40
+      && !(restoredInk.inkRgb[1] > restoredInk.inkRgb[0] + 40 && restoredInk.inkRgb[1] > restoredInk.inkRgb[2] + 40),
+  JSON.stringify({ reopenedColor, restoredInk: restoredInk.inkRgb, changed: restoredInk.changed }));
+
+  await configure({ ...DESKTOP_BASELINE });
+  await page.setViewportSize({ width: 960, height: 160 });
+  await page.evaluate(() => window.__guard.desktopDocument());
+  await page.waitForTimeout(500);
+}
+
+/**
+ * R46：主窗沉浸页的**逐字着色**与**自定义颜色**（与桌面歌词窗同一份适配层）。
+ *
+ * 三件事：
+ * 1. 主窗面板同样把行级 LRC 推导成逐字词（`words.length > 1`，一个字一个 span）——
+ *    R45B 只接了桌面窗，同一首歌在两个面上差一代；
+ * 2. 逐字高亮**真的在动**：同一条当前行在两个播放时刻的像素必须变（不是只有 DOM 里有 span）；
+ * 3. 自定义颜色两面都生效：沉浸页像素变绿 → 恢复主题色后回到令牌色。
+ */
+export async function checkImmersiveKaraokeAndColor(page, guardDir, add) {
+  const configure = (patch) => page.evaluate((next) => window.__guard.configureDesktop(next), patch);
+  const themeLine = '[data-testid="amll-lyrics-panel"] [class*="lyricMainLine"][class*="active"]';
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await configure({ ...DESKTOP_BASELINE });
+  await page.evaluate(() => window.__guard.restoreLyrics());
+  await page.evaluate(() => window.__guard.setTime(700));
+  await page.waitForTimeout(300);
+  await page.getByRole("button", { name: "歌词", exact: true }).click();
+  await page.getByTestId("playback-stage").waitFor();
+  await page.waitForTimeout(1000);
+
+  const wordSpans = await page.locator(`${themeLine} span`).evaluateAll((nodes) =>
+    nodes.filter((node) => node.children.length === 0 && (node.textContent ?? "").length === 1).map((node) => node.textContent));
+  /**
+   * 逐字推导发生在**适配层**（`withKaraokeWords`），不是播放状态里：状态里的 `lines` 仍是行级的
+   * （1 个词），面板渲染前才推导成逐字。所以这里判的是"官方组件真的拿到并画出了 7 个逐字 span"。
+   */
+  const rawWords = await page.evaluate(() => window.__guard.snapshot().lyrics.lines.map((line) => line.words.length));
+  add("r46-immersive-karaoke-word-spans",
+    wordSpans.length >= 5 && wordSpans.join("") === "第一行歌词守卫",
+  JSON.stringify({ wordSpans, stateWordsPerLine: rawWords }));
+
+  const karaokeBox = await stableTextBox(page, themeLine);
+  const shotAt = async (timeMs, file) => {
+    await page.evaluate((ms) => window.__guard.setTime(ms), timeMs);
+    await page.waitForTimeout(800);
+    return page.screenshot(karaokeBox ? { clip: karaokeBox, path: path.join(guardDir, file) } : { path: path.join(guardDir, file) });
+  };
+  const earlyShot = await shotAt(300, "r46-immersive-karaoke-early.png");
+  const lateShot = await shotAt(2600, "r46-immersive-karaoke-late.png");
+  const fillDiff = pixelDiffRatio(await sharp(earlyShot).raw().toBuffer(), await sharp(lateShot).raw().toBuffer());
+  add("r46-immersive-karaoke-fill-progress", Boolean(karaokeBox) && fillDiff > 0.02,
+    `沉浸页逐字高亮推进：行内像素差异 ${(fillDiff * 100).toFixed(2)}%`);
+
+  await page.evaluate(() => window.__guard.setTime(700));
+  await page.waitForTimeout(400);
+  await configure({ customColor: "#00dd00" });
+  await page.waitForTimeout(900);
+  const customPanel = await inkColor(page, themeLine, path.join(guardDir, "r46-immersive-color-custom.png"));
+  add("r46-immersive-custom-color",
+    customPanel.count > 40 && customPanel.mean !== null
+      && customPanel.mean[1] > customPanel.mean[0] + 60 && customPanel.mean[1] > customPanel.mean[2] + 60,
+  JSON.stringify({ ink: customPanel.mean, count: customPanel.count }));
+
+  await configure({ customColor: "" });
+  await page.waitForTimeout(900);
+  const restoredPanel = await inkColor(page, themeLine, path.join(guardDir, "r46-immersive-color-restored.png"));
+  add("r46-immersive-custom-color-restored",
+    restoredPanel.count > 40 && restoredPanel.mean !== null
+      && !(restoredPanel.mean[1] > restoredPanel.mean[0] + 60 && restoredPanel.mean[1] > restoredPanel.mean[2] + 60),
+  JSON.stringify({ ink: restoredPanel.mean, count: restoredPanel.count }));
+
+  await page.getByTestId("playback-stage").getByRole("button", { name: "收起歌词", exact: true }).click();
+  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+  await configure({ ...DESKTOP_BASELINE });
+}
+
+/**
+ * R46：主窗设置页的「歌词」分区在 960×600 里**完整可滚**（brief 第 3 项的后半句）。
+ *
+ * 判据与桌面歌词设置面同一条：每个控件滚进视口后，命中的必须是它自己。
+ * 页面外壳本来就是 `overflow-y-auto`（App.tsx），这里验证的是"卡片里没有把控件裁掉的固定高度"。
+ */
+export async function checkSettingsPageLyricsCard(page, guardDir, add) {
+  const CONFIG_IDS = [
+    "#lyrics-visible", "#lyrics-mode", "#lyrics-size", "#lyrics-color", "#lyrics-custom-color",
+    "#lyrics-locked", "#lyrics-click-through", "#lyrics-layout", "#lyrics-style",
+    "#lyrics-enableBlur", "#lyrics-enableScale", "#lyrics-enableSpring", "#lyrics-showControls",
+  ];
+  await page.setViewportSize({ width: 960, height: 600 });
+  await page.evaluate(() => window.__guard.pause());
+  if (await page.getByTestId("sidebar-search-rail").count()) await page.getByTestId("sidebar-search-rail").click();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByTestId("settings-page").waitFor();
+  await page.getByRole("tab", { name: "歌词", exact: true }).click();
+  await page.getByTestId("lyrics-cache-card").waitFor();
+  await page.locator("#lyrics-visible").waitFor();
+  await page.waitForTimeout(400);
+  /**
+   * 先写一个自定义颜色：这样「恢复主题色」才是**可用**的（没选过色时它是 disabled，
+   * 而 disabled 控件拿不到命中测试——不是"够不着"，是"这一档没意义"）。
+   * 走的是与用户同样的原生取色器路径（value setter + input 事件），不是直接改配置。
+   */
+  await page.locator("#lyrics-custom-color").evaluate((input) => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+    setter.call(input, "#00dd00");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await page.waitForFunction(() => window.__guard.desktopConfig().customColor === "#00dd00");
+  await page.waitForFunction(() => {
+    const settings = document.querySelector('[data-testid="settings-page"]');
+    return [...(settings?.querySelectorAll("button") ?? [])]
+      .some((button) => (button.textContent ?? "").trim() === "恢复主题色" && !button.disabled);
+  });
+  await page.waitForTimeout(200);
+  const reachable = await page.evaluate((ids) => {
+    const nodes = [...ids.flatMap((selector) => [...document.querySelectorAll(selector)])];
+    // 「恢复主题色」没有 id：按文案找，且只在设置页里找（播放栏/桌面窗也可能有同名按钮）
+    const settings = document.querySelector('[data-testid="settings-page"]');
+    for (const button of settings?.querySelectorAll("button") ?? []) {
+      if ((button.textContent ?? "").trim() === "恢复主题色") nodes.push(button);
+    }
+    return nodes.map((node) => {
+      node.scrollIntoView({ block: "nearest", inline: "nearest" });
+      const rect = node.getBoundingClientRect();
+      const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      return {
+        id: node.id || (node.textContent ?? "").trim().slice(0, 8),
+        found: true,
+        inViewport: rect.width > 0 && rect.height > 0 && rect.top >= -1 && rect.left >= -1 && rect.bottom <= innerHeight + 1 && rect.right <= innerWidth + 1,
+        clickable: Boolean(hit && (node === hit || node.contains(hit))),
+      };
+    });
+  }, CONFIG_IDS);
+  add("r46-settings-page-lyrics-card-complete",
+    reachable.length === CONFIG_IDS.length + 1
+      && reachable.every((entry) => entry.inViewport && entry.clickable),
+  JSON.stringify({ count: reachable.length, unreachable: reachable.filter((entry) => !entry.inViewport || !entry.clickable) }));
+  await page.screenshot({ path: path.join(guardDir, "r46-settings-page-lyrics.png") });
+  // 「恢复主题色」在这里也真的能用：点它 → customColor 回到空（主窗设置页与桌面窗同一份配置）
+  await page.getByTestId("settings-page").getByRole("button", { name: "恢复主题色", exact: true }).click();
+  await page.waitForFunction(() => window.__guard.desktopConfig().customColor === "");
+  add("r46-settings-page-color-reset", await page.evaluate(() => window.__guard.desktopConfig().customColor) === "",
+    "设置页的「恢复主题色」把 customColor 清空（回设计令牌）");
+  await page.getByRole("button", { name: "我的收藏", exact: true }).click();
 }
 
 /**
@@ -2100,6 +2606,17 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     checks.push({ id, ok, detail });
     log(`  ${ok ? "PASS" : "FAIL"}  ${id.padEnd(22)} ${detail}`);
   };
+  /**
+   * 单项检查的护栏（R46）：检查自己抛错（选择器不存在、等待超时）时记一条 FAIL 并继续。
+   * 理由：RED 阶段要读到的是"哪一项行为不成立"，而不是整轮守卫崩在第一项上。
+   */
+  const checked = async (id, run) => {
+    try {
+      await run();
+    } catch (cause) {
+      add(id, false, `检查过程抛错：${String(cause?.message ?? cause).split("\n")[0]}`);
+    }
+  };
 
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
@@ -2176,17 +2693,37 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       add(`${theme}-bar-lyrics-toggle-once`, afterBarToggle.length === togglesBeforeBar + 1
         && afterBarToggleBack.length === togglesBeforeBar + 2 && afterBarToggleBack.at(-1) === false,
       JSON.stringify({ barToggleLabel, before: togglesBeforeBar, after: afterBarToggle, back: afterBarToggleBack }));
+      /**
+       * R46（有意更改 R45C 的这条几何断言）：传输组回到 mode → previous → play → next，
+       * 歌词开关搬到**尾部工具区**（`player-bar-trailing`，右端）。
+       *
+       * 量的是几何而不是标记：模式/上一首/播放/下一首从左到右严格递增；开关在下一首的**右边**
+       * 且落在尾部工具区的横向范围内（不是"挂在中间某处"）。
+       */
       add(`${theme}-bar-lyrics-toggle-geometry`, await page.evaluate(() => {
         const bar = document.querySelector('[data-testid="player-bar"]');
         const toggle = bar?.querySelector('[data-testid="player-lyrics-toggle"]');
+        const mode = bar?.querySelector('button[aria-label^="播放模式："]');
+        const previous = bar?.querySelector('button[aria-label="上一首"]');
         const play = bar?.querySelector('button[aria-label="播放"], button[aria-label="暂停"]');
         const next = bar?.querySelector('button[aria-label="下一首"]');
-        if (!toggle || !play || !next) return { ok: false };
-        const t = toggle.getBoundingClientRect();
-        const p = play.getBoundingClientRect();
-        const n = next.getBoundingClientRect();
-        return { ok: t.left >= p.right - 1 && t.right <= n.left + 1, toggle: { left: Math.round(t.left), right: Math.round(t.right) }, play: Math.round(p.right), next: Math.round(n.left) };
-      }).then((geometry) => geometry.ok).catch(() => false), "播放按钮与下一首之间就是那枚歌词开关（DOM/几何同序）");
+        const trailing = bar?.querySelector('[data-testid="player-bar-trailing"]');
+        if (!toggle || !mode || !previous || !play || !next || !trailing) return { ok: false };
+        const rect = (node) => node.getBoundingClientRect();
+        const t = rect(toggle);
+        const m = rect(mode);
+        const p = rect(previous);
+        const playRect = rect(play);
+        const n = rect(next);
+        const trail = rect(trailing);
+        const transportOrder = m.right <= p.left + 1 && p.right <= playRect.left + 1 && playRect.right <= n.left + 1;
+        return {
+          ok: transportOrder && t.left >= n.right - 1 && t.left >= trail.left - 1 && t.right <= trail.right + 1,
+          transportOrder,
+          mode: Math.round(m.left), previous: Math.round(p.left), play: Math.round(playRect.left), next: Math.round(n.left),
+          nextRight: Math.round(n.right), toggle: Math.round(t.left), trailing: [Math.round(trail.left), Math.round(trail.right)],
+        };
+      }).then((geometry) => geometry.ok), "传输组 模式→上一首→播放→下一首；歌词开关在尾部工具区（下一首右侧）");
       await page.getByRole("button", { name: "歌词", exact: true }).click();
       await page.mouse.move(0, 0);
       await page.waitForTimeout(1000);
@@ -2317,9 +2854,20 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       await stage.getByRole("button", { name: "暂停", exact: true }).click();
       await page.evaluate(() => window.__guard.setTime(3300));
       await page.waitForTimeout(800);
+      /**
+       * R46：这一项的判据从"深色墨迹"改成"**字迹画出来了**"（`changed`）。
+       *
+       * 为什么必须改（有意更改 R44 起的这条口径）：R46 让主窗面板也吃官方逐字时间
+       * （`withKaraokeWords`），官方对"还没唱到"的词用遮罩压到 `--dark-mask-alpha`（0.2~0.4）。
+       * 夹具的第二行结束时间来自 `parseLrc` 的哨兵值（59999999ms），所以 3300ms 时整行都"还没唱到"
+       * ——字是画出来的，但只有四成不透明度，`luminance < 95` 这个"深色"判据必然为 0
+       * （实测 `{"ink":0,"changed":1137}`）。字迹是否真的画出来用 `changed`（可见帧 vs 隐藏帧的差异像素）
+       * 来判，与主题无关；"第二行激活"照旧。
+       */
       const progressed = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-seek-line.png`));
       const secondActive = await page.locator(activeLine).first().textContent().catch(() => "");
-      add(`${theme}-seek-text-pixels`, progressed.ink > 60 && secondActive?.includes("第二行"), `${JSON.stringify(progressed)}，第二行激活=${secondActive?.includes("第二行")}`);
+      add(`${theme}-seek-text-pixels`, progressed.changed > 200 && secondActive?.includes("第二行"),
+        `${JSON.stringify(progressed)}，第二行激活=${secondActive?.includes("第二行")}`);
 
       await stage.getByRole("button", { name: "下一首", exact: true }).click();
       await page.waitForFunction(() => window.__guard.snapshot().index === 1 && window.__guard.snapshot().status === "playing");
@@ -2476,6 +3024,15 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
 
     await page.evaluate(() => window.__guard.restoreLyrics());
     /**
+     * R46：主窗沉浸页的逐字着色 / 两面共用的自定义颜色，以及主窗设置页「歌词」卡片的完整性。
+     * 放在两轮主题之后、R45C 开关验收之前：两项都只碰当前这一页的舞台与设置页，用后各自复位。
+     *
+     * 都经过 `checked()`：单项检查自己抛错（选择器还不存在、等待超时）记一条 FAIL 并继续，
+     * 而不是把整轮守卫打断——RED 阶段要看到的是"哪一项不成立"，不是"脚本崩了"。
+     */
+    await checked("r46-immersive-karaoke-and-color", () => checkImmersiveKaraokeAndColor(page, guardDir, add));
+    await checked("r46-settings-page-lyrics-card", () => checkSettingsPageLyricsCard(page, guardDir, add));
+    /**
      * R45C：播放栏/沉浸页快捷开关的真行为（延迟 IPC 下的双击、拒绝后恢复、两种模式、菜单层级）。
      * 放在两轮主题之后、分页之前：它自己重新载入主页，只碰播放栏与沉浸页。
      */
@@ -2492,6 +3049,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     add("desktop-early-document", earlyDocument?.includes("第一行歌词守卫"), "早于 React 挂载的文档丢失后，就绪握手须补回当前快照");
     const desktop = page.getByTestId("lyrics-window");
     await checkDesktopInteraction(page, guardDir, add);
+    /** R46：桌面歌词窗自己的设置面（小窗可滚、颜色往返）。放在交互验收之后，同一扇桌面窗。 */
+    await checked("r46-desktop-lyrics-settings", () => checkDesktopLyricsSettings(page, guardDir, add));
     /**
      * 官方演出开关（R44 起的既有覆盖，R45B 保留）：还能真的关掉弹簧/模糊、还能真的做缩放。
      * 放在交互验收之后：它要一段"播放中"的稳定画面。

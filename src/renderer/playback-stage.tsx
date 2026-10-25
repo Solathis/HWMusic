@@ -218,7 +218,7 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
           smallControlsSlot={musicControls}
           lyricSlot={(
             <div className="relative isolate h-full min-h-0 w-full" data-testid="playback-stage-lyrics-slot">
-              {hasLyric ? <AmllLyricsPanel runtime={runtime} lines={state.lyrics.lines} playing={playing} seekGeneration={state.seekGeneration} /> : null}
+              {hasLyric ? <AmllLyricsPanel runtime={runtime} lines={state.lyrics.lines} playing={playing} seekGeneration={state.seekGeneration} customColor={lyrics?.config.customColor} /> : null}
               {notice === null ? null : (
                 <div className="absolute inset-0 flex items-center justify-center p-6">
                   <p role="status" className="max-w-md text-center text-sm text-foreground">{notice}</p>

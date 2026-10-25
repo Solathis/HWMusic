@@ -50,7 +50,7 @@
 }
 
 /*
- * R45B：竖版 = 官方 AMLL 组件上的**真竖排**。
+ * R45B/R46：竖版 = 官方 AMLL 组件上的**真竖排**。
  *
  * 一句话：竖排落在**一行之内**（一行 = 一条横带，带里是从上到下的列，列自右向左），
  * 播放器自己仍保持水平书写。这不是"把一整行横排折进窄窗"——那是 R45 之前的假竖版。
@@ -65,24 +65,34 @@
  * 官方量到的"行高"就恢复成"这一条横带有多高"= 竖排列的真实高度，排版/居中/滚动边界全部自洽。
  *
  * 逐条说明：
- * - `writing-mode: vertical-rl` + `text-orientation: upright`：文字沿垂直方向**逐字直立**排列，
- *   列自右向左推进（不是把整行旋转 90°）。
- * - `max-height: 100cqh`（`container-type: size` 在播放器上）：一列最多和窗口一样高，超出的字
- *   **折到左边下一列**。于是"当前行"的高度永远不超过播放器 ⇒ 只要列宽的总和放得下，整行就在窗口里。
+ * - `writing-mode: vertical-rl` + `text-orientation: mixed`（R46 改）：文字沿垂直方向排列、
+ *   列自右向左推进（不是把整行旋转 90°）。`mixed` 是 `text-orientation` 的**初始值**，也就是
+ *   Unicode 默认竖排方向：**CJK 直立、拉丁/数字标点旋转 90°**（参考实现的同一条原则）。
+ *   R45B 用的 `upright` 会把拉丁字母也拉成直立方块——中英混排的歌词看起来像一列方块，
+ *   实测（320×620 / lg）拉丁字形盒高 = 字号 28px，旋转后应该只有 16px 左右。
+ * - `max-height: calc(100cqh - 0.8em)`（R46 改）：竖排的折列轴，也是 R46 之前**剪字的直接原因**。
+ *   官方量的那个"行高"是行盒 wrapper 的高度，而 wrapper 自带上下各 `.4em` 内边距
+ *   （`.FmKaba_lyricLineWrapper { padding: .4em var(--lyric-line-padding-x) }`）。
+ *   行内容占满 `100cqh` 时 wrapper = `100cqh + 0.8em` > 播放器高度，官方又把 wrapper 居中，
+ *   于是上下各被 `overflow: hidden` 裁掉一段：240×120 实测 wrapper 106px / 播放器 84px，
+ *   首字 em 盒探出播放器 4px（`insideY=false`）。给内边距让路之后 wrapper 正好等于播放器高度
+ *   （320×620 / xxl 实测 584px），每个字都落在播放器里。
  * - `margin: 0; padding: 0`（只覆盖官方给主行的 `-1em/1em` 那对儿）：那 1em 竖排时是**列的内边距**，
  *   84px 高的窗里它吃掉 56px，每列只剩 1 个字——7 个字的行会被撑成 7 列 235px 宽，反而放不下。
  *   词内 span 自己的 `-1em/1em` 保留（那是逐字遮罩的背景连续性），只撤主行这一层。
  * - `direction: rtl` 在行盒上、`direction: ltr` 在行内容上：竖排的**块起边在右**，列从行盒右端开始
  *   往左排；`rtl` 只用来把行盒摆到右边（块级盒按父级的内联方向靠起边），文字本身仍是
  *   `direction: ltr` 的"从上到下"，不会被倒过来。放不下时至少**行首**在窗口里，不会整行跑到左边去。
- * - `br { display: none }`：官方的平衡换行是按**宽度**量的（`LineBalancer` 用 `getBoundingClientRect`
- *   的 width）。竖排下那个"宽度"是列的厚度，照它插 `<br>` 会把一行切成每列一两个字，
- *   于是"竖排"看起来像横排。让官方那两个 `<br>` 不显示，改由浏览器按窗口**高度**折列。
- *   只动显示，不动官方 DOM，也不改它的测量代码。
+ * - `br { display: none }`（R46 保留，理由更明确）：官方的平衡换行（`LineBalancer`）用 canvas 量的是
+ *   **水平**步进宽度（`prefixWidth` 与 `containerWidth` 比较），在竖排里那个"宽度"是列的厚度——
+ *   两边量的不是同一个轴，插出来的 `<br>` 就是几处**任意的**强制断列，列会长短不一。
+ *   让那两个 `<br>` 不显示，改由浏览器按窗口**高度**折列，列才会整齐填满。只动显示，不动官方 DOM，
+ *   也不改它的测量代码。
  * - `overflow-x: auto` / `overflow-y: hidden`：y 轴留给官方自己的滚动（官方用 `translateY` 排版、
  *   自己接管滚轮并钳在 `beginFrame` 算的上下界里），再给它一条 y 滚动条只会互相打架。
  *   x 是竖排的块轴（见下面 fix4 的两条规则）：窗口宽度装不下所有列时，播放器自己就是滚动容器，
- *   底边出现浏览器原生的横向滚动条，用户用鼠标拖它就能看到剩下的列。
+ *   底边出现浏览器原生的横向滚动条，用户用鼠标拖它就能看到剩下的列（R46 的浏览器守卫按"真拖条"
+ *   验证所有字都够得着、且越界拖不动）。
  * - `direction: rtl`（fix4，只加在**播放器**这一层）：竖排的块起边在右，行首天然落在窗口右边、
  *   溢出朝左。只有 rtl 滚动容器才能把"朝左的溢出"变成可滚的：`scrollLeft` 从 0 走到负值，
  *   按行首在右、行尾在左的顺序露出后面的字。行盒上的那条 `direction: rtl` 照旧保留（两者不冲突）。
@@ -131,11 +141,16 @@
 }
 .amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player [class*="lyricMainLine"] {
   writing-mode: vertical-rl;
-  text-orientation: upright;
+  /* R46：Unicode 默认竖排方向 —— CJK 直立、拉丁/数字/标点旋转（不是全 upright 的方块字） */
+  text-orientation: mixed;
   direction: ltr;
   margin: 0;
   padding: 0;
-  max-height: 100cqh;
+  /*
+   * R46：折列轴。给行盒 wrapper 的上下 `.4em` 内边距让路（`calc(100cqh - 0.8em)`），
+   * 否则 wrapper 比播放器高 0.8em，官方把它居中后上下各被裁掉一段（剪字的直接原因）。
+   */
+  max-height: calc(100cqh - 0.8em);
 }
 .amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player [class*="lyricMainLine"] br {
   display: none;

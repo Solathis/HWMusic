@@ -12,14 +12,19 @@ import { LYRICS_DOCUMENT, LYRICS_PROGRESS, LYRICS_STATE, THEME_CHANGED } from ".
 import { coreLyricsConfigure, coreLyricsControl, onCoreEvent, signalLyricsReady } from "./host-api"
 import { Button } from "./components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card"
+import { Input } from "./components/ui/input"
+import { Label } from "./components/ui/label"
+import { ScrollArea } from "./components/ui/scroll-area"
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "./components/ui/sheet"
+import { Switch } from "./components/ui/switch"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
-import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuTrigger } from "./components/ui/dropdown-menu"
 import { LYRICS_SEEK_WINDOW_MS } from "./features/lyrics/lyric-sync.mjs"
 import {
   LYRICS_STATUS,
   dragRegionEnabled,
   effectiveSizeId,
   estimateTimeMs,
+  isCustomColor,
   lyricsConfigFromSearch,
   normalizeLyricsConfig,
   reanchorProgress,
@@ -260,6 +265,91 @@ export function LyricsWindow() {
    *
    * 无障碍名称把"现在是什么 + 点下去会怎样"说全：`aria-pressed` 让人知道这是个按压态开关。
    */
+  /**
+   * R46：外观设置面。
+   *
+   * 为什么不再是 DropdownMenu：这个窗默认只有 160px 高（960×160），菜单是"往下长"的浮层，
+   * 样式 2 项 + 方向 2 项 + 4 个复选框根本装不下——`.tmp/probe/settings-lyrics.png` 抓到的就是
+   * 被窗口底边切断的菜单（最后两个开关点不到）。换成 shadcn 的 Sheet：面板高度以**窗口**为上限
+   * （`max-h-[100dvh]`），正文区用 shadcn `ScrollArea` 自己滚（仓里的规矩：面板不许自搭滚动容器），
+   * 每个控件都够得着。
+   *
+   * 颜色（brief 第 3 项）：原生 `type=color` + 「恢复主题色」，写的是既有的 `customColor` 字段
+   * （合法 hex 判定来自 `lyrics-window.mjs` 的 `isCustomColor`，这里不另抄正则），
+   * 落盘仍由 Rust 拥有——这里只发一条窄 `core_lyrics_configure`。
+   */
+  const customColorValue = isCustomColor(config.customColor) ? config.customColor : null
+  /**
+   * 面板开合状态**提到这一层**（受控）：换样式会把 `controls` 所在的子树从 `<div>` 换成 `<Card>`
+   * （结构变了，React 会重挂），面板若自己持有开合状态就会在点「面板」的瞬间自己关掉。
+   */
+  const [appearanceOpen, setAppearanceOpen] = useState(false)
+  /** 样式/方向的档位按钮：两枚按压态按钮在 160px 高的窗里比下拉菜单稳（菜单会被窗口裁掉）。 */
+  const choiceButton = (active: boolean, label: string, onPick: () => void, testId: string, disabled = false) => (
+    <Button variant={active ? "secondary" : "ghost"} size="sm" aria-pressed={active} data-testid={testId}
+      disabled={disabled} onClick={onPick}>{label}</Button>
+  )
+  const appearancePanel = (
+    <Sheet open={appearanceOpen} onOpenChange={setAppearanceOpen}>
+      <SheetTrigger asChild>
+        <Button variant="ghost" size="icon-sm" aria-label="桌面歌词外观" data-testid="lyrics-appearance"><Settings2 /></Button>
+      </SheetTrigger>
+      <SheetContent side="right" data-testid="lyrics-appearance-panel"
+        className="w-72 max-w-[calc(100%-0.5rem)] max-h-[100dvh] gap-0 p-0">
+        <SheetHeader className="shrink-0 gap-1 p-3 pb-1">
+          <SheetTitle>桌面歌词外观</SheetTitle>
+          <SheetDescription>小窗里也能改：内容可滚动，设置立即生效并保存。</SheetDescription>
+        </SheetHeader>
+        <ScrollArea data-testid="lyrics-appearance-scroll" className="min-h-0 flex-1">
+          <div className="flex flex-col gap-3 p-3 pt-2">
+            <div className="flex flex-col gap-1">
+              <p className="text-xs text-muted-foreground">样式</p>
+              <div className="flex flex-wrap gap-1">
+                {choiceButton(config.style === "clean", "透明", () => configure({ style: "clean" }), "lyrics-style-clean")}
+                {choiceButton(config.style === "panel", "面板", () => configure({ style: "panel" }), "lyrics-style-panel")}
+              </div>
+            </div>
+            <div className="flex flex-col gap-1">
+              <p className="text-xs text-muted-foreground">方向（竖版为逐字竖排）</p>
+              <div className="flex flex-wrap gap-1">
+                {choiceButton(config.layout === "horizontal", "横版", () => configure({ layout: "horizontal" }), "lyrics-layout-horizontal")}
+                {choiceButton(config.layout === "vertical", "竖版", () => configure({ layout: "vertical" }), "lyrics-layout-vertical", config.mode === "taskbar")}
+              </div>
+            </div>
+            <div className="flex flex-col gap-2">
+              {([["enableBlur", "模糊"], ["enableScale", "缩放"], ["enableSpring", "弹簧动画"], ["showControls", "媒体按钮"]] as const).map(([key, label]) => (
+                <div key={key} className="flex items-center justify-between gap-2">
+                  <Label htmlFor={`lyrics-window-${key}`}>{label}</Label>
+                  <Switch id={`lyrics-window-${key}`} data-testid={`lyrics-window-${key}`} checked={config[key]}
+                    onCheckedChange={(checked) => configure({ [key]: checked })} />
+                </div>
+              ))}
+            </div>
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="lyrics-appearance-color">颜色</Label>
+              <div className="flex items-center gap-2">
+                {/* 非受控（`defaultValue` + 按存档值换 key）：`type=color` 的受控值必须始终合法，
+                    而"还没选过"不该由页面编一个色值出来（颜色一律来自令牌或用户自己选的那个）。 */}
+                <Input key={customColorValue ?? "theme"} id="lyrics-appearance-color" data-testid="lyrics-appearance-color"
+                  type="color" aria-label="自定义歌词颜色" className="h-8 w-14 shrink-0 p-0"
+                  defaultValue={customColorValue ?? undefined}
+                  onChange={(event) => {
+                    const value = event.target.value
+                    if (!isCustomColor(value)) return
+                    configure({ customColor: value })
+                  }} />
+                <Button variant="ghost" size="sm" data-testid="lyrics-appearance-color-reset" disabled={customColorValue === null}
+                  onClick={() => configure({ customColor: "" })}>恢复主题色</Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {customColorValue === null ? "现在用设计令牌里的颜色" : `使用自定义颜色 ${customColorValue}`}
+              </p>
+            </div>
+          </div>
+        </ScrollArea>
+      </SheetContent>
+    </Sheet>
+  )
   const lockButton = (
     <Button variant="ghost" size="icon-sm" aria-pressed={config.locked}
       aria-label={config.locked ? "已锁定桌面歌词（点击解锁）" : "锁定桌面歌词"}
@@ -293,33 +383,7 @@ export function LyricsWindow() {
         <Button variant="ghost" size="icon-sm" aria-label="下一首" onClick={() => control("next")}><SkipForward /></Button>
       </> : null}
       {lockButton}
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="桌面歌词外观"><Settings2 /></Button></DropdownMenuTrigger>
-        <DropdownMenuContent align="end" side="bottom">
-          <DropdownMenuGroup>
-            <DropdownMenuLabel>样式</DropdownMenuLabel>
-            <DropdownMenuRadioGroup value={config.style} onValueChange={(style) => configure({ style })}>
-              <DropdownMenuRadioItem value="clean">透明</DropdownMenuRadioItem>
-              <DropdownMenuRadioItem value="panel">面板</DropdownMenuRadioItem>
-            </DropdownMenuRadioGroup>
-          </DropdownMenuGroup>
-          <DropdownMenuSeparator />
-          <DropdownMenuGroup>
-            <DropdownMenuLabel>方向（竖版为逐字竖排）</DropdownMenuLabel>
-            <DropdownMenuRadioGroup value={config.layout} onValueChange={(layout) => configure({ layout })}>
-              <DropdownMenuRadioItem value="horizontal">横版</DropdownMenuRadioItem>
-              <DropdownMenuRadioItem value="vertical" disabled={config.mode === "taskbar"}>竖版</DropdownMenuRadioItem>
-            </DropdownMenuRadioGroup>
-          </DropdownMenuGroup>
-          <DropdownMenuSeparator />
-          <DropdownMenuGroup>
-            <DropdownMenuCheckboxItem checked={config.enableBlur} onCheckedChange={(enableBlur) => configure({ enableBlur })}>模糊</DropdownMenuCheckboxItem>
-            <DropdownMenuCheckboxItem checked={config.enableScale} onCheckedChange={(enableScale) => configure({ enableScale })}>缩放</DropdownMenuCheckboxItem>
-            <DropdownMenuCheckboxItem checked={config.enableSpring} onCheckedChange={(enableSpring) => configure({ enableSpring })}>弹簧动画</DropdownMenuCheckboxItem>
-            <DropdownMenuCheckboxItem checked={config.showControls} onCheckedChange={(showControls) => configure({ showControls })}>媒体按钮</DropdownMenuCheckboxItem>
-          </DropdownMenuGroup>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      {appearancePanel}
     </div>
   )
   const content = (

@@ -312,3 +312,48 @@ test("禁止自绘解析：必须复用 AMLL 官方 parseLrc，不得自带时�
   assert.doesNotMatch(code, /\\d\{2\}:\\d\{2\}/, "不得出现自写的时间戳正则（那是自绘解析）");
   assert.doesNotMatch(code, /<span|<div|className/, "适配层不产生任何标记（渲染是组件的事）");
 });
+
+/**
+ * R46：自定义颜色的 scoped 覆盖是**两面共用**的同一个函数。
+ *
+ * 桌面歌词窗与主窗沉浸页都要用 `applyCustomColor` 覆盖官方歌词变量（唯一接线点在适配层），
+ * 所以这个函数必须：只写那一个变量、只写已验证的 `#RRGGBB`、空值就把覆盖撤掉（回设计令牌）。
+ * 用最小的假元素断言，不依赖 DOM（node:test 里没有浏览器）。
+ */
+test("R46 applyCustomColor：只写 AMLL 变量、只写已验证 hex、空值撤回覆盖", async () => {
+  const { AMLL_COLOR_VAR, applyCustomColor } = await import("../src/renderer/features/lyrics/amll-adapter.ts");
+  assert.equal(AMLL_COLOR_VAR, "--amll-lp-color", "变量名仍只有适配层这一处真源");
+
+  const makeElement = () => {
+    const written = [];
+    const removed = [];
+    return {
+      written, removed,
+      style: {
+        setProperty: (name, value) => written.push([name, value]),
+        removeProperty: (name) => removed.push(name),
+      },
+    };
+  };
+
+  const custom = makeElement();
+  applyCustomColor(custom, "#00dd00");
+  assert.deepEqual(custom.written, [[AMLL_COLOR_VAR, "#00dd00"]], "只写那一个变量（不拼 CSS 文本、不碰别的属性）");
+  assert.deepEqual(custom.removed, []);
+
+  const empty = makeElement();
+  applyCustomColor(empty, "");
+  assert.deepEqual(empty.written, [], "空值不写任何东西");
+  assert.deepEqual(empty.removed, [AMLL_COLOR_VAR], "空值 = 撤掉覆盖，回到设计令牌");
+
+  for (const bad of ["#fff", "red", "rgb(0,0,0)", ";}body{display:none", 42, null, undefined, true, {}]) {
+    const rejected = makeElement();
+    applyCustomColor(rejected, bad);
+    assert.deepEqual(rejected.written, [], `非法值不许写进样式：${JSON.stringify(bad)}`);
+    assert.deepEqual(rejected.removed, [AMLL_COLOR_VAR], `非法值按"没有自定义色"处理：${JSON.stringify(bad)}`);
+  }
+
+  // 没有元素（未挂载/已卸载）时静默返回：这条路上抛错会炸掉整个面板
+  assert.doesNotThrow(() => applyCustomColor(null, "#00dd00"));
+  assert.doesNotThrow(() => applyCustomColor(undefined, "#00dd00"));
+});

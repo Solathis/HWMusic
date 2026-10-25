@@ -170,7 +170,7 @@ test("R45C 失败：一句可操作的话（原因/下一步）、重试能恢�
   assert.doesNotMatch(toggleFailureText(true, "taskbar"), /桌面歌词/);
 });
 
-test("R45C 播放栏：播放按钮右侧一枚 Captions 开关；没有 lyrics 就不渲染", async () => {
+test("R46 播放栏：传输组回到 模式→上一首→播放→下一首，歌词开关搬到尾部工具区；没有 lyrics 就不渲染", async () => {
   const { render } = await bundle("bar", `
     import { renderToStaticMarkup } from "react-dom/server";
     import { PlayerBar } from "./src/renderer/components.tsx";
@@ -201,13 +201,30 @@ test("R45C 播放栏：播放按钮右侧一枚 Captions 开关；没有 lyrics 
   assert.match(toggle, /aria-pressed="true"/, "开着的状态要可读（不是只有颜色）");
   assert.match(desktop, /lucide-captions/, "图标是 lucide 的 Captions（不自绘）");
 
-  // DOM 顺序 = 视觉顺序：播放 → 这枚开关 → 下一首
-  const playAt = desktop.indexOf('aria-label="播放"');
+  /**
+   * R46（有意更改 R45C 的这条断言）：传输组恢复常规顺序 —— 模式 → 上一首 → 播放 → 下一首，
+   * 歌词开关**不在**传输组里，而是尾部工具区（`player-bar-trailing`）。
+   *
+   * 为什么改：R45C 把它塞在播放与下一首之间（实测顺序 mode, previous, play, lyrics, next），
+   * 传控件被一枚非传输按钮劈成两半；用户按"播放→下一首"的肌肉记忆会点错。
+   * 开关的语义/状态/一次点击一条命令一个字都没变，变的只是它挂在哪一段。
+   */
+  const transportAt = desktop.indexOf('data-testid="player-controls"');
+  const trailingAt = desktop.indexOf('data-testid="player-bar-trailing"');
   const toggleAt = desktop.indexOf('data-testid="player-lyrics-toggle"');
-  const nextAt = desktop.indexOf('aria-label="下一首"');
-  assert.ok(playAt > -1 && toggleAt > -1 && nextAt > -1, "三个锚点都要在标记里");
-  assert.ok(playAt < toggleAt, "开关必须在播放按钮**右侧**（播放在前）");
-  assert.ok(toggleAt < nextAt, "开关紧挨着播放按钮（在下一首之前）");
+  const trailingCloseAt = desktop.indexOf("</div>", toggleAt);
+  assert.ok(transportAt > -1 && trailingAt > -1 && toggleAt > -1, "传输组 / 尾部工具区 / 开关三个锚点都要在标记里");
+  const transport = desktop.slice(transportAt, trailingAt);
+  const modeAt = transport.indexOf('aria-label="播放模式：');
+  const previousAt = transport.indexOf('aria-label="上一首"');
+  const playAt = transport.indexOf('aria-label="播放"');
+  const nextAt = transport.indexOf('aria-label="下一首"');
+  assert.ok(modeAt > -1 && previousAt > -1 && playAt > -1 && nextAt > -1, "传输组里要能找到 模式/上一首/播放/下一首");
+  assert.ok(modeAt < previousAt && previousAt < playAt && playAt < nextAt,
+    "传输组的 DOM 顺序必须是 模式 → 上一首 → 播放 → 下一首（R46：歌词开关不再插在中间）");
+  assert.equal(transport.includes("player-lyrics-toggle"), false, "传输组里不许再有歌词开关（它已搬走）");
+  assert.ok(toggleAt > trailingAt, "开关挂在尾部工具区（`player-bar-trailing`）里");
+  assert.ok(trailingCloseAt > toggleAt, "开关在尾部工具区的标签之内（不是跟在它后面）");
 
   const taskbar = render(binding({ mode: "taskbar" }));
   assert.match(taskbar, /aria-label="显示任务栏歌词"/, "任务栏模式的标签说的是任务栏歌词");

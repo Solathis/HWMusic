@@ -13,9 +13,10 @@
  */
 import { LyricPlayer } from "@applemusic-like-lyrics/react"
 import type { LyricLine } from "@applemusic-like-lyrics/lyric"
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 
 import { createLyricSync } from "./features/lyrics/lyric-sync.mjs"
+import { applyCustomColor, withKaraokeWords } from "./features/lyrics/amll-adapter.ts"
 import type { PlayerRuntime } from "./features/playback/player-runtime.ts"
 
 export interface AmllLyricsPanelProps {
@@ -25,12 +26,21 @@ export interface AmllLyricsPanelProps {
   playing: boolean
   /** 状态机里的跳转信号：变了就通知进度泵（200ms 窗口在 lyric-sync 里） */
   seekGeneration: number
+  /**
+   * 自定义歌词颜色（R46）：`#RRGGBB` 或空串。
+   *
+   * 空串 = 用设计令牌（`amll-theme.css` 的 `[data-lyrics-color]`）；非空时由适配层的
+   * `applyCustomColor` 在**这一面**的容器上做一次 scoped 变量覆盖——与桌面歌词窗走的是同一个
+   * 函数、同一个配置字段（`lyrics.config.customColor`），不存在第二份颜色状态。
+   */
+  customColor?: string
 }
 
-export function AmllLyricsPanel({ runtime, lines, playing, seekGeneration }: AmllLyricsPanelProps) {
+export function AmllLyricsPanel({ runtime, lines, playing, seekGeneration, customColor = "" }: AmllLyricsPanelProps) {
   const player = runtime.player
   const [frame, setFrame] = useState({ time: 0, isSeeking: false })
   const syncRef = useRef<ReturnType<typeof createLyricSync> | null>(null)
+  const stageRef = useRef<HTMLDivElement | null>(null)
 
   // 进度泵：挂载就开跑，卸载就停帧（后台页不留 rAF）
   useEffect(() => {
@@ -57,10 +67,27 @@ export function AmllLyricsPanel({ runtime, lines, playing, seekGeneration }: Aml
     syncRef.current?.notifySeek()
   }, [seekGeneration])
 
+  /**
+   * R46：行级 LRC → 逐字词（与桌面歌词窗**同一个**纯函数）。
+   *
+   * 官方 `LyricPlayer` 只在 `words.length > 1` 且词时间不同时才逐字着色；行级 LRC 在官方解析里
+   * 只有 1 个词，所以 R45B 之后主窗面板一直只有整行渐变。推导结果按 `lines` 记忆：每帧新建数组
+   * 会让官方反复重排（AMLL 的铁律是传进去的数组内容不得再改）。
+   */
+  const playerLines = useMemo(() => withKaraokeWords(lines), [lines])
+
+  /**
+   * R46：自定义颜色只写在**这一个容器**上（一次 scoped 变量覆盖，变量名与写法都在适配层）。
+   * 空值就撤掉覆盖回设计令牌——与桌面歌词窗完全同一条路（`applyCustomColor`）。
+   */
+  useEffect(() => {
+    applyCustomColor(stageRef.current, customColor)
+  }, [customColor])
+
   return (
-    <div className="amll-lyrics-stage absolute inset-0 isolate" data-testid="amll-lyrics-panel">
+    <div ref={stageRef} className="amll-lyrics-stage absolute inset-0 isolate" data-testid="amll-lyrics-panel">
       <LyricPlayer
-        lyricLines={lines}
+        lyricLines={playerLines}
         currentTime={frame.time}
         isSeeking={frame.isSeeking}
         playing={playing}

@@ -540,10 +540,30 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
             {playing ? <PauseIcon /> : <PlayIcon />}
           </Button>
           {/*
-            R45C：播放按钮**右侧**的歌词快捷开关。状态/标签只来自 `lyricsToggleView`，
-            点击只转一次 `toggleVisible()`——取反由 binding 的意图机决定（同一个任务里连点两次
-            也不会把同一个 `true` 发两遍），它不新建运行时，也不自己记一份"我以为开着"。
+            R46：传输组只放传输控件 —— 模式 → 上一首 → 播放 → 下一首。
+            R45C 那枚歌词开关已搬到尾部工具区（见下面的 `player-bar-trailing`）。
           */}
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="下一首"
+            disabled={!hasTrack}
+            onClick={() => void player.next()}
+          >
+            <SkipForwardIcon />
+          </Button>
+        </div>
+
+        {/*
+          R46：歌词快捷开关搬到**尾部工具区**（用户裁决：传输组要回到 mode → previous → play → next）。
+
+          R45C 曾把它夹在播放与下一首之间（实测顺序 mode, previous, play, lyrics, next），
+          传输控件被一枚非传输按钮劈成两半——"播放→下一首"的肌肉记忆会点错。
+          现在它和传输组之间隔开（尾部工具区在右端，`justify-end`），语义一个字没变：
+          状态/标签仍只来自 `lyricsToggleView`，点击仍只转一次 `toggleVisible()`，
+          取反由 binding 的意图机决定（同一个任务里连点两次也不会把同一个 `true` 发两遍）。
+        */}
+        <div className="flex min-w-0 flex-1 items-center justify-end gap-1" data-testid="player-bar-trailing">
           {lyricsView === null ? null : (
             <Button
               variant="ghost"
@@ -556,19 +576,7 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
               <CaptionsIcon />
             </Button>
           )}
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label="下一首"
-            disabled={!hasTrack}
-            onClick={() => void player.next()}
-          >
-            <SkipForwardIcon />
-          </Button>
         </div>
-
-        {/* 右区：本轮没有要放的控件（音量在下面那行），留空占位保持三区语义 */}
-        <div className="flex min-w-0 flex-1 items-center justify-end gap-1" data-testid="player-bar-trailing" />
       </div>
 
       <div className="flex items-center gap-3">
