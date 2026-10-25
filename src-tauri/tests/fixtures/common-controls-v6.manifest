@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Common-Controls v6 激活上下文片段（fragment，只含依赖声明）。
+
+  为什么需要 v6：`src/taskbar_lyrics*/`、托盘等代码用到
+  `comctl32!TaskDialogIndirect` 这类只存在于 v6 的导出；进程若没有 v6 激活
+  上下文，加载期直接报 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`（R48 的根因）。
+
+  本片段实际服务的是「由 link.exe 自己生成清单」的目标：cargo test 的 lib
+  单测二进制、cargo test 的集成测试（tests/ 下各目标）、cargo bench 等。
+  `build.rs` 对这些目标发 `/MANIFEST:EMBED` + `/MANIFESTINPUT:<本文件>`，并且
+  走全局 `rustc-link-arg`（`rustc-link-arg-tests` 不覆盖 lib 单测二进制）。
+
+  app bin 是例外，不读本片段：`build.rs` 用 `-bins=/MANIFEST:NO`（同时就地
+  静音 LNK4075）关掉 bin 侧的生成，继续使用 tauri-build 嵌进 `resource.lib`
+  的那份 RT_MANIFEST（`target/.../out/resource.rc` 里的 `1 24 { ... }`）。
+  原因是实测结论（以此为准）：`/MANIFESTINPUT` **不会**与 tauri-build 已嵌入
+  资源段的清单合并，而是另外生成一份 MANIFEST 资源，链接期直接
+  `CVTRES : fatal error CVT1100`（重复的 MANIFEST 资源）→ `LNK1123`。
+  所以 bin 必须有例外，不能靠「合并」解决。
+
+  为什么只放 <dependency>、不放身份：
+  - 对测试/bench 目标而言，本片段就是 manifest 的全部内容；这些 exe 只需要
+    v6 依赖，不需要任何 assembly 身份。
+  - 不要加 `<assemblyIdentity>`：会给每个测试 exe 认领同一个身份，且与
+    app bin 的 tauri 清单身份冲突。测试 exe 不需要身份，只需要依赖。
+  - 也不加 `<application>` / windowsSettings（dpiAware 等），免得与宿主进程的
+    设置打架。
+  - 依赖条目与 tauri-build 写进 RT_MANIFEST 的那条逐字段一致
+    （type/name/version/processorArchitecture/publicKeyToken/language），
+    两边内容同源，方便与 `mt.exe -inputresource:...;#1` 的输出核对。
+
+  改这个文件时注意：XML 注释里不能出现两个连续的连字符（否则 mt.exe 解析
+  失败，报 `c1010070` / `LNK1327`），所以上面提到 cargo 子命令时只写目标类型，
+  不写带短选项的完整命令行。
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>
