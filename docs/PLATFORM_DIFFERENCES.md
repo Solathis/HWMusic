@@ -21,7 +21,7 @@
 | 全局快捷键 | **verified（代码级）** + untested（真机注册与投递） | untested（**且只在 X11 会话下可能可用**，见 §5） | untested |
 | DPAPI 会话加密 | **verified**（本机真跑过 `cargo test`；1 条半程端到端 ignored） | untested（`#[cfg(not(windows))]` 一行 stub，本机不参与编译） | untested（同上） |
 | HTTP 代理（webview 侧） | **verified（代码级）** + untested（真抓包） | untested | untested（需 `macos-proxy` feature 且**仅 14+**） |
-| 任务栏歌词 | 实验内嵌 Beta；Low 环境成功路径待验 | unsupported | unsupported |
+| 任务栏歌词 | 实验内嵌 Beta；Windows 单屏真实验证，多屏/高 DPI/自动隐藏未验 | unsupported | unsupported |
 | 开机自启 | untested（真实注册表写入**刻意没测**，见 §6） | untested | untested（`MacosLauncher::LaunchAgent`） |
 | 本机 `vite build` 临时目录 | **已验证需要 TEMP 指向仓内**（沙箱限制） | untested | untested |
 
@@ -180,7 +180,7 @@ webview 仍走代理——这是两套网络栈的行为不一致，如实记（
 
 扫描例外仅新模块的限定符号集合；DLL/全局 Hook/foreign HWND 写/系统进程 kill 始终禁止。MIT 参考固定 commit 与全文许可见 NOTICE。
 
-实测边界：当前调试 EXE 为 Low 完整性，返回 access_denied 并停显，设置原因/回桌面拖控/正常退出收 sidecar 已验。真实 GetParent/父客户区内歌词像素、按钮前后尺寸不变、按钮中心不命中 app 必须在权限可用环境补验；17 按钮零覆盖的失败路径不算内嵌成功。多显示器/高 DPI/真实 Explorer 重建/Win10 尚未实机验。
+实测边界（R47 `a62a0ad`，Windows 11 单屏 1920×1080 / dpi 96，正常完整性副本 + 真实 Explorer）：`attached:true`，`GetParent(歌词窗) == Shell_TrayWnd (0x20072)`，子窗 `8,1034 680×44`（宽度由 `safe_slot` 现算）、visible、`enabled=false`（输入交父窗）；同一时刻 show/hide 差分：槽位内 5235 / 5374 / 5394 px 变化，空段与任务栏按钮区 **0**，托盘仅 Explorer 自身活动；`WindowFromPoint` 17 个点全部命中 Explorer，无一点命中本应用；`mode:desktop` 后 `underTaskbar=0`、桌面窗恢复，`mode:taskbar` 往返再次 attached，退出后无残留。**未验**：多显示器 / `Shell_SecondaryTrayWnd`、高 DPI（scale≠1）、自动隐藏、`TaskbarCreated` 重建后的重挂、长时间 z-order、Windows 10、Linux/macOS、NSIS/release 安装包。仓库 `target/debug` 目录带 Low 完整性标签，直接跑该 exe 会 `access_denied`——那是构建目录 ACL 的环境现象，不是产品路径。失败路径（17 按钮零覆盖）仍然只是"降级正确"，不算内嵌成功。
 
 ## 8. 只在一端存在的东西（不要误当跨平台能力）
 

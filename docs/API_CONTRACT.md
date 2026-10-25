@@ -1452,7 +1452,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 **如实登记的未验证项（本任务）**：
 
 1. **R44c Windows 已真验**：拖柄 rect 变化、锁后不动/解锁恢复、锁中媒体一次、横竖几何、样式/颜色/锁/点透不回跳、hide/reopen 最新配置、配置保存及重启恢复；证据 `.tmp/r44c-native-evidence.json` / `.tmp/r44c-restart-evidence.json`。多显示器/高 DPI 和 Linux/macOS 未实机验；
-2. **Windows Beta 成功路径受外部权限阻断**：本机 Low 完整性调试 EXE 已实测 access_denied、原因 UI 与停显/回桌面拖控/退出；真实 Shell parent、客户区内歌词像素、按钮前后不变与命中验证仍未通过，须正常权限环境补验；
+2. **Windows Beta 成功路径已真机验证（R47 `a62a0ad`）**：真实 Explorer 上 `attached:true`、`GetParent(歌词窗) == Shell_TrayWnd (0x20072)`、子窗 `8,1034 680×44` 落在栏体客户区内，槽位像素差分 5235–5394 px 而空段与任务栏按钮区 0，`WindowFromPoint` 17 点全归 Explorer，切回 desktop 与退出无残留（`task-47-report.md`）；未验项：多屏/高 DPI/自动隐藏/`TaskbarCreated` 重建/长时间 z-order/Win10/Linux/macOS/安装包。仓库 `target/debug` 目录带 Low 完整性标签导致直接跑该 exe `access_denied`，属构建目录 ACL 的环境现象，不是产品路径；
 3. **歌词端点未联调**：`playback:lyrics` 的**响应形状**是宽容读取的（候选键见上），
    真实形状确认后应收敛到那一个键（`warnings` 会指出实际读到的是哪个）。
 

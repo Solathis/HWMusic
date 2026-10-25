@@ -105,7 +105,7 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
 | B2 | **托盘真机点击与图标显示**：「点下去真的发生什么」「图标在托盘区长什么样」；Windows **高 DPI 下 ico 的实际清晰度**（只验证了内嵌字节是合法多尺寸 ico 且能被 `Image::from_bytes` 解码） | untested | 同上（托盘菜单构造、事件映射、勾选翻转、`decide_close` 矩阵、图标解码都有测试，缺的是"真机看得见的那一半"） |
 | B3 | **关窗三态的原生行为**：tray 是 `prevent_close + hide`（托盘不可用仍退出）；minimize 是 `prevent_close + window.minimize()`，不依赖托盘并保留任务栏按钮；quit 在线程中收 sidecar 后退出整个应用。失败应保留可恢复主窗；当前运行中 Rust 旧代码不代表新行为 | R43b 代码/行为边界已测，原生待重启复验 | 控制器统一重启后验证三态、任务栏入口、继续播放、歌词/登录辅助窗与 sidecar 收尾；worker 不杀/重启应用 |
 | B4 | **歌词窗的透明 / 置顶 / 无边框 / 拖动 / 点透目视**：屏幕上看起来什么样、鼠标点下去发生什么 | untested | 同上 |
-| B5 | **Windows 真实任务栏内嵌 Beta**：实际 GetParent、parent-client 内像素、系统按钮前后不变与命中不落 app | untested（Low 完整性为外部 blocker） | 已验 access_denied 停显/原因 UI/回桌面拖控；权限可用后补成功附着、多屏/DPI/自动隐藏真机证据，不得以桌面基线代替 |
+| B5 | **Windows 真实任务栏内嵌 Beta**：实际 GetParent、parent-client 内像素、系统按钮前后不变与命中不落 app | Windows **单屏 1920×1080 / dpi 96 已 verified**（R47）；多屏 `Shell_SecondaryTrayWnd`、高 DPI、自动隐藏、`TaskbarCreated` 重建、长时间 z-order untested | R47 `a62a0ad` 真机验：`GetParent(歌词窗) == Shell_TrayWnd (0x20072)`、子窗 `8,1034 680×44`、槽位像素差分 5235–5394 px 而空段与任务栏按钮区 0、`WindowFromPoint` 17 点全归 Explorer、切回桌面与退出无残留（`task-47-report.md`）。剩余项要真机补：多屏、高 DPI、自动隐藏、Explorer 重建后重挂、长时间 z-order；**仍不得以桌面基线代替** |
 | B6 | **多显示器实机**：三屏几何矩阵是**纯函数层面**的（含负坐标副屏），没在多屏机器上真跑过 | untested | 同上 |
 | B7 | **真机快捷键注册与投递**：「媒体键按下去播放器真的动」「`Ctrl+Alt+L` 真的能开关歌词窗」；**一次按键只发一条广播**的去重逻辑也没真机抓过 | untested | 同上（Windows 上媒体键被其它程序占用是常态——回退与提示正是为它写的，但「占用时插件返回的错误文案长什么样」只在夹具里模拟过） |
 | B8 | **开机自启的真实注册表写入/读取** | untested（**刻意不测**） | 真跑一次 `enable()` 会在用户机器上留一个自启项，所以单测用的是假 manager（覆盖判定逻辑：先写后读、报观测值、失败结构化、「插件没注册」走 `try_state` 而不是 panic） |
@@ -182,7 +182,7 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
 | D3 | **音频解密 / 绕过付费或 DRM** | pending（范围外） | 只播官方接口给出的地址 |
 | D4 | **主题手动切换** | pending（**裁决非目标**） | 亮暗**只跟系统 `prefers-color-scheme`**。两份令牌（媒体查询 + `.dark`）逐条一致由测试钉住；渲染层不得写 `dark` 类或存主题偏好（同文件扫描）。**不引 next-themes**（它的防闪烁内联脚本会被 CSP `script-src 'self'` 拦） |
 | D5 | **歌词窗配置持久化** | R44e 已提供（Rust 拥有保存任务） | `settings.json` 的唯一写者是 sidecar（`writeTail`）；Rust 启动时**只读**恢复 `data.lyricsWindow` 当基线，运行期的保存由**独立线程**（`lyrics-persist`）负责：单在途 + 最新待写，成功只确认对应快照，失败保留运行值、标 `dirty`/`saveError` 并停止自动重试（`retrySave` 或下一次改动才重试）。落盘字段是合同 11 键，不含 visible/revision/effectiveSize/dirty。正常退出先排空/校验这最后一笔再进入 D 的不可逆清理，失败保窗可重试。桌面横/竖、锁定、媒体控制与重启恢复已有 Windows 证据（R44c），R44e 的"登出后仍落盘 / Quit 不丢最后一笔 / 重启读回"未在真机复验（未重启应用），其他平台与多屏高 DPI 仍待验 |
-| D6 | **Windows 任务栏歌词（Beta）** | in-progress（成功路径受外部权限限制） | 用户授权精确自窗 `SetParent` 内嵌，不改 Explorer 按钮，不注入 DLL/全局 Hook。Low 完整性 debug EXE 实测返回 access_denied 并停显，切回 desktop 可恢复拖动/控件；真实 parent/client/歌词像素与系统按钮不变须在正常权限环境补验。非 Windows 不支持，不退成贴边浮窗 |
+| D6 | **Windows 任务栏歌词（Beta）** | verified（单屏 1920×1080 / dpi 96；多屏/高 DPI/自动隐藏/`TaskbarCreated` 重建/长时间 z-order 未验） | 用户授权精确自窗 `SetParent` 内嵌，不改 Explorer 按钮，不注入 DLL/全局 Hook。R47 `a62a0ad` 在真实 Explorer 上验到 `GetParent(歌词窗) == Shell_TrayWnd`、歌词像素只落在 UIA 安全槽位内而任务栏按钮区 0 变化、`WindowFromPoint` 不命中本应用、切回 desktop 与退出无残留（`task-47-report.md`）；多屏、高 DPI、自动隐藏、Explorer 重建后重挂、长时间 z-order 仍未验。非 Windows 不支持，不退成贴边浮窗。仓库 `target/debug` 目录带 Low 完整性标签，直接跑该 exe 会 `access_denied`——那是构建目录 ACL 的环境现象，不是产品路径（真实验证用的是正常完整性副本） |
 | D7 | **设置页不显示当前生效的快捷键** | pending（范围外） | 生效组合记在 `ShortcutState`（托管状态），只在启动提示说一次 |
 | D8 | **队列面板没有「移除单曲 / 拖动排序」** | pending（范围外） | 只有点击跳播与清空。「移除当前项时的播放语义」（停还是接着播下一首）需要裁决，没自己拍 |
 
