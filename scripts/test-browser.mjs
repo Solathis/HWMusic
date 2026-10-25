@@ -476,14 +476,17 @@ export function harnessHtml(hasCss) {
  * `startupViewOf` 那三道门。而这一项要证的正是"**第一帧画什么**"——只有真 `App` +
  * 真 `useAuthGate` + 真 IPC 边界才能把它量出来。
  *
- * IPC 只给门禁需要的那几条；两种模式（`?startup=fail` / `?startup=logged-in`）：
+ * IPC 只给门禁需要的那几条；三种模式（`?startup=fail` / `?startup=logged-in` / `?startup=restoring`）：
  * - `fail`：第一次 `auth:get-status` **故意失败**（延迟 400ms 再抛，让"还不知道"那一屏
  *   真的出现在屏幕上），第二次（用户点「重新检查登录状态」）才答 `loggedIn:false`
  *   → 登录页 + 二维码自动发起**恰好一次**；
  * - `logged-in`：第一次就答 `loggedIn:true` → app-shell，且**一张码都不建**。
+ * - `restoring`（R53）：`auth:get-status` 答 `{loggedIn:false, restoring:true}`，测试再用
+ *   `__startupGuard.emitStatus` 播一条"已登录"当作恢复结论 → 全程不许画登录页、不许建码。
  *
  * 计数（`window.__startupGuard`）是断言的核心：`auth:get-status` 次数证明"重试真的重发了"，
- * `auth:qr-start` 次数证明"二维码只在确定未登录之后才建、且只建一次"。
+ * `auth:qr-start` 次数证明"二维码只在确定未登录之后才建、且只建一次"，
+ * `auth:cancel-qr` 次数证明"门禁收场时真的停了一次轮询"（R53）。
  */
 export function startupHarnessSource() {
   return `import { StrictMode } from "react";
@@ -495,9 +498,15 @@ import { App } from "../../src/renderer/App.tsx";
 
 /** 查询失败那一档的延迟：把"还不知道"那一屏真的拉到屏幕上（否则它可能在第一次采样前就过去了）。 */
 const FIRST_STATUS_DELAY_MS = 400;
-const mode = new URLSearchParams(location.search).get("startup") === "logged-in" ? "logged-in" : "fail";
-const counters = { statusQueries: 0, qrStarts: 0, rendererReady: 0, qrStartAt: null };
-window.__startupGuard = { mode, counters };
+const startupMode = new URLSearchParams(location.search).get("startup");
+const mode = startupMode === "logged-in" || startupMode === "restoring" ? startupMode : "fail";
+const counters = { statusQueries: 0, qrStarts: 0, cancelQrCalls: 0, rendererReady: 0, qrStartAt: null };
+window.__startupGuard = {
+  mode,
+  counters,
+  /** 让测试自己"恢复落定"：播一条 auth:status（真机上这条来自 sidecar 的 announce）。 */
+  emitStatus: (payload) => emit("core:event", { channel: "auth:status", payload }),
+};
 
 mockWindows("main");
 mockIPC(async (command, args) => {
@@ -516,7 +525,12 @@ mockIPC(async (command, args) => {
           await new Promise((resolve) => setTimeout(resolve, FIRST_STATUS_DELAY_MS));
           throw { message: "未知请求频道：auth:get-status", kind: "unknown_channel" };
         }
+        if (mode === "restoring") return { loggedIn: false, busy: false, restoring: true };
         return { loggedIn: mode === "logged-in", busy: false };
+      }
+      case "auth:cancel-qr": {
+        counters.cancelQrCalls += 1;
+        return { cancelled: true };
       }
       case "auth:qr-start": {
         counters.qrStarts += 1;
@@ -557,12 +571,15 @@ export function startupHarnessHtml() {
 /**
  * R45A1（复审）：启动三态的**真浏览器**行为验收。
  *
- * 钉四件事（对应复审 brief 的测试行为清单）：
+ * 钉六件事：
  * 1. 首帧（`checking`，状态查询还没落地）**没有**登录页/二维码/任何按钮；
  * 2. 查询失败之后仍是中性启动屏：没有 LoginGate/二维码，但原因、重试、网页登录都在；
  * 3. 点「重新检查登录状态」= **真的再发一次 `auth:get-status`**（计数 +1），
  *    并且答案是未登录之后才出现登录页、二维码**恰好建一次**；
  * 4. 已登录的会话：直接 app-shell，登录页出现 0 次、二维码 0 次。
+ * 5. 恢复中（`restoring:true`）同样是中性启动屏：6 次 DOM 采样里登录页/二维码/壳都是 0、
+ *    `auth:qr-start` 0 次；"已登录"广播到达后直接进壳；
+ * 6. 门禁从登录页切到主界面时发**一次** `auth:cancel-qr`（停掉轮询，不靠延时）。
  */
 export async function checkStartupGate(page, port, guardDir, add) {
   /**
@@ -656,6 +673,65 @@ export async function checkStartupGate(page, port, guardDir, add) {
     "startup-logged-in-app-shell-no-qr",
     loggedIn.loginNodes === 0 && loggedIn.loginGate === 0 && loggedIn.startupScreens === 0 && loggedIn.counters.qrStarts === 0,
     JSON.stringify(loggedIn),
+  );
+
+  // ——— ⑤ 恢复中：快照答 restoring → 中性启动屏，一张码都不建 ———
+  await page.goto(`http://127.0.0.1:${port}/startup.html?startup=restoring`, { waitUntil: "load" });
+  // 只让首屏落地，**不等** `startup-checking`：它缺席本身就是断言的一部分
+  await page.waitForTimeout(250);
+  // 采样窗口：从首屏到模拟恢复落定之前，反复看 DOM（不只一次快照）
+  const restoringSamples = [];
+  for (let round = 0; round < 6; round += 1) {
+    restoringSamples.push({
+      loginNodes: await loginNodes(),
+      loginGate: await page.getByTestId("login-qr-refresh").count(),
+      startupScreens: await page.getByTestId("startup-checking").count(),
+      appShell: await page.locator('[data-shell="app-shell"]').count(),
+      qrStarts: (await counters()).qrStarts,
+    });
+    await page.waitForTimeout(80);
+  }
+  add(
+    "startup-restoring-stays-neutral",
+    restoringSamples.every(
+      (sample) =>
+        sample.loginNodes === 0 && sample.loginGate === 0 && sample.startupScreens === 1 && sample.appShell === 0 && sample.qrStarts === 0,
+    ),
+    JSON.stringify(restoringSamples),
+  );
+  await page.screenshot({ path: path.join(guardDir, "startup-restoring.png") });
+
+  // 恢复落定（sidecar 播"已登录"）→ 直接进主界面，登录页与二维码依然是 0
+  await page.evaluate(() => window.__startupGuard.emitStatus({ loggedIn: true, busy: false }));
+  await page.locator('[data-shell="app-shell"]').waitFor();
+  await page.waitForTimeout(300);
+  const restored = {
+    loginNodes: await loginNodes(),
+    loginGate: await page.getByTestId("login-qr-refresh").count(),
+    startupScreens: await page.getByTestId("startup-checking").count(),
+    counters: await counters(),
+  };
+  add(
+    "startup-restoring-then-app-shell",
+    restored.loginNodes === 0 && restored.loginGate === 0 && restored.startupScreens === 0 && restored.counters.qrStarts === 0,
+    JSON.stringify(restored),
+  );
+
+  // ——— ⑥ 门禁收场：切到主界面时发一次 auth:cancel-qr（把轮询停掉） ———
+  // 回到有二维码的那一档（③ 之后门禁已经建过一张码），再播"已登录"。
+  await page.goto(`http://127.0.0.1:${port}/startup.html?startup=fail`, { waitUntil: "load" });
+  await page.getByTestId("startup-retry-status").waitFor();
+  await page.getByTestId("startup-retry-status").click();
+  await page.getByTestId("login-qr-refresh").waitFor();
+  const beforeSwitch = await counters();
+  await page.evaluate(() => window.__startupGuard.emitStatus({ loggedIn: true, busy: false }));
+  await page.locator('[data-shell="app-shell"]').waitFor();
+  await page.waitForTimeout(300);
+  const afterSwitch = await counters();
+  add(
+    "startup-gate-unmount-cancels-qr",
+    beforeSwitch.qrStarts === 1 && beforeSwitch.cancelQrCalls === 0 && afterSwitch.cancelQrCalls === 1,
+    JSON.stringify({ beforeSwitch, afterSwitch }),
   );
 }
 

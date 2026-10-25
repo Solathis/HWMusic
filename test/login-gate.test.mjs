@@ -94,8 +94,10 @@ import {
   reduceGateState,
   shouldAutoStartQr,
   shouldShowLoginGate,
+  statusEventOf,
   webLoginEntry,
 } from "../src/renderer/features/auth/login-gate-logic.mjs";
+import { STARTUP_VIEW, startupViewOf } from "../src/renderer/features/auth/startup-view.mjs";
 import { THEME_CONTROL_TESTID } from "../src/renderer/features/theme/theme.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -722,8 +724,16 @@ test("重查（R19）：挂载 effect 里**订阅之后**先报就绪、再查�
   assert.ok(readyAt < queryAt, "先冲刷排队的那条广播、再查：查询的应答一定不比排队的旧");
 
   // 广播与查询共用同一份映射（各写一份 = 早晚漂移）
+  //
+  // R53：映射住在纯函数模块的 `statusEventOf` 里——「恢复中」这一档要靠真单测钉，
+  // 源码扫描只能说"字符串在里面"。规矩不变：全仓只有这一份。
   const mapping = gate.match(/function statusEventOf\(/g) ?? [];
-  assert.equal(mapping.length, 1, "广播与查询共用同一个载荷 → 事件映射（statusEventOf）");
+  assert.equal(mapping.length, 0, "映射只许有一份（现在住在 login-gate-logic.mjs 里，不许在这里再写一个）");
+  assert.match(
+    gate,
+    /statusEventOf,\s*\n?\s*webLoginEntry,/,
+    "门禁从纯函数模块取那一份映射（不另写）",
+  );
   assert.match(
     gate,
     /const applyStatusPayload = [\s\S]*?reduceGateState\(current, statusEventOf\(payload\)\)/,
@@ -1195,6 +1205,53 @@ test("R37 文档：遮蔽这一项按 B22 登记（真机观感 untested），�
     rows.length,
     "计数行与表里的实际行数对不上：加/删条目时要连着更新计数行",
   );
+});
+
+// ---------------------------------------------------------------------------
+// R53：恢复期间那一问的应答「恢复中」 → 仍是中性启动屏（绝不画登录页、绝不建码）
+// ---------------------------------------------------------------------------
+// sidecar 恢复期间答 `{restoring:true}`，映射层翻成 `restoring` 事件，reducer 保持 `checking`。
+
+test("R53 恢复中：快照带 restoring 时映射成 restoring 事件（不许当成「未登录」这条结论）", () => {
+  const event = statusEventOf({ loggedIn: false, busy: false, restoring: true });
+  assert.equal(event.type, LOGIN_GATE_EVENT.restoring, "恢复中不是一条结论：它必须走自己那条事件");
+
+  const state = reduceGateState(initialGateState(), event);
+  assert.equal(state.phase, LOGIN_GATE_PHASE.checking, "恢复中 → 仍是「还不知道」（中性启动屏）");
+  assert.equal(shouldShowLoginGate(state), true, "壳不许放行（还没结论）");
+  assert.equal(shouldAutoStartQr(state), false, "恢复中绝不建码——这正是那一串轮询的来源");
+  assert.equal(startupViewOf(state), STARTUP_VIEW.checking, "渲染的是中性启动屏");
+});
+
+test("R53 恢复中：普通载荷（不带 restoring）仍走 status 事件，语义不变", () => {
+  const loggedOut = statusEventOf({ loggedIn: false, busy: false });
+  assert.equal(loggedOut.type, LOGIN_GATE_EVENT.status);
+  assert.equal(reduceGateState(initialGateState(), loggedOut).phase, LOGIN_GATE_PHASE.loggedOut);
+
+  const loggedIn = statusEventOf({ loggedIn: true, busy: false });
+  assert.equal(loggedIn.type, LOGIN_GATE_EVENT.status);
+  assert.equal(reduceGateState(initialGateState(), loggedIn).phase, LOGIN_GATE_PHASE.loggedIn);
+});
+
+test("R53 恢复中：迟到的 restoring 不许把已经放行的主界面打回启动屏（只许维持 checking）", () => {
+  const loggedIn = reduceGateState(initialGateState(), {
+    type: LOGIN_GATE_EVENT.status,
+    loggedIn: true,
+    busy: false,
+  });
+  const after = reduceGateState(loggedIn, { type: LOGIN_GATE_EVENT.restoring });
+  assert.deepEqual(after, loggedIn, "已登录就是结论：restoring 只是「还没有结论」的那一档");
+});
+
+test("R53 接线：门禁切到主界面（或卸载）时发一次 auth:cancel-qr（停掉自己发起的轮询）", () => {
+  const gate = read("src/renderer/login-gate.tsx");
+  assert.match(gate, /AUTH_CANCEL_QR/, "取消二维码走共享常量 auth:cancel-qr（不写字面量）");
+  assert.match(
+    stripComments(gate),
+    /phase === LOGIN_GATE_PHASE\.loggedIn[\s\S]{0,600}?AUTH_CANCEL_QR/,
+    "判据是「已登录」：门禁收场那一刻就该把 sidecar 那边的轮询停掉",
+  );
+  assert.doesNotMatch(stripComments(gate), /setTimeout\([^)]*AUTH_CANCEL_QR/, "不许用延时去凑取消时机");
 });
 
 

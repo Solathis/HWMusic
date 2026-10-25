@@ -210,6 +210,11 @@ export const OFFICIAL_ENDED_NOTE = "网页登录已结束（没有完成登录�
 export const LOGIN_GATE_EVENT = {
   /** `auth:status` 广播：`{loggedIn, busy, message?}` */
   status: "status",
+  /**
+   * 「恢复中」应答 `{restoring:true}`：**不是**结论，reducer 原样保持当前态
+   * （`checking` 仍是中性启动屏，不画登录页、不武装自动发起）。
+   */
+  restoring: "restoring",
   /** （次要入口）本轮发起官方登录窗 */
   started: "started",
   /** 登录成功（广播到达前的本地乐观推进——真正的状态仍由广播说了算） */
@@ -377,10 +382,29 @@ function applyQrEvent(qr, event) {
   return next;
 }
 
+/**
+ * 一份 `auth:status` 形状的载荷 → 门禁事件（**唯一一处**映射：广播回调与 `auth:get-status`
+ * 的应答都经它，两处各写一份早晚会漂移）。
+ *
+ * `restoring:true` 走自己那条事件：它跟 `loggedIn:false` 长得像，含义却是"还不知道"。
+ */
+export function statusEventOf(payload) {
+  if (payload?.restoring === true) return { type: LOGIN_GATE_EVENT.restoring };
+  return {
+    type: LOGIN_GATE_EVENT.status,
+    loggedIn: payload?.loggedIn === true,
+    busy: payload?.busy === true,
+    message: typeof payload?.message === "string" ? payload.message : undefined,
+  };
+}
+
 /** 事件 → 新状态（纯函数：不改写入参，未知事件原样返回）。 */
 export function reduceGateState(state, event) {
   const type = event?.type;
   switch (type) {
+    case LOGIN_GATE_EVENT.restoring:
+      // 「恢复中」= 还没有结论：原样返回，已落定的结论不许被一条迟到的事件推回启动屏
+      return state;
     case LOGIN_GATE_EVENT.status: {
       const loggedIn = event.loggedIn === true;
       const base = {

@@ -222,6 +222,29 @@ test("端到端：auth:get-status 回当前状态快照，且**不**额外广播
   assert.deepEqual(sidecar.problems, []);
 });
 
+test("端到端：auth:cancel-qr 真的挂了处理器（R53：门禁收场时停下来，不是 unknown_channel）", async (t) => {
+  const sidecar = startSidecar();
+  t.after(() => sidecar.cleanup());
+
+  // 等启动期恢复的结论落定：恢复期间快照带 `restoring`（R53），那之后才是普通快照
+  await sidecar.waitForBroadcast((frame) => frame.channel === "auth:status");
+
+  const cancelled = await sidecar.bridge.call("auth:cancel-qr", {});
+  assert.equal(
+    cancelled.ok,
+    true,
+    `auth:cancel-qr 必须真的挂了处理器（不是 unimplemented / unknown_channel）：${JSON.stringify(cancelled)}`,
+  );
+  assert.equal(cancelled.data.cancelled, true, "没有会话也回「已停」（用户的意图已经满足，不是错误）");
+
+  // R53 的第一半：恢复结束之后快照不再带 restoring 这一格（真未登录照旧答未登录，门禁照常发码）
+  const snapshot = await sidecar.bridge.call("auth:get-status", {});
+  assert.equal(snapshot.ok, true);
+  assert.equal(snapshot.data.loggedIn, false);
+  assert.equal(snapshot.data.restoring, undefined, "恢复落定之后不许再挂「恢复中」");
+  assert.deepEqual(sidecar.problems, []);
+});
+
 test("端到端：library:favorites 在端点被关闭时回结构化 endpoint_unknown（不冒充空数据、不挂起）", async (t) => {
   const sidecar = startSidecar();
   t.after(() => sidecar.cleanup());

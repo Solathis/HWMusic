@@ -623,6 +623,129 @@ test("状态快照（R19）：开窗那条路正在跑时 busy 为真，且与�
   assert.deepEqual(context.auth.statusSnapshot(), { loggedIn: true, busy: false });
 });
 
+// ---------------------------------------------------------------------------
+// R53：会话恢复还没落定时，快照与广播都带 restoring，渲染层保持中性启动屏
+// ---------------------------------------------------------------------------
+// 恢复期间的快照不许答「未登录」（那会被当成结论：画登录页 + 自动建码）。
+
+/** 手动控制的 promise（"恢复卡在网络验证上"就是靠它造出来的）。 */
+function deferred() {
+  let resolve;
+  const promise = new Promise((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+test("R53 恢复中：恢复没落定时快照答「恢复中」，不许报未登录（那是闪屏的源头）", async () => {
+  const verifying = deferred();
+  const context = managerOf({
+    sessionStore: fakeSessionStore({ loaded: MUSIC_SESSION }),
+    verifySession: () => verifying.promise,
+  });
+
+  const restoring = context.auth.restore();
+  // 让 restore 真的走到"验证挂住"那一步
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(
+    context.auth.statusSnapshot(),
+    { loggedIn: false, busy: false, restoring: true },
+    "恢复期间答「未登录」= 渲染层画登录页 + 自动建一张二维码（R53 的闪屏与那串轮询）",
+  );
+  assert.deepEqual(context.broadcasts, [], "恢复还没结论就不许广播：广播只说结论");
+
+  verifying.resolve({ ok: true, data: { total: 3 } });
+  const restored = await restoring;
+
+  assert.equal(restored.loggedIn, true, "会话确实有效");
+  assert.deepEqual(
+    context.auth.statusSnapshot(),
+    { loggedIn: true, busy: false },
+    "结论落定之后快照照实答已登录，`restoring` 这一格必须消失（否则门禁永远停在启动屏）",
+  );
+  assert.deepEqual(
+    context.broadcasts.at(-1).payload,
+    { loggedIn: true, busy: false },
+    "广播那一份同样不带 restoring——结论只有一条",
+  );
+});
+
+test("R53 恢复中但确实没会话：结论一到就照实答未登录（恢复中只是中间档，不改变原有冷启动行为）", async () => {
+  const context = managerOf({ sessionStore: fakeSessionStore({ loaded: null }) });
+  const restored = await context.auth.restore();
+
+  assert.equal(restored.loggedIn, false);
+  assert.deepEqual(
+    context.auth.statusSnapshot(),
+    { loggedIn: false, busy: false },
+    "真未登录时不许再挂 restoring：那一档渲染层要照常画二维码并自动发起",
+  );
+});
+
+/** 恢复还没落定时播出去的 auth:status 必须都带 `restoring: true`（不带 = 渲染层当结论）。 */
+function assertNoPrematureConclusion(broadcasts) {
+  for (const { channel, payload } of broadcasts) {
+    if (channel !== AUTH_STATUS) continue;
+    assert.equal(
+      payload.restoring,
+      true,
+      `恢复期间播了一条不带 restoring 的 auth:status：${JSON.stringify(payload)}——渲染层会当结论去画登录页`,
+    );
+  }
+}
+
+test("R53 恢复中：别的广播（cancelQrLogin）不许替恢复结论清位，也不许播「未登录」", async () => {
+  const verifying = deferred();
+  const context = managerOf({
+    sessionStore: fakeSessionStore({ loaded: MUSIC_SESSION }),
+    verifySession: () => verifying.promise,
+  });
+
+  const restoring = context.auth.restore();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  await context.auth.cancelQrLogin();
+
+  assert.deepEqual(
+    context.auth.statusSnapshot(),
+    { loggedIn: false, busy: false, restoring: true },
+    "cancelQrLogin 不是恢复结论：它一清位，快照就照直答「未登录」= 闪登录页 + 自动建码",
+  );
+  assertNoPrematureConclusion(context.broadcasts);
+
+  verifying.resolve({ ok: true, data: { total: 3 } });
+  const restored = await restoring;
+
+  assert.equal(restored.loggedIn, true, "放行之后会话确实有效");
+  assert.deepEqual(context.auth.statusSnapshot(), { loggedIn: true, busy: false });
+  const last = context.broadcasts.at(-1);
+  assert.equal(last.channel, AUTH_STATUS);
+  assert.deepEqual(
+    last.payload,
+    { loggedIn: true, busy: false },
+    "结论那条广播不带 restoring（带了门禁会停在启动屏）",
+  );
+});
+
+test("R53 恢复结论（无会话 / 会话失效）：最后一条 auth:status 不许带 restoring，否则未登录用户卡在启动屏", async () => {
+  const noSession = managerOf({ sessionStore: fakeSessionStore({ loaded: null }) });
+  await noSession.auth.restore();
+  let last = noSession.broadcasts.at(-1);
+  assert.equal(last.channel, AUTH_STATUS);
+  assert.deepEqual(last.payload, { loggedIn: false, busy: false }, "无会话的结论就是「未登录」，不带 restoring");
+
+  const invalid = managerOf({
+    sessionStore: fakeSessionStore({ loaded: MUSIC_SESSION }),
+    verifySession: async () => ({ ok: false, error: { message: "会话无效", kind: "session_invalid" } }),
+  });
+  const invalidStatus = await invalid.auth.restore();
+  assert.equal(invalidStatus.reason, "session_invalid");
+  last = invalid.broadcasts.at(-1);
+  assert.equal(last.channel, AUTH_STATUS);
+  assert.deepEqual(last.payload, { loggedIn: false, busy: false }, "会话失效同样是一条结论，不带 restoring");
+});
+
 test("状态快照（R19）：形状就是广播那一份（只多不许少），文案**不进**快照", async () => {
   const { auth, broadcasts } = await loginWith({ status: "cancelled" });
   const last = broadcasts.at(-1);

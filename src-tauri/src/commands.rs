@@ -49,11 +49,15 @@ use crate::MAIN_WINDOW_LABEL;
 /// - `lyrics:cache-clear` 缺失 → "清除缓存"按下去什么都没发生，而用户以为清了。
 /// 三条都在**这里**被准入，与 `library:*` / `playback:*` 同一条规矩（唯一真源在
 /// `src/shared/request-channels.ts`，本数组是它的镜像副本，由 channel-parity 测试钉住）。
+///
+/// R53 增补 `auth:cancel-qr`：渲染层门禁收场时停掉二维码轮询（切主界面 / 卸载）。
+/// 与 `auth:cancel-login`（关宿主登录窗）是两件事；镜像副本由 channel-parity 测试钉住。
 pub const REQUEST_CHANNELS: &[&str] = &[
     "auth:login",
     "auth:logout",
     "auth:cancel-login",
     "auth:qr-start",
+    "auth:cancel-qr",
     "auth:get-status",
     "settings:get",
     "settings:set",

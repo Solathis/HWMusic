@@ -1334,3 +1334,37 @@ test("R31 轮询请求：URL 带 &t=、表单只有 qrToken、请求头与建单
     assert.equal(poll.headers.referer, "https://id1.cloud.huawei.com/CAS/portal/loginAuth.html?x=1");
   }
 });
+
+// ---------------------------------------------------------------------------
+// R53：`cancel()` 之后一次新轮询都不许再发
+// ---------------------------------------------------------------------------
+// 谁调用 `cancel()` 由 test/auth-qr.test.mjs 的 R53 段钉，这里只钉"停了就真没请求"。
+
+test("R53 停止轮询：cancel() 之后不再有新的轮询请求（停的是真轮询，不只是状态字符串）", async () => {
+  const world = harness({
+    createResponses: [{ body: createPayload() }],
+    pollResponses: [{ body: { resultCode: "103000200", errorDesc: "Please to login." } }],
+  });
+  const session = createQrSession({
+    createUrl: CREATE_URL,
+    pollUrl: POLL_URL,
+    intervalMs: world.intervalMs,
+    fetchImpl: world.fetchImpl,
+    now: () => 1_700_000_000_000,
+    setTimer: world.setTimer,
+    clearTimer: world.clearTimer,
+    onEvent: (event) => world.events.push(event),
+  });
+  const polls = () => world.calls.filter((call) => call.url.includes("DimensionalCode/async")).length;
+
+  await session.start();
+  await world.tick(); // 轮询 #1（pending）→ 按间隔排下一轮
+  assert.equal(polls(), 1, "取消之前那一轮确实发出去过（这条断言不是空转）");
+
+  session.cancel();
+  await world.tick();
+  await world.tick();
+
+  assert.equal(polls(), 1, "取消之后一次新的轮询都不许发（用户看到的就是这串 #1…#17 在空转）");
+  assert.equal(session.isRunning(), false);
+});

@@ -83,8 +83,9 @@ import { Loader2Icon } from "lucide-react"
 import { AUTH_QR, AUTH_STATUS } from "../shared/channels.ts"
 import { LOGIN_VIEW_TOP_INSET } from "../shared/login-inset.mjs"
 import {
-  AUTH_LOGIN,
+  AUTH_CANCEL_QR,
   AUTH_GET_STATUS,
+  AUTH_LOGIN,
   AUTH_QR_START,
 } from "../shared/request-channels.ts"
 import { Button } from "./components/ui/button"
@@ -101,6 +102,7 @@ import { profileFromStatusPayload } from "./features/auth/account.mjs"
 export type AccountProfile = { userName?: string; avatarUrl?: string; vip?: boolean } | null
 import {
   LOGIN_GATE_EVENT,
+  LOGIN_GATE_PHASE,
   LOGIN_GATE_TITLE,
   LOGIN_OPENING_TESTID,
   LOGIN_OPENING_TEXT,
@@ -123,6 +125,7 @@ import {
   qrMaskText,
   reduceGateState,
   shouldAutoStartQr,
+  statusEventOf,
   webLoginEntry,
 } from "./features/auth/login-gate-logic.mjs"
 import { QR_SIZE_PX, paintQrCanvas } from "./features/auth/qr-canvas.mjs"
@@ -190,21 +193,6 @@ export interface AuthGate {
    * "按钮看起来一样、发的是另一条请求"。失败时仍落回同一句失败说明（不猜档位）。
    */
   refreshStatus: () => void
-}
-
-/**
- * 一份 `auth:status` 形状的载荷 → 门禁认得的那条状态事件。
- *
- * 广播回调与 R19 的查询应答**都走这一个映射**：两处各写一份，早晚会出现"广播那条改了、
- * 查询这条没跟上"——而它们说的是同一件事（会话有没有、开窗那条路忙不忙）。
- */
-function statusEventOf(payload: AuthStatusPayload | null | undefined) {
-  return {
-    type: LOGIN_GATE_EVENT.status,
-    loggedIn: payload?.loggedIn === true,
-    busy: payload?.busy === true,
-    message: typeof payload?.message === "string" ? payload.message : undefined,
-  }
 }
 
 /**
@@ -399,6 +387,25 @@ export function useAuthGate(): AuthGate {
     qrStartedRef.current = true
     startQr()
   }, [state, startQr])
+
+  /**
+   * 门禁离开（阶段变"已登录" / 组件卸载）就停掉自己发起的那张码——继续轮询只是在替
+   * 一张没人看的码空转。`qrStartedRef` 守卫：没发起过就不发，StrictMode 双挂载也不会多发。
+   */
+  const loggedIn = state.phase === LOGIN_GATE_PHASE.loggedIn
+  useEffect(() => {
+    if (!loggedIn || !qrStartedRef.current) return
+    qrStartedRef.current = false
+    void coreCall(AUTH_CANCEL_QR, null).catch(() => undefined)
+  }, [loggedIn])
+
+  useEffect(() => {
+    return () => {
+      if (!qrStartedRef.current) return
+      qrStartedRef.current = false
+      void coreCall(AUTH_CANCEL_QR, null).catch(() => undefined)
+    }
+  }, [])
 
   /**
    * 倒计时（R21）：每秒喂一次 `tick`，钟由这一侧提供（逻辑模块是纯函数，不读真实时钟）。

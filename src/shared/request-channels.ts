@@ -42,6 +42,11 @@ export const AUTH_QR_START = "auth:qr-start" as const;
  *    未经验证的会话不会因为被问了一句就变成"已登录"（`restore` 的诚实性规矩不变）。
  */
 export const AUTH_GET_STATUS = "auth:get-status" as const;
+/**
+ * 停掉进行中的二维码会话（门禁切主界面或卸载时发）；幂等，没有会话也回 `{cancelled:true}`。
+ * 与 `auth:cancel-login`（关宿主那扇登录窗）是两件事：这条停的是二维码轮询。
+ */
+export const AUTH_CANCEL_QR = "auth:cancel-qr" as const;
 export const SETTINGS_GET = "settings:get" as const;
 export const SETTINGS_SET = "settings:set" as const;
 
@@ -149,6 +154,7 @@ export const REQUEST_CHANNELS = [
   AUTH_CANCEL_LOGIN,
   AUTH_QR_START,
   AUTH_GET_STATUS,
+  AUTH_CANCEL_QR,
   SETTINGS_GET,
   SETTINGS_SET,
   SETTINGS_TEST_PROXY,

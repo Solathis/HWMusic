@@ -859,3 +859,69 @@ test("R36 状态行（渲染层零改动）：确认之后那一行是「已确�
     "收起之后那一档照旧",
   );
 });
+
+// ---------------------------------------------------------------------------
+// R53：登录态一旦确立（任何来源）就停掉在跑的二维码轮询
+// ---------------------------------------------------------------------------
+// `announce()` 是所有来源的收口：restore 成功 / 扫码收尾成功 / 网页登录成功。
+
+test("R53 登录态确立：恢复成功时停掉正在跑的二维码会话（不再有后续轮询）", async () => {
+  let releaseVerify;
+  const verifying = new Promise((resolve) => {
+    releaseVerify = resolve;
+  });
+  const store = {
+    async saveMusicSession(session) {
+      return { path: "C:\\data\\session.enc", modeApplied: true, modeNote: null };
+    },
+    async loadMusicSession() {
+      return MUSIC_SESSION;
+    },
+    async clearMusicSession() {
+      return true;
+    },
+  };
+  const qrPort = fakeQrPort();
+  const { auth } = managerOf({
+    qrPort,
+    sessionStore: store,
+    verifySession: () => verifying,
+  });
+
+  const restoring = auth.restore();
+  await new Promise((resolve) => setImmediate(resolve));
+  // 恢复期间建一张码（正是"已登录冷启动后台还在轮询"的场景）
+  const started = await auth.startQrLogin();
+  assert.equal(started.ok, true, "恢复期间端口确实开了（这条测试不是空转）");
+  assert.equal(qrPort.state.cancelled, 0);
+
+  releaseVerify({ ok: true, data: { total: 3 } });
+  const restored = await restoring;
+
+  assert.equal(restored.loggedIn, true);
+  assert.equal(
+    qrPort.state.cancelled,
+    1,
+    "登录态确立时必须停掉二维码轮询（一条 cancel 就够：既停轮询也作废待兑换的尝试）",
+  );
+  assert.deepEqual(
+    qrPort.state.starts.length,
+    1,
+    "只有恢复期间那一张码：登录态确立之后不许再建新的",
+  );
+  assert.equal(auth.statusSnapshot().loggedIn, true);
+});
+
+test("R53 只认「已登录」：结论是未登录时二维码会话照旧跑（真未登录的冷启动行为不变）", async () => {
+  const qrPort = fakeQrPort();
+  const { auth } = managerOf({ qrPort });
+
+  const restored = await auth.restore();
+  assert.equal(restored.loggedIn, false, "没有会话文件 = 确定未登录");
+
+  await auth.startQrLogin();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(qrPort.state.cancelled, 0, "未登录档不许顺手停掉二维码：那正是冷启动要显示的那一张");
+  assert.equal(auth.statusSnapshot().loggedIn, false);
+});

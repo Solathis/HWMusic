@@ -256,6 +256,11 @@ export type AuthProfile = { userName?: string; avatarUrl?: string; vip?: boolean
 export type AuthStatusPayload = {
   loggedIn: boolean;
   busy: boolean;
+  /**
+   * 启动恢复尚未落定：快照与广播都可能带它，渲染层保持中性启动屏。
+   * 见到它只表示"还不知道"，不能当"未登录"去画登录页或建码。
+   */
+  restoring?: true;
   message?: string;
   profile?: AuthProfile;
 };
@@ -345,6 +350,11 @@ export function createAuthManager(deps: AuthManagerDeps) {
    */
   let busy = false;
   /**
+   * 启动恢复尚未落定：期间快照与广播都带 `restoring:true`，渲染层保持中性启动屏。
+   * 只由 [`concludeRestore`] 清位（`restore()` 的 `finally` 兜异常）。
+   */
+  let restoring = false;
+  /**
    * **二维码那条路开出来的那扇登录 webview**（R36）：跑着的时候它占在 `qrWindow` 上。
    *
    * 为什么要有这一格：R36 起二维码确认之后的最后一跳由宿主开一扇登录 webview 完成
@@ -386,23 +396,40 @@ export function createAuthManager(deps: AuthManagerDeps) {
       loggedIn: session !== null,
       busy: extra.busy ?? false,
     };
+    // `session` 已经不是 null 时不加这一格：结论其实已经出来了，再挂"恢复中"就自相矛盾
+    if (restoring && session === null) payload.restoring = true;
     if (typeof extra.message === "string" && extra.message !== "") payload.message = extra.message;
     const profile = profileOfSession();
     if (profile !== null) payload.profile = profile;
     return payload;
   }
 
-  /** 状态广播：载荷 `{loggedIn, busy, message?}`（渲染层门禁按它决定显示哪一层）。 */
+  /**
+   * 状态广播（与快照同源）。载荷为已登录时顺带停掉在跑的二维码会话。
+   * 不碰 `restoring`：恢复期间别的广播都不是结论，只有 [`concludeRestore`] 能清位。
+   */
   function announce(extra: { busy?: boolean; message?: string } = {}): void {
     const payload = statusPayload(extra);
     // 广播与查询同源：播出去的这一份就是"当前状态"，`busy` 也跟着它走
     busy = payload.busy;
+    // 已登录 → 二维码那条路没有存在的理由了（还没有会话时才停，避免空转调用端口）
+    if (payload.loggedIn) stopQrIfRunning();
     try {
       broadcast(AUTH_STATUS, payload);
     } catch (cause) {
       // 广播失败不该把登录结果改写成失败：状态本身已经落定，渲染层下一次问就能拿到
       log(`登录状态广播失败：${messageOf(cause)}`);
     }
+  }
+
+  /**
+   * 恢复落定：清 `restoring` 之后播那条结论（恢复期间**只有这一处**能清位）。
+   *
+   * 调用点必须先落定 `session`，否则播出去的"未登录"就是错的结论。
+   */
+  function concludeRestore(extra: { busy?: boolean; message?: string } = { busy: false }): void {
+    restoring = false;
+    announce(extra);
   }
 
   /** 失败收口：广播"空闲 + 原因文案"（渲染层的状态行就靠这句话），然后原样返回失败。 */
@@ -804,6 +831,88 @@ export function createAuthManager(deps: AuthManagerDeps) {
     }
   }
 
+  /**
+   * 有在跑的二维码会话就停掉它；没有就什么都不做——调用方是高频的状态广播，不该空转打扰端口。
+   */
+  function stopQrIfRunning(): boolean {
+    if (qrAttempt === null) return false;
+    stopQrSession();
+    return true;
+  }
+
+  /**
+   * 启动恢复的真实实现（"恢复中"开关在外层 `restore()`）。
+   * 每条收场路径都先落定 `session` 再 `concludeRestore()`，播出去的因此永远是结论。
+   */
+  async function performRestore(): Promise<RestoreStatus> {
+    let loaded: unknown;
+    try {
+      loaded = await sessionStore.loadMusicSession();
+    } catch (cause) {
+      const error = { message: messageOf(cause), kind: kindOf(cause) ?? CORE_ERROR_KINDS.internal };
+      session = null;
+      notify(`读取上次的登录会话失败：${error.message}（不当作"没有会话"处理）`);
+      concludeRestore();
+      return {
+        loggedIn: false,
+        verified: false,
+        sessionKept: false,
+        reason: "session_unreadable",
+        epoch,
+        error,
+      };
+    }
+
+    if (loaded === null || loaded === undefined) {
+      session = null;
+      concludeRestore();
+      return { loggedIn: false, verified: false, sessionKept: false, reason: "no_session", epoch };
+    }
+
+    let verified: CoreResult<unknown>;
+    try {
+      verified = await verifySession(loaded);
+    } catch (cause) {
+      // 验证器自己炸了不是"会话失效"：会话留着，如实报"没验成"（网络/端点缺口的处置在下面）
+      verified = err(`会话验证器抛错：${messageOf(cause)}`, kindOf(cause) ?? CORE_ERROR_KINDS.internal);
+    }
+    if (verified.ok) {
+      session = loaded;
+      epoch += 1;
+      concludeRestore();
+      return { loggedIn: true, verified: true, sessionKept: true, reason: "verified", epoch };
+    }
+
+    const kind = verified.error.kind ?? "";
+    const error = { message: verified.error.message, kind: verified.error.kind };
+    if (SESSION_INVALID_KINDS.includes(kind)) {
+      // 明确失效：不留在内存里（也不删盘上的文件——网络抖动的误判不该抹掉用户的会话）
+      session = null;
+      concludeRestore();
+      return {
+        loggedIn: false,
+        verified: false,
+        sessionKept: false,
+        reason: "session_invalid",
+        epoch,
+        error,
+      };
+    }
+
+    // 没法验证（端点未注入、网络、超时）：会话仍在，但如实说自己没验过
+    session = loaded;
+    epoch += 1;
+    concludeRestore();
+    return {
+      loggedIn: true,
+      verified: false,
+      sessionKept: true,
+      reason: "verify_unavailable",
+      epoch,
+      error,
+    };
+  }
+
   /** 上一次开窗失败的原始类别（`openLogin` 与流程收场之间的一次性传话）。 */
   return {
     /**
@@ -919,74 +1028,19 @@ export function createAuthManager(deps: AuthManagerDeps) {
 
     /**
      * 启动期恢复：读会话 → 验证 → 如实报状态（**不是**布尔）。
+     *
+     * 这一层只管 `restoring` 的开与关，结论逻辑全在 `performRestore`。
+     * sidecar 先注册 `auth:get-status` 再 `await restore()`，那一问必然落在恢复期间。
      */
     async restore(): Promise<RestoreStatus> {
-      let loaded: unknown;
+      // 同步置位（不能晚一个 await）：渲染层那一问可能已经排在队列里了
+      restoring = true;
       try {
-        loaded = await sessionStore.loadMusicSession();
-      } catch (cause) {
-        const error = { message: messageOf(cause), kind: kindOf(cause) ?? CORE_ERROR_KINDS.internal };
-        session = null;
-        notify(`读取上次的登录会话失败：${error.message}（不当作"没有会话"处理）`);
-        announce({ busy: false });
-        return {
-          loggedIn: false,
-          verified: false,
-          sessionKept: false,
-          reason: "session_unreadable",
-          epoch,
-          error,
-        };
+        return await performRestore();
+      } finally {
+        // 结论已落定（`session` 该有就有、该空就空），快照从此照实答
+        restoring = false;
       }
-
-      if (loaded === null || loaded === undefined) {
-        session = null;
-        announce({ busy: false });
-        return { loggedIn: false, verified: false, sessionKept: false, reason: "no_session", epoch };
-      }
-
-      let verified: CoreResult<unknown>;
-      try {
-        verified = await verifySession(loaded);
-      } catch (cause) {
-        // 验证器自己炸了不是"会话失效"：会话留着，如实报"没验成"（网络/端点缺口的处置在下面）
-        verified = err(`会话验证器抛错：${messageOf(cause)}`, kindOf(cause) ?? CORE_ERROR_KINDS.internal);
-      }
-      if (verified.ok) {
-        session = loaded;
-        epoch += 1;
-        announce({ busy: false });
-        return { loggedIn: true, verified: true, sessionKept: true, reason: "verified", epoch };
-      }
-
-      const kind = verified.error.kind ?? "";
-      const error = { message: verified.error.message, kind: verified.error.kind };
-      if (SESSION_INVALID_KINDS.includes(kind)) {
-        // 明确失效：不留在内存里（也不删盘上的文件——网络抖动的误判不该抹掉用户的会话）
-        session = null;
-        announce({ busy: false });
-        return {
-          loggedIn: false,
-          verified: false,
-          sessionKept: false,
-          reason: "session_invalid",
-          epoch,
-          error,
-        };
-      }
-
-      // 没法验证（端点未注入、网络、超时）：会话仍在，但如实说自己没验过
-      session = loaded;
-      epoch += 1;
-      announce({ busy: false });
-      return {
-        loggedIn: true,
-        verified: false,
-        sessionKept: true,
-        reason: "verify_unavailable",
-        epoch,
-        error,
-      };
     },
 
     /** 登出：清会话 + 清个人数据缓存（两件事的成败各自如实上报）。 */

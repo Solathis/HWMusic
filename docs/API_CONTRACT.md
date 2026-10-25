@@ -330,6 +330,15 @@ auth:status → {loggedIn: boolean, busy: boolean, message?: string,
   这条链的响应形状一直缺实证，所以兑换点加了**只记键名**的日志（token 响应顶层 / `id_token`
   claims / loginex 响应顶层 / loginex 两个容器的一层；**值一律不进日志**），
   会话记录里只多一个由它们提取出的 `profile`（**claims 原文与 id_token 都不落盘**）。
+- **可选 `restoring: true`（R53 增补）**：**快照与恢复期间的广播都可能带 `restoring:true`；恢复结论广播不带**。
+  sidecar 先建 RPC（注册 `auth:get-status`）再 `await restore()`，而 restore 要发一次网络验证（真机 1–3 秒）；
+  渲染层挂载即查，那一问落在恢复期间，此时会话还没读出来——`{loggedIn:false}` 的普通载荷会被门禁当成
+  **结论**（画登录页并自动建码）。带 `restoring:true` 的载荷渲染层当 `checking`：中性启动屏、不发码。
+  恢复期间除 `concludeRestore()` 之外的广播（取消、失败……）都不是结论，因此也带这一格；
+  只有恢复落定那条播出去时不带（清位之后构造载荷）。
+- **登录态确立即停二维码（R53）**：每一份"已登录"的 `auth:status` 播出去之前，sidecar 会停掉在跑的
+  二维码会话（停轮询 + 作废待兑换的尝试）。这一处是所有来源的收口：restore 成功 / 扫码确认收尾成功 /
+  网页登录成功。渲染层另有 `auth:cancel-qr`（见 §2.11）在门禁收场时停一次。
 
 **已知缺口（R7 如实登记，不硬绕）**：wry 0.57（tauri 2.12 的 webview 层）只注册 WebView2 的
 `NavigationStarting`（主框架级），**没有** `FrameNavigationStarting`。官方页若从 **iframe** 内部发起
@@ -1550,7 +1559,8 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `auth:logout` | 无 | `{sessionCleared, cacheCleared, notes[]}` | 清不干净**不改写成成功**，原因进 `notes` | R4/R7 |
 | `auth:cancel-login` | 无 | `{cancelled}`（`false` = 本来就没有进行中的登录，**不是错误**） | — | R7（R25 起渲染层不再直接调它：浮动控件的「返回扫码登录」走 `core_login_chrome`，落到**同一个结论槽**） |
 | `auth:qr-start` | 无 | `{content, expiresInMs}`（二维码内容 + 有效期；之后的状态变化走 `auth:qr` 广播） | 建单失败 → 结构化类别 + `auth:qr{failed}` | R16 |
-| `auth:get-status` | 无 | `{loggedIn, busy}`（**与 `auth:status` 广播同形状**；不触发广播、不带 `message`） | 频道不可用即结构化错误（渲染层**不据此猜档位**，只把原因说到状态行上） | R19 |
+| `auth:get-status` | 无 | `{loggedIn, busy, restoring?}`（**与 `auth:status` 广播同形状**；`restoring` 只在恢复落定前出现，恢复期间的广播也带它、结论广播不带） | 频道不可用即结构化错误（渲染层**不据此猜档位**，只把原因说到状态行上） | R19（R53 加 `restoring`） |
+| `auth:cancel-qr` | 无（`null`） | `{cancelled:true}`（幂等：没有在跑的会话也回已停） | 端口取消失败只记日志，仍回已停 | R53 |
 | `settings:get` | 无 | `{settings}` = 归一后的完整文档 | 读不到/读坏了 → 回默认文档（代理当没配）+ 一条日志，**不抛、不砸文件** | R6 |
 | `settings:set` | 二选一：`{patch:{...}}`（合并）或 `{reset:true}`（已知键回默认） | `{settings, restartRequired}` | `invalid_payload`（两个都给 / 都不给 / 类型不对，**不写盘**）；文件认不出 → 结构化错误并**保留原文件** | R6 |
 | `settings:test-proxy` | 见 §2.7 | 见 §2.7 | 见 §2.7 | R10（接 R6 的测试器） |
@@ -1683,6 +1693,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `DEVICE_FINGERPRINT_FIELDS` / `DEVICE_FINGERPRINT_DEFAULT_SCREEN` | 19 个字段 / `{width:1920, height:1080}` | `src/protocols/device-fingerprint.mjs` | R31：设备指纹的字段表（探针实测页面那份的 19 个：`bsh,bsw,canvas,devs,ep,ett,etz,fonts,ips,nacn,nan,nce,nlg,npf,sah,saw,sh,sw,webgl`）与拿不到真窗口尺寸时的合约默认值。**服务端按形状收**（实测），所以 `canvas`/`webgl`/`fonts` 是同形状固定值 |
 | `AUTH_QR_START` / `AUTH_QR` | `"auth:qr-start"` / `"auth:qr"` | `src/shared/request-channels.ts` / `src/shared/channels.ts` | R16：二维码会话的请求频道与状态广播（Rust 镜像由 `test/channel-parity.test.mjs` 钉住） |
 | `AUTH_GET_STATUS` | `"auth:get-status"` | `src/shared/request-channels.ts` | R19：登录状态**重查**频道（渲染层挂载时主动问一次；应答与 `auth:status` 同形状，Rust 镜像由 `test/channel-parity.test.mjs` 钉住） |
+| `AUTH_CANCEL_QR` | `"auth:cancel-qr"` | `src/shared/request-channels.ts` | R53：停掉进行中的二维码会话（渲染层门禁收场时发一次：切主界面 / 卸载）。与 `auth:cancel-login` 分工——那一条关**宿主登录窗**，这一条停**二维码轮询** |
 | `QR_HINT_TEXT` | `"手机「控制中心」>「扫一扫」或者系统「设置」>「华为账号」>「扫一扫」。"` | `src/renderer/features/auth/login-gate-logic.mjs` | R16 立、**R18 按用户指令改文案**：引导页那**一句**提示文字（界面与测试读同一份真源；状态行不再复述它） |
 | `LOGIN_GATE_TITLE` | `"华为账号登录"` | `src/renderer/features/auth/login-gate-logic.mjs` | R18：引导页标题的唯一真源（居中放在二维码正上方；header 里那份已移除，全页只出现一次） |
 | `WEB_LOGIN_ENTRY_TEXT` / `WEB_LOGIN_ENTRY_TESTID` | `"在网页中打开登录"` / `"login-open-web"` | `src/renderer/features/auth/login-gate-logic.mjs` | R18：**常驻**次要入口的文案与测试锚点（走 R7 的 `auth:login` 开窗路径；与二维码互斥，见 §1.8） |
@@ -2094,3 +2105,12 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
      测试 node **832 pass / 0 fail**（+22）、tsc 0 错、`build:web` ✓、acceptance 6/0/0。
      **AMLL 封面必须带 `crossOrigin="anonymous"`**（不带会把画布 taint，AMLL 采样时
      `getImageData` 抛 `SecurityError`；实测 CDN 会回 ACAO）。
+- 2026-10-26（Task R53）：**已登录冷启动不再闪登录页、二维码不再空转到过期**。
+  1. **`auth:get-status` 增可选 `restoring: true`**（恢复期间的广播同样带它，恢复结论广播不带）：sidecar 先建 RPC
+     再 `await restore()`（要发网络验证），渲染层那一问落在恢复期间；旧应答 `{loggedIn:false}` 被门禁
+     当成结论 → 画登录页 + 自动建码。恢复期间现在答"恢复中"，渲染层当 `checking`（中性启动屏、不发码）。
+  2. **新增请求频道 `auth:cancel-qr`**（§2.11 与 §3 登记）：渲染层门禁收场（切主界面 / 卸载）时
+     停一次；Rust `REQUEST_CHANNELS` 镜像同步加了一条（`test/channel-parity.test.mjs` 钉住）。
+  3. **sidecar 侧收口**：`auth-manager.announce()` 一旦播"已登录"就停掉在跑的二维码会话
+     （停轮询 + 作废待兑换的尝试）——restore / 扫码 / 网页三条来源由此共用一处。
+  4. 登录协议本身**一行未动**（端点、建单/轮询/换码、DPAPI 信封全部照旧）。

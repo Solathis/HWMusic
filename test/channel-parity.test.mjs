@@ -53,6 +53,10 @@
  * - 请求频道加 `lyrics:*` 三条（**歌词体系**：本地导入 / 缓存占用 / 清缓存）。它们的载荷与
  *   应答形状见 `src/shared/request-channels.ts`；这里只钉"两侧一致"。三条的后果各不相同
  *   （导入悄悄失败 / 那张卡读不到数字 / "清除"按了没反应），但都落在"用户按了没反应"这一类上。
+ *
+ * R53 的一处增补（同一流程）：
+ * - 请求频道加 `auth:cancel-qr`：门禁收场（切主界面 / 卸载）时停掉二维码轮询；
+ *   sidecar 那一半由 `announce()` 收口，这条是渲染层那一半。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -60,6 +64,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import {
+  AUTH_CANCEL_QR,
   AUTH_GET_STATUS,
   AUTH_QR_START,
   HOST_REQUEST_CHANNELS,
@@ -181,6 +186,7 @@ test("一致性：请求频道白名单（Node 共享常量 ↔ Rust commands.rs
   assert.deepEqual(sorted(rust), sorted(REQUEST_CHANNELS));
   assert.deepEqual(sorted(REQUEST_CHANNELS), [
     "auth:cancel-login",
+    "auth:cancel-qr",
     "auth:get-status",
     "auth:login",
     "auth:logout",
@@ -401,5 +407,18 @@ test("一致性：R25 theme:changed 广播频道（常量 + Rust 镜像 + 白名
   assert.ok(
     rustStringArray(rustSource("bridge.rs"), "BROADCAST_CHANNELS").includes(THEME_CHANGED),
     "Rust 侧白名单同样必须含 theme:changed（它就是发送方）",
+  );
+});
+
+test("一致性：R53 auth:cancel-qr 请求频道（常量 + Rust 字面量 + 请求白名单三处逐字相等）", () => {
+  // 三个环节缺一不可（常量表 / Rust 准入 / sidecar 处理器）：缺了 `core_call` 就回 unknown_channel
+  assert.equal(AUTH_CANCEL_QR, "auth:cancel-qr");
+  assert.ok(
+    REQUEST_CHANNELS.includes(AUTH_CANCEL_QR),
+    "auth:cancel-qr 必须在请求白名单里：不在的话 dispatcher.register 直接抛（处理器挂不上）",
+  );
+  assert.ok(
+    rustChannelLiterals(rustProduction(rustSource("commands.rs")), "auth:").includes(AUTH_CANCEL_QR),
+    "Rust 侧命令白名单同样必须含 auth:cancel-qr（否则 core_call 在准入处就回 unknown_channel）",
   );
 });
