@@ -20,6 +20,7 @@ import {
   CORE_LYRICS_SETTINGS_OPEN,
   CORE_LYRICS_SETTINGS_RESIZE,
   CORE_LYRICS_TOGGLE,
+  CORE_READ_RUN_LOG,
   CORE_RENDERER_READY,
   CORE_SET_AUTOSTART,
 } from "../shared/commands.ts";
@@ -135,6 +136,20 @@ export async function getAutostart(): Promise<boolean> {
 export async function getTrayAvailable(): Promise<boolean> {
   try {
     return await invoke<boolean>(CORE_GET_TRAY_AVAILABLE);
+  } catch (failure) {
+    throw normalizeFailure(failure);
+  }
+}
+
+/**
+ * 运行日志（R56）：日志文件的最后 N 条（旧的在前）。
+ *
+ * 回执是**已经脱敏**的结构化条目（`{time, level, source, message}`）：脱敏在 Rust 侧做，
+ * 渲染层不再有"原文"这一层可用。条数上限也在那里（`run_log::READ_LIMIT`）。
+ */
+export async function readRunLog(): Promise<unknown> {
+  try {
+    return await invoke<unknown>(CORE_READ_RUN_LOG);
   } catch (failure) {
     throw normalizeFailure(failure);
   }

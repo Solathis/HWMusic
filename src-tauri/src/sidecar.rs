@@ -35,6 +35,46 @@ pub const SIDECAR_BIN_STEM: &str = "hwmusic-core";
 /// 收尸宽限：等 sidecar 自己退出（stdin EOF），超时才 kill。
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
+/// sidecar stderr 每一行的前缀（与 `src/sidecar/main.mjs` 的 `log` 逐字相同）。
+pub const STDERR_PREFIX: &str = "[hwmusic-core]";
+
+/// sidecar 那一路日志在宿主日志文件里的 target。
+pub const STDERR_LOG_TARGET: &str = "hwmusic_core";
+
+/// 把 sidecar 的一行 stderr 写进宿主日志管线（与宿主自己的记录同一个文件、同一套级别）。
+pub fn log_stderr_line(raw: &str) {
+    let (level, message) = crate::run_log::stderr_line(raw);
+    let level = match level {
+        "error" => log::Level::Error,
+        "warn" => log::Level::Warn,
+        "debug" => log::Level::Debug,
+        _ => log::Level::Info,
+    };
+    log::log!(target: STDERR_LOG_TARGET, level, "{message}");
+}
+
+/// 逐行读一条 stderr 管道直到对端关闭。
+///
+/// **绝不 join**：管道在子进程退出/被 kill 时才关闭，而退出路径不能等一个可能还没写的管道。
+/// 读失败一律当读完（`break`），把"收尾"留给 `terminate` 的收尸。
+pub fn spawn_stderr_reader<R>(stderr: R, sink: impl Fn(&str) + Send + 'static) -> JoinHandle<()>
+where
+    R: std::io::Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut buffer = String::new();
+        loop {
+            buffer.clear();
+            match reader.read_line(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => sink(&buffer),
+                Err(_) => break,
+            }
+        }
+    })
+}
+
 /// 打包后随应用同目录的 sidecar 文件名。
 pub fn sidecar_binary_name() -> String {
     if cfg!(windows) {
@@ -249,7 +289,9 @@ impl SidecarProcess {
             .args(&plan.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            // stderr 必须接管道：`inherit` 时 sidecar 的每一行只落在启动它的那个控制台上，
+            // 日志文件里一条都没有（设置页的日志面板因此看不到 core 这一侧）。
+            .stderr(Stdio::piped());
 
         let mut child = command.spawn().map_err(|source| LaunchError::Spawn {
             program: plan.program.clone(),
@@ -264,13 +306,18 @@ impl SidecarProcess {
             .stdout
             .take()
             .ok_or(LaunchError::NoPipe("stdout"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or(LaunchError::NoPipe("stderr"))?;
+        let stderr_pump = spawn_stderr_reader(stderr, log_stderr_line);
 
         Ok(Self {
             plan: plan.clone(),
             shared: CoreShared::new(Box::new(stdin)),
             child: Arc::new(Mutex::new(Some(child))),
             stdout: Mutex::new(Some(BufReader::new(stdout))),
-            pumps: Mutex::new(Vec::new()),
+            pumps: Mutex::new(vec![stderr_pump]),
             terminated: AtomicBool::new(false),
         })
     }
@@ -694,6 +741,90 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         condition()
+    }
+
+    /// R56：stderr 管道逐行进日志管线，级别来自 sidecar 自己的 `[warn]`/`[error]` 标记。
+    #[test]
+    fn stderr_pipe_feeds_levels_from_a_real_child() {
+        let script = concat!(
+            "console.error('[hwmusic-core][warn] 慢');",
+            "console.error('[hwmusic-core] 普通');",
+            "console.error('    at nextTick (a.mjs:1:1)');",
+        );
+        let mut child = match std::process::Command::new("node")
+            .args(["-e", script])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                eprintln!("跳过：起不了 node（{error}）");
+                return;
+            }
+        };
+        let stderr = child.stderr.take().expect("stderr 必须是管道");
+
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&lines);
+        let pump = spawn_stderr_reader(stderr, move |line| {
+            sink.lock().unwrap().push(line.trim_end().to_string());
+        });
+        pump.join().expect("子进程退出后读线程必须结束");
+        let _ = child.wait();
+
+        let collected = lines.lock().unwrap().clone();
+        assert_eq!(collected.len(), 3, "三行都要读到：{collected:?}");
+        let levels: Vec<(&str, String)> = collected.iter().map(|line| crate::run_log::stderr_line(line)).collect();
+        assert_eq!(levels[0], ("warn", "慢".to_string()));
+        assert_eq!(levels[1], ("info", "普通".to_string()), "没有标记的行按 info，正文原样");
+        assert_eq!(levels[2].0, "info", "续行也是 info，且不许丢内容");
+        assert!(levels[2].1.contains("nextTick"), "{:?}", levels[2]);
+    }
+
+    /// R56：收尸不许等 stderr 管道——子进程赖在 SHUTDOWN_GRACE 里不走时，terminate 仍要按时返回。
+    #[test]
+    fn terminate_does_not_wait_for_the_stderr_reader() {
+        let plan = LaunchPlan {
+            program: PathBuf::from("node"),
+            args: vec![
+                "-e".into(),
+                "process.stdin.resume(); setInterval(() => {}, 1000);".into(),
+            ],
+            source: LaunchSource::OverrideScript,
+        };
+        let process = match SidecarProcess::spawn(&plan) {
+            Ok(process) => process,
+            Err(error) => {
+                eprintln!("跳过：起不了 node（{error}）");
+                return;
+            }
+        };
+        assert!(!process.shared().is_closed(), "stdin 管道应当已经接上");
+
+        let started = Instant::now();
+        process.terminate("测试收尸");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < SHUTDOWN_GRACE + Duration::from_secs(3),
+            "收尸必须按时返回（读线程不许拖住退出），实际 {elapsed:?}"
+        );
+    }
+
+    /// R56：stderr 必须是管道（`inherit` 时 sidecar 的日志一条都进不了日志文件）。
+    #[test]
+    fn spawn_pipes_stderr_instead_of_inheriting_it() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sidecar.rs"))
+            .expect("要能读到自己的源码");
+        let production = match source.find("#[cfg(test)]") {
+            Some(cut) => &source[..cut],
+            None => &source[..],
+        };
+        let start = production.find("pub fn spawn(plan: &LaunchPlan)").expect("找不到 spawn");
+        let body = &production[start..start + production[start..].find("\n    }\n").expect("spawn 没闭合")];
+        assert!(body.contains(".stderr(Stdio::piped())"), "stderr 必须接管道：{body}");
+        assert!(!body.contains("Stdio::inherit()"), "inherit 会让 sidecar 日志漏出日志文件：{body}");
+        assert!(body.contains("spawn_stderr_reader("), "必须真的起一个读线程：{body}");
     }
 
     /// R6 端到端：真 sidecar 读真 `settings.json` → 广播 `app:notice` → 宿主帧泵收到 `Effect::Emit`。

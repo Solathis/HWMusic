@@ -35,6 +35,8 @@ import esbuild from "esbuild";
 import { chromium } from "playwright-core";
 import sharp from "sharp";
 
+import { RUN_LOG_EMPTY_TEXT, RUN_LOG_FAILURE_TEXT } from "../src/renderer/features/settings/run-log.mjs";
+
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** 守卫自己的中间产物（.gitignore 已含 .tmp/）。 */
 export const GUARD_DIR = ".tmp/browser-guard";
@@ -135,6 +137,21 @@ const persistSettings = () => localStorage.setItem("guard-settings", JSON.string
 const settingsWrites = [];
 /** R50：settings:set 的夹具行为（拒绝几次）——写盘失败要回滚，这一项得能造出来。 */
 let settingsSetPlan = { failTimes: 0 };
+/**
+ * R56：运行日志夹具（core_read_run_log 的返回）。
+ *
+ * 四条覆盖四档级别 + 一条带假 token 的行：界面必须显示打码后的星号
+ * （宿主侧已脱敏，渲染层再兜一层——守卫按"DOM 里搜不到那串"判）。
+ */
+const GUARD_RUN_LOG_SECRET = "guardsecret123456";
+const guardRunLogEntries = () => [
+  { time: "2026-10-26 05:12:30", level: "info", source: "hwmusic_core", message: "已就绪（帧协议 v1）" },
+  { time: "2026-10-26 05:12:31", level: "warn", source: "hwmusic_core", message: "代理不可用，按直连处理" },
+  { time: "2026-10-26 05:12:32", level: "error", source: "huawei_music_desktop_lib::commands", message: "登录失败 token=" + GUARD_RUN_LOG_SECRET },
+  { time: "2026-10-26 05:12:33", level: "debug", source: "tao", message: "窗口几何恢复" },
+];
+let runLogPlan = { failTimes: 0, mode: "entries" };
+const runLogReads = [];
 let dragCalls = 0;
 /** R45B：官方 startResizeDragging 的方向记录（缩放手柄"真的调了官方 API"按它判）。 */
 const resizeCalls = [];
@@ -312,6 +329,15 @@ mockIPC(async (command, args) => {
     settingsPopupCloses.push(Math.round(performance.now()));
     return { open: false };
   }
+  /** R56：日志文件的夹具（失败、空文件、正常三种都由 runLogPlan 造）。 */
+  if (command === "core_read_run_log") {
+    runLogReads.push(Math.round(performance.now()));
+    if (runLogPlan.failTimes > 0) {
+      runLogPlan = { ...runLogPlan, failTimes: runLogPlan.failTimes - 1 };
+      throw { kind: "internal", message: "守卫夹具：这一次日志读取被故意拒绝" };
+    }
+    return runLogPlan.mode === "empty" ? [] : guardRunLogEntries();
+  }
   throw new Error("未提供守卫命令：" + command);
 }, { shouldMockEvents: true });
 const runtime = getPlayerRuntime();
@@ -404,6 +430,14 @@ function Guard() {
       },
       /** R50：让接下来 N 次 settings:set 被拒绝（写盘失败 → 回滚）。 */
       setSettingsPlan: (patch) => { settingsSetPlan = { ...settingsSetPlan, ...(patch ?? {}) }; },
+      /** R56：日志夹具（mode=entries|empty，failTimes）与读取次数。 */
+      setRunLogPlan: (patch) => { runLogPlan = { ...runLogPlan, ...(patch ?? {}) }; },
+      runLogReads: () => runLogReads.slice(),
+      resetRunLog: () => { runLogPlan = { failTimes: 0, mode: "entries" }; runLogReads.length = 0; },
+      /** R56：经**真实广播通道**播一条 app:notice（提示条目的来源是这条广播）。 */
+      async emitNotice(text) {
+        await emit("core:event", { channel: "app:notice", payload: { text } });
+      },
       async configureDesktop(patch) {
         const { coreLyricsConfigure } = await import("../../src/renderer/host-api.ts");
         return coreLyricsConfigure(patch);
@@ -2597,6 +2631,150 @@ export async function checkSettingsPageLyricsCard(page, guardDir, add) {
 }
 
 /**
+ * R56：设置页「日志」标签——日志文件真的显示出来、级别标识与筛选真的生效。
+ *
+ * 夹具覆盖四档级别 + 一条带假 token 的行；判据里"DOM 里搜不到那串"是脱敏的证据，
+ * "没有横向溢出"是布局的证据（长行必须断行，不许把卡片撑破）。
+ */
+export async function checkSettingsLogPane(page, guardDir, add) {
+  const openLogPane = async () => {
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByTestId("settings-page").waitFor();
+    await page.getByTestId("settings-page").getByRole("tab", { name: "日志", exact: true }).click();
+    await page.getByTestId("log-terminal").waitFor();
+    await page.waitForTimeout(250);
+  };
+  const snapshot = () => page.evaluate(() => {
+    const lines = [...document.querySelectorAll('[data-testid="log-line"]')];
+    const badges = [...document.querySelectorAll('[data-testid="log-level-badge"]')];
+    const pane = document.querySelector('[data-testid="log-lines"]');
+    const terminal = document.querySelector('[data-testid="log-terminal"]');
+    return {
+      lines: lines.length,
+      levels: badges.map((node) => node.getAttribute("data-level")),
+      variants: badges.map((node) => node.getAttribute("data-variant")),
+      lineTexts: lines.map((node) => (node.textContent ?? "").trim()),
+      count: (document.querySelector('[data-testid="log-count"]')?.textContent ?? "").trim(),
+      text: (terminal?.textContent ?? "").trim(),
+      pressed: [...document.querySelectorAll('[data-testid^="log-level-"][aria-pressed]')]
+        .map((node) => [node.getAttribute("data-testid"), node.getAttribute("aria-pressed")]),
+      paneOverflowX: pane ? pane.scrollWidth - pane.clientWidth : null,
+      documentOverflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      failure: (document.querySelector('[data-testid="log-failure"]')?.textContent ?? "").trim(),
+    };
+  });
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.evaluate(() => window.__guard.resetRunLog());
+  await openLogPane();
+
+  const opened = await snapshot();
+  const reads = (await page.evaluate(() => window.__guard.runLogReads())).length;
+  add("r56-log-reads-on-open", reads >= 1, `打开日志标签必须读一次日志文件，实际 ${reads} 次`);
+  add(
+    "r56-log-shows-file-entries",
+    opened.lines === 3 && opened.count === "3 / 4 条",
+    `默认三档（debug 关着）：${JSON.stringify({ lines: opened.lines, count: opened.count, levels: opened.levels })}`,
+  );
+  add(
+    "r56-log-level-badges",
+    opened.levels.join(",") === "info,warn,error" && opened.variants.join(",") === "secondary,default,destructive",
+    `每行一个级别标识（官方变体）：${JSON.stringify({ levels: opened.levels, variants: opened.variants })}`,
+  );
+  add(
+    "r56-log-default-level-buttons",
+    opened.pressed.filter(([, pressed]) => pressed === "true").length === 3
+      && opened.pressed.some(([id, pressed]) => id === "log-level-debug" && pressed === "false"),
+    `默认选中 info/warn/error：${JSON.stringify(opened.pressed)}`,
+  );
+  await page.screenshot({ path: path.join(guardDir, "r56-log-entries.png") });
+
+  // 打开 debug 那一档：多出一行（筛选真的按级别走，不是摆设）
+  await page.getByTestId("log-level-debug").click();
+  await page.waitForTimeout(200);
+  const withDebug = await snapshot();
+  add(
+    "r56-log-debug-toggle",
+    withDebug.lines === 4 && withDebug.count === "4 / 4 条" && withDebug.levels.includes("debug"),
+    `勾上「调试」要多一条：${JSON.stringify({ lines: withDebug.lines, count: withDebug.count })}`,
+  );
+
+  // 文本搜索：只有那一行
+  await page.getByTestId("log-filter").fill("代理");
+  await page.waitForTimeout(200);
+  const filtered = await snapshot();
+  add(
+    "r56-log-text-filter",
+    filtered.lines === 1 && filtered.count === "1 / 4 条" && filtered.lineTexts[0].includes("代理"),
+    `搜索「代理」只剩那条：${JSON.stringify({ lines: filtered.lines, count: filtered.count })}`,
+  );
+  await page.screenshot({ path: path.join(guardDir, "r56-log-filtered.png") });
+
+  // 无命中：另一句话
+  await page.getByTestId("log-filter").fill("这条不存在");
+  await page.waitForTimeout(200);
+  const noMatch = await snapshot();
+  add(
+    "r56-log-no-match",
+    noMatch.lines === 0 && noMatch.count === "0 / 4 条" && noMatch.text.length > 0,
+    `没命中要显示"被筛掉了"：${JSON.stringify({ count: noMatch.count, text: noMatch.text.slice(0, 40) })}`,
+  );
+
+  // 脱敏：夹具里那串假 token 一个字都不许出现在界面上
+  await page.getByTestId("log-filter").fill("");
+  await page.waitForTimeout(200);
+  const masked = await snapshot();
+  add(
+    "r56-log-credentials-masked",
+    !masked.text.includes("guardsecret123456") && masked.text.includes("***"),
+    `界面不许出现凭据原文（宿主与渲染层各挡一次）：${JSON.stringify(masked.text.slice(0, 80))}`,
+  );
+  add(
+    "r56-log-no-horizontal-overflow",
+    masked.paneOverflowX !== null && masked.paneOverflowX <= 0 && masked.documentOverflowX <= 0,
+    `日志区不许横向溢出：${JSON.stringify({ pane: masked.paneOverflowX, document: masked.documentOverflowX })}`,
+  );
+
+  // 空文件：与"被筛掉"不是同一句话（先量这一档，再播提示——提示会留在外壳状态里）
+  await page.evaluate(() => window.__guard.setRunLogPlan({ mode: "empty" }));
+  await page.getByTestId("log-refresh").click();
+  await page.waitForTimeout(250);
+  const empty = await snapshot();
+  add(
+    "r56-log-empty-state",
+    empty.text.includes(RUN_LOG_EMPTY_TEXT) && empty.count === "0 / 0 条",
+    `空文件要显示空态：${JSON.stringify({ text: empty.text.slice(0, 40), count: empty.count })}`,
+  );
+  await page.screenshot({ path: path.join(guardDir, "r56-log-empty.png") });
+
+  // 提示条目：经真实广播通道进来一条，来源标「提示」
+  await page.evaluate(() => window.__guard.emitNotice("守卫提示：代理按环境变量生效"));
+  await page.waitForTimeout(300);
+  const withNotice = await snapshot();
+  add(
+    "r56-log-notice-entries",
+    withNotice.lines === 1 && withNotice.text.includes("提示"),
+    `app:notice 的条目要标来源「提示」：${JSON.stringify({ lines: withNotice.lines, count: withNotice.count })}`,
+  );
+
+  // 读失败：一句带下一步的提示，且不留旧内容冒充新结果
+  await page.evaluate(() => window.__guard.setRunLogPlan({ failTimes: 1 }));
+  await page.getByTestId("log-refresh").click();
+  await page.waitForTimeout(250);
+  const failed = await snapshot();
+  add(
+    "r56-log-read-failure",
+    failed.failure === RUN_LOG_FAILURE_TEXT && failed.lines <= 1,
+    `读失败要说出来：${JSON.stringify({ failure: failed.failure, lines: failed.lines })}`,
+  );
+
+  // 复位：夹具与页面都回到干净状态（后面的用例从这里继续）
+  await page.evaluate(() => window.__guard.resetRunLog());
+  await page.getByRole("button", { name: "我的收藏", exact: true }).click();
+  await page.waitForTimeout(150);
+}
+
+/**
  * R52：沉浸式歌词**禁止改色**——桌面歌词的颜色与它无关（R50 的 `playerLyrics` 已整段删除）。
  *
  * 三层判据（缺一层就可能是"看起来没变色，其实只是没生效"）：
@@ -3869,6 +4047,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
      */
     await checked("r46-immersive-karaoke", () => checkImmersiveKaraoke(page, guardDir, add));
     await checked("r52-settings-page-lyrics-pane", () => checkSettingsPageLyricsCard(page, guardDir, add));
+    /** R56：设置页「日志」标签（日志文件条目 + 级别标识 + 筛选 + 脱敏 + 空态）。 */
+    await checked("r56-settings-log-pane", () => checkSettingsLogPane(page, guardDir, add));
     await checked("r52-immersive-lyrics-color-fixed", () => checkImmersiveLyricsColorIsFixed(page, guardDir, add));
     /**
      * R45C：播放栏/沉浸页快捷开关的真行为（延迟 IPC 下的双击、拒绝后恢复、两种模式、菜单层级）。

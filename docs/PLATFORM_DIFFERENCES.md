@@ -164,7 +164,7 @@ webview 仍走代理——这是两套网络栈的行为不一致，如实记（
 | 开机自启 | untested（**刻意不写真注册表**：那会在用户机器上留一个自启项） | untested | untested（`MacosLauncher::LaunchAgent`） |
 | 单实例 | verified（代码级）：第二实例聚焦主窗 | untested | untested |
 | 通知 | verified（代码级）：`host:notify` → 系统通知，标题 = 应用显示名 | untested | untested |
-| 日志 | verified（代码级）：`tauri-plugin-log`，Info / KeepOne / 4MB | 同 | 同 |
+| 日志 | verified（代码级）：`tauri-plugin-log`，Info / KeepOne / 4MB / 本地时间（`UseLocal`），行格式 `[日期][时间][级别][target]`；sidecar stderr 由宿主读进同一文件（target `hwmusic_core`） | 同（`UseLocal` 跨平台同样成立） | 同 |
 
 开机自启的**单测口径**要写清：用假 manager 覆盖的是**判定逻辑**（先写后读、报观测值、失败结构化、
 「插件没注册」走 `try_state` 而不是 panic）；**真实注册表写入/读取未实测**。

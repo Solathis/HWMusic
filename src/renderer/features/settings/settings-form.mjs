@@ -263,7 +263,7 @@ export const APPEARANCE_NOTICE_TEXT = "浅色 / 深色 / 跟随系统三选一�
 export function autostartStateText(enabled) {
   if (enabled === true) return "已开启：登录系统后自动启动。";
   if (enabled === false) return "已关闭：不会随系统启动。";
-  return "状态未取到（详情见运行日志）。";
+  return "状态未取到。";
 }
 
 /**
@@ -279,15 +279,16 @@ export function autostartFailureText(error) {
 }
 
 /**
- * 读自启状态失败的文案（与"改不动"分开：一个是读不到、一个是写不进，下一步不同）。
+ * 读自启状态失败的文案：**一句**话说完原因与下一步。
  *
- * 读不到时开关**不给猜**：状态显示成"未取到"并禁用（见 `autostartStateText`）。
+ * 状态行这时不渲染（见 `pages.tsx`）：同一个失败说两遍，用户只会以为坏了两处。
+ * core 的技术原文不进界面，它已经由 Rust 侧记进运行日志（`commands::logged`）。
  */
-export function autostartStatusFailureText(error) {
-  const message = isPlainObject(error) ? text(error.message).trim() : "";
-  return message === ""
-    ? "读不到开机自启状态（详情见运行日志）：开关暂时不可用，可以稍后重开设置页再试。"
-    : `读不到开机自启状态：${message}`;
+export const AUTOSTART_STATUS_FAILURE_TEXT =
+  "读不到开机自启状态，开关暂不可用：可以稍后重开设置页再试，详情见运行日志。";
+
+export function autostartStatusFailureText() {
+  return AUTOSTART_STATUS_FAILURE_TEXT;
 }
 
 // ---------------------------------------------------------------------------

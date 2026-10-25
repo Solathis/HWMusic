@@ -17,6 +17,7 @@ pub mod login;
 pub mod lyrics_settings;
 pub mod lyrics_window;
 pub mod taskbar_lyrics;
+pub mod run_log;
 mod secure_store;
 mod sidecar;
 pub mod shortcuts;
@@ -599,6 +600,9 @@ pub fn run() {
                 .level(log::LevelFilter::Info)
                 .max_file_size(4 * 1024 * 1024)
                 .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
+                // 时间统一成**本地时间**：插件默认 UTC，与用户看到的系统时间差一个时区，
+                // 排障时对不上"刚才那一下"。（这一句会把行格式换成 [时间][级别][target]。）
+                .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
                 // 落点跟随数据根（R17/A）：旋钮指哪，日志就写那儿；旋钮没设时是插件的
                 // 默认 LogDir。留在这里而不是塞进 Builder 的默认值，是为了让"档位"与
                 // "落点"两件事各有一个看得见的位置。
@@ -719,6 +723,8 @@ pub fn run() {
             commands::core_get_autostart,
             // R11：托盘可用性（R10 写死的 TRAY_AVAILABLE 占位改真查询的唯一来源）
             commands::core_get_tray_available,
+            // R56：设置页「日志」标签的数据源（主窗来源守卫 + 返回前脱敏）
+            commands::core_read_run_log,
             lyrics_window::core_lyrics_toggle,
             lyrics_window::core_lyrics_configure,
             lyrics_window::core_lyrics_control,
@@ -1582,6 +1588,10 @@ mod tests {
         assert!(
             plugins.contains("tauri_plugin_log::RotationStrategy::KeepOne"),
             "轮转只留一个文件"
+        );
+        assert!(
+            plugins.contains("TimezoneStrategy::UseLocal"),
+            "日志时间必须是本地时间（插件默认 UTC，与用户看到的系统时间差一个时区）"
         );
     }
 

@@ -88,7 +88,8 @@
 ## B. 真窗视觉与运行期行为类
 
 **共同根因**：开发机的沙箱里**应用起不来真窗**。`tauri-plugin-log` 要写
-`%LOCALAPPDATA%\<identifier>\logs`，被沙箱拒绝：
+`%LOCALAPPDATA%\<identifier>\logs`（R17 起数据根旋钮可用时改写 `<数据根>\logs`，行格式见
+`RUN_AND_PACKAGING.md` §1），被沙箱拒绝：
 
 ```
 thread 'main' panicked at src\lib.rs:326:10:

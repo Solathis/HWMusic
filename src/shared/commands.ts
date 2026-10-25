@@ -46,6 +46,15 @@ export const CORE_GET_AUTOSTART = "core_get_autostart";
  */
 export const CORE_GET_TRAY_AVAILABLE = "core_get_tray_available";
 
+/**
+ * 设置页「日志」标签的数据源（R56）：日志文件的最后 N 条结构化条目。
+ *
+ * 为什么另开一条命令而不是走 `core_call`：日志在**宿主**这一侧（`tauri_plugin_log` 写文件、
+ * sidecar 的 stderr 由宿主读进同一条管线），sidecar 里没有这份数据。守卫与自启/托盘同门
+ * （`require_main_webview`），返回前逐条脱敏（`src-tauri/src/run_log.rs` 的 `redact`）。
+ */
+export const CORE_READ_RUN_LOG = "core_read_run_log";
+
 /** 歌词专命令均 async。toggle/document/progress 限 main；configure 限 main/lyrics/设置弹出窗；
  * control 限 main/lyrics（弹出窗只改外观，不按播放键）。
  * configure({}) 纯读，回 {config, visible, revision}；restoreIfPristine 仅 main 且 revision=0 恢复。

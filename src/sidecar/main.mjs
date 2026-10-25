@@ -60,9 +60,21 @@ function implementedBy(channel) {
   return "后续任务";
 }
 
-/** 日志只走 stderr。 */
+/**
+ * 日志只走 stderr，每行带级别标记：`[hwmusic-core][<级别>] 正文`。
+ *
+ * 宿主按这个标记把每一行分档写进同一个日志文件（`run_log::stderr_line` 认这一种形状）；
+ * `log.warn` / `log.error` 给"用户该知道的事"和"出错了"两档，默认 info。
+ */
+const LOG_PREFIX = "[hwmusic-core]";
 const log = (...parts) => {
-  console.error("[hwmusic-core]", ...parts);
+  console.error(`${LOG_PREFIX}[info]`, ...parts);
+};
+log.warn = (...parts) => {
+  console.error(`${LOG_PREFIX}[warn]`, ...parts);
+};
+log.error = (...parts) => {
+  console.error(`${LOG_PREFIX}[error]`, ...parts);
 };
 
 /**
@@ -89,7 +101,7 @@ const settings = await settingsStore.read();
 const startupProxy = applyStartupProxy({ settings, env: process.env, log });
 
 const dispatcher = createDispatcher({
-  onHandlerError: ({ channel, error }) => log(`频道 ${channel} 处理失败：`, error),
+  onHandlerError: ({ channel, error }) => log.error(`频道 ${channel} 处理失败：`, error),
 });
 
 const settingsHandlers = createSettingsHandlers({ store: settingsStore });
@@ -162,7 +174,7 @@ for (const [channel, handler] of Object.entries(createProxyHandlers({ testProxy:
 const bridge = createBridge({
   readable: process.stdin,
   writable: process.stdout,
-  onProtocolError: (problem) => log("协议异常：", problem),
+  onProtocolError: (problem) => log.error("协议异常：", problem),
 });
 
 const rpc = createRpc({ bridge, dispatcher });
@@ -235,7 +247,7 @@ dispatcher.register(AUTH_LOGIN, (request, respond) => {
     })
     .catch((cause) => {
       // auth-manager 自己会把意外抛出收成结构化失败，这里只是最后一道兜底
-      log("登录过程抛出未预期异常：", cause);
+      log.error("登录过程抛出未预期异常：", cause);
     });
   return undefined;
 });
@@ -290,7 +302,7 @@ log(
 // 没人希望流量悄悄换了出口。桥已就绪才广播，发不出去也要留痕，不静默。
 if (startupProxy.notice !== null) {
   const announced = rpc.broadcast(APP_NOTICE, { text: startupProxy.notice });
-  if (!announced.ok) log(`启动提示未能广播：${announced.error.message}`);
+  if (!announced.ok) log.warn(`启动提示未能广播：${announced.error.message}`);
 }
 
 let shuttingDown = false;
@@ -321,12 +333,12 @@ process.stdin.on("end", () => shutdown("stdin EOF"));
 process.stdin.on("close", () => shutdown("stdin 关闭"));
 
 process.on("uncaughtException", (cause) => {
-  log("未捕获异常：", cause);
+  log.error("未捕获异常：", cause);
   flushAndExit(1);
 });
 
 process.on("unhandledRejection", (cause) => {
-  log("未处理的 promise 拒绝：", cause);
+  log.error("未处理的 promise 拒绝：", cause);
 });
 
 log(

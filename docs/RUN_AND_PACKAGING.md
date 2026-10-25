@@ -33,6 +33,18 @@ npm run dev:web      # 只起渲染层（改界面时更快，但没有宿主能
 真窗跑不起来（容器/无桌面会话、WebView2 数据目录不可写 → `os error 5`）时**如实记 untested**，
 不要用"SSR 渲出静态标记"冒充"窗口起来了"。
 
+### 日志落在哪、长什么样
+
+- **落点**：`HWMUSIC_DATA_DIR` 指到可写绝对路径时写 `<该值>\logs\`，否则沿用插件的默认
+  `%LOCALAPPDATA%\<identifier>\logs`（见 §7 的 `os error 5`）。文件名由插件按应用名给（实测
+  `华为音乐第三方客户端.log`），`KeepOne` 只留一个。设置页「日志」标签读的就是**这个文件**的尾部。
+- **行格式**：`[日期][时间][级别][target] 正文`，时间是**本地时间**（`TimezoneStrategy::UseLocal`）。
+  读取端（`run_log::parse_line`）按"值"认字段，插件默认的 `[日期][时间][target][级别]` 旧顺序同样
+  认得；认不出的行原样当 info。
+- **sidecar 那一半也在同一个文件里**：`hwmusic-core` 的 stderr 由宿主后台线程逐行读进同一条管线，
+  target 固定 `hwmusic_core`；级别来自 sidecar 自己的 `[hwmusic-core][warn]` 标记，
+  没有标记的续行（多行异常的半截栈）按 info 原样收下。
+
 ## 2. 打包链：三步，顺序是硬要求
 
 ```

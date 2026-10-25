@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, existsSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -380,4 +380,51 @@ test("端到端：半帧后 stdin EOF 同样干净退出（残余有确定结论
     new Promise((resolve) => setTimeout(() => resolve({ code: "timeout" }), 10_000)),
   ]);
   assert.equal(code, 0, `半帧 EOF 后 sidecar 未干净退出（code=${code}，stderr=${sidecar.stderrText()}）`);
+});
+
+/**
+ * R56：stderr 每一行都要带级别标记——宿主按它把 sidecar 的日志分档写进同一个日志文件。
+ *
+ * 标记就是契约：`[hwmusic-core][info|warn|error|debug] 正文`（Rust 侧 `run_log::stderr_line`
+ * 认这一种形状；没有标记的行按 info，但**不许**把级别写在没有前缀的格式里）。
+ */
+test("端到端：stderr 每行都带 [hwmusic-core][级别] 标记，启动行是 info", async (t) => {
+  const sidecar = startSidecar();
+  t.after(() => sidecar.cleanup());
+
+  await sidecar.bridge.call("auth:get-status", {});
+  // 「已就绪」是启动装配的最后一行：等到它，才谈得上"每一行"都齐了
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline && !sidecar.stderrText().includes("已就绪")) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const lines = sidecar
+    .stderrText()
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line !== "");
+  assert.ok(lines.length > 0, "启动期就该有日志：空 stderr 说明日志根本没写");
+
+  const marker = /^\[hwmusic-core\]\[(info|warn|error|debug)\] .+/;
+  for (const line of lines) {
+    assert.match(line, marker, `每行都必须带级别标记（宿主靠它分档）：${line}`);
+  }
+  const ready = lines.filter((line) => line.includes("已就绪"));
+  assert.equal(ready.length, 1, `启动那一行必须恰好一条：${JSON.stringify(lines)}`);
+  assert.match(ready[0], /^\[hwmusic-core\]\[info\]/, `启动行是 info：${ready[0]}`);
+});
+
+test("级别标记：错误路径用 warn/error（不是所有行都一个档）", async () => {
+  const main = readFileSync(`${repoRoot}src/sidecar/main.mjs`, "utf8");
+  assert.match(main, /\[info\]/, "log 默认写 info 标记");
+  assert.match(main, /\[warn\]/, "log.warn 写 warn 标记");
+  assert.match(main, /\[error\]/, "log.error 写 error 标记");
+
+  // 未捕获异常 / 未处理的拒绝 / 处理器抛错：这三处必须是 error（日志面板的红色从这来）
+  for (const anchor of ["uncaughtException", "unhandledRejection", "onHandlerError"]) {
+    const at = main.indexOf(anchor);
+    assert.ok(at > 0, `找不到 ${anchor}`);
+    const window = main.slice(at, at + 400);
+    assert.match(window, /log\.error\(/, `${anchor} 这一档要用 log.error 而不是 log：${window}`);
+  }
 });

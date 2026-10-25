@@ -1534,6 +1534,14 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
    （`DEFAULT_LOG_TARGETS`），文件落 `app_log_dir()`（`tauri-plugin-log-2.10.1/src/lib.rs:820`），
    不需要显式 `.target(..)`。**`eprintln!` 只出现在 `sidecar.rs` 的 `#[cfg(test)]` 段**（4 处：
    "release 没有开发期脚本回退"/"起不了真 sidecar" 时打印跳过）——生产代码只有 `log::` 一条通道。
+   **R56 补齐的三件事**：① 时间用 `TimezoneStrategy::UseLocal`（插件默认 UTC，与用户看到的系统
+   时间差一个时区），行格式因此是 `[日期][时间][级别][target] 正文`（读取端按值解析，插件的
+   `[日期][时间][target][级别]` 旧顺序同样认得）；② sidecar 的 stderr 从 `inherit` 改成**管道**，
+   宿主后台线程逐行读进同一条 `log` 管线、target 固定 `hwmusic_core`（级别取 sidecar 自己的
+   `[hwmusic-core][warn]` 标记，没有标记的续行按 info），读线程**不 join**——收尸不等管道关闭；
+   ③ 设置页「日志」的数据源 `core_read_run_log`：只允许主窗（`require_main_webview`），回日志文件
+   **最后 500 条** `{time,level,source,message}`，返回前逐条脱敏（`run_log::redact`：`Bearer` /
+   `Authorization`·`Cookie` 类头部 / `token`·`code`·`ticket`·`sign` 等键的值一律 `***`）。
 6. **快捷键 ↔ 托盘兜底 ✓**：全废时提示里指路托盘菜单；托盘不可用则指应用窗口入口（同一句话
    不指两个地方）。歌词键与托盘勾选的联动走 `tray::revert_lyrics_checked`（同一个"把勾选改成
    某个确定状态"的动作；R12 用它翻回事实，R13 用它镜像目标态），失败收口仍归 R12。
@@ -1692,6 +1700,8 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `PROXY_TEST_URL` | `https://oauth-login1.cloud.huawei.com/` | `src/host/proxy-handlers.mjs` | R10：`settings:test-proxy` 的唯一目标（不接受调用方指定；业务端点仍待联调） |
 | `CORE_SET_AUTOSTART` / `CORE_GET_AUTOSTART` | `"core_set_autostart"` / `"core_get_autostart"` | `src/shared/commands.ts` | R10：命令名的唯一真源（渲染层只用常量；Rust 侧为镜像副本，由 `test/autostart.test.mjs` 钉住） |
 | `CORE_GET_TRAY_AVAILABLE` | `"core_get_tray_available"` | `src/shared/commands.ts` | R11：托盘可用性的唯一来源（Rust 侧镜像由 `test/tray.test.mjs` 与 lib.rs 的注册扫描钉住） |
+| `CORE_READ_RUN_LOG` | `"core_read_run_log"` | `src/shared/commands.ts` | R56：设置页「日志」标签的数据源（宿主侧日志文件的最后 500 条；`require_main_webview` 守卫、返回前脱敏）；Rust 侧注册由 `lib.rs` 的注册扫描钉住 |
+| `STDERR_PREFIX` / `STDERR_LOG_TARGET` | `"[hwmusic-core]"` / `"hwmusic_core"` | `src-tauri/src/sidecar.rs`（与 `src/sidecar/main.mjs` 的 `LOG_PREFIX` 逐字一致） | R56：sidecar stderr 每一行的前缀，以及它在日志文件里的 target |
 | `TRAY_AVAILABLE` | `false` | `src/renderer/features/settings/settings-form.mjs` | R11：**兜底值**——宿主没答上来时用（真值来自 `core_get_tray_available`）。方向保守：界面说"不可用"而实际能用，比反过来代价小 |
 | `TRAY_ID` | `"tray"` | `src-tauri/src/lib.rs` | R11：托盘**图标** id（菜单项 id 前缀是 `tray:`，见 `tray::MENU_ID_PREFIX`）；`core_get_tray_available` 与关窗回调都按它现问托盘表 |
 | `MENU_SLOTS`（9 槽位/7 项/2 分隔线） | 见 `src-tauri/src/tray.rs` | `src-tauri/src/tray.rs` | R11：托盘菜单的唯一真源（顺序与文案由 Rust 内联单测 + `test/tray.test.mjs` 双向钉住） |

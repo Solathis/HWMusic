@@ -1132,17 +1132,26 @@ fn autostart_manager<R: tauri::Runtime>(
 /// 顺带：这条命令挂在 `require_main_webview` 后面——登录页/歌词窗/托盘都改不了系统自启。
 #[tauri::command]
 pub fn core_set_autostart(webview: Webview, enabled: bool) -> Result<bool, CoreError> {
-    require_main_webview(webview.label())?;
-    let manager = autostart_manager(&webview)?;
-    apply_autostart(enabled, manager.inner())
+    require_main_webview(webview.label()).map_err(|error| logged("core_set_autostart", error))?;
+    let manager = autostart_manager(&webview).map_err(|error| logged("core_set_autostart", error))?;
+    apply_autostart(enabled, manager.inner()).map_err(|error| logged("core_set_autostart", error))
 }
 
 /// 读当前开机自启状态（设置页挂载时一次；没有这条，开关的初始状态只能靠猜）。
 #[tauri::command]
 pub fn core_get_autostart(webview: Webview) -> Result<bool, CoreError> {
-    require_main_webview(webview.label())?;
-    let manager = autostart_manager(&webview)?;
-    read_autostart(manager.inner())
+    require_main_webview(webview.label()).map_err(|error| logged("core_get_autostart", error))?;
+    let manager = autostart_manager(&webview).map_err(|error| logged("core_get_autostart", error))?;
+    read_autostart(manager.inner()).map_err(|error| logged("core_get_autostart", error))
+}
+
+/// 命令失败时先把**原文**记进运行日志，再原样返回给渲染层。
+///
+/// 界面只说一句可操作的话（原因 + 下一步）；core 侧的原文留给日志面板——
+/// 同一个失败说两遍，第二遍还带着技术细节，用户既读不懂也帮不上排障。
+fn logged(command: &str, error: CoreError) -> CoreError {
+    log::warn!("{command} 未完成：{error}");
+    error
 }
 
 // ---------------------------------------------------------------------------
@@ -1163,6 +1172,27 @@ pub fn core_get_autostart(webview: Webview) -> Result<bool, CoreError> {
 pub fn core_get_tray_available(webview: Webview) -> Result<bool, CoreError> {
     require_main_webview(webview.label())?;
     Ok(crate::tray::available(webview.app_handle()))
+}
+
+// ---------------------------------------------------------------------------
+// 运行日志（R56）
+// ---------------------------------------------------------------------------
+
+/// 设置页「日志」标签的数据源：最新日志文件的最后 [`crate::run_log::READ_LIMIT`] 条（旧的在前）。
+///
+/// 只给主窗（与自启/托盘同一道门）：日志是宿主的诊断面，登录页与浮动控件不该读到。
+/// 每条 `message` 在返回前已脱敏（`run_log::redact`），渲染层拿到的就是能直接显示的东西。
+#[tauri::command]
+pub fn core_read_run_log(webview: Webview) -> Result<Vec<crate::run_log::RunLogEntry>, CoreError> {
+    require_main_webview(webview.label())?;
+    let dir = crate::run_log::resolve_dir(
+        std::env::var(crate::DATA_DIR_ENV).ok().as_deref(),
+        webview.path().app_log_dir().ok(),
+    );
+    crate::run_log::read_entries(&dir, crate::run_log::READ_LIMIT).map_err(|source| {
+        log::warn!("读运行日志失败（{}）：{source}", dir.display());
+        CoreError::new("internal", format!("读不到运行日志：{source}"))
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -198,7 +198,7 @@ test("状态文案：开 / 关 / 没取到 是三档，不许互相冒充", () =
   assert.equal(autostartStateText(undefined), unknown);
 });
 
-test("失败文案：带上 core 给的原因，且说清开关显示的是实际状态", () => {
+test("失败文案：改不动时带上 core 给的原因，且说清开关显示的是实际状态", () => {
   const withMessage = autostartFailureText({
     kind: "internal",
     message: "开机自启设置失败（拒绝访问）",
@@ -213,15 +213,53 @@ test("失败文案：带上 core 给的原因，且说清开关显示的是实�
   assert.ok(!/敬请期待|即将上线/.test(bare));
 });
 
-test("失败文案：读不到状态与改不动是两句不同的话（下一步不同）", () => {
-  const read = autostartStatusFailureText({ kind: "internal", message: "插件未注册" });
-  assert.match(read, /插件未注册/, read);
-  assert.match(read, /读不到|读取/, `要指明是读这一侧的问题：${read}`);
-  assert.notEqual(read, autostartFailureText({ kind: "internal", message: "插件未注册" }));
+/**
+ * R56：读失败只说**一句**可操作的话，且不把 core 的技术原文糊到界面上。
+ *
+ * 原文（守卫里就是命令名 `core_get_autostart`）进运行日志——设置页的日志标签能看到它，
+ * 界面那句只回答"现在能不能用、下一步做什么"。
+ */
+test("失败文案：读不到状态只有一句（原因 + 下一步），core 原文不进界面", () => {
+  const read = autostartStatusFailureText();
+  assert.equal(typeof read, "string");
+  assert.match(read, /读不到/, read);
+  assert.match(read, /日志/, `要指向运行日志：${read}`);
+  assert.match(read, /重开设置页|再试/, `给出下一步：${read}`);
+  assert.doesNotMatch(read, /core_get_autostart|core_set_autostart|forbidden_source/, "技术原文不许进界面");
+  assert.ok(read.split("。").filter((part) => part.trim() !== "").length <= 1, `只留一句：${read}`);
+  assert.notEqual(read, autostartFailureText({ kind: "internal", message: "插件未注册" }), "读与写是两件事");
 
-  const bare = autostartStatusFailureText(null);
-  assert.match(bare, /日志|稍后|重试/, bare);
-  assert.ok(!/敬请期待|即将上线/.test(bare));
+  // 未取到这一档不再自带"详情见运行日志"（那句话归失败提示说，说两遍就是同一个失败说两遍）
+  assert.equal(autostartStateText(null), "状态未取到。");
+});
+
+test("页面接线：读失败时不重复说两遍（状态行让位给那一句提示）", () => {
+  const page = read(PAGE_FILE);
+  const settingsPage = page.slice(page.indexOf("export function SettingsPage("));
+
+  assert.match(settingsPage, /setAutostartReadFailed\(true\)/, "读失败要记一个独立的状态");
+  assert.match(
+    settingsPage,
+    /autostartReadFailed\s*\?[\s\S]{0,40}null/,
+    "读失败时状态行不渲染（同一件事不说两遍）",
+  );
+  assert.match(
+    settingsPage,
+    /setAutostartFailure\(autostartStatusFailureText\(\)\)/,
+    "文案不带 core 原文（不吃 error 入参）",
+  );
+});
+
+test("Rust 侧：自启命令失败时先把 core 原文记进运行日志", () => {
+  const rust = read("src-tauri/src/commands.rs");
+  assert.match(rust, /fn logged\(command: &str, error: CoreError\) -> CoreError/, "有一个统一记失败的地方");
+  assert.match(rust, /log::warn!\("\{command\} 未完成：\{error\}"\)/, "原文进日志（warn 档，日志面板能筛到）");
+  for (const command of ["core_set_autostart", "core_get_autostart"]) {
+    const at = rust.indexOf(`pub fn ${command}(`);
+    assert.ok(at > 0, `找不到 ${command}`);
+    const body = rust.slice(at, at + rust.slice(at).indexOf("\n}\n"));
+    assert.match(body, new RegExp(`logged\\("${command}"`), `${command} 的每条失败路径都要记进日志：${body}`);
+  }
 });
 
 // ---------------------------------------------------------------------------

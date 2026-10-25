@@ -51,8 +51,9 @@ import { Switch } from "./components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs"
 import { CoverArt, EmptyState, GridSkeleton, ListSkeleton, LoadFailed, TrackTable } from "./components"
 import { AmllBackground } from "./AmllBackground.tsx"
-import { LOG_ENTRY_LIMIT, LogTerminal } from "./log-terminal.tsx"
+import { LogTerminal } from "./log-terminal.tsx"
 import type { LogEntry } from "./log-terminal.tsx"
+import { RUN_LOG_READ_LIMIT } from "./features/settings/run-log.mjs"
 import { LyricsCacheCard } from "./lyrics-cache-card.tsx"
 import { coreCall, getAutostart, isCoreError, setAutostart } from "./host-api"
 import { PlaylistGrid } from "./playlist-grid.tsx"
@@ -894,6 +895,7 @@ export function SettingsPage({
   const [autostartReady, setAutostartReady] = useState(false)
   const [autostartBusy, setAutostartBusy] = useState(false)
   const [autostartFailure, setAutostartFailure] = useState<string | null>(null)
+  const [autostartReadFailed, setAutostartReadFailed] = useState(false)
   /**
    * 主题档位（R41b 的「外观」卡）：与左下角那枚循环图标按钮、登录页那个控件**同一份接线**
    * ——读回档位、订阅 `theme:changed`、写回档位都在 `useThemeChoice` 里，
@@ -928,8 +930,12 @@ export function SettingsPage({
       try {
         const current = await getAutostart()
         if (alive) setAutostartEnabled(current)
-      } catch (error) {
-        if (alive) setAutostartFailure(autostartStatusFailureText(error))
+      } catch {
+        // core 的原文由 Rust 侧记进运行日志；界面只说那一句（不重复说两遍）
+        if (alive) {
+          setAutostartReadFailed(true)
+          setAutostartFailure(autostartStatusFailureText())
+        }
       } finally {
         // "还在读"与"读不到"是两件事：没读完就说"未取到"是把读的过程说成失败
         if (alive) setAutostartReady(true)
@@ -1113,9 +1119,12 @@ export function SettingsPage({
                 />
                 <Label htmlFor="autostart-enabled">随系统启动</Label>
               </div>
-              <p className="text-xs text-muted-foreground">
-                {autostartReady ? autostartStateText(autostartEnabled) : "正在读取当前状态…"}
-              </p>
+              {/* 读失败时状态行让位给下面那一句：同一个失败不说两遍 */}
+              {autostartReadFailed ? null : (
+                <p className="text-xs text-muted-foreground">
+                  {autostartReady ? autostartStateText(autostartEnabled) : "正在读取当前状态…"}
+                </p>
+              )}
               {autostartFailure !== null ? (
                 <p className="text-xs text-destructive" role="alert">
                   {autostartFailure}
@@ -1367,18 +1376,17 @@ export function SettingsPage({
         {/* 日志：只读的诊断面板（不是设置项——理由见 SETTINGS_TABS 的注释）；终端始终整宽 */}
         <TabsContent value="log" className="grid grid-cols-1 items-start gap-4">
           {/*
-            运行日志（R39 从侧栏那个 Sheet 搬到这里）。
-            展示与筛选全在 `LogTerminal` 里（编辑器样式：行号 gutter + 等宽正文 + ScrollArea，
-            上面一个文本筛选框与「N / 总数 条」计数）；这里只给卡片外壳与那句说明。
-            `app:notice` 的载荷只有 text，**没有级别**——所以筛选只按文本，不发明级别列。
+            运行日志（R56）：宿主的日志文件（含 sidecar 那一侧）+ `app:notice` 的提示。
+            级别、筛选、脱敏、空态文案全在 `LogTerminal` 与 `features/settings/run-log.mjs`；
+            这里只给卡片外壳与那句说明。
           */}
           <Card>
             <CardHeader>
               <CardTitle>运行日志</CardTitle>
-              <CardDescription>{`来自应用内核的提示（最多保留最新 ${LOG_ENTRY_LIMIT} 条）。`}</CardDescription>
+              <CardDescription>{`来自应用内核与宿主的日志（最近 ${RUN_LOG_READ_LIMIT} 条，凭据已打码）。`}</CardDescription>
             </CardHeader>
             <CardContent>
-              <LogTerminal entries={notices} />
+              <LogTerminal notices={notices} />
             </CardContent>
           </Card>
         </TabsContent>
