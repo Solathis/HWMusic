@@ -105,7 +105,7 @@ test("歌词舞台：定位容器 + 压暗层 + 文案来自纯逻辑模块（�
   assert.match(stage, /bg-background\//, "压暗层用设计令牌（背景之上、歌词之下）");
   assert.match(stage, /lyricsNoticeText/, "占位文案来自 playback-state.mjs（三档不混）");
   assert.doesNotMatch(stripComments(stage), /歌词来源|还没有歌词|敬请期待/, "文案不许在组件里另写一份");
-  assert.match(stage, /<MediaButton[^>]*aria-label="关闭歌词"/, "沉浸关闭按钮同样来自官方 AMLL");
+  assert.match(stage, /<MediaButton[^>]*aria-label="收起歌词"/, "沉浸页收起按钮同样来自官方 AMLL");
 });
 
 /** 全应用遮挡与字迹像素由 scripts/test-browser.mjs 的完整组合回归验证。 */
@@ -120,7 +120,7 @@ test("沉浸舞台：官方 full 控件复用同一 runtime、尊重 prefers-red
   assert.match(stage, /runtime\.player/, "只转发到已有播放器运行时");
 
   // 3. 关闭入口与动画
-  assert.match(stage, /aria-label="关闭歌词"/, "关闭按钮保留（右上角）");
+  assert.match(stage, /aria-label="收起歌词"/, "收起按钮保留（R45C：顶部中央的下拉箭头，不再右上角叉号）");
   assert.match(stage, /motion-safe:animate-in/, "打开动效用官方能力，并且只在允许动效时播");
   assert.match(stage, /motion-safe:fade-in/, "淡入用官方的 fade-in 工具类");
   assert.match(stage, /<MotionConfig reducedMotion="user">/, "官方 full 的 framer 布局动效也必须尊重用户设置");

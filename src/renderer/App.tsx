@@ -621,14 +621,17 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
           />
         </div>
 
-        {/* R40：封面/曲目信息也是"进入播放页（歌词舞台）"的入口，与头部那枚按钮同一个 state */}
-        <PlayerBar runtime={runtime} state={playback} onOpenStage={() => setStageOpen(true)} />
+        {/* R40：封面/曲目信息也是"进入播放页（歌词舞台）"的入口，与头部那枚按钮同一个 state
+            R45C：`lyrics` 是外壳那**唯一一份** binding（useLyricsWindow 的实例），
+            播放栏与沉浸页共用它——两处开关说的是同一个歌词窗，不存在第二份状态 */}
+        <PlayerBar runtime={runtime} state={playback} onOpenStage={() => setStageOpen(true)} lyrics={lyrics} />
       </SidebarInset>
       <PlaybackStage
         open={stageOpen}
         runtime={runtime}
         state={playback}
         onClose={() => setStageOpen(false)}
+        lyrics={lyrics}
       />
     </SidebarProvider>
   )

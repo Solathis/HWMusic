@@ -350,7 +350,7 @@ export function TrackTable({
 }
 
 /**
- * 播放器栏（R9 接通状态机）。
+ * 播放栏（R9 接通状态机）。
  *
  * `data-state` 直接写状态机的状态（`idle`/`loading`/`playing`/`paused`/`ended`/`error`）：
  * 它是给测试与 review 的锚点，也是"界面现在到底是什么状态"的唯一说法。
