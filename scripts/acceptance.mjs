@@ -125,16 +125,90 @@ export const ACCEPTANCE_PATHS = [
   },
 ];
 
-/** Rust/TS 注释剥离：自我约束常写在注释里，不能把注释数成命中。 */
-export function stripComments(source, file = "") {
-  const withoutBlock = source.replace(/\/\*[\s\S]*?\*\//g, "");
-  if (file.endsWith(".rs")) {
-    return withoutBlock
-      .split(/\r?\n/)
-      .map((line) => line.replace(/\/\/.*$/, ""))
-      .join("\n");
+/**
+ * Rust 注释剥离：**认得字面量**——字符串 / raw 字符串 / 字符字面量里的 `//`、`/*` 是内容，
+ * 不是注释。旧实现按行跑 `/\/\/.*$/`，于是 `r#"https://…"#; ShowWindow(foreign, SW_HIDE)`
+ * 这类**同一行**的真实写会被整段抹掉，扫描结果变成 0 违规（I-1 raw-string 补丁的第二个洞）。
+ * 普通字符串按 Rust 规则**可以跨行**（裸 LF 是内容，见 `rustStringEnd`），所以整段照抄到真正的
+ * 收尾引号；**未闭合**的普通字符串不猜内容，余下原文照抄、不剥注释（扫描阶段 fail closed）。
+ * 块注释按 Rust 规则**可以嵌套**（`/* a /* b *\/ b *\/ a`，深度计数），停在第一个 `*\/` 会让
+ * 后面的 `//` 把真实写整行剥掉（F2）。注释内部不再解释引号——Rust 的块注释里 `"` 就是注释内容。
+ * **注释一律换成分隔空白，绝不直接删除**：注释是 token 分隔符，删掉会把合法 Rust
+ * `use …::SetParent/**\/as reparent;` 拼成 `…::SetParentas`，于是别名与调用两层都看不见
+ * （agent108 Important 1，rustc 可编译）。换行按原数量保留，行结构不变。
+ * 字面量助手（`rustRawString`/`rustStringEnd`/`rustCharEnd`）定义在下方扫描器一节，函数声明提升。
+ */
+function stripRustComments(source) {
+  let out = "";
+  for (let i = 0; i < source.length; i += 1) {
+    const raw = rustRawString(source, i);
+    if (raw !== null) {
+      // 未结束的 raw：原样留到末尾（交给扫描阶段 fail closed），剥注释不做任何猜测。
+      const end = raw.close < 0 ? source.length - 1 : raw.end;
+      out += source.slice(i, end + 1);
+      i = end;
+      continue;
+    }
+    const ch = source[i];
+    if (ch === '"' || ch === "'") {
+      const end = ch === '"' ? rustStringEnd(source, i) : rustCharEnd(source, i);
+      if (end < 0) {
+        // 多行普通串已经由 `rustStringEnd` 认下来（裸 LF 合法），走到这里只有两种可能：
+        // 字符/生命周期（`rustCharEnd` 不认，就当一个普通字节照抄），或者**未闭合/裸 CR**
+        // 的普通字符串。后者绝不许把余下源码当代码继续剥注释——那正是"注释剥离删掉真实写"
+        // 的入口（`let s = "abc` + 下一行 `// ShowWindow(foreign, …)` 会被整行吃掉）。
+        // 余下原文一字不改地照抄，交给扫描阶段 fail closed（不平衡 → `(调用未闭合)`）。
+        if (ch === '"') {
+          out += source.slice(i);
+          break;
+        }
+        out += ch;
+        continue;
+      }
+      out += source.slice(i, end + 1);
+      i = end;
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "/") {
+      // **分隔空白**，不是"删掉"：注释在 Rust 词法里是 token 分隔符。删掉会让
+      // `use …::SetParent/**/as reparent;` 拼成 `…::SetParentas`——写 API 与 `as` 双双隐身，
+      // 扫描器对着真实的外来写返回 0 违规（agent108 Important 1，rustc 可编译）。
+      // 换行照旧留给下一轮原样输出，行结构不变。
+      out += " ";
+      const newline = source.indexOf("\n", i);
+      i = newline < 0 ? source.length - 1 : newline - 1; // 换行保留，行结构不变
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "*") {
+      // Rust 块注释**可以嵌套**：深度计数到配对的 `*/`。旧实现取第一个 `*/`，
+      // 于是 `/* outer /* inner */ // ignored */ real_write` 里的 `//` 把真实写剥掉（F2）。
+      let depth = 1;
+      let j = i + 2;
+      while (j < source.length && depth > 0) {
+        if (source[j] === "/" && source[j + 1] === "*") { depth += 1; j += 2; continue; }
+        if (source[j] === "*" && source[j + 1] === "/") { depth -= 1; j += 2; continue; }
+        j += 1;
+      }
+      // 同上：已经删到末尾（未闭合，非法 Rust）时也吐一个分隔空白。
+      const end = depth === 0 ? j : source.length;
+      const newlines = source.slice(i, end).split("\n").length - 1;
+      out += ` ${"\n".repeat(newlines)}`; // 分隔空白 + 原有换行（行结构不变）
+      // 未闭合（非法 Rust）：与旧实现一致，吃到末尾；换行仍按原数量保留，只是内容换成空白。
+      i = depth === 0 ? j - 1 : source.length - 1;
+      continue;
+    }
+    out += ch;
   }
-  return withoutBlock.replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  return out;
+}
+
+/** Rust/TS 注释剥离：自我约束常写在注释里，不能把注释数成命中。
+ *  注释一律换成**分隔空白**而不是删除（Rust 与 TS/JS 的注释都是 token 分隔符；
+ *  删掉会把 `SetParent/**\/as` 黏成一个标识符，见 agent108 Important 1）。 */
+export function stripComments(source, file = "") {
+  if (file.endsWith(".rs")) return stripRustComments(source).replace(/\r\n/g, "\n");
+  const withoutBlock = source.replace(/\/\*[\s\S]*?\*\//g, " ");
+  return withoutBlock.replace(/(^|[^:])\/\/[^\n]*/g, "$1 ");
 }
 
 /**
@@ -236,16 +310,535 @@ export const TASKBAR_NATIVE_FILE = "src-tauri/src/taskbar_lyrics.rs";
 const TASKBAR_ALLOWED = new Set([["Set", "Parent"], ["Find", "WindowW"], ["Find", "WindowExW"], ["Shell_", "TrayWnd"], ["explorer", ".exe"]].map((parts) => parts.join("")));
 export function nativeTokenAllowed(file, token) { return file === TASKBAR_NATIVE_FILE && TASKBAR_ALLOWED.has(token); }
 
+/**
+ * 原生写目标必须**在调用表达式里当场复核**（参数名永远不是凭证）。放行的形态只有两种：
+ *
+ * - `self::ensure_own(...)`：唯一的写资格入口——当前创建代次 + 自进程 + owner 线程 + 活性。
+ * - `self::own_top_level(...)`：**只给 `SetWindowSubclass`** 用。顶层主窗不属于歌词创建代次，
+ *   由它当场核"句柄存活 + 本进程 + owner 线程"。它比 `ensure_own` 弱（不核代次），
+ *   所以样式/位置/父/显隐/启用那几种写**不许**拿它当挡箭牌——这条差别就是本扫描的牙。
+ *
+ * 为什么必须是调用现场的表达式：`let own = ensure_own(..)?;` 再传 `own` 这种形状，
+ * 校验与写入之间任何一次重新绑定都逃得过扫源码的检查，而"校验没覆盖到的那次写"正是要防的事。
+ *
+ * 为什么必须解析**完整的第一个实参**（I-1）：只看前缀 `ensure_own(` 会把
+ * `ensure_own(policy, own).unwrap_or(hwnd(foreign))` 这种"守卫之后再兜底/改写目标"当成合法。
+ * 所以这里按括号平衡取出整个实参（跨嵌套调用、跳过字符串/字符/raw 字符串字面量），
+ * 再要求它**恰好**是 `self::<guard>(...)?`——`?` 之后多一个字符（`.unwrap_or`、`as`、`&&`）都算违规。
+ *
+ * 为什么必须带 `self::`（F3）：裸名是**绑定**解析的，同作用域的 `let ensure_own = |…| Ok(foreign)`
+ * 能让文本检查全绿而目标变外来；`self::` 是模块路径，局部绑定 shadow 不到它。
+ */
+const WRITE_GUARDS = ["ensure_own", "own_top_level"];
+const OPENERS = { "(": ")", "[": "]", "{": "}" };
+
+/**
+ * 从 `open`（左括号）处扫到配对右括号，同时记下**顶层**（只在外层括号里）的第一个逗号。
+ *
+ * 字面量整体跳过，里面的 `(`、`)`、`,` 不参与结构判定，所以 `label("),")`、`check(r#"(,"#)`
+ * 这类字面量既不会截断实参，也不会把嵌套数算错。raw 字符串（`r#"…"#`、`r##"…"##`、
+ * `br#"…"#`、`rb##"…"##`）按**同样多个 `#` 的引号**收尾，内部不解释反斜杠；`close = -1`
+ * 表示这段源码本身不平衡/未闭合（含未结束的 raw）——调用方必须按违规处理，绝不猜。
+ */
+function scanBracket(text, open) {
+  const stack = [];
+  let firstComma = -1;
+  for (let i = open; i < text.length; i += 1) {
+    const raw = rustRawString(text, i);
+    if (raw !== null) {
+      // 未结束的 raw 不是"跨行普通字符串"，是解析失败：整段实参按未受核处理。
+      if (raw.close < 0) return { close: -1, firstComma };
+      i = raw.end;
+      continue;
+    }
+    const ch = text[i];
+    if (ch === '"' || ch === "'") {
+      const end = ch === '"' ? rustStringEnd(text, i) : rustCharEnd(text, i);
+      if (end < 0) {
+        // 普通字符串跨行是合法的（裸 LF 是内容），所以走到这里只有"未闭合/裸 CR"这种解析失败。
+        if (ch === '"') return { close: -1, firstComma };
+        continue;
+      }
+      i = end;
+      continue;
+    }
+    if (OPENERS[ch] !== undefined) {
+      stack.push(OPENERS[ch]);
+      continue;
+    }
+    if (ch === ")" || ch === "]" || ch === "}") {
+      if (stack.pop() !== ch) return { close: -1, firstComma };
+      if (stack.length === 0) return { close: i, firstComma };
+      continue;
+    }
+    if (ch === "," && stack.length === 1 && firstComma < 0) firstComma = i;
+  }
+  return { close: -1, firstComma };
+}
+
+/**
+ * `text[start]` 起是不是 Rust raw 字符串：`r"…"`、`r#"…"#`、`r##"…"##`、`br#"…"#`、`cr#"…"#`。
+ *
+ * 是就返回 `{ open, close, end }`：`open` 是起始引号、`close` 是收尾引号、`end` 是收尾的最后一个
+ * `#`（无 `#` 时等于 `close`）；**未结束**返回 `close = -1, end = -1`；不是 raw 开头返回 null。
+ * 收尾必须是**完全相同数量**的 `#` 紧跟引号，raw 内部不处理反斜杠（`r#"a\"#"` 的内容是 `a\`）。
+ * `r#type` 这种 raw identifier、`br` 这种普通标识符都不算字面量（后面不是引号）。
+ *
+ * 前缀按 rustc：`r`（str）、`br`（byte str）、`cr`（C str，1.77+）。`cr` 漏认曾是 F1 绕过：
+ * `cr#"quote " // "#; ShowWindow(hwnd(foreign), SW_HIDE);` 里 `cr` 不被认成 raw 开头，
+ * 串里的 `//` 就变成注释起点，同一行的真实写被整行抹掉 → 0 违规。
+ * 另外**故意**多认一个 `rb`（**不是**合法 Rust 前缀）：它只在**不可能编译**的源码上生效，
+ * 判据侧只会更保守。别把它读成"合法 Rust 前缀"。
+ */
+const RAW_PREFIXES = ["cr", "br", "rb", "r"];
+
+function rustRawString(text, start) {
+  const before = start === 0 ? "" : text[start - 1];
+  if (/[A-Za-z0-9_]/.test(before)) return null; // 紧跟在标识符里：不是 raw 开头
+  for (const prefix of RAW_PREFIXES) {
+    if (!text.startsWith(prefix, start)) continue;
+    const hashesStart = start + prefix.length;
+    let quote = hashesStart;
+    while (text[quote] === "#") quote += 1;
+    if (text[quote] !== '"') continue;
+    const hashes = quote - hashesStart;
+    const close = text.indexOf(`"${"#".repeat(hashes)}`, quote + 1);
+    return close < 0 ? { open: quote, close: -1, end: -1 } : { open: quote, close, end: close + hashes };
+  }
+  return null;
+}
+
+/**
+ * `text[start] === '"'`；返回收尾引号下标，未闭合返回 -1。
+ *
+ * Rust **普通字符串允许裸 LF**（多行串，`"abc\n// "` 是合法字面量），所以不能见到换行就判失败。
+ * 规则照 rustc：
+ * - 裸 LF 是内容（跨行串）；
+ * - CRLF 是一个合法行尾（本仓源码就是 CRLF，`stripComments` 之后才归一成 LF）；
+ * - **裸 CR**（后面不是 LF）非法 → `-1`，fail closed，调用方按解析失败记账；
+ * - `\` 加换行是**续行**（`\` 与 LF 一起跳过），其它 `\x` 转义照旧跳过；`\` 后到输入末尾也 `-1`。
+ *
+ * 旧实现见 LF 就返回 -1，于是合法多行串被判"没结束"：剥注释时那行 `//` 被当成注释起点，
+ * 把同一行的真实外来写整行抹掉（I-1 多行串绕过），扫描结果变成 0 违规。
+ */
+function rustStringEnd(text, start) {
+  for (let i = start + 1; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === "\\") {
+      const escaped = text[i + 1];
+      if (escaped === undefined) return -1; // `\` 后没有字节：转义不完整
+      if (escaped === "\r" && text[i + 2] !== "\n") return -1; // `\` + 裸 CR：不是合法转义
+      i += 1; // 跳掉被转义的字节（`\` + LF 因此成为续行；`\` + CR + LF 里的 CR 也在这里被吃掉）
+      continue;
+    }
+    if (ch === "\r") {
+      if (text[i + 1] !== "\n") return -1; // 裸 CR 不是行尾：rustc 非法，fail closed
+      i += 1; // CRLF 算一个行尾
+      continue;
+    }
+    if (ch === '"') return i;
+  }
+  return -1;
+}
+
+/** `text[start] === "'"`；是字符字面量就返回收尾下标，是生命周期/普通字符就返回 -1。 */
+function rustCharEnd(text, start) {
+  if (text[start + 1] === "\\") {
+    const close = text.indexOf("'", start + 2);
+    return close < 0 || close - start > 12 ? -1 : close;
+  }
+  const single = text[start + 1] !== undefined && text[start + 1] !== "'" && text[start + 2] === "'";
+  return single ? start + 2 : -1;
+}
+
+/**
+ * 整个实参必须**恰好**是 `self::<guard>(...)?`；返回 guard 名，否则 null。
+ *
+ * **必须带 `self::`**（F3）：写位置靠的是**绑定**，不是名字。裸名 `ensure_own(...)` 可以被
+ * 同作用域里的 `let ensure_own = |…| Ok::<HWND, _>(hwnd(foreign));` shadow 掉，
+ * 于是文本前缀检查全绿而写到外来句柄；`self::ensure_own` 走的永远是本模块的那份定义。
+ */
+function exactGuardCall(argument) {
+  const space = (from) => {
+    let i = from;
+    while (i < argument.length && /\s/.test(argument[i])) i += 1;
+    return i;
+  };
+  for (const guard of WRITE_GUARDS) {
+    let i = space(0);
+    if (!argument.startsWith("self", i)) continue;
+    i += 4;
+    if (/[A-Za-z0-9_]/.test(argument[i] ?? "")) continue; // `selfish::…` 不是模块路径
+    i = space(i);
+    if (argument[i] !== ":" || argument[i + 1] !== ":") continue;
+    i = space(space(i + 2));
+    if (!argument.startsWith(guard, i)) continue;
+    i = space(i + guard.length);
+    if (argument[i] !== "(") return null;
+    const close = scanBracket(argument, i).close;
+    if (close < 0) return null;
+    i = space(close + 1);
+    if (argument[i] !== "?") return null;
+    return argument.slice(i + 1).trim() === "" ? guard : null;
+  }
+  return null;
+}
+
+export function guardedWriteTarget(name, target) {
+  const guard = exactGuardCall(target);
+  if (guard === null) return false;
+  if (guard === "ensure_own") return true;
+  return name === "SetWindowSubclass";
+}
+
+/**
+ * 写 API 的真名清单（`SetParent` 拼接写：本文件自己也在同一棵扫描树里被扫 token 表）。
+ *
+ * 范围（brief §39）：**对 HWND 做父/尺寸/位置/样式/显示/启用/销毁/消息/文本/区域/属性的直接
+ * 改写入口，且 HWND 是第一个实参**。判据与别名规则对清单里每一项完全一样：第一实参必须是
+ * `self::ensure_own(...)?`；`own_top_level` 仍只给 `SetWindowSubclass`（它不核创建代次）。
+ *
+ * 清单**只许扩、不许缩**：前十二条是 R44d 前几轮已钉住的（顺序原样保留——防止"换一张名单"的
+ * 回归），后面十七条是独立复审点名的常见直接改写入口（`ShowWindowAsync`、`PostMessageW/A`、
+ * `SendMessageTimeoutW/A`、`SetWindowLongPtrA`、`SetWindowTextW/A`、`AnimateWindow`、
+ * `SetWindowPlacement`、`SetLayeredWindowAttributes`、`SetWindowRgn`、
+ * `SetWindowTheme`、`SetPropW/A`、`SetWindowContextHelpId`、`SetWindowDisplayAffinity`）。
+ *
+ * 写**共享窗口类**的入口（`SetClassLongPtrW/A`、`SetClassLongW/A`、`SetClassWord`）**不在**这里
+ * （agent109 Important 3 + R44d 类级写补扫）：它们改的不是"这一个 HWND"——首参自窗守卫证明不了
+ * 类级效果只波及自窗，所以归 `BLANKET_FORBIDDEN_APIS`。
+ *
+ * 边界照实说：这**不是** Win32 全集。没列进来的入口（例如 `EndPaint`、`InvalidateRect`、
+ * `SetScrollInfo`、`SetWindowFeedbackSetting`…）本判据不管；要覆盖就再开一轮扩清单，
+ * 不假装已覆盖。
+ */
+const MUTATION_APIS = [
+  "Set" + "Parent",
+  "SetWindowPos",
+  "SetWindowLongPtrW",
+  "ShowWindow",
+  "SetWindowSubclass",
+  "EnableWindow",
+  "MoveWindow",
+  "SetWindowLongW",
+  "SetWindowLongA",
+  "DestroyWindow",
+  "SendMessageW",
+  "SendMessageA",
+  "ShowWindowAsync",
+  "PostMessageW",
+  "PostMessageA",
+  "SendMessageTimeoutW",
+  "SendMessageTimeoutA",
+  "SetWindowLongPtrA",
+  "SetWindowTextW",
+  "SetWindowTextA",
+  "AnimateWindow",
+  "SetWindowPlacement",
+  "SetLayeredWindowAttributes",
+  "SetWindowRgn",
+  "SetWindowTheme",
+  "SetPropW",
+  "SetPropA",
+  "SetWindowContextHelpId",
+  "SetWindowDisplayAffinity",
+];
+
+/**
+ * **一律禁用**的批量 / 多窗口 / 类级写：在本模块里出现即违规，连 canonical 第一实参也不放行。
+ *
+ * 理由写在判据上（不是"懒得测"）：
+ * - `DeferWindowPos` 的第一个实参是 HDWP（批次句柄），真正的 HWND 在第三位；
+ * - `EndDeferWindowPos` 只拿到 HDWP，一次提交整批窗口；
+ * - `LockWindowUpdate` 锁的是绘制范围，不是"这一个窗口的某个属性"；
+ * - `SetClassLongPtrW/A` 改的是**共享窗口类**（`GCLP_*`），第一实参指向的那个 HWND 只是
+ *   "选哪个类"，类级效果的波及面不是自窗——自窗首参守卫**证明不了**类上只刻了自窗的属性
+ *   （agent109 Important 3）。
+ * - `SetClassLongW/A`、`SetClassWord` 是同一件事的 32 位 / LONG / WORD 变体（`GCL_*` / `GCW_*`）：
+ *   它们改的同样是**共享窗口类**，不是"这一个 HWND"（R44d 类级写补扫：此前它们完全不在
+ *   扫描器里，是源码扫描覆盖遗漏，不是 native 调用点变化）。
+ *
+ * 清单是**枚举式**的，不是 Win32 全集：没列进来的类级 / 批量 / 多窗口入口本判据不管；
+ * 要覆盖就再开一轮扩清单，不假装已覆盖。
+ *
+ * 这些调用要么一次改多个窗口、要么 HWND 根本不在第一位、要么效果是类级的——"第一实参恰好是
+ * `self::ensure_own(...)?`"这条判据**证明不了**"只影响自窗"，所以本模块不承认任何安全形态
+ * （当前实现也用不到）。真要引入，必须另开一轮给出**单独测过的**精确安全形态，而不是给这里
+ * 加一条"看着像守卫"的例外。
+ */
+const BLANKET_FORBIDDEN_APIS = [
+  "DeferWindowPos",
+  "EndDeferWindowPos",
+  "LockWindowUpdate",
+  "SetClassLongPtrW",
+  "SetClassLongPtrA",
+  "SetClassLongW",
+  "SetClassLongA",
+  "SetClassWord",
+];
+
+/**
+ * 把字面量整体抹成空格（**长度不变**），得到"只看代码"的视图。
+ *
+ * 用途只有一个：判断某处标识符是不是**调用形态**。字面量里的 `SetParent(` 是内容，
+ * 不能算调用、也不能算别名（F4 的"字符串里的示例不是命中"）。注释在 `stripComments` 里
+ * 已经剥掉了，这里只处理字面量。
+ */
+function blankLiterals(text) {
+  const chars = text.split("");
+  const blank = (from, to) => { for (let k = from; k <= to && k < chars.length; k += 1) chars[k] = " "; };
+  let i = 0;
+  while (i < text.length) {
+    const raw = rustRawString(text, i);
+    if (raw !== null) {
+      const end = raw.close < 0 ? text.length - 1 : raw.end;
+      blank(i, end);
+      i = end + 1;
+      continue;
+    }
+    if (text[i] === '"') {
+      const end = rustStringEnd(text, i);
+      if (end < 0) { blank(i, text.length - 1); break; } // 解析失败：余下不猜，交给写扫描 fail closed
+      blank(i, end);
+      i = end + 1;
+      continue;
+    }
+    if (text[i] === "'") {
+      const end = rustCharEnd(text, i);
+      if (end >= 0) { blank(i, end); i = end + 1; continue; } // 否则是生命周期，照旧当代码
+    }
+    i += 1;
+  }
+  return chars.join("");
+}
+
+const RUST_IDENTIFIER = /[A-Za-z_][A-Za-z0-9_]*/g;
+
+/** 跳过空白后的下一个字节 / 上一个 / 下一个标识符。 */
+function nextByte(text, index) {
+  let i = index;
+  while (i < text.length && /\s/.test(text[i])) i += 1;
+  return i < text.length ? text[i] : "";
+}
+
+/** 跳过空白后的前一个 / 后一个标识符（没有就是空串）。 */
+function prevWord(text, index) {
+  let i = index - 1;
+  while (i >= 0 && /\s/.test(text[i])) i -= 1;
+  const end = i + 1;
+  while (i >= 0 && /[A-Za-z0-9_]/.test(text[i])) i -= 1;
+  return i + 1 === end ? "" : text.slice(i + 1, end);
+}
+/** 跳过空白后的前一个字节（没有就是空串）。 */
+function prevByte(text, index) {
+  let i = index - 1;
+  while (i >= 0 && /\s/.test(text[i])) i -= 1;
+  return i >= 0 ? text[i] : "";
+}
+function nextWord(text, index) {
+  let i = index;
+  while (i < text.length && /\s/.test(text[i])) i += 1;
+  const start = i;
+  while (i < text.length && /[A-Za-z0-9_]/.test(text[i])) i += 1;
+  return text.slice(start, i);
+}
+
+/** `start` 处的标识符是不是模块路径写法 `self::<name>`（`self :: name` 也认）。 */
+function selfQualified(text, start) {
+  let i = start - 1;
+  while (i >= 0 && /\s/.test(text[i])) i -= 1;
+  if (i < 1 || text[i] !== ":" || text[i - 1] !== ":") return false;
+  return prevWord(text, i - 1) === "self";
+}
+
+/**
+ * `start` 处的标识符是不是 **raw identifier** 写法 `r#name`（`r#` 紧贴，且再往前不是标识符字符）。
+ *
+ * rustc 里 `r#ensure_own` 与 `ensure_own` 是**同一个名字**（raw identifier 只解决关键字冲突）。
+ * 所以 `fn r#ensure_own(…)` 必须和 `fn ensure_own(…)` 一样计入"守卫定义唯一性"——否则在嵌套
+ * `mod` 里放一份 raw 定义、外层留一份真实定义时，`self::ensure_own` 到底解析到哪一份就不可证，
+ * 而名字级规则会把 `ensure_own` 后面的 `(` 当成"非写位置的自查调用"放过去（I1）。
+ */
+function rawIdentifierPrefix(text, start) {
+  if (start < 2) return false;
+  if (text.slice(start - 2, start) !== "r#") return false;
+  return start < 3 || !/[A-Za-z0-9_]/.test(text[start - 3]);
+}
+
+/**
+ * `use` 条目的区间（`use …;`）。`blank` 已经抹掉字面量，所以这里不会命中字符串里的 use。
+ */
+function useItemRanges(blank) {
+  const ranges = [];
+  for (const hit of blank.matchAll(/\buse\b[^;]*;/g)) ranges.push({ start: hit.index, end: hit.index + hit[0].length, text: hit[0] });
+  return ranges;
+}
+
+/**
+ * 唯一一份 `lyrics_proc` 子类回调的函数体区间（`{ … }`）；0 处或 ≥2 处都返回 null（fail closed）。
+ *
+ * `blank` 已抹掉字面量，`scanBracket` 能正确跨过参数表里的 `::`/泛型与嵌套调用。
+ */
+function subclassCallbackBody(blank) {
+  const hits = [...blank.matchAll(/\bfn\s+lyrics_proc\s*\(/g)];
+  if (hits.length !== 1) return null;
+  const open = hits[0].index + hits[0][0].length - 1;
+  const close = scanBracket(blank, open).close;
+  if (close < 0) return null;
+  const brace = blank.indexOf("{", close);
+  if (brace < 0) return null;
+  const end = scanBracket(blank, brace).close;
+  return end < 0 ? null : { start: brace, end };
+}
+
+/** 回调自己的三个实参：`window`（回调收到的 HWND）、`Some(lyrics_proc)`（本回调）、`id`（本子类 id）。 */
+const SUBCLASS_REMOVAL_CALL = ["window", "Some(lyrics_proc)", "id"];
+
+/** 按**顶层**逗号切实参（括号里的逗号不算）；`blank` 已抹掉字面量，所以不会把串里的逗号当分隔符。 */
+function callArguments(text) {
+  const args = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === "(" || ch === "[" || ch === "{") { depth += 1; continue; }
+    if (ch === ")" || ch === "]" || ch === "}") { depth -= 1; continue; }
+    if (ch === "," && depth === 0) { args.push(text.slice(start, i)); start = i + 1; }
+  }
+  args.push(text.slice(start));
+  return args;
+}
+
+/**
+ * `start` 处的 `RemoveWindowSubclass` 是不是**唯一放行形态**：位置在唯一一份 `lyrics_proc`
+ * 回调体内，且三个实参逐 token 就是回调自己的 `window` / `lyrics_proc` / `id`，不是方法形态。
+ *
+ * 为什么不给它做普通首参受核（`self::ensure_own(...)?`）：`WM_NCDESTROY` 分支里代码先把
+ * liveness 置 false 再摘子类，那一刻写资格已经失效；要救就得改回调状态/生命周期接口
+ * （`NativeLife` 带 token、构造点、销毁顺序），超出本轮允许范围。所以这里给的是**位置 +
+ * 实参**的窄证明：只有"当前子类回调撤自己的子类"这一种出现被承认，别的出现一律 fail closed。
+ */
+function exactSubclassRemoval(blank, start, end, callback) {
+  if (callback === null || start <= callback.start || start >= callback.end) return false;
+  if (prevByte(blank, start) === ".") return false; // `recv.RemoveWindowSubclass(…)`：接收者来源不可证
+  const open = blank.indexOf("(", end);
+  if (open < 0 || blank.slice(end, open).trim() !== "") return false;
+  const close = scanBracket(blank, open).close;
+  if (close < 0) return false;
+  const args = callArguments(blank.slice(open + 1, close)).map((arg) => arg.replace(/\s+/g, ""));
+  return args.length === SUBCLASS_REMOVAL_CALL.length && SUBCLASS_REMOVAL_CALL.every((expected, index) => args[index] === expected);
+}
+
+/**
+ * 名字级规则（F4 + F3 的第二半）：写 API 清单（`MUTATION_APIS`，二十九条）与两个守卫名、
+ * 回调自撤的唯一形态（`RemoveWindowSubclass`），除了**受核调用形态**之外不许出现。
+ *
+ * 扫描器不是 Rust 解析器，所以这里用的是"名字出现的位置必须属于白名单形态"，形态之外一律
+ * fail closed（多报一侧，绝不放过）：
+ *
+ * - 写 API：只允许①直接调用形态（名字后面紧跟 `(`，含 `windows::…::SetParent(…)` 这种全路径，
+ *   目标仍由第一实参守卫核）；②`use windows::…` 的**无 `as`** 导入（绑定名没变，调用仍按名受核）。
+ *   `let reparent = SetParent;`、`use …::SetParent as reparent;`、`[SetParent]`、`SetParent as usize`
+ *   都会命中——它们是"换了个名字去调"，按名匹配再也找不到。
+ *   **关联方法形态**（`recv.SetParent(…)`）也命中：写目标是接收者，第一实参守卫管不到它，
+ *   词法扫描器又不解析接收者来源，所以只按 fail closed 处理（不假装覆盖了这种语法）。
+ * - **批量 / 多窗口 / 类级写**（`BLANKET_FORBIDDEN_APIS`）：**出现即违规**，不看形态、不看第一实参——
+ *   这类调用的第一实参根本不是目标 HWND（或是"选哪个类"），守卫它证明不了什么。导入、别名、方法形态一并点名。
+ * - **`RemoveWindowSubclass`**：只承认唯一一份 `lyrics_proc` 子类回调体内、
+ *   实参为 `window, Some(lyrics_proc), id` 的非方法形态（回调撤自己的子类）；其余出现一律点名。
+ * - 守卫名：只允许①`fn <name>` / `fn r#<name>` 定义（全文件最多一份，raw 写法算**同一个名字**）；
+ *   ②`self::<name>`；③非写位置的直接调用 `ensure_own(…)` / `r#ensure_own(…)`（自查点，不决定写目标）。
+ *   `let ensure_own = |…| …`、`use x as ensure_own`、`let mut ensure_own` 都命中：它们能 shadow 掉守卫。
+ *
+ * 已知边界（照实说）：宏展开看不到；把守卫连同写一起搬进另一个 `mod` 并让 `self::` 指向那份新定义，
+ * 词法扫描器无法与"真正的守卫"区分——这条靠 native 单测与人工复审兜，不靠这里。
+ */
+function referenceViolations(code) {
+  const blank = blankLiterals(code);
+  const uses = useItemRanges(blank);
+  const callback = subclassCallbackBody(blank);
+  const violations = [];
+  const definitions = new Map(WRITE_GUARDS.map((guard) => [guard, 0]));
+  for (const hit of blank.matchAll(RUST_IDENTIFIER)) {
+    const word = hit[0];
+    const start = hit.index;
+    const end = start + word.length;
+    const rawPrefixed = rawIdentifierPrefix(blank, start);
+    if (word === "RemoveWindowSubclass") {
+      // 回调自撤是**唯一**放行形态（见 `exactSubclassRemoval`）：导入（无 as）与回调体内的
+      // 自身移除；别名、非 windows 导入、方法形态、回调外、别家的窗/proc/id 一律点名。
+      const item = uses.find((range) => start > range.start && end < range.end);
+      if (item !== undefined) {
+        const aliased = prevWord(blank, start) === "as" || nextWord(blank, end) === "as";
+        if (aliased) violations.push(`${word}: (use 里用 as 改名的别名引用)`);
+        else if (!/^\s*use\s+windows::/.test(item.text)) violations.push(`${word}: (use 导入不是 windows:: 路径，绑定到哪份实现不可证)`);
+        continue;
+      }
+      if (!exactSubclassRemoval(blank, start, end, callback)) {
+        violations.push(`${word}: (只允许唯一一份 lyrics_proc 子类回调撤自己的子类：实参必须是 window, Some(lyrics_proc), id)`);
+      }
+      continue;
+    }
+    if (BLANKET_FORBIDDEN_APIS.includes(word)) {
+      // 不看形态：导入、别名、方法、直接调用、裸引用都点名（第一实参守卫对这类调用没有意义）。
+      violations.push(`${word}: (本模块一律禁用：批量/多窗口/类级写，第一实参守卫证明不了效果只波及自窗)`);
+      continue;
+    }
+    if (MUTATION_APIS.includes(word)) {
+      const item = uses.find((range) => start > range.start && end < range.end);
+      if (item !== undefined) {
+        const aliased = prevWord(blank, start) === "as" || nextWord(blank, end) === "as";
+        if (aliased) violations.push(`${word}: (use 里用 as 改名的别名引用)`);
+        else if (!/^\s*use\s+windows::/.test(item.text)) violations.push(`${word}: (use 导入不是 windows:: 路径，绑定到哪份实现不可证)`);
+        continue;
+      }
+      // 关联方法形态（`recv.SetParent(…)` / `recv.MoveWindow(…)`）：写目标是**接收者**，
+      // 第一实参守卫根本管不到它。词法扫描器不解析接收者来源，所以这条形态一律 fail closed
+      // （`windows::…::SetParent(…)` 是 `::` 结尾，不受影响）。
+      if (prevByte(blank, start) === ".") {
+        violations.push(`${word}: (关联方法形态：写目标是接收者，第一实参守卫管不到)`);
+        continue;
+      }
+      if (nextByte(blank, end) === "(") continue; // 直接调用形态：目标由第一实参守卫核
+      violations.push(`${word}: (非调用形态的引用：疑似函数指针/别名)`);
+      continue;
+    }
+    if (!definitions.has(word)) continue;
+    if (selfQualified(blank, start)) continue;
+    // `fn r#ensure_own`：raw 前缀属于名字本身，判定"前面是不是 fn"要跳过它（I1）。
+    if (prevWord(blank, rawPrefixed ? start - 2 : start) === "fn") {
+      definitions.set(word, definitions.get(word) + 1);
+      continue;
+    }
+    if (nextByte(blank, end) === "(") continue; // 非写位置的裸名自查调用：不决定写目标
+    violations.push(`${word}: (不是 fn 定义 / self:: 调用 / 直接调用：本地绑定能 shadow 守卫)`);
+  }
+  for (const [guard, count] of definitions) {
+    if (count > 1) violations.push(`${guard}: (守卫定义出现 ${count} 次，必须唯一)`);
+  }
+  return violations;
+}
+
 export function taskbarWriteViolations(source) {
   const code = stripComments(source, TASKBAR_NATIVE_FILE);
-  const mutations = ["Set" + "Parent", "SetWindowPos", "SetWindowLongPtrW", "ShowWindow", "SetWindowSubclass", "EnableWindow"];
+  const mutations = MUTATION_APIS;
   const violations = [];
   for (const name of mutations) {
-    for (const hit of code.matchAll(new RegExp(`\\b${name}\\s*\\(\\s*([^,\\n]*)`, "g"))) {
-      const target = hit[1].trim();
-      if (!/^ensure_own\(/.test(target)) violations.push(`${name}: ${target}`);
+    for (const hit of code.matchAll(new RegExp(`\\b${name}\\s*\\(`, "g"))) {
+      const open = hit.index + hit[0].length - 1;
+      const { close, firstComma } = scanBracket(code, open);
+      const argumentEnd = firstComma >= 0 && (close < 0 || firstComma < close) ? firstComma : close;
+      const argument = code.slice(open + 1, argumentEnd < 0 ? Math.min(code.length, open + 120) : argumentEnd).trim();
+      if (close < 0) {
+        // 不平衡/未闭合：解析不出来的实参一律按"未复核"处理，绝不猜。
+        violations.push(`${name}: ${argument} (调用未闭合)`);
+        continue;
+      }
+      if (!guardedWriteTarget(name, argument)) violations.push(`${name}: ${argument}`);
     }
   }
+  // 名字级：别名引用 / 守卫绑定（F4、F3）。写调用形态本身不在这里重复记账。
+  violations.push(...referenceViolations(code));
   return violations;
 }
 

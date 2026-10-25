@@ -1228,6 +1228,59 @@ fn apply_config<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<R>, previ
     result
 }
 
+/// 桌面窗上允许做的两种动作（生产实现包住 `WebviewWindow`；测试用会计数的那种假的）。
+///
+/// 为什么要为一个"就两行"的动作抽出窄接口：D3 的规矩是**撤销态下一`reload`/`show` 都不许发**
+/// （旧 taskbar HWND 可能还挂在 Explorer 下）。这条只有**行为**上被钉住才算数——扫源码只能
+/// 证明写了 `if`，证明不了它挡在副作用之前。所以动作与判定收进同一处，假的窗直接数次数。
+pub trait DesktopWindowOps {
+    fn reload(&mut self) -> Result<(), String>;
+    fn show(&mut self) -> Result<(), String>;
+}
+
+/// 生产实现：动作原样转给 `WebviewWindow`（不缓存任何 tee 样式，与 tao 的唯一事实来源一致）。
+struct LyricsWindowOps<'a, R: Runtime>(&'a WebviewWindow<R>);
+impl<R: Runtime> DesktopWindowOps for LyricsWindowOps<'_, R> {
+    fn reload(&mut self) -> Result<(), String> {
+        self.0.reload().map_err(|error| error.to_string())
+    }
+    fn show(&mut self) -> Result<(), String> {
+        self.0.show().map_err(|error| error.to_string())
+    }
+}
+
+/// 桌面「打开」那一步的窄收口（**行为可测**）：所有对已有窗的 `reload`/`show` 只从这里出去。
+///
+/// - `revoked`：这扇窗是不是**已 revoke 但仍活着**的旧代次（唯一事实来源是宿主：
+///   [`revoked_window`] ← `Host::revoked_live()`；`live`/`saved` 刻意保留，好让同一代次重试
+///   restore/detach）。撤销态下这里**一次也不碰它**——不 reload、不 show——直接回
+///   `destroy_failed`：窗保持隐藏，用户再点一次就是明确的重试，撤销只能由**新代次 register**
+///   或同一代次的受控 detach/restore 成功来解除。
+/// - `fresh`：刚建出来的窗（本来就在加载）：reload 会打断首次加载，所以只 show。
+/// - 已有窗的 reload 失败只留一行 warn：页面刷新不了不该让"打开歌词"这件事失败。
+pub fn open_desktop(
+    revoked: bool,
+    fresh: bool,
+    window: &mut dyn DesktopWindowOps,
+) -> Result<(), CoreError> {
+    if revoked {
+        // 一次也不碰：不 reload、不 show，窗保持隐藏，回可重试的失败。
+        return Err(CoreError::new(
+            "destroy_failed",
+            "歌词窗清理未完成，已停显；请关闭歌词后重试",
+        ));
+    }
+    if !fresh {
+        if let Err(error) = window.reload() {
+            log::warn!("歌词窗页面没能重新加载（继续显示现有页面）：{error}");
+        }
+    }
+    // `show()` 失败发生在 `build()` 之后：窗已经在 label 表里了，如实报错让上层提示并翻回勾选
+    window
+        .show()
+        .map_err(|source| CoreError::new("internal", format!("歌词窗显示不出来：{source}")))
+}
+
 /// 开关落地：开 = 建（没有就建）/摆好/**重新加载**/显示；关 = **隐藏**（不销毁，webview 与进度都留着）。
 ///
 /// ## 为什么"已经有了的窗"在 show 之前要 reload（R41）
@@ -1291,29 +1344,23 @@ fn apply_toggle<R: Runtime>(
         return Ok(false);
     }
 
-    let window = match app.get_webview_window(LYRICS_WINDOW_LABEL) {
+    let (window, fresh) = match app.get_webview_window(LYRICS_WINDOW_LABEL) {
         // 已经有了（多半是上次隐藏下来的）：**不重摆几何**——用户可能刚把它拖到别处，
         // 每次开关都把它拽回计算位置等于"拖了白拖"。模式/点透变化由 configure 那条路负责。
-        Some(window) => {
-            // 重新加载（见函数头）：失败只留一行 warn——"页面没能刷新"不该让"打开歌词"这件事失败，
-            // 用户至少还有上一次那份页面（比"什么都看不到"好）。
-            if let Err(error) = window.reload() {
-                log::warn!("歌词窗页面没能重新加载（继续显示现有页面）：{error}");
-            }
-            window
-        }
+        // 重新加载（见函数头）由 [`open_desktop`] 做，而且它先问撤销态。
+        Some(window) => (window, false),
         None => {
             let window = build_lyrics_window(app, config)?;
             if let Err(error) = apply_config(app, &window, None, config) {
                 log::warn!("歌词窗没能摆到目标位置（按默认位置显示）：{error}");
             }
-            window
+            (window, true)
         }
     };
-    // `show()` 失败发生在 `build()` 之后：窗已经在 label 表里了，如实报错让上层提示并翻回勾选
-    window
-        .show()
-        .map_err(|source| CoreError::new("internal", format!("歌词窗显示不出来：{source}")))?;
+    // 显示这一步只走窄收口：已 revoke 的旧代次在这里被挡住（`destroy_failed`、窗保持隐藏），
+    // 命令层那条 `DesktopReopen::ReplaceRevoked` 是正常路径，这里是**竞态兜底**：
+    // 判定之后、显示之前若宿主刚被 revoke，也绝不再把旧 HWND 显示出来。
+    open_desktop(revoked_window(app), fresh, &mut LyricsWindowOps(&window))?;
     Ok(true)
 }
 
@@ -1338,6 +1385,46 @@ pub fn toggle_failure_plan(requested_open: bool, window_visible: bool, reason: &
     }
 }
 
+/// 桌面重开时"已经存在的那扇窗"能不能直接沿用（**纯函数**：决定权不在调用点）。
+///
+/// R44d 复审 D3 的 Important：`Host::revoke` 之后旧 taskbar HWND **仍然活着**
+/// （`live`/`saved` 都刻意保留，好让同一代次重试 restore/detach），只是永久禁探测/禁显示。
+/// 此时配置已经切到 desktop，一次 `core_lyrics_toggle(true)` 若照旧 `reload()` + `show()`，
+/// 就把**可能还挂在 Explorer 下的旧子窗**重新显示出来了——既不是桌面歌词该有的样子，
+/// 也绕过了 revoke 的失败关闭。
+///
+/// 所以桌面重开分两条路：普通窗照旧沿用（没有就建、有就 reload + show）；
+/// 被 revoke 的旧代次先走**既有的受控 detach/restore/destroy**，再由新代次重建
+/// （新代次 `register` 即 disabled，且不继承旧 saved）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopReopen {
+    /// 没有旧代次问题：按原来的规则（没有就建，有就 reload + show）。
+    Direct,
+    /// 窗还是被 revoke 的旧代次：**不许 reload/show**，先受控销毁再新建。
+    ReplaceRevoked,
+}
+
+pub fn desktop_reopen(checked: bool, mode: LyricsMode, window_exists: bool, revoked: bool) -> DesktopReopen {
+    if checked && mode == LyricsMode::Desktop && window_exists && revoked {
+        DesktopReopen::ReplaceRevoked
+    } else {
+        DesktopReopen::Direct
+    }
+}
+
+/// 现有歌词窗是不是**已被 revoke 的旧（taskbar）代次**。
+///
+/// 只有 Windows 原生宿主有这个状态；其它平台没有 taskbar 挂接，也就没有撤销态。
+#[cfg(windows)]
+fn revoked_window<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.state::<crate::taskbar_lyrics::Host>().revoked_live().is_some()
+}
+
+#[cfg(not(windows))]
+fn revoked_window<R: Runtime>(_app: &AppHandle<R>) -> bool {
+    false
+}
+
 // ---------------------------------------------------------------------------
 // 命令面（主窗数据转发与 main/lyrics 窄配置/媒体）
 // ---------------------------------------------------------------------------
@@ -1354,8 +1441,33 @@ pub async fn core_lyrics_toggle(
     let state = app.state::<LyricsWindowState>();
     let _operation = state.operations.lock().await;
     let snapshot = state.snapshot();
-    match apply_toggle(&app, &snapshot.config, checked) {
-        Ok(_) => {
+    // R44d 复审 D3：先判定"已经存在的那扇窗"能不能沿用。被 `Host::revoke` 过的旧 taskbar
+    // 代次仍活着（live/saved 保留给 restore 重试），照旧 reload + show 就会把它重新显示出来。
+    let reopened = desktop_reopen(
+        checked,
+        snapshot.config.mode,
+        app.get_webview_window(LYRICS_WINDOW_LABEL).is_some(),
+        revoked_window(&app),
+    );
+    let result = match reopened {
+        DesktopReopen::Direct => apply_toggle(&app, &snapshot.config, checked).map(|_| ()),
+        DesktopReopen::ReplaceRevoked => {
+            // `rebuild_window` 只按 `lifecycle.requested` 决定重建后要不要重新打开，
+            // 所以先把"用户想要开着"落进状态；它内部走的仍是既有的受控销毁
+            // （detach → restore/hide → destroy），失败即 `destroy_failed`：窗保持隐藏、
+            // saved 不动，用户再点一次就是明确的重试。
+            // 没有登记代次就没有受控 detach 可走：宁可保守失败（窗本来就被 revoke 隐藏着），
+            // 也绝不落到 apply_toggle 去 reload/show 一扇旧 HWND。
+            if lock(&state.lifecycle).live_generation.is_none() {
+                Err(CoreError::new("destroy_failed", "歌词窗清理未完成，已停显；请关闭歌词后重试"))
+            } else {
+                lock(&state.lifecycle).requested = checked;
+                rebuild_window(&app, false).await
+            }
+        }
+    };
+    match result {
+        Ok(()) => {
             let payload = read_status(&app).await?;
             emit_core_event(&app, LYRICS_STATE, payload.clone());
             Ok(payload)
@@ -1517,6 +1629,159 @@ mod tests {
         });
         assert_eq!(position, Some(Point { x: 12.0, y: -24.0 }));
         assert!(lock(&state.lifecycle).requested);
+    }
+
+    /// R44d-D3 复审 Important：桌面重开**不得**沿用已被 revoke 的旧 taskbar 代次。
+    ///
+    /// 现场：`Host::revoke` 之后旧 HWND 仍活着（`live`/`saved` 故意保留，好让同一代次重试
+    /// restore/detach），而配置已经切到 desktop。这时一次 `core_lyrics_toggle(true)` 若照旧
+    /// `reload()` + `show()`，就把**可能还挂在 Explorer 下**的旧子窗重新显示出来了。
+    #[test]
+    fn d3_desktop_reopen_replaces_a_revoked_generation_instead_of_reusing_it() {
+        assert_eq!(
+            desktop_reopen(true, LyricsMode::Desktop, true, true),
+            DesktopReopen::ReplaceRevoked,
+            "旧代次被 revoke 后仍活着：不许 reload/show，必须先受控销毁再由新代次重建"
+        );
+        assert_eq!(
+            desktop_reopen(true, LyricsMode::Desktop, true, false),
+            DesktopReopen::Direct,
+            "没被 revoke 的桌面窗照旧沿用（reload + show）"
+        );
+        assert_eq!(
+            desktop_reopen(true, LyricsMode::Desktop, false, true),
+            DesktopReopen::Direct,
+            "没有窗就没有可沿用的旧 HWND：直接新建一代"
+        );
+        assert_eq!(
+            desktop_reopen(false, LyricsMode::Desktop, true, true),
+            DesktopReopen::Direct,
+            "关（hide）不销毁：撤销态只拦「打开」这一侧"
+        );
+        assert_eq!(
+            desktop_reopen(true, LyricsMode::Taskbar, true, true),
+            DesktopReopen::Direct,
+            "taskbar 分支已由宿主 request 拒绝复活，不走桌面重建"
+        );
+    }
+
+    /// 命令行为（扫源码）：先判定，再决定沿用还是受控重建；重建复用既有销毁路径。
+    #[test]
+    fn d3_desktop_toggle_consults_the_plan_before_applying_it() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs"))
+            .expect("要能读到自己的源码");
+        let production = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let start = production.find("pub async fn core_lyrics_toggle(").expect("开关命令必须在");
+        let end = production.find("pub async fn core_lyrics_configure(").expect("窄配置命令必须在");
+        let toggle = &production[start..end];
+        let plan = toggle.find("desktop_reopen(").expect("开关命令必须先问「这扇窗能不能沿用」");
+        let reused = toggle.find("apply_toggle(").expect("沿用那条路仍在");
+        assert!(plan < reused, "判定必须在 apply_toggle（reload/show）之前");
+        let branch = toggle.find("DesktopReopen::ReplaceRevoked").expect("被 revoke 的旧代次要有单独一条路");
+        assert!(branch > plan);
+        let replaced = &toggle[branch..];
+        let rebuild = replaced.find("rebuild_window(").expect("旧代次走既有的受控 detach/restore/destroy 后重建");
+        assert!(
+            !replaced[..rebuild].contains(".show()") && !replaced[..rebuild].contains(".reload()"),
+            "那条路不许再显示/重新加载旧 HWND"
+        );
+        assert!(
+            production.contains("fn revoked_window"),
+            "撤销态只读地取自宿主（不在命令里现猜）"
+        );
+        // 竞态兜底：真正 reload/show 的那一步也要先问撤销态（命令层判定之后、显示之前被 revoke）。
+        let seam = production.find("pub fn open_desktop(").expect("显示那一步必须是窄收口");
+        let seam_body = &production[seam..];
+        let seam_body = &seam_body[..seam_body.find("\n}").expect("窄收口要有结尾")];
+        assert!(seam_body.find("if revoked").expect("窄收口必须先问撤销态") < seam_body.find("window.reload()").expect("reload 仍在"));
+        let applied = production.find("fn apply_toggle").expect("apply_toggle 必须在");
+        let applied_body = &production[applied..];
+        let applied_body = &applied_body[..applied_body.find("\n}\n").expect("apply_toggle 要有结尾")];
+        assert!(
+            applied_body.contains("open_desktop(revoked_window(app)"),
+            "沿用的那条路只许从窄收口显示，且撤销态取自宿主"
+        );
+    }
+
+    /// 假宿主：只回答 [`revoked_window`] 问的那一件事——**已 revoke 但仍活着**的旧代次还在不在
+    /// （生产实现是 `Host::revoked_live()`：撤销态 + `live` 仍存在）。
+    struct FakeRevokedHost {
+        live: Option<u64>,
+        revoked: Option<u64>,
+    }
+    impl FakeRevokedHost {
+        /// 旧 taskbar 代次被 revoke 之后的状态：`live`/`saved` 都刻意保留（好让同一代次重试
+        /// restore/detach），所以它**还活着**，只是不许被显示。
+        fn revoked_live(generation: u64) -> Self {
+            Self { live: Some(generation), revoked: Some(generation) }
+        }
+        fn healthy(generation: u64) -> Self {
+            Self { live: Some(generation), revoked: None }
+        }
+        fn revoked_live_generation(&self) -> Option<u64> {
+            if self.revoked.is_some() {
+                self.live
+            } else {
+                None
+            }
+        }
+    }
+
+    /// 假窗：只数次数（`reload`/`show`）并记可见性——D3 要断言的就是这两个计数。
+    #[derive(Default)]
+    struct FakeDesktopWindow {
+        reloads: usize,
+        shows: usize,
+        visible: bool,
+    }
+    impl DesktopWindowOps for FakeDesktopWindow {
+        fn reload(&mut self) -> Result<(), String> {
+            self.reloads += 1;
+            Ok(())
+        }
+        fn show(&mut self) -> Result<(), String> {
+            self.shows += 1;
+            self.visible = true;
+            Ok(())
+        }
+    }
+
+    /// R44d-D3 复审 Important（**行为级**）：撤销态 + 桌面 toggle ⇒ 旧 HWND 的 `show`/`reload`
+    /// 计数必须都是 0，窗保持隐藏，回 `destroy_failed`（用户可重试）。
+    ///
+    /// 为什么这条必须验行为而不是扫源码：缺陷的本质就是"判定写了、副作用照发"。这里用假宿主
+    /// （`revoked_live` 语义）+ 假窗（数次数）驱动生产那条窄收口，副作用一旦漏发就直接红。
+    #[test]
+    fn d3_revoked_generation_is_never_reloaded_or_shown_by_a_desktop_toggle() {
+        // 现场：Beta 显示中切回 Desktop，restore 失败 → 旧 g1 被 revoke 但 HWND 仍活着。
+        let host = FakeRevokedHost::revoked_live(1);
+        let mut window = FakeDesktopWindow::default();
+        let outcome = open_desktop(host.revoked_live_generation().is_some(), false, &mut window);
+        // 先看副作用：这两条一旦不为 0，就说明旧 HWND 被重新显示/重载了（= 缺陷本身）。
+        assert_eq!(window.reloads, 0, "旧 HWND 一次也不许 reload");
+        assert_eq!(window.shows, 0, "旧 HWND 一次也不许 show");
+        assert!(!window.visible, "撤销态下窗必须保持隐藏（用户再点一次才是重试）");
+        let error = outcome.expect_err("撤销态下桌面 toggle 必须失败关闭：绝不许把旧 HWND 重新显示出来");
+        assert_eq!(error.kind.as_deref(), Some("destroy_failed"), "要回可重试的 destroy_failed");
+        // 同一状态再点一次（用户重试）：在撤销解除之前仍不许放行——只有新代次 register
+        // 或同一代次受控 detach/restore 成功才解除，这里不再碰窗。
+        let mut retry = FakeDesktopWindow::default();
+        assert!(open_desktop(host.revoked_live_generation().is_some(), false, &mut retry).is_err());
+        assert_eq!((retry.reloads, retry.shows), (0, 0), "重试也不许绕过撤销");
+    }
+
+    /// 正控：没被 revoke 的桌面窗**照旧** reload + show；刚建出来的窗只 show（不打断首次加载）。
+    /// 少了这条，"撤销态什么都不做"可以用"永远什么都不做"作弊过关。
+    #[test]
+    fn d3_a_healthy_desktop_generation_still_reloads_and_shows() {
+        let host = FakeRevokedHost::healthy(2);
+        let mut window = FakeDesktopWindow::default();
+        open_desktop(host.revoked_live_generation().is_some(), false, &mut window)
+            .expect("没被 revoke 的窗必须照旧显示");
+        assert_eq!((window.reloads, window.shows, window.visible), (1, 1, true));
+        let mut fresh = FakeDesktopWindow::default();
+        open_desktop(false, true, &mut fresh).expect("新建的窗必须显示");
+        assert_eq!((fresh.reloads, fresh.shows, fresh.visible), (0, 1, true), "新建的窗不 reload");
     }
 
     /// R44e：原子 revision 仍成立；`restoreIfPristine` 那条旧入口**已取消**（启动恢复由宿主只读做）。
@@ -1850,26 +2115,23 @@ mod tests {
 
     /// R41：显示已有窗口之前必须**重新加载**页面（从"页面没加载完 ⇒ 永久空白"里恢复的唯一出路）。
     ///
-    /// 这条只能扫源码：真要验得建一个真窗并让它的加载失败，而本任务不能重启应用。
-    /// 扫描同时把"新建那条分支不许 reload"钉住——新建的窗本来就在加载，reload 会把它打断。
+    /// R44d-D3 之后这条 reload 与 show 都在 [`open_desktop`] 这一个窄收口里——因为
+    /// "撤销态下什么动作都不许发"必须**行为**可测，而行为可测的前提是这些动作只从一处出去。
     #[test]
     fn showing_an_existing_lyrics_window_reloads_the_page_but_a_fresh_one_is_left_alone() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs"))
             .expect("要能读到自己的源码");
         let production = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
-        let start = production.find("fn apply_toggle").expect("apply_toggle 必须在");
+        let start = production.find("pub fn open_desktop(").expect("显示那一步必须是窄收口");
         let body = &production[start..];
-        let existing = body.find("Some(window) => {").expect("必须有「已经有了」那条分支");
-        let building = body.find("None => {").expect("必须有「新建」那条分支");
+        let body = &body[..body.find("\n}").expect("open_desktop 的函数体要有结尾")];
+        // 新建的窗本来就在加载：reload 会把它打断
+        let fresh = body.find("if !fresh").expect("新建那条分支不许 reload");
         let reload = body.find("window.reload()").expect("显示已有窗口前必须重新加载页面");
-        assert!(
-            existing < reload && reload < building,
-            "reload 必须在「已经有了」那条分支里（不是新建那条）"
-        );
-        assert!(
-            body[reload..].contains("log::warn!"),
-            "重新加载失败只留一行 warn：刷新不了不该让「打开歌词」这件事失败"
-        );
+        assert!(fresh < reload, "reload 必须在「已经有了」那条分支里（不是新建那条）");
+        assert!(body[reload..].contains("log::warn!"), "重新加载失败只留一行 warn：刷新不了不该让「打开歌词」这件事失败");
+        let show = body.find(".show()").expect("必须真的显示");
+        assert!(reload < show, "先 reload 再 show");
     }
 
     /// R41a：歌词文档的归一（缓存里躺着的与发出去的必须是同一份形状）。

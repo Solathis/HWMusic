@@ -286,3 +286,12 @@ fn exit_destroyed_before_begin_failure_and_fixed_deadline_all_converge() {
     assert!(!b.finished(101)); assert!(b.finished(2100));
     let mut b = ExitBarrier::default(); b.begin(100, Some(4)); b.destroyed(4); assert!(b.finished(101));
 }
+#[test]
+fn fix_self_window_guard_rejects_foreign_process_foreign_thread_and_dead_handle() {
+    use huawei_music_desktop_lib::taskbar_lyrics::self_window;
+    assert!(self_window(true, 7, 8, 7, 8), "本进程、owner 线程上的活窗才放行");
+    assert!(!self_window(true, 4, 5, 7, 8), "外来进程的句柄（Explorer 任务栏控件）必须拒");
+    assert!(!self_window(true, 7, 5, 7, 8), "别的线程拥有的窗必须拒（写只在 owner UI 线程上）");
+    assert!(!self_window(false, 7, 8, 7, 8), "已销毁的句柄必须拒");
+    assert!(!self_window(true, 0, 8, 7, 8), "pid 0 不是本进程");
+}

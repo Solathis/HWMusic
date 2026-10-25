@@ -595,6 +595,43 @@ test("Rust：普通开关隐藏不销毁，换模式与退出走受控销毁", (
   );
 });
 
+test("R44d D3：桌面重开不 reload/show 已 revoke 的旧代次，先受控销毁再由新代次重建", () => {
+  const rust = rustProduction(rustSource("lyrics_window.rs"));
+  const taskbar = rustProduction(rustSource("taskbar_lyrics.rs"));
+  // 判定是纯函数（真值表在 Rust 单测里），命令体只按它走路
+  assert.match(rust, /pub fn desktop_reopen\(/, "「这扇窗能不能沿用」要是可单测的纯函数");
+  const toggle = rust.slice(
+    rust.indexOf("pub async fn core_lyrics_toggle("),
+    rust.indexOf("pub async fn core_lyrics_configure("),
+  );
+  const plan = toggle.indexOf("desktop_reopen(");
+  const applied = toggle.indexOf("apply_toggle(");
+  assert.ok(plan >= 0, "开关命令必须先问判定，不能直接 apply_toggle");
+  assert.ok(applied > plan, "判定要在 apply_toggle（reload/show）之前");
+  const branch = toggle.indexOf("DesktopReopen::ReplaceRevoked");
+  assert.ok(branch > plan, "被 revoke 的旧代次要有单独一条路");
+  const replaced = toggle.slice(branch);
+  const rebuild = replaced.indexOf("rebuild_window(");
+  assert.ok(rebuild >= 0 && rebuild < 900, "旧代次走既有的受控 detach/restore/destroy 后重建");
+  assert.doesNotMatch(replaced.slice(0, rebuild), /\.show\(\)|\.reload\(\)/, "那条路不许显示/重新加载旧 HWND");
+  assert.match(toggle, /lock\(&state\.lifecycle\)\.requested = checked/, "重建后按目标态重新打开（rebuild_window 只看 requested）");
+  assert.match(taskbar, /pub fn revoked_live\(/, "宿主给窄只读口子：已 revoke 的代次是否仍活着");
+  assert.ok(rust.includes("fn revoked_window"), "撤销态只读地取自宿主");
+  // 真正 reload/show 的那一步也得先问撤销态（命令层判定之后、显示之前被 revoke 的竞态）。
+  // 行为级证据在 Rust 单测（假宿主 + 数 show/reload 次数的假窗），这里只钉接线位置。
+  const seamAt = rust.indexOf("pub fn open_desktop(");
+  assert.ok(seamAt >= 0, "显示那一步要是窄收口（行为测试才能数 show/reload 次数）");
+  const seam = rust.slice(seamAt, rust.indexOf("\n}", seamAt));
+  const gate = seam.indexOf("if revoked");
+  assert.ok(gate >= 0, "窄收口必须先问撤销态");
+  assert.ok(gate < seam.indexOf("reload()"), "撤销态判定必须挡在 reload 之前");
+  assert.ok(gate < seam.indexOf("show()"), "撤销态判定必须挡在 show 之前");
+  assert.ok(
+    rust.includes("open_desktop(revoked_window(app)"),
+    "沿用的那条路只许从窄收口显示，且撤销态取自宿主",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // 3. 几何（判定矩阵在 Rust 内联单测；这里钉"函数在不在、口径对不对"）
 // ---------------------------------------------------------------------------

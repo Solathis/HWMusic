@@ -71,6 +71,15 @@ pub fn surface_message(message: u32, taskbar_created: u32) -> bool {
     (taskbar_created != 0 && message == taskbar_created) || matches!(message, 0x007e | 0x02e0 | 0x02e2 | 0x02e3)
 }
 
+/// 窄自窗判据（纯逻辑，可脱窗单测）：句柄必须**存在**、属于**本进程**、且是**当前 owner 线程**的窗。
+///
+/// 只给子类化顶层主窗那一个入口用：主窗不属于歌词创建代次，`ensure_own` 的代次资格对它不成立，
+/// 但"只写自窗"这条不变量不变——外来 HWND（Explorer 的任务栏控件、任意他进程窗）PID 对不上，
+/// 别的线程拥有的窗也不在本线程上，两者都被拒；销毁后的句柄（`is_window == false`）同样被拒。
+pub fn self_window(is_window: bool, pid: u32, thread: u32, current_pid: u32, current_thread: u32) -> bool {
+    is_window && pid != 0 && pid == current_pid && thread == current_thread
+}
+
 pub fn verify_content_bounds(wanted: PixelRect, actual: Result<PixelRect, Reason>) -> Result<(), Reason> {
     if wanted.valid() && actual? == wanted { Ok(()) } else { Err(Reason::AttachFailed) }
 }
@@ -248,18 +257,34 @@ mod native {
         DefSubclassProc(window, message, w, l)
     }
 
+    // 子类化目标只能是本项目自己 runtime 的顶层主窗：现场核 存活/本进程/owner 线程，
+    // 外来 HWND 与别的线程的窗一律拒（判据走纯函数 `self_window`，可单测）。
+    fn own_top_level<R: Runtime>(window: &WebviewWindow<R>) -> Result<HWND, Reason> {
+        let handle = HWND(window.hwnd().map_err(|_| Reason::Stale)?.0);
+        unsafe {
+            let mut pid = 0; let thread = GetWindowThreadProcessId(handle, Some(&mut pid));
+            if !self_window(IsWindow(Some(handle)).as_bool(), pid, thread, std::process::id(), GetCurrentThreadId()) { return Err(Reason::Stale); }
+            Ok(handle)
+        }
+    }
+    // 顶层观察窗的子类化：目标在调用表达式里由 self::own_top_level 当场复核；装不上就把 ref_data 收回来。
+    fn observe_with<R: Runtime>(window: &WebviewWindow<R>, id: usize, data: usize) -> Result<bool, Reason> {
+        Ok(unsafe { windows::Win32::UI::Shell::SetWindowSubclass(self::own_top_level(window)?, Some(lyrics_proc), id, data).as_bool() })
+    }
+    // 歌词宿主窗的子类化：目标在调用表达式里由 ensure_own 当场核 代次/线程/自进程/活性。
+    fn subclass_own(policy: &EmbedState, own: OwnWindow, id: usize, data: usize) -> Result<bool, Reason> {
+        Ok(unsafe { windows::Win32::UI::Shell::SetWindowSubclass(self::ensure_own(policy, own)?, Some(lyrics_proc), id, data).as_bool() })
+    }
+
     // Only the current own top-level main observes broadcasts; it never receives lyrics style/geometry writes.
     pub fn observe_main<R: Runtime>(app: &AppHandle<R>) -> Result<(), Reason> {
         let main = app.get_webview_window(crate::MAIN_WINDOW_LABEL).ok_or(Reason::Stale)?;
-        let handle = HWND(main.hwnd().map_err(|_| Reason::Stale)?.0);
         unsafe {
-            let mut pid=0; let thread=GetWindowThreadProcessId(handle, Some(&mut pid));
-            if pid != std::process::id() || thread != GetCurrentThreadId() { return Err(Reason::Stale); }
             let taskbar_created=RegisterWindowMessageW(w!("TaskbarCreated"));
             if taskbar_created==0 { return Err(Reason::ShellUnavailable); }
             let host=app.state::<Host>();
             let data=Box::into_raw(Box::new(NativeLife { alive: std::sync::Arc::new(AtomicBool::new(true)), changed: host.changed.clone(), taskbar_created }));
-            if !windows::Win32::UI::Shell::SetWindowSubclass(handle, Some(lyrics_proc), usize::MAX, data as usize).as_bool() { drop(Box::from_raw(data)); return Err(Reason::Stale); }
+            if !matches!(observe_with(&main, usize::MAX, data as usize), Ok(true)) { drop(Box::from_raw(data)); return Err(Reason::Stale); }
         }
         Ok(())
     }
@@ -431,6 +456,17 @@ mod native {
         pub fn now(&self) -> u64 { self.origin.elapsed().as_millis().min(u128::from(u64::MAX)) as u64 }
         pub fn payload(&self) -> Value { let i = lock(&self.inner); i.reason.payload(i.attached) }
         pub fn live(&self) -> Option<OwnWindow> { lock(&self.inner).policy.live() }
+        /// 窄只读出口：**已 revoke 但仍活着**的旧代次（没有就 `None`）。
+        ///
+        /// 撤销态只影响探测/显示/摆位（`live`/`saved` 故意保留，好让同一代次重试
+        /// restore/detach）。所以"这扇窗还是不是那个被禁用的旧 HWND"只能问宿主：
+        /// 桌面重开必须据此改走受控销毁 + 新建代次，而不是 reload/show 旧窗。
+        /// 顺手消费迟到的 Destroyed 记账，免得拿一扇已经销毁的代次去重建。
+        pub fn revoked_live(&self) -> Option<OwnWindow> {
+            let mut i = lock(&self.inner);
+            self.consume_destroyed(&mut i);
+            i.policy.revoked().and_then(|_| i.policy.live())
+        }
         pub fn failed(&self, reason: Reason) { let mut i = lock(&self.inner); i.policy.fail(reason); i.reason = reason; i.attached = false; }
         /// 失败关闭出口（窄接口）：切出 taskbar / restore 失败时，旧宿主立即进入 detached、
         /// 禁探测、隐藏；`live` 与 saved 保留给同一有效代次重试 restore。
@@ -467,11 +503,18 @@ mod native {
                 if taskbar_created == 0 { return Err(Reason::AttachFailed); }
                 let alive = std::sync::Arc::new(AtomicBool::new(true));
                 let data = Box::into_raw(Box::new(NativeLife { alive: alive.clone(), changed: self.changed.clone(), taskbar_created }));
-                if !windows::Win32::UI::Shell::SetWindowSubclass(handle, Some(lyrics_proc), generation as usize, data as usize).as_bool() {
-                    drop(Box::from_raw(data)); return Err(Reason::AttachFailed);
+                // 先登记代次再装子类：这样子类化调用的目标参数本身就能由 ensure_own 当场复核
+                // （代次/线程/自进程/活性四项），而不是靠前面那次 PID 检查。装不上就地撤销这次登记，
+                // 绝不留"有写资格却没有 liveness 观察"的活代次。
+                i.policy.register(own); i.policy.native_alive = Some(alive);
+                let installed = subclass_own(&i.policy, own, generation as usize, data as usize);
+                if !matches!(installed, Ok(true)) {
+                    let reason = installed.err().unwrap_or(Reason::AttachFailed);
+                    drop(Box::from_raw(data)); i.policy.native_alive = None; i.policy.destroyed(own);
+                    return Err(reason);
                 }
                 self.resources.register(own); i.policy.attachment = None;
-                i.policy.register(own); i.policy.native_alive = Some(alive); i.policy.request(enabled, requested); i.target_monitor = monitor; i.rebuilding = false; i.attached = false; i.reason = if enabled && requested { Reason::Waiting } else { Reason::Disabled };
+                i.policy.request(enabled, requested); i.target_monitor = monitor; i.rebuilding = false; i.attached = false; i.reason = if enabled && requested { Reason::Waiting } else { Reason::Disabled };
             }
             Ok(())
         }
@@ -489,7 +532,7 @@ mod native {
                 return Err(Reason::Stale);
             };
             // 从这里开始任何失败都必须失败关闭：旧宿主不能再被探测或显示。
-            let restored = ensure_own(&i.policy, own).and_then(|_| match i.resources.saved_for(own) {
+            let restored = self::ensure_own(&i.policy, own).and_then(|_| match i.resources.saved_for(own) {
                 Some(saved) => restore(&i.policy, saved),
                 None => hide(&i.policy, own),
             });
@@ -533,7 +576,7 @@ mod native {
             if !i.policy.probing() || self.stopped.load(Ordering::Acquire) { return false; }
             let own = i.policy.live().unwrap();
             i.target_monitor = monitor_for(app);
-            if ensure_own(&i.policy, own).is_err() { i.reason = Reason::Stale; i.attached = false; return false; }
+            if self::ensure_own(&i.policy, own).is_err() { i.reason = Reason::Stale; i.attached = false; return false; }
             if self.changed.swap(false, Ordering::AcqRel) {
                 let _ = hide(&i.policy, own); i.policy.shell_changed(); i.reason = Reason::Stale; i.attached = false;
                 if i.resources.saved_for(own).is_some() && !i.rebuilding { i.rebuilding = true; return true; }
@@ -569,36 +612,35 @@ mod native {
         }
     }
     fn hide(policy: &EmbedState, own: OwnWindow) -> Result<(), Reason> {
-        let own = ensure_own(policy, own)?;
-        unsafe { let _ = ShowWindow(own, SW_HIDE); } Ok(())
+        // 隐藏也走同一条写资格核验，且核验就在调用表达式里（不留"先校验再绑别名"的缝）。
+        unsafe { let _ = ShowWindow(self::ensure_own(policy, own)?, SW_HIDE); } Ok(())
     }
     unsafe fn get_long(own: HWND, index: WINDOW_LONG_PTR_INDEX) -> Result<isize, Reason> {
         SetLastError(WIN32_ERROR(0)); let value = GetWindowLongPtrW(own, index);
         if value == 0 && GetLastError().0 != 0 { Err(Reason::AttachFailed) } else { Ok(value) }
     }
     unsafe fn set_long(policy: &EmbedState, token: OwnWindow, index: WINDOW_LONG_PTR_INDEX, value: isize) -> Result<(), Reason> {
-        let own = ensure_own(policy, token)?;
-        SetLastError(WIN32_ERROR(0)); let previous = SetWindowLongPtrW(own, index, value);
+        SetLastError(WIN32_ERROR(0)); let previous = SetWindowLongPtrW(self::ensure_own(policy, token)?, index, value);
         if previous == 0 && GetLastError().0 != 0 { Err(Reason::AttachFailed) } else { Ok(()) }
     }
     // Saved owns no HWND. Every mutation revalidates the current creation token on the owner UI thread;
     // foreign handles are only read or supplied as the new parent. Stack RECT/POINT buffers never escape.
     fn restore(policy: &EmbedState, saved: Saved) -> Result<(), Reason> {
-        let own = ensure_own(policy, saved.own)?; hide(policy, saved.own)?;
+        let own = self::ensure_own(policy, saved.own)?; hide(policy, saved.own)?;
         unsafe {
             // Style before parent: SetParent(NULL) on a window that still carries WS_CHILD reparents it
             // under the desktop window (GetParent != 0) instead of restoring top-level ownership.
             set_long(policy, saved.own, GWL_STYLE, saved.style & !(WS_VISIBLE.0 as isize))?;
             set_long(policy, saved.own, GWL_EXSTYLE, saved.exstyle)?;
-            let _ = SetParent(ensure_own(policy, saved.own)?, (saved.parent != 0).then(|| hwnd(saved.parent)));
+            let _ = SetParent(self::ensure_own(policy, saved.own)?, (saved.parent != 0).then(|| hwnd(saved.parent)));
             if GetParent(own).ok().map(|h| h.0 as isize).unwrap_or(0) != saved.parent { return Err(Reason::AttachFailed); }
             let after = if saved.exstyle & WS_EX_TOPMOST.0 as isize != 0 { HWND_TOPMOST } else { HWND_NOTOPMOST };
-            SetWindowPos(ensure_own(policy, saved.own)?, Some(after), saved.rect.x, saved.rect.y, saved.rect.width, saved.rect.height, SWP_NOACTIVATE | SWP_FRAMECHANGED).map_err(|_| Reason::AttachFailed)?;
+            SetWindowPos(self::ensure_own(policy, saved.own)?, Some(after), saved.rect.x, saved.rect.y, saved.rect.width, saved.rect.height, SWP_NOACTIVATE | SWP_FRAMECHANGED).map_err(|_| Reason::AttachFailed)?;
         }
         Ok(())
     }
     fn sync_content<R: Runtime>(policy: &EmbedState, token: OwnWindow, window: &WebviewWindow<R>, wanted: PixelRect) -> Result<(), Reason> {
-        ensure_own(policy, token)?;
+        self::ensure_own(policy, token)?;
         let webview: &tauri::Webview<R> = window.as_ref();
         webview.set_bounds(tauri::Rect { position: tauri::PhysicalPosition::new(0,0).into(), size: tauri::PhysicalSize::new(wanted.width as u32, wanted.height as u32).into() }).map_err(|_| Reason::AttachFailed)?;
         let completed = std::sync::Arc::new(Mutex::new(None)); let receipt = completed.clone();
@@ -622,12 +664,12 @@ mod native {
             })();
             *lock(&receipt) = Some(result);
         }).map_err(|_| Reason::AttachFailed)?;
-        ensure_own(policy, token)?;
+        self::ensure_own(policy, token)?;
         let result = lock(&completed).take().unwrap_or(Err(Reason::AttachFailed)); result
     }
 
     fn prepare_child<R: Runtime>(i: &mut Inner, token: OwnWindow, target: &TargetSnapshot, rect: PixelRect, window: &WebviewWindow<R>) -> Result<(), Reason> {
-        let own = ensure_own(&i.policy, token)?;
+        let own = self::ensure_own(&i.policy, token)?;
         unsafe {
             if i.resources.saved_for(token).is_none() {
                 hide(&i.policy, token)?;
@@ -637,18 +679,18 @@ mod native {
                 let (style, exstyle) = child_styles(saved.style, saved.exstyle);
                 set_long(&i.policy, token, GWL_STYLE, style)?;
                 set_long(&i.policy, token, GWL_EXSTYLE, exstyle)?;
-                SetWindowPos(ensure_own(&i.policy, token)?, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE).map_err(|_| Reason::AttachFailed)?;
-                SetLastError(WIN32_ERROR(0)); let _ = SetParent(ensure_own(&i.policy, token)?, Some(hwnd(target.parent.handle)));
+                SetWindowPos(self::ensure_own(&i.policy, token)?, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE).map_err(|_| Reason::AttachFailed)?;
+                SetLastError(WIN32_ERROR(0)); let _ = SetParent(self::ensure_own(&i.policy, token)?, Some(hwnd(target.parent.handle)));
                 if GetParent(own).ok() != Some(hwnd(target.parent.handle)) { return Err(if GetLastError().0 == 5 { Reason::AccessDenied } else { Reason::AttachFailed }); }
             }
             if GetParent(own).ok() != Some(hwnd(target.parent.handle)) { return Err(Reason::Stale); }
-            SetWindowPos(ensure_own(&i.policy, token)?, None, rect.x, rect.y, rect.width, rect.height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED).map_err(|_| Reason::AttachFailed)?;
+            SetWindowPos(self::ensure_own(&i.policy, token)?, None, rect.x, rect.y, rect.width, rect.height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED).map_err(|_| Reason::AttachFailed)?;
             let mut client = RECT::default(); GetClientRect(own, &mut client).map_err(|_| Reason::AttachFailed)?;
             sync_content(&i.policy, token, window, PixelRect { x:0, y:0, width:client.right-client.left, height:client.bottom-client.top })?;
             use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};
-            let _ = EnableWindow(ensure_own(&i.policy, token)?, false);
+            let _ = EnableWindow(self::ensure_own(&i.policy, token)?, false);
             if IsWindowEnabled(own).as_bool() { return Err(Reason::AttachFailed); }
-            let mut actual = RECT::default(); GetWindowRect(ensure_own(&i.policy, token)?, &mut actual).map_err(|_| Reason::AttachFailed)?;
+            let mut actual = RECT::default(); GetWindowRect(self::ensure_own(&i.policy, token)?, &mut actual).map_err(|_| Reason::AttachFailed)?;
             verify_placement(target, GetParent(own).ok().map(|h| h.0 as isize).unwrap_or(0), rect, pixel(actual)?)?;
         }
         Ok(())
@@ -657,7 +699,7 @@ mod native {
         if probe(token, i.target_monitor)? != *target { return Err(Reason::Stale); }
         prepare_child(i, token, target, rect, window)?;
         if probe(token, i.target_monitor)? != *target || !matches!(i.policy.plan(target, origin.elapsed().as_millis() as u64), ApplyPlan::Place(_)) { return Err(Reason::Stale); }
-        unsafe { let _ = ShowWindow(ensure_own(&i.policy, token)?, SW_SHOWNOACTIVATE); }
+        unsafe { let _ = ShowWindow(self::ensure_own(&i.policy, token)?, SW_SHOWNOACTIVATE); }
         if !unsafe { IsWindowVisible(hwnd(token.handle)) }.as_bool() { return Err(Reason::AttachFailed); }
         Ok(())
     }

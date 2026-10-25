@@ -274,13 +274,1840 @@ test("acceptance：无注入扫描的 token 表从 R12 的既有测试里读（�
 
 test("R44d native 写扫描只允许以 ensure_own 包裹的显式受核 HWND，不按参数名放行", async () => {
   const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
-  assert.deepEqual(taskbarWriteViolations("unsafe { SetParent(ensure_own(policy, own)?, Some(parent)); SetWindowPos(ensure_own(policy, own)?, None, 0, 0, 1, 1, flags); }"), []);
+  assert.deepEqual(taskbarWriteViolations("unsafe { SetParent(self::ensure_own(policy, own)?, Some(parent)); SetWindowPos(self::ensure_own(policy, own)?, None, 0, 0, 1, 1, flags); }"), []);
   for (const fn of ["SetParent", "SetWindowPos", "SetWindowLongPtrW", "ShowWindow", "SetWindowSubclass", "EnableWindow"]) {
     assert.equal(taskbarWriteViolations(`${fn}(parent, None);`).length, 1, `${fn} foreign must be rejected`);
     assert.equal(taskbarWriteViolations(`${fn}(own, None);`).length, 1, `${fn} 不能靠变量名绕过核验`);
     assert.equal(taskbarWriteViolations(`${fn}(handle, None);`).length, 1, `${fn} 不能靠通用句柄名绕过核验`);
-    assert.equal(taskbarWriteViolations(`${fn}(ensure_own(token)?, None);`).length, 0, `${fn} 显式 own guard 可通过`);
+    assert.equal(taskbarWriteViolations(`${fn}(self::ensure_own(token)?, None);`).length, 0, `${fn} 显式 own guard 可通过`);
   }
+
+  // I-1：**前缀不是凭证**。只截到第一个逗号的写法会把 `ensure_own(policy` 当成合法守卫，
+  // 于是守卫之后又接了一个"兜底/改写"的表达式也能过——那正是"写目标没被当场复核"的另一条路。
+  // 每条都必须恰好点名 1 次（既不能放行，也不能把小片段重复计数）。
+  const bypasses = [
+    ["SetWindowLongPtrW(ensure_own(policy, own).unwrap_or(hwnd(foreign)), index, value)", "`.unwrap_or(foreign)` 兜底"],
+    ["ShowWindow(ensure_own(policy, own).unwrap_or_else(|_| hwnd(foreign)), SW_HIDE)", "`.unwrap_or_else(foreign)` 兜底"],
+    ["SetWindowPos(ensure_own(policy, own).map_or(hwnd(foreign), |h| h), None, 0, 0, 1, 1, flags)", "`.map_or(foreign, ...)` 兜底"],
+    ["EnableWindow(ensure_own(policy, own).map(|_| hwnd(foreign)), false)", "`.map(...)` 改写目标"],
+    ["ShowWindow((ensure_own(policy, own)?), SW_HIDE)", "整体多包一层括号"],
+    ["ShowWindow(ensure_own(policy, own)? as isize, SW_HIDE)", "守卫之后接 cast"],
+    ["SetParent(ensure_own(policy, own), None)", "守卫少了 `?`（不是完整表达式）"],
+    ["SetWindowSubclass(own_top_level(&main).unwrap_or(hwnd(foreign)), Some(p), id, data)", "子类化也不许兜底"],
+    ["ShowWindow(ensure_own(policy, own)?, SW_HIDE", "调用未闭合（实参不完整）"],
+    ["ShowWindow(ensure_own(policy, (own)", "守卫自己的括号不平衡"],
+  ];
+  for (const [snippet, why] of bypasses) {
+    const violations = taskbarWriteViolations(snippet);
+    assert.equal(violations.length, 1, `${why} 必须点名：${snippet} -> ${JSON.stringify(violations)}`);
+  }
+
+  // 精确的守卫表达式 + `?` 仍然放行，守卫自己的嵌套逗号不截断。
+  assert.deepEqual(
+    taskbarWriteViolations("unsafe { let _ = ShowWindow(self::ensure_own(&i.policy, token)?, SW_SHOWNOACTIVATE); }"),
+    [],
+    "`self::ensure_own(&i.policy, token)?` 这种带嵌套逗号的精确守卫要继续放行",
+  );
+  assert.deepEqual(
+    taskbarWriteViolations("SetWindowSubclass(self::own_top_level(&main)?, Some(lyrics_proc), id, data)"),
+    [],
+    "`self::own_top_level(&main)?` 仅限子类化，精确形态放行",
+  );
+
+  // Rust 字符串/字符字面量里的括号与逗号既不能截断实参，也不能把外来目标藏起来。
+  assert.equal(
+    taskbarWriteViolations('SetParent(fallback("),"), None)').length,
+    1,
+    "字符串里的 `)`/`,` 不能被当成真实分隔符（外来目标仍要点名）",
+  );
+  assert.deepEqual(
+    taskbarWriteViolations('SetParent(self::ensure_own(policy, label("("))?, None)'),
+    [],
+    "守卫实参里的字符串括号不能把嵌套数算错（算错就会误报或误放行）",
+  );
+
+  // I-1 raw-string 补丁：Rust raw 字面量（`r#"…"#`、`r##"…"##`、`br#"…"#`、`rb"…"`）里
+  // 的 `"`、`(`、`)`、`,` 全是**内容**，不是结构；raw 内部的反斜杠也不是转义，
+  // 只有「同样多个 `#` 的引号」才收尾。旧实现把 raw 里的第一个 `"` 当普通字符串引号，
+  // 于是实参解析被截断/判成"未闭合"，合法调用被误报、或干脆整段被抹掉。
+  //
+  // brief 第一段那条表达式逐字节不变、照原样断言（必须点名）：它自己括号不平衡
+  // （rustc 报 mismatched closing delimiter，证据 `.tmp/r44d-i1-raw-fixture.log`），
+  // 所以这里只钉"必须被点名"，而把"raw 真的被解析完"钉在下面补平衡的同形表达式上。
+  assert.equal(
+    taskbarWriteViolations('ShowWindow(ensure_own(policy, make_own(r#"" )?, hwnd(foreign))"#).unwrap_or(hwnd(foreign)), SW_HIDE)').length,
+    1,
+    "brief 原样的 raw 兜底表达式必须点名（raw 里的 `)`/`,`/`?` 都是内容，不能当结构）",
+  );
+  const rawBypass =
+    'ShowWindow(ensure_own(policy, make_own(r#"" )?, hwnd(foreign))"#)).unwrap_or(hwnd(foreign)), SW_HIDE)';
+  const rawBypassViolations = taskbarWriteViolations(rawBypass);
+  assert.equal(rawBypassViolations.length, 1, `raw 字符串里的兜底目标必须点名：${JSON.stringify(rawBypassViolations)}`);
+  assert.match(
+    rawBypassViolations[0],
+    /\.unwrap_or\(hwnd\(foreign\)\)/,
+    "实参要完整解析到 `.unwrap_or(hwnd(foreign))`——raw 内容里的引号与分隔符字节不能把实参截断",
+  );
+  assert.doesNotMatch(
+    rawBypassViolations[0],
+    /调用未闭合/,
+    "raw 字面量必须真的被解析完（靠\"未闭合\"碰巧拦住不算理解 raw，换个位置就会放行）",
+  );
+  for (const [fn, literal, why] of [
+    ["ShowWindow", 'make_own(br#"" )?, hwnd(foreign))"#', "字节 raw 前缀 `br` 不能当普通标识符"],
+    ["SetWindowPos", 'make_own(br#"" )? "#', "byte raw 里的分隔符字节不能把 `?` 之后的兜底藏掉"],
+  ]) {
+    assert.equal(
+      taskbarWriteViolations(`${fn}(ensure_own(policy, ${literal}).unwrap_or(hwnd(foreign)), None, 0, 0, 1, 1, flags)`).length,
+      1,
+      `${why}：${literal}`,
+    );
+  }
+
+  // 「字面量里的 `//` 不是注释」：剥注释这一步也必须认得字面量，否则同一行后面的
+  // **真实**外来写会被整行抹掉，扫描结果变成 0 违规（这是 raw/普通字符串的同一条洞）。
+  for (const hidden of [
+    'let url = r#"https://example.test"#; unsafe { ShowWindow(hwnd(foreign), SW_HIDE); }',
+    'let url = r##"a//b"##; unsafe { SetParent(hwnd(foreign), None); }',
+    'let url = "https://example.test"; unsafe { ShowWindow(hwnd(foreign), SW_HIDE); }',
+  ]) {
+    assert.equal(taskbarWriteViolations(hidden).length, 1, `字面量里的 // 不能把同一行后面的真实写抹掉：${hidden}`);
+  }
+
+  // 未结束的 raw 一律 fail closed：解析不出来就绝不当合法。
+  for (const [snippet, why] of [
+    ['ShowWindow(ensure_own(policy, probe(r#"abc)?, hwnd(foreign)), SW_HIDE)', "hash 数不匹配、到输入末尾仍在 raw 里"],
+    ['ShowWindow(ensure_own(policy, probe(r##"abc"#)?, hwnd(foreign)), SW_HIDE)', "两 hash 开头只给一 hash 收尾"],
+    ['SetParent(probe(r#"abc, None)', "外来目标后接未结束 raw"],
+    ['ShowWindow(ensure_own(policy, own)?, r#"oops)', "第二实参里的未结束 raw 也不能让调用算闭合"],
+  ]) {
+    assert.equal(taskbarWriteViolations(snippet).length, 1, `未结束的 raw 必须 fail closed（${why}）：${snippet}`);
+  }
+
+  // 带 raw 字面量的**合法**精确守卫调用必须继续放行：raw 里的 `)`/`,`/`"`/`\` 不外溢，
+  // `r#type` 这种 raw identifier 也不是字面量。
+  for (const [snippet, why] of [
+    ['SetWindowPos(self::ensure_own(policy, check(r#"(,"#))?, None, 0, 0, 1, 1, flags)', "raw 里的 `(,` 不是结构"],
+    ['SetParent(self::ensure_own(policy, check(r##"a")b"##))?, None)', "两 hash 分隔符里可以出现裸 `\"`"],
+    ['SetWindowLongPtrW(self::ensure_own(policy, probe(br#") , ( "#))?, index, value)', "byte raw br# 里的 `)`/`(`/`,`"],
+    ['EnableWindow(self::ensure_own(policy, probe(rb#"x), y("#))?, false)', "rb 前缀的 raw"],
+    ['ShowWindow(self::ensure_own(policy, probe(r")raw("))?, SW_HIDE)', "零 hash 的 raw `r\"…\"`"],
+    ['SetParent(self::ensure_own(policy, probe(r#"a\\"#))?, None)', "raw 里的反斜杠不是转义，`\\\"#` 照常收尾"],
+    ['SetParent(self::ensure_own(policy, probe(r#"{([])}"#))?, None)', "raw 里的三种括号都不参与配对"],
+    ['SetParent(self::ensure_own(policy, r#type)?, None)', "`r#type` 是 raw identifier，不是 raw 字符串"],
+    ['SetWindowSubclass(self::own_top_level(&main)?, Some(probe(r#")"#)), id, data)', "子类化的第二实参里可以带 raw"],
+  ]) {
+    assert.deepEqual(taskbarWriteViolations(snippet), [], `带 raw 字面量的合法守卫调用必须放行（${why}）：${snippet}`);
+  }
+});
+
+test("R44d I-1 follow-up 2：Rust 普通字符串可以跨行，字面量里的 // 与 /* 不是注释，未闭合必须 fail closed", async () => {
+  const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
+
+  // 控制器实跑确认的那条绕过：Rust **普通字符串允许裸 LF**，所以下面这段是合法 Rust
+  // （`.tmp/r44d-i1-multiline-repro-before.log`）。旧实现见到 LF 就判"字符串没结束"，
+  // 于是串里那行 `//` 被当成注释起点，把同一行的**真实**外来写整行剥掉 → 0 违规。
+  const controllerRepro = [
+    "unsafe fn g(h: HWND) {",
+    '    let _s = "abc',
+    '// "; unsafe { ShowWindow(h, SW_HIDE); }',
+    "}",
+  ].join("\n");
+  const reproViolations = taskbarWriteViolations(controllerRepro);
+  assert.equal(reproViolations.length, 1, `多行串里的 // 不能把真实写抹掉：${JSON.stringify(reproViolations)}`);
+  assert.match(reproViolations[0], /ShowWindow: h\b/, "实参要完整解析到真实写目标：多行串里的字节不能把实参截断");
+  assert.doesNotMatch(
+    reproViolations[0],
+    /调用未闭合/,
+    '多行普通串必须真的被解析完（靠"未闭合"碰巧拦住不算理解多行串，换个位置就放行）',
+  );
+
+  // 同一条洞的 `/*` 面：旧实现在串里撞见 `/*` 就去找 `*/`，找不到就把**余下整个文件**吃掉，
+  // 后面的真实外来写一起消失（修前实测 0 违规）。
+  const blockCommentBypass = [
+    "unsafe fn g(h: HWND) {",
+    '    let _s = "abc',
+    '/* "; unsafe { SetParent(hwnd(foreign), None); }',
+    "}",
+  ].join("\n");
+  const blockViolations = taskbarWriteViolations(blockCommentBypass);
+  assert.equal(blockViolations.length, 1, `多行串里的 /* 不能把后面的真实写吃掉：${JSON.stringify(blockViolations)}`);
+  assert.match(blockViolations[0], /hwnd\(foreign\)/, "被吃掉的是串外那段真实写，实参要完整出现");
+  assert.doesNotMatch(blockViolations[0], /调用未闭合/, "`/*` 面同样是\"多行串必须被解析完\"，不能靠未闭合拦住");
+
+  // 反向：**合法**的跨行守卫调用不许误报（修前实测 1 条 `(调用未闭合)`）。
+  const guardedMultiline = ["ShowWindow(self::ensure_own(policy,", '"line one', 'line two")?, SW_HIDE)'].join("\n");
+  assert.deepEqual(taskbarWriteViolations(guardedMultiline), [], "跨行的精确 `self::ensure_own(...)?` 守卫必须继续放行");
+
+  // 行尾规则照 rustc：裸 LF 是内容（上面已证）；CRLF 是合法行尾；
+  // `\` + LF 是续行；转义引号不是收尾；**裸 CR**（后面不是 LF）非法，fail closed。
+  for (const [snippet, why] of [
+    ['ShowWindow(self::ensure_own(policy, "a\r\nb")?, SW_HIDE)', "多行串里的 CRLF 是合法行尾"],
+    ['ShowWindow(self::ensure_own(policy, "a\\\nb")?, SW_HIDE)', "`\\` + LF 是续行，不是字符串结束"],
+    ['ShowWindow(self::ensure_own(policy, "a\\"b")?, SW_HIDE)', "转义引号 `\\\"` 不是收尾引号"],
+    ['SetParent(self::ensure_own(policy, "a\n\\\nb")?, None)', "续行之后再跨一行仍在同一个串里"],
+  ]) {
+    assert.deepEqual(taskbarWriteViolations(snippet), [], `合法多行串必须放行（${why}）：${JSON.stringify(snippet)}`);
+  }
+  const bareCrViolations = taskbarWriteViolations('ShowWindow(ensure_own(policy, "a\rb")?, SW_HIDE)');
+  assert.equal(bareCrViolations.length, 1, `裸 CR 不是合法行尾，必须 fail closed：${JSON.stringify(bareCrViolations)}`);
+  assert.match(bareCrViolations[0], /调用未闭合/, "裸 CR 让字符串无法收尾 → 按解析失败记账");
+
+  // 未闭合普通串：解析不出来就绝不当合法，也**不许**把后面的代码当注释吃掉。
+  assert.equal(
+    taskbarWriteViolations('ShowWindow(ensure_own(policy, probe("abc)?, hwnd(foreign)), SW_HIDE)').length,
+    1,
+    "实参里的未闭合普通串必须 fail closed",
+  );
+  const unterminatedThenWrite = [
+    "unsafe fn g(h: HWND) {",
+    '    let _s = "abc',
+    "// ShowWindow(hwnd(foreign), SW_HIDE);",
+    "}",
+  ].join("\n");
+  const unterminatedViolations = taskbarWriteViolations(unterminatedThenWrite);
+  assert.equal(unterminatedViolations.length, 1, `未闭合串不许把后面的真实写剥掉：${JSON.stringify(unterminatedViolations)}`);
+  assert.match(unterminatedViolations[0], /hwnd\(foreign\)/, "未闭合串之后的内容照抄原文，扫描阶段才看得见真实写");
+
+  // 串收尾引号落在后面几行也照常算：`//` 只是内容。
+  assert.equal(
+    taskbarWriteViolations(['let s = "a', "// b", 'c"; unsafe { EnableWindow(hwnd(foreign), false); }'].join("\n")).length,
+    1,
+    "收尾引号在后面的行上时，串里的 // 依旧不是注释",
+  );
+  // 没有真实写时不许因为"多行串里的 //"凭空冒违规。
+  assert.deepEqual(
+    taskbarWriteViolations(['let url = "https://example.test', '// 还在串里";'].join("\n")),
+    [],
+    "多行串里的 // 是内容，串外没有写就不许报",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// R44d scanner 收紧：独立审查 agent106 的四个 Important 绕过（先写先看红）
+//
+// 四个都是**可编译**的 Rust 形态，修前扫描器对它们返回 0 违规：
+// F1 `cr#""` C 字符串前缀不认 → 串里的 `//` 把同一行的真实写剥掉；
+// F2 块注释可以嵌套 → 停在第一个 `*/`，后面的 `//` 再把真实写剥掉；
+// F3 本地闭包 shadow 守卫名 → 文本前缀检查认的是名字不是绑定；
+// F4 写 API 的函数指针别名 / `use … as` → 只按字面 callee 名匹配就找不到。
+// ---------------------------------------------------------------------------
+
+test("R44d scanner F1：cr/C 字符串 raw 前缀与多 hash 收尾必须被识别（raw 里的 // 不能抹掉同一行的真实写）", async () => {
+  const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
+  // `cr#"…"#` 是 Rust 1.77+ 的 C 字符串 raw 前缀。修前 `cr` 不被认成 raw 开头，
+  // 于是串里那句 `// ` 被当成注释起点，把同一行的真实外来写整行抹掉 → 0 违规。
+  const bypass = 'let _s = cr#"quote " // "#; unsafe { ShowWindow(hwnd(foreign), SW_HIDE); }';
+  const violations = taskbarWriteViolations(bypass);
+  assert.equal(violations.length, 1, `cr#"" 里的 // 不能抹掉真实写：${JSON.stringify(violations)}`);
+  assert.match(violations[0], /ShowWindow: hwnd\(foreign\)/, "被抹掉的那次写要完整点名");
+
+  // 多 hash：收尾必须是**同样多个** `#` 紧跟引号；串里可以出现裸 `"` 与 `#`。
+  for (const hidden of [
+    'let _s = cr##"a " # // "##; unsafe { SetParent(hwnd(foreign), None); }',
+    'let _s = cr"a // b"; unsafe { SetParent(hwnd(foreign), None); }',
+    'let _s = cr#"a\\"#; unsafe { EnableWindow(hwnd(foreign), false); }',
+  ]) {
+    assert.equal(taskbarWriteViolations(hidden).length, 1, `C 字符串 raw 里的 // 不能抹掉真实写：${hidden}`);
+  }
+
+  // hash 数不一致 → 未结束的 raw，必须 fail closed（不许当成"串里的内容"放行）。
+  assert.equal(
+    taskbarWriteViolations('SetParent(self::ensure_own(policy, probe(cr##"abc"#)?, hwnd(foreign)), None)').length,
+    1,
+    "两 hash 开头只给一 hash 收尾：未结束的 raw 必须按解析失败记账",
+  );
+  // 合法：`cr` raw 里的 `"`/`(`/`)`/`,` 都是内容，不外溢。
+  assert.deepEqual(
+    taskbarWriteViolations('SetParent(self::ensure_own(policy, probe(cr#"a") , ("#))?, None)'),
+    [],
+    "cr raw 里的引号与括号是内容，精确守卫调用必须放行",
+  );
+  // `cr` 只是前缀：`cr` 是普通标识符时不构成字面量。
+  assert.deepEqual(taskbarWriteViolations('let cr = 1; let x = cr + 1;'), [], "`cr` 当标识符用时不是字面量");
+});
+
+test("R44d scanner F2：Rust 块注释可以嵌套（深度计数；整段注释里的假写不算命中）", async () => {
+  const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
+  // 修前停在第一个 `*/`，于是 ` // ignored */` 被当成行注释，把后面的真实写整行吃掉 → 0 违规。
+  const bypass = "/* outer /* inner */ // ignored */ unsafe { ShowWindow(hwnd(foreign), SW_HIDE); }";
+  const violations = taskbarWriteViolations(bypass);
+  assert.equal(violations.length, 1, `嵌套块注释里的 // 不能抹掉真实写：${JSON.stringify(violations)}`);
+  assert.match(violations[0], /ShowWindow: hwnd\(foreign\)/, "被抹掉的那次写要完整点名");
+
+  // 反方向：整段（含嵌套）注释里的假写必须被忽略；修前停得太早会把它当成真实写→误报。
+  assert.deepEqual(
+    taskbarWriteViolations("/* outer /* inner */ ShowWindow(hwnd(foreign), SW_HIDE); */ let x = 1;"),
+    [],
+    "整段嵌套注释里的写不是命中（停得太早就会误报）",
+  );
+  assert.deepEqual(
+    taskbarWriteViolations("/* 1 /* 2 /* 3 */ ShowWindow(hwnd(foreign), SW_HIDE); 2 */ 1 */ let x = 1;"),
+    [],
+    "三层嵌套的整段注释仍要被剥掉（写在外层注释收尾之前）",
+  );
+
+  // 跨行嵌套：外层注释在后续行才收尾，之后的真实写必须点名。
+  const multiline = ["/* a /* b", "   // c", "*/ still comment */ unsafe { SetParent(hwnd(foreign), None); }"].join("\n");
+  assert.equal(taskbarWriteViolations(multiline).length, 1, "跨行嵌套注释收尾之后的真实写必须点名");
+
+  // 注释里的 `/*`/`*/` 不影响字符串解析，字符串里的注释符也不是注释（既有行为，别回归）。
+  assert.deepEqual(
+    taskbarWriteViolations('/* " */ let _s = "/* not a comment */";'),
+    [],
+    "字面量里的 /* */ 不是注释，串外的块注释照旧被剥掉",
+  );
+});
+
+test("R44d scanner F3：写位置必须是 canonical self:: 守卫路径（本地闭包 shadow 不算守卫）", async () => {
+  const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
+  // canonical：写目标由 `self::ensure_own` / `self::own_top_level` 当场给出（模块路径不能被局部绑定 shadow）。
+  assert.deepEqual(
+    taskbarWriteViolations("SetParent(self::ensure_own(policy, own)?, None)"),
+    [],
+    "`self::ensure_own(...)?` 是唯一的 canonical 守卫形态",
+  );
+  assert.deepEqual(
+    taskbarWriteViolations("SetWindowSubclass(self::own_top_level(&main)?, Some(lyrics_proc), id, data)"),
+    [],
+    "`self::own_top_level(...)?` 仍是子类化专用",
+  );
+  // 裸名不再是写位置的凭证：局部闭包可以 shadow 它。
+  const shadow = [
+    "fn hide(policy: &EmbedState, own: OwnWindow) -> Result<(), Reason> {",
+    "    let ensure_own = |_p: &EmbedState, _o: OwnWindow| Ok::<HWND, Reason>(hwnd(9));",
+    "    unsafe { SetParent(ensure_own(policy, own)?, None); } Ok(())",
+    "}",
+  ].join("\n");
+  const shadowViolations = taskbarWriteViolations(shadow);
+  assert.ok(
+    shadowViolations.some((item) => item.startsWith("SetParent:")),
+    `局部闭包 shadow 之后的写必须点名：${JSON.stringify(shadowViolations)}`,
+  );
+  assert.equal(shadowViolations.filter((item) => item.startsWith("SetParent:")).length, 1, "同一处只点一次");
+
+  // 就算写位置已经 canonical，本地再出现一份同名绑定也必须 fail closed（不许出现第二份 ensure_own）。
+  const rebound = [
+    "let ensure_own = |_p: &EmbedState, _o: OwnWindow| Ok::<HWND, Reason>(hwnd(9));",
+    "SetParent(self::ensure_own(policy, own)?, None)",
+  ].join("\n");
+  const reboundViolations = taskbarWriteViolations(rebound);
+  assert.ok(reboundViolations.length >= 1, "本地 ensure_own 绑定本身不许存在");
+  assert.doesNotMatch(reboundViolations.join("\n"), /SetParent:.*self::ensure_own/, "canonical 的那处写不是违规点");
+  for (const [snippet, name] of [
+    ["use evil::ensure_own;", "ensure_own"],
+    ["use evil::helpers as own_top_level;", "own_top_level"],
+    ["fn f() { let mut ensure_own = 1; }", "ensure_own"],
+  ]) {
+    assert.ok(
+      taskbarWriteViolations(snippet).some((item) => item.startsWith(`${name}:`)),
+      `导入/别名/可变绑定都不许占用守卫名：${snippet}`,
+    );
+  }
+  // 定义必须唯一：模块里出现第二份 `fn ensure_own`（嵌套 mod 也算）一律拒绝。
+  const nestedDefinition = [
+    "mod helper {",
+    "    fn ensure_own(_p: &EmbedState, _o: OwnWindow) -> Result<HWND, Reason> { Ok(hwnd(9)) }",
+    "}",
+    "fn ensure_own(policy: &EmbedState, own: OwnWindow) -> Result<HWND, Reason> { Ok(hwnd(own.handle)) }",
+  ].join("\n");
+  assert.ok(
+    taskbarWriteViolations(nestedDefinition).some((item) => item.startsWith("ensure_own:")),
+    "守卫定义必须唯一（多份定义让 self:: 不再可证）",
+  );
+  // 裸守卫调用（非写位置的自查点）仍允许；`own_top_level` 仍只对子类化开放。
+  assert.deepEqual(taskbarWriteViolations("fn f() { ensure_own(policy, own)?; }"), [], "非写位置的自查调用不报");
+  assert.equal(
+    taskbarWriteViolations("ShowWindow(self::own_top_level(&main)?, SW_HIDE)").length,
+    1,
+    "`own_top_level` 许给子类化，但不许给显隐写",
+  );
+});
+
+test("R44d scanner F4：六个写 API 的别名引用（函数指针 / use as / 裸引用）必须点名", async () => {
+  const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
+  const apis = ["SetParent", "SetWindowPos", "SetWindowLongPtrW", "ShowWindow", "SetWindowSubclass", "EnableWindow"];
+  for (const api of apis) {
+    for (const [snippet, why] of [
+      [`let reparent = ${api};\nunsafe { reparent(hwnd(foreign), None); }`, "函数指针别名"],
+      [`use windows::Win32::UI::WindowsAndMessaging::${api} as reparent;\nunsafe { reparent(hwnd(foreign), None); }`, "`use … as` 别名"],
+      [`let f: usize = ${api} as usize;`, "裸引用（cast）"],
+      [`let table = [${api}];`, "裸引用（放进数组）"],
+    ]) {
+      const violations = taskbarWriteViolations(snippet);
+      assert.ok(
+        violations.some((item) => item.startsWith(`${api}:`)),
+        `${why} 必须点名：${snippet} -> ${JSON.stringify(violations)}`,
+      );
+    }
+    // 直接（含全路径限定）调用仍是受核调用形态：放行/点名由第一实参守卫决定。
+    assert.deepEqual(
+      taskbarWriteViolations(`windows::Win32::UI::WindowsAndMessaging::${api}(self::ensure_own(policy, own)?, None)`),
+      [],
+      `${api} 的全路径限定调用形态仍受核（守卫给了就放行）`,
+    );
+    assert.equal(
+      taskbarWriteViolations(`windows::Win32::UI::WindowsAndMessaging::${api}(hwnd(foreign), None)`).length,
+      1,
+      `${api} 的全路径限定调用也必须核第一实参`,
+    );
+  }
+  // 同名导入（没有 `as`）不是别名：它绑定的还是原名，写调用仍按名字受核。
+  assert.deepEqual(
+    taskbarWriteViolations("use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};"),
+    [],
+    "无 as 的导入不是别名（绑定名没变）",
+  );
+  assert.deepEqual(
+    taskbarWriteViolations("use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;"),
+    [],
+    "单条目无 as 的导入不是别名",
+  );
+  // 字符串/注释里的示例不是代码，不许误报（假阳性会让真实现被噪声淹没）。
+  for (const inert of [
+    'let doc = "let reparent = SetParent;";',
+    'let doc = "use windows::Win32::UI::WindowsAndMessaging::SetParent as reparent;";',
+    "// let reparent = SetParent;\n// use x::SetWindowPos as p;",
+    'let doc = "reparent = SetParent";',
+  ]) {
+    assert.deepEqual(taskbarWriteViolations(inert), [], `字符串/注释里的别名示例不算命中：${inert}`);
+  }
+  // 已知的**假阳性**（保留、不修，安全一侧）：写函数名带括号地出现在字符串内容里时，旧的
+  // 调用形态扫描仍会点名。它只会多报、不会漏报；照实钉住，免得以后被当成回归或悄悄放宽。
+  assert.equal(
+    taskbarWriteViolations('let doc = "SetParent(hwnd(foreign), None)";').length,
+    1,
+    "字符串里的调用形态仍是已知假阳性（多报一侧，保留）",
+  );
+});
+
+test("R44d fix：写目标必须是当场复核的表达式，先校验再绑局部别名一律算违规", async () => {
+  const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
+  // 缺陷形状（本仓真实出现过）：先 `ensure_own(...)` 到局部别名，写调用拿到的是别名；
+  // 子类化点则是先做一次 PID/线程检查再传裸句柄。三者都必须被点名。
+  const localAlias = [
+    "fn hide(policy: &EmbedState, own: OwnWindow) -> Result<(), Reason> {",
+    "    let own = ensure_own(policy, own)?;",
+    "    unsafe { let _ = ShowWindow(own, SW_HIDE); } Ok(())",
+    "}",
+    "unsafe fn set_long(policy: &EmbedState, token: OwnWindow) -> Result<(), Reason> {",
+    "    let own = ensure_own(policy, token)?;",
+    "    SetLastError(WIN32_ERROR(0)); let previous = SetWindowLongPtrW(own, index, value);",
+    "}",
+    "SetWindowSubclass(handle, Some(lyrics_proc), id, data as usize)",
+  ].join("\n");
+  const alias = taskbarWriteViolations(localAlias);
+  assert.equal(alias.length, 3, `局部别名三条都要点名：${JSON.stringify(alias)}`);
+  // 点名顺序按扫描器自己的 API 清单（不是源码顺序），这里只断言"三条都在"。
+  assert.deepEqual(alias.map((item) => item.split(":")[0]).sort(), ["SetWindowLongPtrW", "SetWindowSubclass", "ShowWindow"].sort());
+  assert.equal(
+    taskbarWriteViolations(read("src-tauri/src/taskbar_lyrics.rs")).length,
+    0,
+    "仓库里的真实实现不许留未复核的写目标（局部别名这种形状已经在上面证明会被点名）",
+  );
+
+  // 唯一放行的两种形态，都是**写调用现场**给出的守卫表达式（canonical `self::`：局部绑定 shadow 不到它）。
+  const direct = [
+    "ShowWindow(self::ensure_own(policy, own)?, SW_HIDE)",
+    "SetWindowLongPtrW(self::ensure_own(policy, token)?, index, value)",
+    "SetWindowSubclass(self::ensure_own(&i.policy, own)?, Some(lyrics_proc), id, data)",
+    "SetWindowSubclass(self::own_top_level(&main)?, Some(lyrics_proc), id, data)",
+  ].join("\n");
+  assert.deepEqual(taskbarWriteViolations(direct), [], "当场由守卫表达式给出的目标才放行");
+
+  // 第二个守卫只对子类化开放：它只核自进程/owner 线程/存活，不核创建代次，
+  // 别的写（样式/位置/父/显隐/启用）不许拿它当挡箭牌。
+  for (const fn of ["SetParent", "SetWindowPos", "SetWindowLongPtrW", "ShowWindow", "EnableWindow"]) {
+    const call = fn === "ShowWindow" ? `${fn}(own_top_level(&main)?, SW_HIDE)` : `${fn}(own_top_level(&main)?, None)`;
+    assert.equal(taskbarWriteViolations(call).length, 1, `${fn} 不许用 own_top_level 绕开代次核验`);
+  }
+  for (const near of ["own_top_level_x(&main)?", "own_top_levelish(&main)?", "ensure_own_top_level(&main)?"]) {
+    assert.equal(taskbarWriteViolations(`SetWindowSubclass(${near}, Some(lyrics_proc), id, data)`).length, 1, `形近名一律不放行：${near}`);
+  }
+  // 参数名不是凭证：own / handle / parent / foreign 都不能靠名字过。
+  for (const fn of ["SetParent", "SetWindowPos", "SetWindowLongPtrW", "ShowWindow", "SetWindowSubclass", "EnableWindow"]) {
+    for (const name of ["own", "handle", "parent", "foreign"]) {
+      assert.equal(taskbarWriteViolations(`${fn}(${name}, None)`).length, 1, `${fn}(${name}) 不能靠参数名放行`);
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// R44d final review（agent108）Important 1：注释必须替换成**分隔空白**
+//
+// `stripRustComments` 旧行为是"把注释删掉、不吐任何字符"，于是**合法** Rust
+// `use …::SetParent/**/as reparent;` 被拼成 `…::SetParentas`——别名名字层与调用层
+// 双双看不见，扫描器对着货真价实的外来写返回 `[]`（审查自己 rustc 编译复现过）。
+// 判据本身不放宽，只把"注释分隔"这件事在词法上恢复成空白。
+// ---------------------------------------------------------------------------
+
+test("R44d final 1：注释要换成分隔空白，`SetParent/**/as reparent` 不许拼成一个标识符", async () => {
+  const { taskbarWriteViolations, stripComments } = await import("../scripts/acceptance.mjs");
+
+  // 先在词法层钉住：`/**/` 之后必须仍是两个 token，而不是一个拼出来的标识符。
+  const lexed = stripComments("use windows::Win32::UI::WindowsAndMessaging::SetParent/**/as reparent;", "x.rs");
+  assert.match(lexed, /\bSetParent\b/, `注释两侧的标识符不能被拼掉：${JSON.stringify(lexed)}`);
+  assert.doesNotMatch(lexed, /SetParentas/, `注释要换成空白，不是删掉：${JSON.stringify(lexed)}`);
+
+  // 审查 rustc 编译过的那条（证据 `.tmp/r44d-final-fixture.rs`）：块注释把 API 名和 `as` 黏在一起。
+  const alias = [
+    "use windows::Win32::UI::WindowsAndMessaging::SetParent/**/as reparent;",
+    "unsafe { reparent(hwnd(foreign), None); }",
+  ].join("\n");
+  const aliasViolations = taskbarWriteViolations(alias);
+  assert.ok(aliasViolations.length >= 1, `注释分隔的 use as 别名必须点名：${JSON.stringify(aliasViolations)}`);
+  assert.match(aliasViolations.join("\n"), /SetParent/, "点名的必须是被改名的那份写 API");
+
+  // 行注释分隔同理（`use x::SetParent // c` + 下一行 `as reparent;` 是合法 Rust）。
+  assert.ok(
+    taskbarWriteViolations("use x::SetParent//c\nas reparent;").length >= 1,
+    "行注释分隔的 use as 别名必须点名",
+  );
+
+  // 守卫名的本地绑定同样不许因为 `let/*c*/ensure_own` 拼成 `letensure_own` 而隐身。
+  assert.ok(
+    taskbarWriteViolations("let/*c*/ensure_own = |_p: &EmbedState, _o: OwnWindow| Ok::<HWND, Reason>(hwnd(9));").some((item) =>
+      item.startsWith("ensure_own:"),
+    ),
+    "`let/**/ensure_own` 仍是守卫名绑定，必须点名",
+  );
+
+  // 新扩清单里的 API 也走同一条词法。
+  for (const api of ["MoveWindow", "SetWindowLongW", "SetWindowLongA", "DestroyWindow", "SendMessageW", "SendMessageA"]) {
+    assert.ok(
+      taskbarWriteViolations(`use windows::Win32::UI::WindowsAndMessaging::${api}/**/as evil;`).some((item) => item.startsWith(`${api}:`)),
+      `${api} 的注释分隔别名必须点名`,
+    );
+  }
+
+  // 分隔空白不许引入新的假阳性：注释**内部**的写仍然是注释内容。
+  assert.deepEqual(taskbarWriteViolations("/* SetParent(/**/hwnd(foreign), None); */"), [], "注释里的东西仍然是注释");
+});
+
+// ---------------------------------------------------------------------------
+// R44d final review Important 3：精确调用清单不全
+//
+// brief §39 禁的是"对**外来** HWND 做尺寸/样式/销毁/消息写"；只扫六个 API 时
+// `MoveWindow(hwnd(foreign), …)` 这类直接改写返回 `[]`（审查复现）。这里把审查点名的
+// 六个常见 HWND 直接改写 API 并进同一份清单，判据（第一实参必须是 `self::ensure_own(...)?`）
+// 与别名规则一条不改松紧，也不新增任何"按参数名/变量名放行"的形态。
+// ---------------------------------------------------------------------------
+
+test("R44d final 3：MoveWindow/SetWindowLongW/A/DestroyWindow/SendMessageW/A 也必须在受核调用清单里", async () => {
+  const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
+  const shapes = [
+    ["MoveWindow", "0, 0, 10, 10, true"],
+    ["SetWindowLongW", "index, value"],
+    ["SetWindowLongA", "index, value"],
+    ["DestroyWindow", ""],
+    ["SendMessageW", "message, w, l"],
+    ["SendMessageA", "message, w, l"],
+  ];
+  const call = (name, first, rest) => `${name}(${rest === "" ? first : `${first}, ${rest}`})`;
+  for (const [api, rest] of shapes) {
+    assert.equal(taskbarWriteViolations(`${call(api, "hwnd(foreign)", rest)};`).length, 1, `${api} 写外来 HWND 必须点名`);
+    // 参数名不是凭证：own/handle/parent/foreign 一律点名。
+    for (const name of ["own", "handle", "parent", "foreign"]) {
+      assert.equal(taskbarWriteViolations(call(api, name, rest)).length, 1, `${api}(${name}) 不能靠参数名放行`);
+    }
+    // 写位置由 `self::ensure_own(...)?` 当场给出时才放行。
+    assert.deepEqual(taskbarWriteViolations(call(api, "self::ensure_own(policy, own)?", rest)), [], `${api} 的受核调用必须放行`);
+    // `own_top_level` 只给子类化：新清单里的写同样不许拿它当挡箭牌（它不核创建代次）。
+    assert.equal(taskbarWriteViolations(call(api, "own_top_level(&main)?", rest)).length, 1, `${api} 不许用 own_top_level 绕开代次核验`);
+    // 改名前后的四种别名形态都要点名（与既有六个 API 同一套规则）。
+    for (const [snippet, why] of [
+      [`let evil = ${api};\nunsafe { evil(hwnd(foreign)); }`, "函数指针别名"],
+      [`use windows::Win32::UI::WindowsAndMessaging::${api} as evil;`, "`use … as` 别名"],
+      [`let evil = ${api} as usize;`, "cast 后的裸引用"],
+      [`let table = [${api}];`, "数组里的裸引用"],
+      [`use evil::${api};`, "非 windows:: 的导入"],
+    ]) {
+      assert.ok(
+        taskbarWriteViolations(snippet).some((item) => item.startsWith(`${api}:`)),
+        `${api} 的${why} 必须点名：${snippet} -> ${JSON.stringify(taskbarWriteViolations(snippet))}`,
+      );
+    }
+    // 全路径限定调用仍按第一实参受核。
+    assert.deepEqual(
+      taskbarWriteViolations(`windows::Win32::UI::WindowsAndMessaging::${call(api, "self::ensure_own(policy, own)?", rest)}`),
+      [],
+      `${api} 的全路径受核调用必须放行`,
+    );
+    assert.equal(
+      taskbarWriteViolations(`windows::Win32::UI::WindowsAndMessaging::${call(api, "hwnd(foreign)", rest)}`).length,
+      1,
+      `${api} 的全路径调用也必须核第一实参`,
+    );
+  }
+  // 清单只许扩、不许缩：原有六个仍然逐个受核（防"换了张名单"的回归）。
+  for (const api of ["SetParent", "SetWindowPos", "SetWindowLongPtrW", "ShowWindow", "SetWindowSubclass", "EnableWindow"]) {
+    assert.equal(taskbarWriteViolations(`${api}(hwnd(foreign), None)`).length, 1, `既有 ${api} 检查不许被新清单挤掉`);
+  }
+  // 关联方法形态（`recv.SetParent(…)`）：写目标是**接收者**，第一实参守卫管不到它。
+  // 扫描器不解析接收者来源，所以这种语法一律 fail closed——不假装它被覆盖了。
+  for (const api of ["SetParent", "SetWindowLongPtrW", "MoveWindow", "SetWindowLongW", "SetWindowLongA", "DestroyWindow", "SendMessageW", "SendMessageA"]) {
+    assert.equal(
+      taskbarWriteViolations(`h.${api}(self::ensure_own(policy, own)?)`).length,
+      1,
+      `${api} 的关联方法形态必须以"写目标是接收者"点名（第一实参守卫管不到接收者）`,
+    );
+    assert.ok(
+      taskbarWriteViolations(`h.${api}/*c*/(hwnd(foreign))`).length >= 1,
+      `${api} 的关联方法形态（注释分隔）同样点名（接收者 + 外来目标各一次）`,
+    );
+  }
+  // 全路径限定（`::` 结尾）不是方法形态，仍按第一实参受核。
+  assert.deepEqual(
+    taskbarWriteViolations("windows::Win32::UI::WindowsAndMessaging::MoveWindow(self::ensure_own(policy, own)?, 0, 0, 1, 1, true)"),
+    [],
+    "`::` 结尾的全路径调用不是关联方法形态",
+  );
+  // 字符串/注释里的示例不是代码。
+  for (const inert of ['let doc = "use x::MoveWindow as m;";', "// let evil = DestroyWindow;", 'let doc = "SendMessageW as f";']) {
+    assert.deepEqual(taskbarWriteViolations(inert), [], `字符串/注释里的示例不算命中：${inert}`);
+  }
+  // 真实模块在**完整**清单下仍然 0 违规（真实现只对自窗写）。
+  assert.deepEqual(
+    taskbarWriteViolations(read("src-tauri/src/taskbar_lyrics.rs")),
+    [],
+    "真实实现不许出现未受核的写目标（含新扩的六个 API）",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// R44d follow-up：守卫**实现体**的不变量（扫描器只核调用形态，不核 `ensure_own` 的函数体）
+//
+// 独立复审指出：`taskbarWriteViolations` 证明的是"写目标的实参恰好是
+// `self::ensure_own(...)?`"，它**不证明** `fn ensure_own` 自己还在核
+// 存活 / 代次 / owner 线程 / 自进程。把函数体改成直接 `Ok(handle)`，
+// acceptance 依旧全绿。所以这条用例钉的是实现体本身。
+//
+// 下面的读取器（剥注释 / 平衡花括号取函数体 / 守卫判定）是**测试本地**的：
+// 不进 `scripts/acceptance.mjs`、不新增任何写目标的放行形态，
+// 也不把"守卫实现体不变量"改成扫描器里的白名单。
+// ---------------------------------------------------------------------------
+
+/**
+ * 测试本地的 Rust 字面量跳过：`start` 处是字面量起点就返回其后的位置，否则 `-1`。
+ * 只服务下面这条守卫体不变量（普通串、raw 串 `r/br/rb/cr` + 任意 `#`、字节/C 串、字符、生命周期）。
+ */
+function literalEnd(text, start) {
+  const plainEnd = (quote) => {
+    for (let i = quote + 1; i < text.length; i += 1) {
+      if (text[i] === "\\") { i += 1; continue; }
+      if (text[i] === '"') return i + 1;
+    }
+    return -1;
+  };
+  if (text[start] === '"') return plainEnd(start);
+  if (text[start] === "'") {
+    if (text[start + 1] === "\\") {
+      const close = text.indexOf("'", start + 3);
+      return close < 0 ? -1 : close + 1;
+    }
+    if (text[start + 2] === "'") return start + 3;
+    return -1; // 生命周期 `'a` / `'_`：不是字面量
+  }
+  if (start > 0 && /[A-Za-z0-9_]/.test(text[start - 1])) return -1; // 标识符中间的前缀不是 raw
+  if ((text[start] === "b" || text[start] === "c") && text[start + 1] === '"') return plainEnd(start + 1);
+  const raw = /^(?:br|rb|cr|r)(#*)"/.exec(text.slice(start, start + 64));
+  if (raw !== null) {
+    const closer = `"${raw[1]}`;
+    const end = text.indexOf(closer, start + raw[0].length);
+    return end < 0 ? -1 : end + closer.length;
+  }
+  return -1;
+}
+
+/** 测试本地的 Rust 注释屏蔽：注释（含嵌套块注释）换成**等长空白**（换行保留），字面量整段照抄。
+ *
+ *  与 `scripts/acceptance.mjs` 里的 `stripRustComments` 的差别只有一个：那个把注释折叠成一个
+ *  分隔空格（够用，因为它不要求偏移对回原文），这里必须**长度不变**——守卫体提取之后还要用
+ *  索引切花括号，注释一折叠偏移就歪了（I2）。
+ */
+function blankRustComments(source) {
+  let out = "";
+  let i = 0;
+  while (i < source.length) {
+    const literal = literalEnd(source, i);
+    if (literal > 0) { out += source.slice(i, literal); i = literal; continue; }
+    if (source[i] === "/" && source[i + 1] === "/") {
+      const start = i;
+      while (i < source.length && source[i] !== "\n") i += 1;
+      out += source.slice(start, i).replace(/[^\n]/g, " ");
+      continue;
+    }
+    if (source[i] === "/" && source[i + 1] === "*") {
+      const start = i;
+      let depth = 0;
+      while (i < source.length) {
+        if (source[i] === "/" && source[i + 1] === "*") { depth += 1; i += 2; continue; }
+        if (source[i] === "*" && source[i + 1] === "/") { depth -= 1; i += 2; if (depth === 0) break; continue; }
+        i += 1;
+      }
+      out += source.slice(start, i).replace(/[^\n]/g, " ");
+      continue;
+    }
+    out += source[i];
+    i += 1;
+  }
+  return out;
+}
+
+/** 测试本地的 Rust 字面量屏蔽：串 / raw 串 / 字节/C 串 / 字符字面量换成**等长空格**（`\n` 保留），
+ *  字符偏移与原文一致，所以 `index` 比较仍然有效；生命周期 `'a` / `'_` 原样保留（它们不是字面量）。 */
+function blankRustLiterals(code) {
+  let out = "";
+  let i = 0;
+  while (i < code.length) {
+    const end = literalEnd(code, i);
+    if (end > 0) {
+      out += code.slice(i, end).replace(/[^\n]/g, " ");
+      i = end;
+      continue;
+    }
+    out += code[i];
+    i += 1;
+  }
+  return out;
+}
+
+/** 先剥注释、再屏蔽字面量（两步都**等长**、换行保留），按**平衡花括号**切出 `fn ensure_own` 的
+ *  函数体（含花括号）；切不出来返回 `null`。
+ *
+ *  顺序是判据的一部分（I2）：旧实现只在"找花括号"时跳过字面量、返回的仍是**原始字节**，于是
+ *  一段字符串里的 `fn ensure_own(…) { … }` 能被当成真定义（或把唯一性挤成两份而提取失败）。
+ *  现在定义与花括号都在"只剩代码"的视图上定位：
+ *  - 字符串 / raw 串 / 字符 / 注释里的 `fn ensure_own` 既不算定义，也不会把偏移算歪；
+ *  - 返回的函数体本身也不含字面量内容（内容已换成空格），`ensureOwnGuardMisses` /
+ *    `ensureOwnProvenanceMisses` 因此不会把"串里的检查文本"读成检查；
+ *  - 定义必须**唯一**：0 处（含只有 raw 定义 `fn r#ensure_own`）或 ≥2 处都返回 `null`，
+ *    调用方必须按失败记账（fail closed），不许拿"提取失败"当通过。
+ */
+function ensureOwnBody(source) {
+  const code = blankRustLiterals(blankRustComments(source));
+  const definitions = [...code.matchAll(/\bfn\s+ensure_own\s*[<(]/g)];
+  if (definitions.length !== 1) return null; // 定义必须唯一：0 处或 2 处都不能当通过
+  const open = code.indexOf("{", definitions[0].index + definitions[0][0].length - 1);
+  if (open < 0) return null;
+  const close = matchDelimiter(code, open); // 字面量已屏蔽，平衡就是代码自己的平衡
+  return close < 0 ? null : code.slice(open, close + 1);
+}
+
+/** `ensure_own` 实现体必须自己做的四项 live 检查（写资格 = 当前代次 + 自进程 + owner 线程 + 活性）。 */
+const ENSURE_OWN_CHECKS = [
+  { label: "!IsWindow(Some(handle)).as_bool()（句柄存活）", pattern: /!\s*IsWindow\s*\(\s*Some\s*\(\s*handle\s*\)\s*\)\s*\.\s*as_bool\s*\(\s*\)/ },
+  { label: "!policy.may_write(own, pid, thread)（当前代次 + 写资格）", pattern: /!\s*policy\s*\.\s*may_write\s*\(\s*own\s*,\s*pid\s*,\s*thread\s*\)/ },
+  { label: "thread != GetCurrentThreadId()（owner 线程）", pattern: /thread\s*!=\s*GetCurrentThreadId\s*\(\s*\)/ },
+  { label: "pid != std::process::id()（自进程）", pattern: /pid\s*!=\s*std\s*::\s*process\s*::\s*id\s*\(\s*\)/ },
+];
+
+/** 返回守卫实现体的问题清单（空数组 = 四项都在且都在 `Ok(handle)` 之前）。
+ *  先屏蔽字面量再判：字符串/字符里的检查文本不是检查，`Ok(handle)` 只出现在串里也不算成功出口。 */
+function ensureOwnGuardMisses(body) {
+  if (typeof body !== "string" || body.trim() === "") return ["函数体为空：提取失败不能当成守卫成立"];
+  const code = blankRustLiterals(body);
+  const success = /Ok\s*\(\s*handle\s*\)/.exec(code);
+  const misses = [];
+  if (success === null) misses.push("Ok(handle)：守卫的成功出口不见了");
+  for (const { label, pattern } of ENSURE_OWN_CHECKS) {
+    const hit = pattern.exec(code);
+    if (hit === null) misses.push(`${label}：检查不见了`);
+    else if (success !== null && hit.index > success.index) misses.push(`${label}：检查出现在 Ok(handle) 之后`);
+  }
+  return misses;
+}
+
+test("R44d follow-up：真实 ensure_own 的函数体自己核 存活/代次/owner 线程/自进程，且都在 Ok(handle) 之前", () => {
+  // 1) 真实函数体：先剥注释，再用**平衡花括号**把 `fn ensure_own` 的体切出来
+  //    （不用无界正则——那种写法会越过函数尾，读到后面紧邻的 `fn hide`）。
+  const source = read("src-tauri/src/taskbar_lyrics.rs");
+  const body = ensureOwnBody(source);
+  assert.ok(body !== null, "没能从真实模块切出 `fn ensure_own` 的函数体：提取失败不等于守卫成立，必须红");
+  assert.ok(body.startsWith("{") && body.endsWith("}"), "切出来的必须是完整函数体（配对花括号）");
+  assert.match(body, /Ok\s*\(\s*handle\s*\)/, "成功出口必须是 `Ok(handle)`（切错函数或切得太短都要红）");
+  assert.doesNotMatch(body, /fn\s+hide\s*\(/, "平衡括号提取不许把后面紧邻的 `fn hide` 一起吃进来");
+  const misses = ensureOwnGuardMisses(body);
+  assert.deepEqual(misses, [], `ensure_own 的守卫不变量被破坏：${JSON.stringify(misses)}`);
+
+  // 2) 注释不是检查：把 `may_write` 那一项挪进注释后，判定必须点名它（剥注释真的生效）。
+  const commented = source.replace("!policy.may_write(own, pid, thread)", "/* !policy.may_write(own, pid, thread) */ true");
+  assert.notEqual(commented, source, "注释变体必须真的改动了源码，否则这条正控无效");
+  const commentedMisses = ensureOwnGuardMisses(ensureOwnBody(commented));
+  assert.ok(
+    commentedMisses.some((item) => item.includes("may_write")),
+    `注释里写一遍检查不算检查：${JSON.stringify(commentedMisses)}`,
+  );
+
+  // 3) 变异自查（**内存源码**，测试本地）：判定必须不是"永远为真"——
+  //    同一份函数体重组一遍（正控）要通过；删掉任一项检查必须失败；
+  //    把检查挪到 `Ok(handle)` 之后也必须失败。
+  const wrap = (bodyText) => `mod native {\n    fn ensure_own(policy: &EmbedState, own: OwnWindow) -> Result<HWND, Reason> ${bodyText}\n}\n`;
+  assert.deepEqual(
+    ensureOwnGuardMisses(ensureOwnBody(wrap(body))),
+    [],
+    "内存里重组同一份函数体后，判定仍要通过（否则下面那些'必须红'没有意义）",
+  );
+  for (const [needle, why] of [
+    ["!IsWindow(Some(handle)).as_bool() || ", "句柄存活"],
+    ["!policy.may_write(own, pid, thread) || ", "代次 + 本代次写资格"],
+    ["thread != GetCurrentThreadId() || ", "owner 线程"],
+    [" || pid != std::process::id()", "自进程"],
+  ]) {
+    const mutated = body.replace(needle, "");
+    assert.notEqual(mutated, body, `变异必须真的删掉了「${why}」这一项：${needle}`);
+    const mutatedBody = ensureOwnBody(wrap(mutated));
+    assert.ok(mutatedBody !== null, `删掉「${why}」后仍应能切出函数体（这是判定的事，不是提取的事）`);
+    assert.ok(ensureOwnGuardMisses(mutatedBody).length >= 1, `删掉「${why}」后守卫判定必须红：${needle}`);
+  }
+  const lateBody = body
+    .replace(" || pid != std::process::id()", "")
+    .replace("Ok(handle)", "Ok(handle); if pid != std::process::id() { return Err(Reason::Stale); }");
+  const lateMisses = ensureOwnGuardMisses(ensureOwnBody(wrap(lateBody)));
+  assert.ok(
+    lateMisses.some((item) => item.includes("之后")),
+    `检查必须出现在 Ok(handle) 之前：挪到成功后必须点名：${JSON.stringify(lateMisses)}`,
+  );
+
+  // 4) 负控：**字面量里的检查文本不是检查**。把四项检查的文本原样塞进普通串 / raw 串，
+  //    可执行代码里一项都没有——判定必须点名四项缺失。否则"删掉四项检查、把它们的文本
+  //    放进一个字符串再 `Ok(handle)`"这种回退依旧全绿（正则直接扫原文的假阳性）。
+  const guardText =
+    "!IsWindow(Some(handle)).as_bool() || !policy.may_write(own, pid, thread) " +
+    "|| thread != GetCurrentThreadId() || pid != std::process::id()";
+  for (const [shape, literal] of [
+    ["普通串", `"${guardText}"`],
+    ['raw 串 r#"…"#', `r#"${guardText}"#`],
+    ['raw 串 r##"…"##', `r##"${guardText}"##`],
+  ]) {
+    const inString = wrap(`{ let _ = note(${literal}); Ok(handle) }`);
+    const inStringBody = ensureOwnBody(inString);
+    assert.ok(inStringBody !== null, `${shape}变体仍应能切出函数体（这是判定的事，不是提取的事）`);
+    const inStringMisses = ensureOwnGuardMisses(inStringBody);
+    assert.equal(
+      inStringMisses.length,
+      ENSURE_OWN_CHECKS.length,
+      `${shape}里的检查文本不是检查，四项都要点名：${JSON.stringify(inStringMisses)}`,
+    );
+    for (const { label } of ENSURE_OWN_CHECKS) {
+      assert.ok(
+        inStringMisses.some((item) => item.includes(label) && item.includes("不见了")),
+        `${shape}：必须点名「${label}」缺失：${JSON.stringify(inStringMisses)}`,
+      );
+    }
+  }
+
+  // 同一个假阳性也要覆盖成功出口：`Ok(handle)` 只出现在串里时不算"守卫之后成功返回"。
+  const hiddenSuccess = wrap(
+    `{ if !IsWindow(Some(handle)).as_bool() || !policy.may_write(own, pid, thread) ` +
+      `|| thread != GetCurrentThreadId() || pid != std::process::id() { return Err(Reason::Stale); } ` +
+      `let _ = note("Ok(handle)"); Err(Reason::Stale) }`,
+  );
+  const hiddenSuccessMisses = ensureOwnGuardMisses(ensureOwnBody(hiddenSuccess));
+  assert.ok(
+    hiddenSuccessMisses.some((item) => item.includes("Ok(handle)") && item.includes("不见了")),
+    `串里的 Ok(handle) 不是成功出口：${JSON.stringify(hiddenSuccessMisses)}`,
+  );
+
+  // 5) 反向：屏蔽字面量**不许**吃掉生命周期 / 字符字面量之后真正的检查
+  //    （`'a`、`'_` 是生命周期而不是字符字面量；`'"'` 是字符而不是串开头）。
+  const lifetimeBody = wrap(
+    `{ fn tag<'a>(s: &'a str) -> &'a str { s } let quote = '"'; let _ = (tag("a"), quote); ` +
+      `if !IsWindow(Some(handle)).as_bool() || !policy.may_write(own, pid, thread) ` +
+      `|| thread != GetCurrentThreadId() || pid != std::process::id() { return Err(Reason::Stale); } Ok(handle) }`,
+  );
+  assert.deepEqual(
+    ensureOwnGuardMisses(ensureOwnBody(lifetimeBody)),
+    [],
+    "生命周期 / 字符字面量之后的四项检查必须照样被看到（屏蔽字面量不许连代码一起吃掉）",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// R44d final review Important 2：守卫的**来源**必须可证（handle / PID / 线程同一来源）
+//
+// 上一轮的判定只核"四项检查的文本都在 `Ok(handle)` 之前"，**不核** `handle` 是谁、
+// `pid`/`thread` 从哪来。于是把 `handle` 换成 `GetShellWindow()`、或让 pid/thread 抄
+// `own.pid/own.thread`，四条关键字照样全中、判定照样绿，外来 HWND 从守卫里流出去。
+// 本轮把来源本身写成判据（仍是测试本地、仍只认 canonical 写法）。
+//
+// 口径照实说：这是**词法 + 局部结构**的判据，不证明任意 Rust 控制流。它只认
+// `fn ensure_own` 的这一种写法：`let handle = hwnd(own.handle);` + `let mut pid = 0;
+// let thread = GetWindowThreadProcessId(handle, Some(&mut pid));` + 四项检查在**同一个**
+// `if` 里（该分支 `return Err`）→ `Ok(handle)` 收尾。真实源码一旦重构成别的形状，
+// 判定会 fail closed（红），而不是悄悄放行。
+// ---------------------------------------------------------------------------
+
+/** `code` 里名字作为**赋值目标**出现的位置（`=` 的下标；排除 `==` / `=>` / `own.pid`）。 */
+function assignmentSites(code, name) {
+  const sites = [];
+  for (const hit of code.matchAll(new RegExp(`(?<![A-Za-z0-9_.])${name}\\s*=(?!=|>)`, "g"))) {
+    sites.push(hit.index + hit[0].length - 1);
+  }
+  return sites;
+}
+
+/** 从 `=` 处扫到**顶层** `;`，返回初始值文本；扫不到（不平衡/没有分号）返回 `null`。
+ *  传进来的 `code` 已屏蔽字面量，所以不会把串里的 `;` 当分隔符。 */
+function assignmentTarget(code, eqIndex) {
+  let depth = 0;
+  for (let i = eqIndex + 1; i < code.length; i += 1) {
+    const ch = code[i];
+    if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+    else if (ch === ")" || ch === "]" || ch === "}") {
+      if (depth === 0) return null;
+      depth -= 1;
+    } else if (ch === ";" && depth === 0) return code.slice(eqIndex + 1, i).trim();
+  }
+  return null;
+}
+
+/** 配对括号扫描（跳过字面量）；`code[open]` 是左括号，不平衡返回 `-1`。 */
+function matchDelimiter(code, open) {
+  const closers = { "(": ")", "[": "]", "{": "}" };
+  const stack = [];
+  for (let i = open; i < code.length; i += 1) {
+    const literal = literalEnd(code, i);
+    if (literal > 0) { i = literal - 1; continue; }
+    const ch = code[i];
+    if (closers[ch] !== undefined) { stack.push(closers[ch]); continue; }
+    if (ch === ")" || ch === "]" || ch === "}") {
+      if (stack.pop() !== ch) return -1;
+      if (stack.length === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * 拒绝条件的 canonical 形状：四个**拒绝谓词**按固定顺序用 `||` 连起来——任何一项不成立就拒绝。
+ *
+ * 判据只容忍**空白**差异（`self ::`、`Some ( handle )` 这种），不容忍：连接符（`&&`）、
+ * 短路常量（`false && (…)` / `true || (…)`）、整体括号或取反（`(…)` / `!(…)`）、
+ * 子句多一个 / 少一个 / 换序。形状变了就是 fail closed（红），不是"等价写法"。
+ */
+const ENSURE_OWN_REJECT_CLAUSES = [
+  /^!\s*IsWindow\s*\(\s*Some\s*\(\s*handle\s*\)\s*\)\s*\.\s*as_bool\s*\(\s*\)$/,
+  /^!\s*policy\s*\.\s*may_write\s*\(\s*own\s*,\s*pid\s*,\s*thread\s*\)$/,
+  /^thread\s*!=\s*GetCurrentThreadId\s*\(\s*\)$/,
+  /^pid\s*!=\s*std\s*::\s*process\s*::\s*id\s*\(\s*\)$/,
+];
+
+/** 按**顶层**（不在括号里）的 `||` 切子句；括号里的 `||` 不切。 */
+function splitDisjunction(condition) {
+  const clauses = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < condition.length; i += 1) {
+    const ch = condition[i];
+    if (ch === "(" || ch === "[" || ch === "{") { depth += 1; continue; }
+    if (ch === ")" || ch === "]" || ch === "}") { depth -= 1; continue; }
+    if (depth === 0 && ch === "|" && condition[i + 1] === "|") {
+      clauses.push(condition.slice(start, i));
+      i += 1;
+      start = i + 1;
+    }
+  }
+  clauses.push(condition.slice(start));
+  return clauses;
+}
+
+/** 条件是不是**恰好**那条"四项任一不成立就拒绝"的析取式（顺序固定、只容忍空白）。 */
+function exactRejectCondition(condition) {
+  const clauses = splitDisjunction(condition).map((clause) => clause.trim());
+  if (clauses.length !== ENSURE_OWN_REJECT_CLAUSES.length) return false;
+  return ENSURE_OWN_REJECT_CLAUSES.every((pattern, index) => pattern.test(clauses[index]));
+}
+
+/**
+ * 找出"拒绝条件恰好是 canonical 析取式、该分支 `return Err`、且没有 `else`"的那个 `if`。
+ *
+ * 返回 `{ found, nearMiss, condStart, condEnd, blockEnd }`：`found === false` 时调用方必须按缺失
+ * 记账（fail closed）。`nearMiss === true` 表示"有 `if` 且分支 `return Err`，但条件形状不可证"
+ * ——诊断上要明确说"拒绝条件不可弱化"，不能笼统说"检查不在 if 里"。
+ *
+ * 这是**词法 + 局部结构**判据，不是 Rust 表达式求值：它证明不了任意控制流，只证明"挡住
+ * `Ok(handle)` 的那个 `if` 的条件形状就是支持的那一种"。形状一变就红，不猜。
+ */
+function guardingIf(code) {
+  let nearMiss = false;
+  for (const hit of code.matchAll(/\bif\b/g)) {
+    let depth = 0;
+    let open = -1;
+    for (let i = hit.index + 2; i < code.length; i += 1) {
+      const literal = literalEnd(code, i);
+      if (literal > 0) { i = literal - 1; continue; }
+      const ch = code[i];
+      if (ch === "{" && depth === 0) { open = i; break; }
+      if (ch === "(" || ch === "[") { depth += 1; continue; }
+      if (ch === ")" || ch === "]") { depth -= 1; if (depth < 0) break; }
+    }
+    if (open < 0) continue;
+    const blockEnd = matchDelimiter(code, open);
+    if (blockEnd < 0) continue;
+    const block = code.slice(open, blockEnd + 1);
+    if (!/\breturn\b/.test(block) || !/\bErr\b/.test(block)) continue;
+    // `else` 分支是没声明的形状（例如 `else { return Ok(handle) }`）：不算命中，按不可证处理。
+    if (/^\s*else\b/.test(code.slice(blockEnd + 1, blockEnd + 16))) { nearMiss = true; continue; }
+    const condition = code.slice(hit.index + 2, open);
+    if (!exactRejectCondition(condition)) { nearMiss = true; continue; }
+    return { found: true, nearMiss: false, condStart: hit.index, condEnd: open, blockEnd };
+  }
+  return { found: false, nearMiss, condStart: -1, condEnd: -1, blockEnd: -1 };
+}
+
+/**
+ * 守卫体的 **canonical token 形状**（agent109 Important 1/2）：`{ unsafe { … } }` 外壳，
+ * `let handle = hwnd(own.handle);` 一次、`let mut pid = 0;` 与
+ * `let thread = GetWindowThreadProcessId(handle, Some(&mut pid));` 一次、四项拒绝条件恰好是
+ * 那条 `||` 析取式、`if` 分支**直接** `return Err(Reason::Stale);`、之后只有唯一的 `Ok(handle)`。
+ *
+ * 判据按 **token** 比较，所以空白与注释可以随便变（注释在提取时已等长屏蔽）；但绑定、分支、
+ * 连接符、成功出口一个都不许换：
+ * - `if` 分支里放闭包（`let _swallow = || { return Err(…); };`）会把拒绝 `return` 吞进闭包，
+ *   `Ok(handle)` 变成无条件成功——token 形状一变即红；
+ * - `match GetShellWindow() { handle => Ok(handle) }` 里的 `handle` 是 pattern 影子绑定，
+ *   不是被检查过的那个 `handle`——成功出口不是 `Ok(handle)` 单独收尾即红；
+ * - `else` / 额外绑定 / 成功后加代码同理。
+ *
+ * 这是**fail closed** 的 canonical 判据，不是 Rust 解析器：形状变了就红，绝不猜"等价"。
+ */
+const CANONICAL_GUARD_BODY = [
+  "{ unsafe {",
+  "let handle = hwnd(own.handle);",
+  "let mut pid = 0;",
+  "let thread = GetWindowThreadProcessId(handle, Some(&mut pid));",
+  "if !IsWindow(Some(handle)).as_bool() || !policy.may_write(own, pid, thread)",
+  "|| thread != GetCurrentThreadId() || pid != std::process::id() { return Err(Reason::Stale); }",
+  "Ok(handle)",
+  "} }",
+].join(" ");
+
+/** Rust 代码的 token 化（字面量/注释已屏蔽，所以只剩代码）：多字符运算符优先，其余单字节。 */
+const GUARD_TOKEN = /::|->|=>|==|!=|&&|\|\||[A-Za-z_][A-Za-z0-9_]*|\d+|[^\s]/g;
+function guardTokens(code) {
+  return [...code.matchAll(GUARD_TOKEN)].map((hit) => hit[0]);
+}
+const CANONICAL_GUARD_TOKENS = guardTokens(CANONICAL_GUARD_BODY);
+
+/** 逐 token 比 canonical 形状；不同就返回一条点名第一个差异的诊断（相同返回 null）。 */
+function canonicalGuardMismatch(tokens) {
+  const length = Math.max(tokens.length, CANONICAL_GUARD_TOKENS.length);
+  for (let i = 0; i < length; i += 1) {
+    if (tokens[i] === CANONICAL_GUARD_TOKENS[i]) continue;
+    return (
+      "控制流：函数体必须恰好是 canonical 守卫形状（拒绝分支只能是直接的 `return Err(Reason::Stale);`，" +
+      "成功后只能是唯一的 `Ok(handle)`；闭包吞 return / match 影子绑定 / else / 额外绑定都不认）：" +
+      `第 ${i + 1} 个 token 起不同，期望 ${JSON.stringify(CANONICAL_GUARD_TOKENS[i] ?? "（结束）")}，` +
+      `实际 ${JSON.stringify(tokens[i] ?? "（结束）")}`
+    );
+  }
+  return null;
+}
+
+/** `handle` 的唯一合法来源：受核 HWND 转换（`hwnd(own.handle)`；`self::hwnd(...)` 也认）。 */
+const ENSURE_OWN_HANDLE_SOURCE = /^\s*(?:self\s*::\s*)?hwnd\s*\(\s*own\s*\.\s*handle\s*\)\s*$/;
+/** `pid`/`thread` 的唯一合法来源：同一次 `GetWindowThreadProcessId` 调用。 */
+const ENSURE_OWN_IDENTITY =
+  /let\s+mut\s+pid\s*(?::\s*u32\s*)?=\s*0\s*;\s*let\s+thread\s*(?::\s*u32\s*)?=\s*GetWindowThreadProcessId\s*\(\s*handle\s*,\s*Some\s*\(\s*&\s*mut\s+pid\s*\)\s*\)\s*;/;
+
+/** provenance 版四项检查：判据与 `ENSURE_OWN_CHECKS` 相同，但名字必须指向**局部值**。
+ *  差别只在 `pid`/`thread` 前的负向后行断言：`own.pid != std::process::id()` 不是"拿查出来的
+ *  pid 去比对"，而是抄 `own` 里的值自证——外来句柄会顺着它流出去。 */
+const ENSURE_OWN_PROVENANCE_CHECKS = [
+  {
+    label: "!IsWindow(Some(handle)).as_bool()（句柄存活）",
+    pattern: /!\s*IsWindow\s*\(\s*Some\s*\(\s*handle\s*\)\s*\)\s*\.\s*as_bool\s*\(\s*\)/,
+  },
+  {
+    label: "!policy.may_write(own, pid, thread)（当前代次 + 写资格）",
+    pattern: /!\s*policy\s*\.\s*may_write\s*\(\s*own\s*,\s*pid\s*,\s*thread\s*\)/,
+  },
+  { label: "thread != GetCurrentThreadId()（owner 线程）", pattern: /(?<![A-Za-z0-9_.])thread\s*!=\s*GetCurrentThreadId\s*\(\s*\)/ },
+  { label: "pid != std::process::id()（自进程）", pattern: /(?<![A-Za-z0-9_.])pid\s*!=\s*std\s*::\s*process\s*::\s*id\s*\(\s*\)/ },
+];
+
+/** 返回守卫实现体的**来源**问题清单（空数组 = handle/pid/thread 同一来源，且四项检查挡在成功出口前）。
+ *  先用 `blankRustLiterals` 屏蔽字面量：串里的"来源"不是来源。判据只认 canonical 写法，
+ *  真实源码一旦换成别的形状就 fail closed（红），而不是默默放行。 */
+function ensureOwnProvenanceMisses(body) {
+  const misses = ensureOwnGuardMisses(body);
+  if (typeof body !== "string" || body.trim() === "") return misses; // 空体已由上面点名
+  const code = blankRustLiterals(body);
+
+  // ① handle：只能有一次赋值，且来自 own.handle 的受核转换（多一次赋值就能在检查之后换目标）。
+  const handleSites = assignmentSites(code, "handle");
+  if (handleSites.length !== 1) {
+    misses.push(`handle 的来源：只能有一次赋值（发现 ${handleSites.length} 次）——多一次就能在检查之后换掉写目标`);
+  } else {
+    const init = assignmentTarget(code, handleSites[0]);
+    if (init === null || !ENSURE_OWN_HANDLE_SOURCE.test(init)) {
+      misses.push(`handle 的来源：必须是 let handle = hwnd(own.handle)（当前是 ${JSON.stringify(init)}）`);
+    }
+  }
+
+  // ② pid/thread：各自只能有一次赋值，且由**同一次** GetWindowThreadProcessId(handle, …) 填出来。
+  const pidSites = assignmentSites(code, "pid");
+  const threadSites = assignmentSites(code, "thread");
+  if (pidSites.length !== 1 || threadSites.length !== 1) {
+    misses.push(`pid/thread 的来源：各自只能有一次赋值（pid ${pidSites.length} / thread ${threadSites.length}）`);
+  }
+  const identity = ENSURE_OWN_IDENTITY.exec(code);
+  if (identity === null) {
+    misses.push(
+      "pid/thread 的来源：必须来自 let mut pid = 0; let thread = GetWindowThreadProcessId(handle, Some(&mut pid));（抄 own.pid/own.thread 不算）",
+    );
+  } else {
+    for (const { label, pattern } of ENSURE_OWN_PROVENANCE_CHECKS) {
+      const hit = pattern.exec(code);
+      if (hit !== null && hit.index < identity.index) {
+        misses.push(`${label}：身份值在 GetWindowThreadProcessId 之前就被用了（来源顺序不可证）`);
+      }
+    }
+  }
+
+  // ③ 四项检查必须真的用 handle 查出来的局部值（不是 own.pid/own.thread，也不是别的名字）。
+  for (const { label, pattern } of ENSURE_OWN_PROVENANCE_CHECKS) {
+    if (!pattern.test(code)) misses.push(`${label}：检查的不是 handle 查出来的局部值（来源不可证）`);
+  }
+
+  // ④ 成功出口唯一、且是函数体最后一条表达式。
+  const successHits = [...code.matchAll(/Ok\s*\(\s*handle\s*\)/g)];
+  if (successHits.length !== 1) misses.push(`Ok(handle)：成功出口必须唯一（发现 ${successHits.length} 个）`);
+  const success = successHits[0] ?? null;
+  if (success !== null && /[A-Za-z0-9_]/.test(code.slice(success.index + success[0].length))) {
+    misses.push("Ok(handle)：必须是函数体最后一条表达式（之后不许再有代码）");
+  }
+
+  // ⑤ 支配关系：拒绝条件必须**恰好**是那条四项 `||` 析取式、该分支 return Err，且整段排在
+  //    `Ok(handle)` 之前。条件被弱化（`&&` / `false && (…)` / `true || (…)` / 多、少、换序）
+  //    时这里必须点名——只核"四项文本都出现过"是挡不住"逻辑上被短路"的（I3）。
+  const guarded = guardingIf(code);
+  if (!guarded.found) {
+    misses.push(
+      guarded.nearMiss
+        ? "拒绝条件：必须是恰好那条四项 `||` 析取式（`&&` / `false && (…)` / `true || (…)` / 多、少、换序子句 / 外层括号或取反 / else 分支都不行）"
+        : "四项检查：必须都在同一个 if 条件里、该分支 return Err（来源有了，判据也得真的挡在写之前）",
+    );
+  } else {
+    for (const { label, pattern } of ENSURE_OWN_PROVENANCE_CHECKS) {
+      const hit = pattern.exec(code);
+      if (hit !== null && (hit.index < guarded.condStart || hit.index >= guarded.condEnd)) {
+        misses.push(`${label}：不在挡住 Ok(handle) 的那个 if 条件里`);
+      }
+    }
+    if (success !== null && guarded.blockEnd > success.index) {
+      misses.push("四项检查的那条 if 分支必须整段排在 Ok(handle) 之前");
+    }
+  }
+
+  // ⑥ canonical token 控制流：绑定 / 拒绝分支 / 成功出口必须逐 token 对得上（空白、注释可变）。
+  //    ①–⑤ 是"来源 + 条件形状 + 次序"的判据，抓不到"if 分支里用闭包吞掉 return"与
+  //    "match 的 pattern 影子绑定冒充成功出口"（agent109 Important 1/2）——所以这里再钉一条结构判据。
+  const mismatch = canonicalGuardMismatch(guardTokens(blankRustLiterals(blankRustComments(body))));
+  if (mismatch !== null) misses.push(mismatch);
+  return misses;
+}
+
+test("R44d final 2：真实 ensure_own 的 handle/pid/thread 来源必须可证（GetShellWindow 变体必须红）", () => {
+  const source = read("src-tauri/src/taskbar_lyrics.rs");
+  const body = ensureOwnBody(source);
+  assert.ok(body !== null, "没能从真实模块切出 `fn ensure_own` 的函数体：提取失败不等于守卫成立，必须红");
+  assert.deepEqual(
+    ensureOwnProvenanceMisses(body),
+    [],
+    `真实守卫的来源不变量被破坏：${JSON.stringify(ensureOwnProvenanceMisses(body))}`,
+  );
+
+  const wrap = (bodyText) => `mod native {\n    fn ensure_own(policy: &EmbedState, own: OwnWindow) -> Result<HWND, Reason> ${bodyText}\n}\n`;
+  // 正控：真实函数体在内存里重组后照样通过（否则下面那些"必须红"没有意义）。
+  assert.deepEqual(ensureOwnProvenanceMisses(ensureOwnBody(wrap(body))), [], "内存里重组真实函数体后判定仍要通过");
+
+  // 恶意体：句柄/身份来源被换掉，但四项关键字与 `Ok(handle)` 一个不缺——**修前口径**会全部接受，
+  // 这就是本轮的 RED（这一组对照断言在修复后仍然成立，用来钉住"来源判据真的管用"）。
+  const guardTail =
+    "if !IsWindow(Some(handle)).as_bool() || !policy.may_write(own, pid, thread) " +
+    "|| thread != GetCurrentThreadId() || pid != std::process::id() { return Err(Reason::Stale); }";
+  const malicious = [
+    [
+      "handle 在检查之后被换成 GetShellWindow()",
+      `{ let handle = hwnd(own.handle); let mut pid = 0; let thread = GetWindowThreadProcessId(handle, Some(&mut pid)); ${guardTail} let handle = GetShellWindow(); Ok(handle) }`,
+      "handle",
+    ],
+    [
+      "handle 直接取自 GetShellWindow()",
+      `{ let handle = GetShellWindow(); let mut pid = 0; let thread = GetWindowThreadProcessId(handle, Some(&mut pid)); ${guardTail} Ok(handle) }`,
+      "handle",
+    ],
+    [
+      "pid/thread 抄 own 里的值（不是从 handle 查出来）",
+      `{ let handle = hwnd(own.handle); let mut pid = own.pid; let thread = own.thread; ${guardTail} Ok(handle) }`,
+      "GetWindowThreadProcessId",
+    ],
+    [
+      "成功出口换回外来句柄",
+      `{ let handle = hwnd(own.handle); let mut pid = 0; let thread = GetWindowThreadProcessId(handle, Some(&mut pid)); ${guardTail} Ok(handle); Ok(GetShellWindow()) }`,
+      "Ok(handle)",
+    ],
+    [
+      "检查用的是 own.pid/own.thread，不是查出来的局部值",
+      `{ let handle = hwnd(own.handle); let mut pid = 0; let thread = GetWindowThreadProcessId(handle, Some(&mut pid)); if !IsWindow(Some(handle)).as_bool() || !policy.may_write(own, pid, thread) || own.thread != GetCurrentThreadId() || own.pid != std::process::id() { return Err(Reason::Stale); } Ok(handle) }`,
+      "owner 线程",
+    ],
+    [
+      "四项检查不在 if 里（只算了个没用的局部布尔值）",
+      `{ let handle = hwnd(own.handle); let mut pid = 0; let thread = GetWindowThreadProcessId(handle, Some(&mut pid)); let ok = !IsWindow(Some(handle)).as_bool() || !policy.may_write(own, pid, thread) || thread != GetCurrentThreadId() || pid != std::process::id(); Ok(handle) }`,
+      "if",
+    ],
+  ];
+  const accepted = [];
+  for (const [why, text, keyword] of malicious) {
+    const maliciousBody = ensureOwnBody(wrap(text));
+    assert.ok(maliciousBody !== null, `${why}：仍应能切出函数体（这是判定的事，不是提取的事）`);
+    assert.deepEqual(ensureOwnGuardMisses(maliciousBody), [], `${why}：修前口径（只核四项关键字）确实会接受它`);
+    const misses = ensureOwnProvenanceMisses(maliciousBody);
+    // 判定为"通过"的恶意体收集起来一次点名（RED 时这一行会把六条全列出来）。
+    if (misses.length === 0) { accepted.push(why); continue; }
+    assert.ok(
+      misses.join("\n").includes(keyword),
+      `${why} 的点名要指出来源问题（含「${keyword}」）：${JSON.stringify(misses)}`,
+    );
+  }
+  assert.deepEqual(accepted, [], `来源判据必须拒绝这些恶意体（修前口径全部接受）：${JSON.stringify(accepted)}`);
+
+  // 变异自查：来源或任一条守卫子句被删/被改，判定必须红（防止判定"永远为真"或只核到别处）。
+  for (const [needle, replacement, why] of [
+    ["hwnd(own.handle)", "GetShellWindow()", "handle 不再来自 own.handle"],
+    ["let thread = GetWindowThreadProcessId(handle, Some(&mut pid));", "let thread = own.thread;", "thread 不再从 handle 查出来"],
+    ["!IsWindow(Some(handle)).as_bool() || ", "", "句柄存活"],
+    ["!policy.may_write(own, pid, thread) || ", "", "代次 + 写资格"],
+    ["thread != GetCurrentThreadId() || ", "", "owner 线程"],
+    [" || pid != std::process::id()", "", "自进程"],
+  ]) {
+    const mutated = body.replace(needle, replacement);
+    assert.notEqual(mutated, body, `变异必须真的改动了「${why}」：${needle}`);
+    const mutatedBody = ensureOwnBody(wrap(mutated));
+    assert.ok(mutatedBody !== null, `「${why}」变异后仍应能切出函数体（这是判定的事，不是提取的事）`);
+    assert.ok(ensureOwnProvenanceMisses(mutatedBody).length >= 1, `「${why}」被改动后判定必须红：${mutated.slice(0, 120)}`);
+  }
+  // 检查挪到成功出口之后也必须红（次序判据）。
+  const late = body
+    .replace(" || pid != std::process::id()", "")
+    .replace("Ok(handle)", "Ok(handle); if pid != std::process::id() { return Err(Reason::Stale); }");
+  assert.ok(
+    ensureOwnProvenanceMisses(ensureOwnBody(wrap(late))).some((item) => item.includes("之后")),
+    "检查挪到 Ok(handle) 之后必须点名「之后」",
+  );
+
+  // 负控：把整段"来源 + 检查"塞进串里、可执行代码只有 `Ok(handle)` —— 来源判据必须红。
+  const guardText =
+    "let handle = hwnd(own.handle); let mut pid = 0; let thread = GetWindowThreadProcessId(handle, Some(&mut pid)); " +
+    "if !IsWindow(Some(handle)).as_bool() || !policy.may_write(own, pid, thread) || thread != GetCurrentThreadId() || pid != std::process::id() { return Err(Reason::Stale); }";
+  const inStringBody = ensureOwnBody(wrap(`{ let _ = note(r#"${guardText}"#); Ok(handle) }`));
+  assert.ok(inStringBody !== null, "串里放检查文本的变体仍应能切出函数体");
+  const inStringMisses = ensureOwnProvenanceMisses(inStringBody);
+  assert.ok(
+    inStringMisses.some((item) => item.includes("handle")),
+    `串里的来源文本不是来源，必须点名 handle：${JSON.stringify(inStringMisses)}`,
+  );
+  assert.ok(
+    inStringMisses.some((item) => item.includes("GetWindowThreadProcessId")),
+    `串里放的 GetWindowThreadProcessId 不算来源：${JSON.stringify(inStringMisses)}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// R44d final findings：本轮独立复审留下的四个 Important
+//
+// I1 raw identifier 的守卫定义（`fn r#ensure_own`）也是定义，唯一性必须管得到；
+// I2 守卫体提取必须**先剥注释 + 屏蔽字面量**再定位唯一一份真实定义（串里伪造的 `fn ensure_own` 不算）；
+// I3 四项拒绝条件必须恰好是那条 `||` 析取式（`&&` / `false && (…)` / `true || (…)` / 多/少/换序都不行）；
+// I4 写 API 清单必须覆盖审查点名的全部直接改写入口，批量/多窗口写（`DeferWindowPos` /
+//    `EndDeferWindowPos` / `LockWindowUpdate`）在本模块里一律禁用。
+//
+// 四条都只往严的方向走：没有新增参数名/变量名/模块白名单，也没有放宽任何既有形态。
+// ---------------------------------------------------------------------------
+
+/** I4 的 first-HWND 直接改写清单（既有十二条 + 复审点名的十七条）。第二项是"除 HWND 外的实参"，
+ *  按各 API 的真实参数表写全（`SendMessageTimeoutW/A` 是 Msg, wParam, lParam, flags, timeout, result）。
+ *  这份表就是"清单只许扩、不许缩"的可审计版本：新增 API 必须同时进扫描器与本表。
+ *
+ *  写**共享窗口类**的入口（`SetClassLongPtrW/A`、`SetClassLongW/A`、`SetClassWord`）**不在**这张表里：
+ *  它们改的不是"这一个 HWND"，自窗守卫证明不了类级效果只影响自窗——所以它们在
+ *  `BLANKET_FORBIDDEN_APIS` 一侧（出现即拒绝，canonical 首参也不行）。 */
+const MUTATION_SIGNATURES = [
+  ["SetParent", "None"],
+  ["SetWindowPos", "None, 0, 0, 1, 1, flags"],
+  ["SetWindowLongPtrW", "index, value"],
+  ["ShowWindow", "SW_HIDE"],
+  ["SetWindowSubclass", "Some(lyrics_proc), id, data"],
+  ["EnableWindow", "false"],
+  ["MoveWindow", "0, 0, 10, 10, true"],
+  ["SetWindowLongW", "index, value"],
+  ["SetWindowLongA", "index, value"],
+  ["DestroyWindow", ""],
+  ["SendMessageW", "message, w, l"],
+  ["SendMessageA", "message, w, l"],
+  ["ShowWindowAsync", "SW_HIDE"],
+  ["PostMessageW", "message, w, l"],
+  ["PostMessageA", "message, w, l"],
+  ["SendMessageTimeoutW", "message, w, l, flags, timeout, Some(&mut result)"],
+  ["SendMessageTimeoutA", "message, w, l, flags, timeout, Some(&mut result)"],
+  ["SetWindowLongPtrA", "index, value"],
+  ["SetWindowTextW", "text"],
+  ["SetWindowTextA", "text"],
+  ["AnimateWindow", "duration, flags"],
+  ["SetWindowPlacement", "&placement"],
+  ["SetLayeredWindowAttributes", "color, alpha, flags"],
+  ["SetWindowRgn", "region, redraw"],
+  ["SetWindowTheme", "app, id"],
+  ["SetPropW", "name, data"],
+  ["SetPropA", "name, data"],
+  ["SetWindowContextHelpId", "id"],
+  ["SetWindowDisplayAffinity", "affinity"],
+];
+
+test("R44d findings 1：raw identifier 的守卫定义也算定义（fn r#ensure_own 不许绕过唯一性）", async () => {
+  const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
+  const realGuard = "fn ensure_own(policy: &EmbedState, own: OwnWindow) -> Result<HWND, Reason> { Ok(hwnd(own.handle)) }";
+  const rawGuard = "fn r#ensure_own(policy: &EmbedState, own: OwnWindow) -> Result<HWND, Reason> { Ok(hwnd(9)) }";
+
+  // 审查指出的实际绕过：嵌套 mod 里一份 raw 定义 + 外层真实定义。`self::ensure_own` 到底解析到
+  // 哪一份，词法扫描器证明不了——所以"两份定义"必须被当成违规，不是当成一份。
+  const nestedRaw = ["mod helper {", `    ${rawGuard}`, "}", realGuard].join("\n");
+  const nestedViolations = taskbarWriteViolations(nestedRaw);
+  assert.ok(
+    nestedViolations.some((item) => item.startsWith("ensure_own:")),
+    `raw 定义 + canonical 定义 = 两份定义，必须点名：${JSON.stringify(nestedViolations)}`,
+  );
+  assert.equal(
+    nestedViolations.filter((item) => item.startsWith("ensure_own:")).length,
+    1,
+    "同一处唯一性问题只点一次（不按定义数重复记账）",
+  );
+
+  // 两份 raw 定义同样不许（嵌套 mod 里一份、外层一份）。
+  const secondRawGuard = rawGuard.replace("hwnd(9)", "hwnd(own.handle)");
+  assert.ok(
+    taskbarWriteViolations(["mod helper {", `    ${rawGuard}`, "}", secondRawGuard].join("\n")).some((item) => item.startsWith("ensure_own:")),
+    "两份 raw 定义也必须点名",
+  );
+
+  // 第二个守卫名同规则（`own_top_level` 只给子类化用，但定义本身同样必须唯一）。
+  const realTop = "fn own_top_level<R: Runtime>(window: &WebviewWindow<R>) -> Result<HWND, Reason> { Ok(hwnd(1)) }";
+  const rawTop = "fn r#own_top_level<R: Runtime>(window: &WebviewWindow<R>) -> Result<HWND, Reason> { Ok(hwnd(9)) }";
+  const topViolations = taskbarWriteViolations(["mod helper {", `    ${rawTop}`, "}", realTop].join("\n"));
+  assert.ok(
+    topViolations.some((item) => item.startsWith("own_top_level:")),
+    `raw 的 own_top_level 定义同样计入唯一性：${JSON.stringify(topViolations)}`,
+  );
+
+  // raw 名不能当写目标的凭证：写位置只认 canonical `self::`。
+  assert.equal(
+    taskbarWriteViolations("SetParent(r#ensure_own(policy, own)?, None)").length,
+    1,
+    "`r#ensure_own(...)` 不是 canonical 守卫路径，写位置必须点名",
+  );
+  // 但**唯一一份** raw 定义本身不是"本地绑定"（它就是同名函数），唯一性由计数兜、
+  // 实现体由守卫体用例兜——这里钉住"不许因为加了 raw 支持就误报"。
+  assert.deepEqual(taskbarWriteViolations(rawGuard), [], "唯一一份 raw 定义不违反唯一性（实现体由守卫体用例管）");
+  // 非写位置的自查调用形态照旧放行（raw 名与裸名一样）。
+  assert.deepEqual(taskbarWriteViolations("fn f() { r#ensure_own(policy, own)?; }"), [], "非写位置的 raw 自查调用不报");
+});
+
+test("R44d findings 2：守卫体提取必须先剥注释/屏蔽字面量，串里伪造的 fn ensure_own 不算定义", () => {
+  const source = read("src-tauri/src/taskbar_lyrics.rs");
+  const realBody = ensureOwnBody(source);
+  assert.ok(realBody !== null, "真实模块必须能切出唯一一份 `fn ensure_own`");
+  const wrap = (text) => `mod native {\n    fn ensure_own(policy: &EmbedState, own: OwnWindow) -> Result<HWND, Reason> ${text}\n}\n`;
+  const forged = "fn ensure_own(policy: &EmbedState, own: OwnWindow) -> Result<HWND, Reason> { Ok(hwnd(9)) }";
+
+  // ① 串里伪造的定义不能把真实定义挤成"两份"（也不能被当成被检查的那一份）。
+  for (const [shape, literal] of [
+    ["普通串", `let _doc = ${JSON.stringify(forged)};`],
+    ['raw 串 r#"…"#', `let _doc = r#"${forged}"#;`],
+    ['raw 串 r##"…"##', `let _doc = r##"${forged}"##;`],
+  ]) {
+    const injected = wrap(`{ ${literal} ${realBody.slice(1)}`);
+    const body = ensureOwnBody(injected);
+    assert.ok(body !== null, `${shape}里的伪造定义不算定义，真实定义必须仍能被切出来`);
+    assert.doesNotMatch(body, /fn\s+ensure_own/, `${shape}里的定义文本必须被屏蔽，不能进"函数体"`);
+    assert.doesNotMatch(body, /hwnd\s*\(\s*9\s*\)/, `${shape}里伪造体的内容不能冒充真实守卫体`);
+    // 串只是内容：四项真检查与真实来源都还在（弱基线 + 来源判据都不该被串里的文本顶替）。
+    // 但注入本身给函数体加了一条前置语句，**canonical 控制流判据因此 fail closed**（多报一侧）：
+    // 它只许点名"控制流"，不许栽赃 handle/pid/thread 来源。
+    assert.deepEqual(ensureOwnGuardMisses(body), [], `${shape}里的注入不改变四项真检查`);
+    const provenance = ensureOwnProvenanceMisses(body);
+    assert.ok(provenance.length >= 1, `${shape}：注入后的形状不是 canonical，必须 fail closed（不静默放行）`);
+    assert.ok(
+      provenance.every((item) => item.includes("控制流")),
+      `${shape}：只许点名形状，不许把注入说成来源问题：${JSON.stringify(provenance)}`,
+    );
+  }
+
+  // ② 只有串里那一份"定义"（模块里没有任何真实 fn 定义）时，提取必须失败（fail closed），
+  //    不许把串内容当成守卫体。
+  for (const [shape, literal] of [
+    ["普通串", JSON.stringify(forged)],
+    ['raw 串 r#"…"#', `r#"${forged}"#`],
+    ['raw 串 r##"…"##', `r##"${forged}"##`],
+  ]) {
+    const onlyInString = `mod native {\n    const DOC: &str = ${literal};\n}\n`;
+    assert.equal(ensureOwnBody(onlyInString), null, `${shape}里的伪造定义不许被当成真实定义（必须提取失败）`);
+  }
+
+  // ③ 注释里的"定义"同样不是定义（剥注释先于定位），且不得制造"两份定义"。
+  assert.equal(
+    ensureOwnBody(`mod native {\n    const A: u8 = 1;\n    // ${forged}\n}\n`),
+    null,
+    "注释里的伪造定义不许被当成真实定义",
+  );
+  assert.ok(
+    ensureOwnBody(wrap(`{ // ${forged}\n ${realBody.slice(1)}`)) !== null,
+    "注释里的伪造定义也不许把真实定义挤成两份（否则提取失败就掩盖了真实守卫体）",
+  );
+
+  // ④ 屏蔽必须**等长、换行保留**：跨行串里的伪造定义既不能被当成定义，也不能把偏移算歪。
+  const baselineLines = ensureOwnBody(wrap(realBody)).split("\n").length;
+  const multiline = wrap(`{ let _doc = "line a\n${forged}\nline b"; ${realBody.slice(1)}`);
+  const multilineBody = ensureOwnBody(multiline);
+  assert.ok(multilineBody !== null, "跨行串里的伪造定义不算定义");
+  assert.equal(
+    multilineBody.split("\n").length,
+    baselineLines + 2,
+    "字面量屏蔽要保留换行（串里的两个换行既不能丢、也不能把偏移算歪）",
+  );
+  assert.doesNotMatch(multilineBody, /fn\s+ensure_own/, "跨行串里的定义文本必须被屏蔽");
+
+  // ⑤ 字符字面量里的花括号不许把体内嵌的平衡算错。
+  const braces = wrap(`{ let _open = '{'; let _close = '}'; ${realBody.slice(1)}`);
+  const bracesBody = ensureOwnBody(braces);
+  assert.ok(bracesBody !== null, "字符字面量里的花括号不能把体内嵌的平衡算错");
+  assert.doesNotMatch(bracesBody, /'\s*[{}]\s*'/, "字符字面量必须被等长屏蔽（`'{'`/`'}'` 不能留在视图里）");
+  assert.deepEqual(ensureOwnGuardMisses(bracesBody), [], "字符字面量之后的四项真实检查仍要看得见");
+  // 前置的 `let _open = …;` 让形状不再 canonical：只许因控制流 fail closed，来源不受影响。
+  const bracesProvenance = ensureOwnProvenanceMisses(bracesBody);
+  assert.ok(
+    bracesProvenance.length >= 1 && bracesProvenance.every((item) => item.includes("控制流")),
+    `字符字面量只是等长屏蔽，只许因形状 fail closed：${JSON.stringify(bracesProvenance)}`,
+  );
+});
+
+test("R44d findings 3：四项拒绝条件必须恰好是那条析取式（&& / false && / true || / 多/少/换序一律红）", () => {
+  const source = read("src-tauri/src/taskbar_lyrics.rs");
+  const body = ensureOwnBody(source);
+  assert.ok(body !== null, "真实模块必须能切出 `fn ensure_own` 的函数体");
+  const CANON =
+    "!IsWindow(Some(handle)).as_bool() || !policy.may_write(own, pid, thread) " +
+    "|| thread != GetCurrentThreadId() || pid != std::process::id()";
+  assert.ok(
+    body.includes(CANON),
+    "真实守卫的条件必须仍是那条 canonical 析取式（下面的变异以它为锚；形状变了就 fail closed）",
+  );
+  const wrap = (text) => `mod native {\n    fn ensure_own(policy: &EmbedState, own: OwnWindow) -> Result<HWND, Reason> ${text}\n}\n`;
+  const missesOf = (text) => {
+    const extracted = ensureOwnBody(wrap(text));
+    assert.ok(extracted !== null, "变异后仍应能切出函数体（这是判定的事，不是提取的事）");
+    return ensureOwnProvenanceMisses(extracted);
+  };
+  assert.deepEqual(missesOf(body), [], "正控：真实函数体必须通过");
+
+  // 只加空白的等价写法仍要通过：判据是 token 形状，不是字节相等。
+  assert.deepEqual(
+    missesOf(
+      body.replace(
+        CANON,
+        "! IsWindow ( Some ( handle ) ) . as_bool ( ) || ! policy . may_write ( own , pid , thread ) " +
+          "|| thread != GetCurrentThreadId ( ) || pid != std :: process :: id ( )",
+      ),
+    ),
+    [],
+    "只加空白的等价写法必须继续通过",
+  );
+
+  // 逻辑被弱化的六种写法：四项关键字全在、次序也对，但条件已经不是"四项任一不成立就拒绝"。
+  for (const [why, mutant] of [
+    ["四项之间改成 && 连接", CANON.split(" || ").join(" && ")],
+    ["外面套 `false && (…)`（整段被短路）", `false && (${CANON})`],
+    ["外面套 `true || (…)`（整段被短路）", `true || (${CANON})`],
+    ["整个条件取反 `!(…)`", `!(${CANON})`],
+    ["多一个恒假子句 `|| false`", `${CANON} || false`],
+    ["少一个子句（自进程被删）", CANON.replace(" || pid != std::process::id()", "")],
+    ["后两个子句换序", "!IsWindow(Some(handle)).as_bool() || !policy.may_write(own, pid, thread) || pid != std::process::id() || thread != GetCurrentThreadId()"],
+    ["条件只剩常量 false", "false"],
+    ["条件只剩常量 true", "true"],
+  ]) {
+    const misses = missesOf(body.replace(CANON, mutant));
+    assert.ok(misses.length >= 1, `「${why}」必须让守卫判定报失败`);
+    assert.ok(
+      misses.some((item) => item.includes("拒绝条件")),
+      `「${why}」要点名"拒绝条件"不可弱化：${JSON.stringify(misses)}`,
+    );
+  }
+
+  // 子句被挪到成功出口之后：同样必须红（次序判据，独立于上面的条件形状判据）。
+  const moved = body
+    .replace(" || pid != std::process::id()", "")
+    .replace("Ok(handle)", "Ok(handle); if pid != std::process::id() { return Err(Reason::Stale); }");
+  assert.notEqual(moved, body, "变异必须真的把子句挪走了");
+  assert.ok(
+    missesOf(moved).some((item) => item.includes("之后")),
+    `子句挪到 Ok(handle) 之后必须点名「之后」：${JSON.stringify(missesOf(moved))}`,
+  );
+});
+
+test("R44d findings 4：完整写 API 清单（first-HWND 受核 + 批量/多窗口写在本模块一律禁用）", async () => {
+  const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
+  const call = (name, first, rest) => `${name}(${rest === "" ? first : `${first}, ${rest}`})`;
+
+  for (const [api, rest] of MUTATION_SIGNATURES) {
+    // 外来目标 / 别的窗口 / 纯参数名：一律点名，且只点一次。
+    for (const [first, why] of [
+      ["hwnd(foreign)", "外来目标"],
+      ["GetShellWindow()", "另一个窗口（shell）"],
+      ["own", "参数名 own"],
+      ["handle", "参数名 handle"],
+      ["parent", "参数名 parent"],
+    ]) {
+      assert.equal(taskbarWriteViolations(call(api, first, rest)).length, 1, `${api}：${why} 必须点名`);
+    }
+    // 写位置由 canonical 守卫当场给出才放行。
+    assert.deepEqual(
+      taskbarWriteViolations(call(api, "self::ensure_own(policy, own)?", rest)),
+      [],
+      `${api} 的 canonical 受核调用必须放行`,
+    );
+    // `own_top_level` 不核创建代次：只许给 `SetWindowSubclass`，别的写不许拿它当挡箭牌。
+    assert.equal(
+      taskbarWriteViolations(call(api, "self::own_top_level(&main)?", rest)).length,
+      api === "SetWindowSubclass" ? 0 : 1,
+      `${api}：own_top_level 仍然只允许子类化`,
+    );
+    // 改名/取地址的四种形态都不能让"按名字受核"失效。
+    for (const [snippet, why] of [
+      [`let evil = ${api};`, "函数指针别名"],
+      [`use windows::Win32::UI::WindowsAndMessaging::${api} as evil;`, "use as 别名"],
+      [`let evil = ${api} as usize;`, "cast 后的裸引用"],
+      [`let table = [${api}];`, "数组里的裸引用"],
+      [`use evil::${api};`, "非 windows:: 的导入"],
+      [`h.${api}(self::ensure_own(policy, own)?)`, "关联方法形态（写目标是接收者）"],
+    ]) {
+      assert.ok(
+        taskbarWriteViolations(snippet).some((item) => item.startsWith(`${api}:`)),
+        `${api} 的${why}必须点名：${snippet} -> ${JSON.stringify(taskbarWriteViolations(snippet))}`,
+      );
+    }
+    // 全路径限定调用仍按第一实参受核。
+    assert.deepEqual(
+      taskbarWriteViolations(`windows::Win32::UI::WindowsAndMessaging::${call(api, "self::ensure_own(policy, own)?", rest)}`),
+      [],
+      `${api} 的全路径受核调用必须放行`,
+    );
+    // 字符串 / 注释里的名字不是代码（**调用形态**的字符串是既有的、已钉住的假阳性，见 F4 用例，
+    // 这里只用非调用形态，避免把那条"多报一侧"的已知行为混进来）。
+    assert.deepEqual(taskbarWriteViolations(`let doc = "${api} 是 Win32 的直接改写入口";`), [], `${api}：字符串里的名字不算命中`);
+  }
+
+  // 批量 / 多窗口 / 非首参 HWND 的三个 API：本模块**一律禁用**，连 canonical 第一实参也不行
+  // （第一实参守卫证明不了"这一批里只有一个自窗"，也证明不了 HDWP 里装的是谁）。
+  for (const api of ["DeferWindowPos", "EndDeferWindowPos", "LockWindowUpdate"]) {
+    for (const [snippet, why] of [
+      [`${api}(hdwp, hwnd(foreign), 0, 0, 0, 0, flags)`, "外来目标调用"],
+      [`${api}(self::ensure_own(policy, own)?, hdwp, 0, 0, 0, 0, flags)`, "连 canonical 守卫也不行"],
+      [`${api}(hdwp)`, "哪怕没有明显的 HWND 实参"],
+      [`use windows::Win32::UI::WindowsAndMessaging::${api};`, "导入也算出现"],
+      [`let f = ${api};`, "函数指针别名"],
+      [`h.${api}(self::ensure_own(policy, own)?)`, "方法形态"],
+    ]) {
+      assert.equal(taskbarWriteViolations(snippet).length, 1, `${api}：${why} 必须点名（本模块一律禁用）`);
+    }
+    assert.deepEqual(taskbarWriteViolations(`let doc = "${api} 是禁用入口";`), [], `${api}：字符串里的名字不是出现`);
+    assert.deepEqual(taskbarWriteViolations(`// ${api}(hwnd(foreign))`), [], `${api}：注释里的名字不是出现`);
+  }
+
+  // 清单只许扩不许缩：既有十二条仍逐个受核（MUTATION_SIGNATURES 前十二项就是它们），
+  // 且真实模块在完整清单下仍然 0 违规（真实现只对自窗写）。
+  assert.deepEqual(
+    taskbarWriteViolations(read("src-tauri/src/taskbar_lyrics.rs")),
+    [],
+    "真实实现不许出现未受核的写目标（含本轮扩进来的全部 API 与三个禁用 API）",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// R44d fix2（final review round 2，agent109）：
+// A1 守卫体判据只核"四项文本 + 次序"，**不核控制流**——`if` 分支里放一个闭包
+//    `let _swallow = || { return Err(Reason::Stale); };` 就把拒绝 `return` 吞进闭包，
+//    `Ok(handle)` 变成无条件成功，旧判据照样全绿；
+// A2 成功出口只按"`Ok(handle)` 出现在最后"判，`match GetShellWindow() { handle => Ok(handle) }`
+//    里的 `handle` 是 **pattern 影子绑定**，旧判据认的还是同一个名字；
+// A3 `SetClassLongPtrW/A` 改的是共享**窗口类**，不是"这一个 HWND"，自窗首参守卫证明不了
+//    类级效果只波及自窗——它们必须进"出现即拒绝"的清单，而不是普通首参受核清单；
+// A4 `SendMessageTimeoutW/A` 的夹具少了真实的 `timeout` 实参；
+// A5 `RemoveWindowSubclass` 的唯一调用在 `WM_NCDESTROY` 里撤自己的子类，扫描器看不见——
+//    要么给出窄的"只有当前子类回调能到达"证明，要么 fail closed。
+//
+// 本轮判定一律只收紧：canonical token 形状不匹配就 fail closed（红），不放行任何"等价写法"。
+// ---------------------------------------------------------------------------
+
+/** 与真实 `fn ensure_own` 逐 token 相同的 canonical 形状（含 `unsafe {}` 外壳）。
+ *  负控都在它上面改**一处**，这样"红了"只能归因于那处控制流/来源，而不是别的形状差异。 */
+const FIX2_COND =
+  "!IsWindow(Some(handle)).as_bool() || !policy.may_write(own, pid, thread) " +
+  "|| thread != GetCurrentThreadId() || pid != std::process::id()";
+const FIX2_PREFIX =
+  "{ unsafe { let handle = hwnd(own.handle); let mut pid = 0; " +
+  `let thread = GetWindowThreadProcessId(handle, Some(&mut pid)); if ${FIX2_COND} { return Err(Reason::Stale); } `;
+const FIX2_CANON = `${FIX2_PREFIX}Ok(handle) } }`;
+
+test("R44d fix2 1：守卫体必须是 canonical token 控制流（闭包吞 return / match 影子绑定一律红）", () => {
+  const source = read("src-tauri/src/taskbar_lyrics.rs");
+  const realBody = ensureOwnBody(source);
+  assert.ok(realBody !== null, "真实模块必须能切出 `fn ensure_own` 的函数体");
+  assert.deepEqual(ensureOwnProvenanceMisses(realBody), [], "真实守卫体仍必须是 canonical 形状");
+
+  const wrap = (text) => `mod native {\n    fn ensure_own(policy: &EmbedState, own: OwnWindow) -> Result<HWND, Reason> ${text}\n}\n`;
+  const missesOf = (text) => {
+    const extracted = ensureOwnBody(wrap(text));
+    assert.ok(extracted !== null, `仍应能切出函数体（这是判定的事，不是提取的事）：${text.slice(0, 80)}`);
+    return ensureOwnProvenanceMisses(extracted);
+  };
+  const canonicalBody = ensureOwnBody(wrap(FIX2_CANON));
+  assert.ok(canonicalBody !== null, "canonical 负控基准必须能切出函数体");
+  assert.deepEqual(ensureOwnProvenanceMisses(canonicalBody), [], "canonical 基准体必须通过（下面每条负控只改它一处）");
+
+  // 空白/注释可以变（判据是 token 形状，不是字节相等）：注释在提取时已被等长屏蔽。
+  assert.deepEqual(missesOf(FIX2_CANON.replaceAll(" ", "   ")), [], "只改空白的等价写法必须继续通过");
+  assert.deepEqual(
+    missesOf(FIX2_CANON.replace("unsafe {", "unsafe { // 守卫在这里\n")),
+    [],
+    "函数体里插注释不算控制流变化（注释是空白）",
+  );
+
+  // A1/A2：两条**旧判据会接受**的绕过，必须被新控制流判据点名。
+  const slips = [
+    [
+      "if 分支里用闭包吞掉 return（Ok(handle) 变成无条件成功）",
+      `${FIX2_PREFIX.replace(
+        "{ return Err(Reason::Stale); }",
+        "{ let _swallow = || { return Err::<HWND, Reason>(Reason::Stale); }; }",
+      )}Ok(handle) } }`,
+    ],
+    [
+      "match 的 pattern 影子绑定冒充成功出口",
+      `${FIX2_PREFIX}match GetShellWindow() { handle => Ok(handle) } } }`,
+    ],
+  ];
+  // 两条**旧判据会接受**的绕过：收集起来一次点名（RED 时这一行会把两条都列出来）。
+  const accepted = [];
+  for (const [why, text] of slips) {
+    const body = ensureOwnBody(wrap(text));
+    assert.ok(body !== null, `${why}：仍应能切出函数体`);
+    assert.deepEqual(ensureOwnGuardMisses(body), [], `${why}：旧判据（只核四项 + 次序）确实会接受它`);
+    if (!ensureOwnProvenanceMisses(body).some((item) => item.includes("控制流"))) accepted.push(why);
+  }
+  assert.deepEqual(accepted, [], `控制流判据必须拒绝这两条绕过（旧判据全部接受）：${JSON.stringify(accepted)}`);
+
+  // brief 点名的其余负控：条件被短路、来源被换、假检查、成功后加料——全部必须红。
+  const others = [
+    ["四项之间改成 && 连接", FIX2_CANON.replaceAll(" || ", " && ")],
+    ["外面套 `false && (…)`", FIX2_CANON.replace(`if ${FIX2_COND} {`, `if false && (${FIX2_COND}) {`)],
+    ["外面套 `true || (…)`", FIX2_CANON.replace(`if ${FIX2_COND} {`, `if true || (${FIX2_COND}) {`)],
+    ["handle 不是 hwnd(own.handle)", FIX2_CANON.replace("hwnd(own.handle)", "GetShellWindow()")],
+    [
+      "pid/thread 抄 own 里的值",
+      FIX2_CANON.replace(
+        "let mut pid = 0; let thread = GetWindowThreadProcessId(handle, Some(&mut pid));",
+        "let mut pid = own.pid; let thread = own.thread;",
+      ),
+    ],
+    [
+      "检查文本只在块注释里",
+      FIX2_CANON.replace(`if ${FIX2_COND} { return Err(Reason::Stale); }`, `/* if ${FIX2_COND} { return Err(Reason::Stale); } */`),
+    ],
+    ["成功出口之后又加了代码", FIX2_CANON.replace("Ok(handle) } }", "Ok(handle); let _extra = 1; } }")],
+  ];
+  for (const [why, text] of others) {
+    assert.notEqual(text, FIX2_CANON, `负控必须真的改动了基准体：「${why}」`);
+    assert.ok(missesOf(text).length >= 1, `「${why}」必须让守卫判定报失败`);
+  }
+});
+
+test("R44d fix2 2：SetClassLongPtrW/A 是类级写，任何出现都拒绝（canonical 首参也不行）", async () => {
+  const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
+  for (const api of ["SetClassLongPtrW", "SetClassLongPtrA"]) {
+    for (const [snippet, why] of [
+      [`${api}(hwnd(foreign), index, value)`, "外来目标直接调用"],
+      [`${api}(self::ensure_own(policy, own)?, index, value)`, "canonical 首参也不行（改的是共享窗口类）"],
+      [`let f = ${api};`, "函数指针引用"],
+      [`use windows::Win32::UI::WindowsAndMessaging::${api} as evil;`, "`use … as` 别名"],
+      [`use windows::Win32::UI::WindowsAndMessaging::${api};`, "导入本身也算出现"],
+      [`h.${api}(self::ensure_own(policy, own)?, index, value)`, "关联方法形态"],
+      [`let table = [${api}];`, "数组里的裸引用"],
+    ]) {
+      assert.equal(taskbarWriteViolations(snippet).length, 1, `${api}：${why} 必须点名：${snippet}`);
+    }
+    assert.deepEqual(taskbarWriteViolations(`let doc = "${api} 是类级写";`), [], `${api}：字符串里的名字不是出现`);
+    assert.deepEqual(taskbarWriteViolations(`// ${api}(hwnd(foreign), 0, 0)`), [], `${api}：注释里的名字不是出现`);
+  }
+  // 普通首参受核的邻居不受影响（防止"一刀切所有 Set*Long*"式误伤）。
+  assert.deepEqual(
+    taskbarWriteViolations("SetWindowLongPtrW(self::ensure_own(policy, own)?, index, value)"),
+    [],
+    "SetWindowLongPtrW 仍是首参受核（只拒绝外来目标）",
+  );
+  assert.equal(taskbarWriteViolations("SetWindowLongPtrW(hwnd(foreign), index, value)").length, 1, "SetWindowLongPtrW 仍核第一实参");
+  assert.deepEqual(taskbarWriteViolations(read("src-tauri/src/taskbar_lyrics.rs")), [], "真实实现不碰类级写");
+});
+
+test("R44d fix2 3：SendMessageTimeoutW/A 的夹具必须是真实参数表（Msg, wParam, lParam, flags, timeout, result）", async () => {
+  const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
+  const EXPECTED = "message, w, l, flags, timeout, Some(&mut result)";
+  for (const api of ["SendMessageTimeoutW", "SendMessageTimeoutA"]) {
+    const row = MUTATION_SIGNATURES.find(([name]) => name === api);
+    assert.ok(row !== undefined, `${api} 必须在 first-HWND 受核清单里`);
+    assert.equal(row[1], EXPECTED, `${api} 的样例必须按 windows 0.61 的真实参数表写全（含 timeout）`);
+    assert.equal(row[1].split(",").length, 6, `${api}：HWND 之后是 6 个实参（Msg/wParam/lParam/flags/timeout/result）`);
+    assert.equal(taskbarWriteViolations(`${api}(hwnd(foreign), ${row[1]})`).length, 1, `${api}：外来目标必须点名`);
+    assert.deepEqual(
+      taskbarWriteViolations(`${api}(self::ensure_own(policy, own)?, ${row[1]})`),
+      [],
+      `${api}：canonical 首参必须放行`,
+    );
+    // 真实全参数表（含 timeout、结果指针）同样按第一实参受核，不因参数变多而换判据。
+    assert.equal(
+      taskbarWriteViolations(`${api}(hwnd(foreign), WM_NULL, WPARAM(0), LPARAM(0), SMTO_ABORTIFHUNG, 100, Some(&mut result))`).length,
+      1,
+      `${api}：完整真实参数表下外来目标仍要点名`,
+    );
+  }
+});
+
+test("R44d fix2 4：RemoveWindowSubclass 只允许当前子类回调对内层自窗的移除（其他出现一律点名）", async () => {
+  const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
+  const real = read("src-tauri/src/taskbar_lyrics.rs");
+  // 真实模块的调用点是已审例外：唯一一份 `lyrics_proc` 子类回调里，用回调自己的 `window`/`id`
+  // 撤掉自己装的子类（`WM_NCDESTROY`）。除此之外本模块没有任何 RemoveWindowSubclass。
+  assert.deepEqual(taskbarWriteViolations(real), [], "真实实现的 RemoveWindowSubclass 必须是已审例外");
+  const occurrences = [...real.matchAll(/\bRemoveWindowSubclass\b/g)].length;
+  assert.equal(occurrences, 2, "真实实现里只有 import 与回调内各一次（新增调用点必须先过复审）");
+
+  const CALL = "RemoveWindowSubclass(window, Some(lyrics_proc), id)";
+  const callbackSource = [
+    "struct NativeLife { alive: u32 }",
+    'unsafe extern "system" fn lyrics_proc(window: HWND, message: u32, w: WPARAM, l: LPARAM, id: usize, ref_data: usize) -> LRESULT {',
+    "    use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass};",
+    "    if message == WM_NCDESTROY { let _ = RemoveWindowSubclass(window, Some(lyrics_proc), id); }",
+    "    DefSubclassProc(window, message, w, l)",
+    "}",
+  ].join("\n");
+  assert.deepEqual(taskbarWriteViolations(callbackSource), [], "子类回调里撤自己的子类是唯一放行形态");
+  // 只变空白（`( window , Some ( lyrics_proc ) , id )`）不是"换目标"：判据是实参 token，不是字节。
+  assert.deepEqual(
+    taskbarWriteViolations(callbackSource.replace(CALL, "RemoveWindowSubclass( window , Some ( lyrics_proc ) , id )")),
+    [],
+    "回调自撤的实参只差空白时必须继续放行（判据是实参 token，不是字节相等）",
+  );
+
+  const inCallback = (call) => callbackSource.replace(CALL, call);
+  for (const [call, why] of [
+    ["RemoveWindowSubclass(GetShellWindow(), Some(lyrics_proc), id)", "回调外的 shell 窗"],
+    ["RemoveWindowSubclass(hwnd(foreign), Some(lyrics_proc), id)", "回调里的外来窗"],
+    ["RemoveWindowSubclass(window, Some(evil_proc), id)", "别人的子类回调"],
+    ["RemoveWindowSubclass(window, Some(lyrics_proc), other_id)", "别人的子类 id"],
+    ["h.RemoveWindowSubclass(window, Some(lyrics_proc), id)", "方法形态（接收者来源不可证）"],
+  ]) {
+    const snippet = inCallback(call);
+    assert.equal(taskbarWriteViolations(snippet).length, 1, `${why} 必须点名：${call}`);
+  }
+
+  // 回调**外**的调用不许借"参数名恰好对"混过去：只有唯一一份 lyrics_proc 的体内才是放的。
+  assert.equal(
+    taskbarWriteViolations(`fn f() { let _ = ${CALL}; }`).length,
+    1,
+    "回调外的同形调用必须点名（参数名不是凭证，位置才是）",
+  );
+  assert.equal(
+    taskbarWriteViolations(`${CALL};`).length,
+    1,
+    "没有子类回调时的同形调用必须点名",
+  );
+  // 回调存在多份 / 无法唯一定位时 fail closed。
+  assert.equal(
+    taskbarWriteViolations(
+      [callbackSource, 'unsafe extern "system" fn lyrics_proc(window: HWND) -> LRESULT { LRESULT(0) }'].join("\n"),
+    ).length,
+    1,
+    "lyrics_proc 定义必须唯一，两处定义时 fail closed",
+  );
+  // 改名/导入形态照旧按名字级规则点名。
+  for (const [snippet, why] of [
+    ["let f = RemoveWindowSubclass;", "函数指针别名"],
+    ["use windows::Win32::UI::Shell::RemoveWindowSubclass as evil;", "`use … as` 别名"],
+    ["use evil::RemoveWindowSubclass;", "非 windows:: 的导入"],
+  ]) {
+    assert.ok(taskbarWriteViolations(snippet).length >= 1, `${why} 必须点名：${snippet}`);
+  }
+  // 无 `as` 的 windows 导入（绑定名没变）仍放行。
+  assert.deepEqual(
+    taskbarWriteViolations("use windows::Win32::UI::Shell::RemoveWindowSubclass;"),
+    [],
+    "无 as 的 windows 导入不是别名",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// R44d fix3（class-wide API follow-up）：
+// `SetClassLongPtrW/A` 已经在"一律禁用"一侧，理由是它们改的是**共享窗口类**（第一实参
+// 只用来"选哪个类"，自窗首参守卫证明不了类级效果只波及自窗）。同样的语义完全适用于
+// `SetClassLongW`、`SetClassLongA`、`SetClassWord`——但它们此前**根本不在扫描器里**
+// （源码扫描覆盖遗漏，不是 native 调用点变化；真实模块一个都没用到）。
+// 因此这三条也必须走 `BLANKET_FORBIDDEN_APIS`：出现即拒绝，canonical 首参不是放行凭证。
+// 下面用行为钉住"在 blanket 一侧而不是普通首参受核一侧"：同一段 canonical 首参调用，
+// 普通受核 API 放行、这三条必须点名，且诊断词是"一律禁用"。
+// ---------------------------------------------------------------------------
+
+test("R44d fix3：SetClassLongW/A、SetClassWord 是类级写，任何出现都拒绝（canonical 首参也不行）", async () => {
+  const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
+  const CLASS_WIDE_APIS = ["SetClassLongW", "SetClassLongA", "SetClassWord"];
+
+  for (const api of CLASS_WIDE_APIS) {
+    for (const [snippet, why] of [
+      [`${api}(hwnd(foreign), index, value)`, "外来目标直接调用"],
+      [`${api}(self::ensure_own(policy, own)?, index, value)`, "canonical 首参也不行（改的是共享窗口类）"],
+      [`let f = ${api};`, "函数指针引用"],
+      [`use windows::Win32::UI::WindowsAndMessaging::${api} as evil;`, "`use … as` 别名"],
+      [`use windows::Win32::UI::WindowsAndMessaging::${api};`, "无 as 导入本身也算出现"],
+      [`h.${api}(self::ensure_own(policy, own)?, index, value)`, "关联方法形态"],
+    ]) {
+      assert.equal(taskbarWriteViolations(snippet).length, 1, `${api}：${why} 必须点名：${snippet}`);
+    }
+    // 名字级规则只看代码：字符串/注释里的名字不是出现。
+    assert.deepEqual(taskbarWriteViolations(`let doc = "${api} 是类级写";`), [], `${api}：字符串里的名字不是出现`);
+    assert.deepEqual(taskbarWriteViolations(`// ${api}(hwnd(foreign), 0, 0)`), [], `${api}：注释里的名字不是出现`);
+  }
+
+  // 必须落在 blanket 一侧：canonical 首参被拒绝，且诊断是"一律禁用"——
+  // 如果它只是被塞进普通受核清单，canonical 首参会被放行（那就等于没修）。
+  for (const api of CLASS_WIDE_APIS) {
+    const violations = taskbarWriteViolations(`${api}(self::ensure_own(policy, own)?, index, value)`);
+    assert.equal(violations.length, 1, `${api}：canonical 首参必须被拒绝（类级写）`);
+    assert.match(violations[0], /一律禁用/, `${api} 必须由 blanket 规则点名，不是普通首参受核：${violations[0]}`);
+  }
+
+  // 邻居不受影响（防止"一刀切所有 Set*Class*Long*"式误伤）：首参受核的两个同族 API
+  // 仍是 canonical 放行、外来点名。
+  for (const api of ["SetWindowLongW", "SetWindowLongPtrW"]) {
+    assert.deepEqual(
+      taskbarWriteViolations(`${api}(self::ensure_own(policy, own)?, index, value)`),
+      [],
+      `${api} 仍是首参受核（canonical 首参放行）`,
+    );
+    assert.equal(taskbarWriteViolations(`${api}(hwnd(foreign), index, value)`).length, 1, `${api} 仍核第一实参`);
+  }
+
+  // 当前真实实现不碰类级写：完整清单下仍 0 违规。
+  assert.deepEqual(taskbarWriteViolations(read("src-tauri/src/taskbar_lyrics.rs")), [], "真实实现不碰类级写");
 });
 
 test("acceptance：锚点缺失会被点名（不是静默通过），SKIP 不算 PASS", async () => {
