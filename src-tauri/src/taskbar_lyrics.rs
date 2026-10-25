@@ -88,6 +88,29 @@ pub fn uia_container(class: &str, control_type: i32, shell_owned: bool, root: bo
     root || (shell_owned && matches!(control_type, 50033 | 50025 | 50032) && matches!(class, "Windows.UI.Input.InputSite.WindowClass" | "Taskbar.TaskbarFrameAutomationPeer" | "ReBarWindow32" | "WorkerW"))
 }
 
+/// XAML 任务栏宿主判据（纯逻辑，可脱窗单测）：Windows 11 把整条任务栏内容画在一个铺满栏体的
+/// XAML 子窗里，而**类名随系统版本变**（本机是 `Windows.UI.Composition.DesktopWindowContentBridge`，
+/// 另有版本用 `Windows.UI.Input.InputSite.WindowClass`）。按类名点名会在没见过的版本上退回经典
+/// `ReBarWindow32`——而在 XAML 任务栏上 ReBar 只剩任务列表那一条（本机 264×48），拿它当"栏体"
+/// 会让安全空白计算永远找不到空段（R47 的 `no_space` 根因）。
+///
+/// 所以只认只读结构，四条缺一不可：shell 自有进程、**可见**、**直接**子窗、客户区覆盖整条栏体。
+/// 全宽但不可见的 `Windows.UI.Core.CoreWindow`（本机 65535×65535）不是宿主；窄条 ReBar、
+/// 开始按钮、托盘也都不是——判据只看几何，未知类名一样适用，不需要往白名单里加名字。
+pub fn xaml_surface(shell_owned: bool, visible: bool, direct_child: bool, child_client: PixelRect, bar: PixelRect) -> bool {
+    direct_child && shell_owned && visible && bar.valid() && child_client.valid()
+        && child_client.x <= bar.x && child_client.y <= bar.y
+        && child_client.right() >= bar.right() && child_client.bottom() >= bar.bottom()
+}
+
+/// 父窗选择（纯逻辑，可脱窗单测）：**XAML 任务栏一律以栏体根为父**。宿主管的只是"整条栏体
+/// 由谁铺满"这件事——ReBar 在 XAML 栏上只剩任务列表那一条，把它当父窗等于把歌词塞进任务列表
+/// 的条带里，安全空白也随之按那条带算（R47 的 `no_space`）。经典任务栏才退到
+/// `ReBarWindow32`/`WorkerW`（ANYNC/TaskbarLyrics 的做法），都没有就用根。
+pub fn taskbar_parent(xaml_host: bool, legacy: Option<isize>, root: isize) -> isize {
+    if xaml_host { root } else { legacy.unwrap_or(root) }
+}
+
 pub fn verify_placement(target: &TargetSnapshot, actual_parent: isize, slot: PixelRect, actual_screen: PixelRect) -> Result<(), Reason> {
     let bar = target.client_screen;
     if actual_parent != target.parent.handle || !bar.valid() || !slot.valid() || !actual_screen.valid() || slot.x < 0 || slot.y < 0 || slot.right() > bar.width || slot.bottom() > bar.height { return Err(Reason::AttachFailed); }
@@ -344,6 +367,23 @@ mod native {
             Ok(shell)
         }
     }
+    /// XAML 任务栏宿主：在**直接子窗**里找那个铺满整条栏体的可见 shell 自有窗（判据走纯函数
+    /// `xaml_surface`）。只读枚举，不碰 Explorer 的任何状态。
+    fn xaml_host(root: HWND, shell_pid: u32, bar: PixelRect) -> Option<HWND> {
+        struct Search { root: HWND, pid: u32, bar: PixelRect, found: Option<HWND> }
+        unsafe extern "system" fn each(child: HWND, data: windows::Win32::Foundation::LPARAM) -> windows::core::BOOL {
+            let search = &mut *(data.0 as *mut Search);
+            if search.found.is_some() { return false.into(); }
+            let mut pid = 0; let _ = GetWindowThreadProcessId(child, Some(&mut pid));
+            let direct = GetParent(child).ok() == Some(search.root);
+            let visible = IsWindowVisible(child).as_bool();
+            let area = client_screen(child).unwrap_or(PixelRect { x: 0, y: 0, width: 0, height: 0 });
+            if xaml_surface(pid == search.pid, visible, direct, area, search.bar) { search.found = Some(child); false.into() } else { true.into() }
+        }
+        let mut search = Search { root, pid: shell_pid, bar, found: None };
+        unsafe { let _ = EnumChildWindows(Some(root), Some(each), windows::Win32::Foundation::LPARAM(&mut search as *mut Search as isize)); }
+        search.found
+    }
     fn client_screen(handle: HWND) -> Result<PixelRect, Reason> {
         unsafe {
             let mut rect = RECT::default(); GetClientRect(handle, &mut rect).map_err(|_| Reason::Stale)?;
@@ -373,11 +413,18 @@ mod native {
                 let mut appbar = APPBARDATA { cbSize: std::mem::size_of::<APPBARDATA>() as u32, hWnd: root, rc: info.rcMonitor, ..Default::default() };
                 if SHAppBarMessage(ABM_GETSTATE, &mut appbar) & ABS_AUTOHIDE as usize != 0 { return Err(Reason::AutoHide); }
                 for edge in 0..4 { appbar.uEdge = edge; if SHAppBarMessage(ABM_GETAUTOHIDEBAREX, &mut appbar) != 0 { return Err(Reason::AutoHide); } }
-                let xaml_taskbar = FindWindowExW(Some(root), None, w!("Windows.UI.Input.InputSite.WindowClass"), None).is_ok();
-                let parent = if xaml_taskbar { root } else {
-                    FindWindowExW(Some(root), None, w!("ReBarWindow32"), None).ok()
-                        .or_else(|| FindWindowExW(Some(root), None, w!("WorkerW"), None).ok()).unwrap_or(root)
-                };
+                let root_client = client_screen(root)?;
+                // 宿主选择：XAML 任务栏（整条栏体由一个 XAML 子窗铺满）→ 直接挂在栏体根上；
+                // 经典任务栏才退到 ReBarWindow32/WorkerW。R47 之前只按 InputSite 类名判断，
+                // 本机没有这个类名的 HWND，于是 ReBarWindow32 被当成"栏体"（本机 264×48），
+                // 安全空白永远算不出来 → no_space。
+                let host = xaml_host(root, root_id.pid, root_client);
+                let legacy = FindWindowExW(Some(root), None, w!("ReBarWindow32"), None).ok()
+                    .or_else(|| FindWindowExW(Some(root), None, w!("WorkerW"), None).ok())
+                    .map(|handle| handle.0 as isize);
+                let parent = hwnd(taskbar_parent(host.is_some(), legacy, root.0 as isize));
+                // 只留 debug 级（Info 级别下不落盘）：父窗选择的现场——排查 no_space 类问题的第一手。
+                log::debug!("任务栏父窗：root {} {:?}，XAML 宿主 {:?}，选定 {}", class(root), root_client, host.map(class), class(parent));
                 let parent_id = identity(parent)?;
                 if parent_id.pid != root_id.pid || (parent != root && GetAncestor(parent, GA_ROOT) != root) { return Err(Reason::ShellUnavailable); }
                 let context = GetWindowDpiAwarenessContext(parent); let own_context = GetWindowDpiAwarenessContext(hwnd(own.handle));

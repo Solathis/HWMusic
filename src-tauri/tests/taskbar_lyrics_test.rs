@@ -295,3 +295,97 @@ fn fix_self_window_guard_rejects_foreign_process_foreign_thread_and_dead_handle(
     assert!(!self_window(false, 7, 8, 7, 8), "已销毁的句柄必须拒");
     assert!(!self_window(true, 0, 8, 7, 8), "pid 0 不是本进程");
 }
+
+/// R47 真实几何夹具：本机 2026-10-25 单屏 1920×1080 任务栏的一手 UIA 观测
+/// （`.tmp/probe/uia-pids.json`，Explorer pid 10916 全部同进程）。21 个非容器节点里，
+/// 可交互控件只占 718–1203 与 1631–1920，中间 1203–1631 与左侧 0–718 是空白。
+/// 注意夹具里刻意保留两个**铺满一段**的占用块（MSTaskSwWClass 762–982、
+/// TrayNotifyWnd 1631–1920）——它们不是"空白"，只是把空白切断。
+fn measured_taskbar() -> (TargetSnapshot, Vec<PixelRect>) {
+    let mut bar = target();
+    bar.client_screen = rect(0, 1032, 1920, 48);
+    bar.monitor_rect = rect(0, 0, 1920, 1080);
+    let mut occupied = vec![
+        rect(718, 1032, 45, 48), rect(763, 1032, 44, 48), rect(807, 1032, 44, 48),
+        rect(851, 1032, 44, 48), rect(895, 1032, 44, 48), rect(939, 1032, 44, 48),
+        rect(983, 1032, 44, 48), rect(1027, 1032, 44, 48), rect(1071, 1032, 44, 48),
+        rect(1115, 1032, 44, 48), rect(1159, 1032, 44, 48),
+        rect(1631, 1032, 32, 48), rect(1663, 1032, 32, 48), rect(1695, 1032, 44, 48),
+        rect(1743, 1032, 24, 48), rect(1771, 1032, 24, 48), rect(1799, 1032, 28, 48),
+        rect(1835, 1032, 69, 48), rect(1908, 1032, 12, 48),
+        rect(1631, 1032, 289, 48),
+        rect(762, 1032, 220, 48),
+    ];
+    occupied.sort_unstable_by_key(|r| (r.x, r.width));
+    (bar, occupied)
+}
+
+#[test]
+fn measured_taskbar_with_real_blank_band_yields_a_slot_that_touches_no_button() {
+    let (bar, occupied) = measured_taskbar();
+    let slot = safe_slot(&bar, Some(&occupied)).expect("本机确有两段 ≥100 DIP 空白（0–718 与 1203–1631），必须能算出安全空白");
+    assert_eq!(slot, rect(8, 2, 702, 44), "取最宽空段（左侧 0–718）并保留 8 px 边距");
+    assert_eq!(slot.x + slot.width, 710);
+    assert!(slot.x + slot.width + 8 <= 718, "第一个真实按钮在 718，槽位必须留出完整 8 px 边距");
+    for button in occupied.iter().filter(|r| r.x >= 718) {
+        assert!(slot.x + slot.width <= button.x, "槽位不得压到任何真实控件：{button:?}");
+    }
+}
+
+/// 误把经典 `ReBarWindow32`（本机 264×48、随任务列表移动）当成"整条栏体"的后果：
+/// 那一条被任务列表容器铺满，安全空白算成 0 → `no_space`。这就是 R47 修复前的真实现象，
+/// 用它把"父窗选错必须失败关闭、不许硬塞"钉住。
+#[test]
+fn task_list_band_is_not_the_bar_so_a_missing_slot_fails_closed_with_no_space() {
+    let (mut bar, occupied) = measured_taskbar();
+    bar.client_screen = rect(718, 1032, 264, 48);
+    assert_eq!(safe_slot(&bar, Some(&occupied)), Err(Reason::NoSpace));
+}
+
+#[test]
+fn xaml_host_is_decided_by_structure_not_by_class_name() {
+    use huawei_music_desktop_lib::taskbar_lyrics::xaml_surface;
+    let bar = rect(0, 1032, 1920, 48);
+    assert!(xaml_surface(true, true, true, rect(0, 1032, 1920, 48), bar), "本机 Windows.UI.Composition.DesktopWindowContentBridge 铺满栏体");
+    assert!(xaml_surface(true, true, true, rect(0, 1032, 1921, 49), bar), "覆盖得比栏体还大也算铺满");
+    assert!(!xaml_surface(true, false, true, rect(0, 1032, 65535, 65535), bar), "全宽但不可见的 CoreWindow 不是宿主");
+    for narrow in [rect(718, 1032, 264, 48), rect(739, 1032, 45, 48), rect(1631, 1032, 289, 48)] {
+        assert!(!xaml_surface(true, true, true, narrow, bar), "只覆盖一段的窗（ReBar/开始/托盘）不是宿主：{narrow:?}");
+    }
+    assert!(!xaml_surface(false, true, true, rect(0, 1032, 1920, 48), bar), "非 shell 进程的大窗不是宿主");
+    assert!(!xaml_surface(true, true, false, rect(0, 1032, 1920, 48), bar), "孙窗不是直接子窗，不能当宿主");
+    assert!(!xaml_surface(true, true, true, rect(0, 1032, 0, 48), bar), "非法矩形失败关闭");
+    assert!(!xaml_surface(true, true, true, rect(0, 1032, 1920, 48), rect(0, 1032, 0, 0)), "栏体自身非法时失败关闭");
+}
+
+/// 父窗选择：宿主在就必须用栏体根；只有经典任务栏才退 ReBar/WorkerW。
+/// R47 的 `no_space` 正是这一条选错：本机是 XAML 任务栏但宿主类名换了，走了 ReBar 分支。
+#[test]
+fn parent_selection_prefers_the_bar_root_whenever_a_xaml_host_covers_it() {
+    use huawei_music_desktop_lib::taskbar_lyrics::taskbar_parent;
+    const ROOT: isize = 0x20072;
+    const REBAR: isize = 0x20010;
+    const WORKERW: isize = 0x88;
+    assert_eq!(taskbar_parent(true, Some(REBAR), ROOT), ROOT, "XAML 任务栏必须挂栏体根，不能挂任务列表条带");
+    assert_eq!(taskbar_parent(true, Some(WORKERW), ROOT), ROOT);
+    assert_eq!(taskbar_parent(true, None, ROOT), ROOT);
+    assert_eq!(taskbar_parent(false, Some(REBAR), ROOT), REBAR, "经典任务栏沿用 ReBarWindow32");
+    assert_eq!(taskbar_parent(false, Some(WORKERW), ROOT), WORKERW);
+    assert_eq!(taskbar_parent(false, None, ROOT), ROOT, "两个经典子窗都没有就用根");
+}
+
+/// 容器判定仍以"已知白名单 + 允许的 ControlType"为准，宽度不是放行理由：
+/// 全宽 Pane 只有类名已知才递归，全宽 Button 永不递归，窄的未知 Pane 也不会被自动打开，
+/// 非 shell 进程的节点一律保守占用。
+#[test]
+fn uia_container_boundaries_keep_width_out_of_the_decision() {
+    use huawei_music_desktop_lib::taskbar_lyrics::uia_container;
+    assert!(uia_container("ReBarWindow32", 50032, true, false), "Window 类型的已知容器可以递归");
+    assert!(uia_container("WorkerW", 50025, true, false), "Custom 类型的已知容器可以递归");
+    for kind in [50000, 50006, 50004, 50026] {
+        assert!(!uia_container("Taskbar.TaskbarFrameAutomationPeer", kind, true, false), "Button/Image/Edit/Group 即使类名已知也不递归（control type {kind}）");
+    }
+    assert!(!uia_container("FullWidthUnknownPane", 50033, true, false), "未知类名的全宽 Pane 仍整块占用，不按宽度开洞");
+    assert!(!uia_container("Windows.UI.Composition.DesktopWindowContentBridge", 50033, true, false), "宿主类名进的是父窗判据，不是 UIA 容器白名单");
+    assert!(!uia_container("Taskbar.TaskbarFrameAutomationPeer", 50033, false, false), "非 shell 进程仍保守占用");
+}
