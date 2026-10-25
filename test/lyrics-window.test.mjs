@@ -218,6 +218,22 @@ test("R44e 保存失败由 Rust 记账：saveError 翻成人话、retrySave 只�
   env.bridge.dispose();
 });
 
+test("R50 回归：保存失败之后**下一笔成功保存**会清掉旧的 saveError（不用重试也能自愈）", async () => {
+  const env = revisionBridge({ saveFailure: "settings_write_failed" });
+  await env.bridge.initialize();
+  await env.bridge.applyConfig({ locked: true });
+  await flushBridge();
+  assert.match(env.bridge.snapshot().saveError ?? "", /未保存/, "先造一个失败");
+
+  env.setFailure(null);
+  await env.bridge.applyConfig({ locked: false });
+  await flushBridge();
+  assert.equal(env.bridge.snapshot().saveError, null, "下一笔成功保存要把旧的失败提示清掉（R44e 的 settle 逻辑）");
+  assert.equal(env.bridge.snapshot().dirty, false, "落定之后不再是脏的");
+  assert.deepEqual(env.stored(), { ...DEFAULT_LYRICS_CONFIG, locked: false }, "盘上的就是最后这一份");
+  env.bridge.dispose();
+});
+
 test("R44c 取消初始化时迟到监听立即退订，重新挂载只有一套状态订阅", async () => {
   const gate = deferredBridge();
   let active = 0;
@@ -1516,56 +1532,71 @@ test("R45B 设置页：颜色选择器 + 恢复主题色（只写合法 hex，�
   assert.match(settings, /恢复主题色/, "要能一键回到主题色");
   assert.match(settings, /customColor/, "颜色写的是 customColor 字段（不是第二份颜色配置）");
   assert.match(settings, /isCustomColor/, "合法 hex 判定来自纯逻辑模块");
-  assert.match(settings, /aria-label="自定义歌词颜色"/, "颜色选择器要有可读的名称");
+  // R50：设置页上的这枚取色器现在是**播放器歌词**那一枚（桌面歌词的颜色只在桌面窗的外观菜单里改）
+  assert.match(settings, /aria-label="播放器歌词自定义颜色"/, "颜色选择器要有可读的名称");
   // 不允许在这里自己写 hex 正则（唯一真源在 lyrics-window.mjs）
   assert.doesNotMatch(settings, /0-9a-fA-F\]\{6\}|\[0-9a-f\]\{6\}/, "不许在页面里另抄一份 hex 正则");
 });
 
 /**
- * R46：桌面歌词窗自己的设置面。
+ * R50（brief 第 5 项）：桌面歌词设置恢复**原样式**——锚定齿轮的紧凑下拉菜单，不是整窗 `Sheet`。
  *
- * R45B 之前这里是一个 `DropdownMenu`：菜单在 160px 高的窗里根本装不下（样式 2 项 + 方向 2 项 +
- * 4 个复选框，`.tmp/probe/settings-lyrics.png` 抓到的是被窗口底边切断的菜单）。窗口只有 160px 高，
- * 任何"往下长"的浮层都必然被裁，所以改成**窗口之内**的一整面设置：Sheet 用窗口高度做上限，
- * 内容自己在里面滚，所有控件都够得着。
+ * R46 换 Sheet 的理由是"160px 高的窗里，往下长的浮层会被裁"。R50 撤销那个决定：菜单回到
+ * 齿轮上（`align="end" side="bottom"`），滚动交给官方 `DropdownMenuContent`——它自带
+ * `max-h-(--radix-dropdown-menu-content-available-height) overflow-y-auto`，窗口装不下时自己滚，
+ * 这里只补 `w-64`（触发点是一枚图标按钮，默认宽度 `w-(--radix-dropdown-menu-trigger-width)`
+ * 会窄到只剩 32px）与 `collisionPadding`（贴窗口边时留出可点的余量）。
  *
- * 顺带把颜色补上（brief 第 3 项）：原生 `type=color` + 「恢复主题色」，走的仍是
- * `customColor`/`isCustomColor` 这一条配置路（没有第二份存储）。
+ * 内容保持原样式：样式（透明/面板）单选、方向（横版/竖版）单选、四个复选框（模糊/缩放/弹簧/媒体按钮），
+ * 再增加"颜色"行（原生 `type=color` + 「恢复主题色」，仍走既有的 `customColor` 字段）。
+ * 四个测试锚点（`lyrics-appearance` / `lyrics-appearance-panel` / `lyrics-appearance-color` /
+ * `lyrics-appearance-color-reset`）全部保留——真浏览器守卫按它们开面板、改色、恢复。
  */
-test("R46 桌面歌词设置面：窗口内可滚动的 Sheet，含样式/方向/模糊/缩放/弹簧/媒体/颜色", () => {
+test("R50 桌面歌词设置面：齿轮 DropdownMenu（align=end/side=bottom），含样式/方向/四开关/颜色", () => {
   const source = read("src/renderer/LyricsWindow.tsx");
   const code = stripComments(source);
 
-  // 不再是被 160px 窗口裁掉的 DropdownMenu
-  assert.doesNotMatch(code, /DropdownMenu/, "旧的 DropdownMenu 设置面已删（它在 160px 高的窗里必被裁）");
-  assert.match(code, /from "\.\/components\/ui\/sheet"/, "设置面换成 shadcn 的 Sheet（弹层里可滚动，且是官方组件）");
-  assert.match(code, /<Sheet\b/, "要真的用 Sheet");
-  assert.match(code, /<SheetTrigger asChild>/, "外观按钮仍是触发点（asChild：不额外包一层）");
-  assert.match(code, /aria-label="桌面歌词外观"/, "触发按钮的无障碍名称不变");
-  assert.match(code, /data-testid="lyrics-appearance"/, "设置面要有测试锚点（浏览器守卫按它开面板）");
-  assert.match(code, /<SheetContent[^>]*max-h-\[100dvh\]/, "面板高度以窗口为上限（小窗里不往下长）");
-  assert.match(code, /data-testid="lyrics-appearance-scroll"/, "面板内部要有一个可滚动的正文区");
-  assert.match(code, /<ScrollArea[^>]*data-testid="lyrics-appearance-scroll"/,
-    "正文区用 shadcn ScrollArea（仓里的规矩：面板不许自搭 overflow 滚动容器，见 no-self-visual）");
-  assert.match(code, /from "\.\/components\/ui\/scroll-area"/, "ScrollArea 来自 components/ui");
-  assert.doesNotMatch(code, /overflow-[xy]-(?:auto|scroll)/, "不许在这里自搭滚动容器（页面级滚动根的例外集合里没有这个文件）");
-  assert.match(code, /min-h-0/, "滚动容器必须能收缩（flex 子项的默认 min-height:auto 会撑破窗口）");
+  // 不再是整窗 Sheet（R46 的决定已撤销）
+  assert.doesNotMatch(code, /components\/ui\/sheet/, "Sheet 原语从这个文件里删净");
+  assert.doesNotMatch(code, /<Sheet\b/, "不再用 Sheet");
+  assert.doesNotMatch(code, /ScrollArea/, "面板不再自搭 ScrollArea（滚动交回官方菜单内容体）");
+  assert.doesNotMatch(code, /overflow-[xy]-(?:auto|scroll)/, "不许在这里自搭滚动容器（面板的规矩见 no-self-visual）");
 
-  // 控件齐全（brief 点名的七类：样式、方向、模糊、缩放、弹簧、媒体、颜色）
+  // 齿轮 + 紧凑下拉
+  assert.match(code, /from "\.\/components\/ui\/dropdown-menu"/, "下拉菜单来自 shadcn 原语");
+  assert.match(code, /<DropdownMenu\b/, "要真的用 DropdownMenu");
+  assert.match(code, /<DropdownMenuTrigger asChild>/, "外观按钮仍是触发点（asChild：不额外包一层）");
+  assert.match(code, /<DropdownMenuContent[^>]*align="end"/, "锚定齿轮的右端（不再铺满整窗）");
+  assert.match(code, /<DropdownMenuContent[^>]*side="bottom"/, "往下开（齿轮在上方控件条里）");
+  assert.match(code, /<DropdownMenuContent[^>]*w-64/, "菜单自己定宽（默认跟着 32px 的图标按钮走，装不下文案）");
+  assert.match(code, /<DropdownMenuContent[^>]*collisionPadding=/, "贴窗口边时留出可点余量（小窗尤其要紧）");
+  assert.match(code, /aria-label="桌面歌词外观"/, "触发按钮的无障碍名称不变");
+  assert.match(code, /data-testid="lyrics-appearance"/, "设置面要有测试锚点（浏览器守卫按它开菜单）");
+  assert.match(code, /data-testid="lyrics-appearance-panel"/, "菜单内容体要有锚点");
+
+  // 控件齐全（样式、方向、模糊、缩放、弹簧、媒体、颜色）
   for (const label of ["透明", "面板", "横版", "竖版", "模糊", "缩放", "弹簧动画", "媒体按钮"]) {
     assert.ok(code.includes(label), `设置面必须包含「${label}」`);
   }
-  // 样式/方向是**按压态按钮**（在 160px 里比下拉菜单稳：菜单会被窗口底边裁掉）
-  assert.match(code, /aria-pressed=\{active\}/, "档位按钮是按压态开关（aria-pressed 可读）");
-  assert.match(code, /choiceButton\(config\.style === "clean",\s*"透明"/, "「透明」的按压态来自 config.style");
-  assert.match(code, /choiceButton\(config\.style === "panel",\s*"面板"/, "「面板」同理");
-  assert.match(code, /choiceButton\(config\.layout === "horizontal",\s*"横版"/, "「横版」的按压态来自 config.layout");
+  // 样式/方向是**单选**（菜单里的 radio group，不是一堆孤立复选）
+  assert.match(code, /<DropdownMenuRadioGroup/, "单选组来自 shadcn 原语");
+  assert.match(code, /<DropdownMenuRadioItem/, "单选项目来自 shadcn 原语");
+  for (const testid of ["lyrics-style-clean", "lyrics-style-panel", "lyrics-layout-horizontal", "lyrics-layout-vertical"]) {
+    assert.ok(code.includes(testid), `单选项目保留稳定锚点 ${testid}`);
+  }
   assert.match(code, /configure\(\{ style/, "样式走既有 configure 窄命令");
   assert.match(code, /configure\(\{ layout/, "方向走既有 configure 窄命令");
   assert.match(code, /config\.mode === "taskbar"/, "任务栏模式仍禁竖版（Rust 侧强制 horizontal）");
+  // 四个复选框（开关仍用 shadcn Switch，运行时 testid 与之前一致）
+  assert.match(code, /data-testid=\{`lyrics-window-\$\{key\}`\}/, "开关的 testid 由 key 生成（运行时仍是 lyrics-window-<key>）");
+  for (const key of ["enableBlur", "enableScale", "enableSpring", "showControls"]) {
+    assert.ok(code.includes(`["${key}", `), `四个开关保留 ${key}`);
+  }
 
-  // 颜色：原生取色器 + 恢复主题色，只写合法的 #RRGGBB（判定来自纯逻辑模块）
-  assert.match(code, /type="color"/, "设置面要有原生颜色选择器");
+  // 颜色行：原生取色器 + 恢复主题色，只写合法的 #RRGGBB（判定来自纯逻辑模块）
+  assert.match(code, /data-testid="lyrics-appearance-color"/, "取色器锚点保留");
+  assert.match(code, /data-testid="lyrics-appearance-color-reset"/, "恢复主题色锚点保留");
+  assert.match(code, /type="color"/, "原生颜色输入");
   assert.match(code, /aria-label="自定义歌词颜色"/, "取色器要有可读名称");
   assert.match(code, /恢复主题色/, "要能一键回到主题色");
   assert.match(code, /isCustomColor/, "合法 hex 判定来自 lyrics-window.mjs（页面不另抄正则）");
@@ -1573,4 +1604,29 @@ test("R46 桌面歌词设置面：窗口内可滚动的 Sheet，含样式/方向
   assert.doesNotMatch(code, /0-9a-fA-F\]\{6\}|\[0-9a-f\]\{6\}/, "不许在这里另抄一份 hex 正则");
   assert.doesNotMatch(code, /localStorage|sessionStorage/, "设置面不许自建存储（落盘仍由 Rust 拥有）");
   assert.doesNotMatch(code, /style=\{\{/, "不许内联视觉样式");
+});
+
+/**
+ * R50（brief 第 3 项）：透明桌面歌词的**可读性衬底**。
+ *
+ * 桌面模式 + `style=clean` 时窗里没有任何衬底：深色主题的白字、近白图标浮在**白色桌面**上就看不清
+ * （浅色主题的黑字浮在深色桌面上同理）。衬底必须是令牌（`bg-background/60`），
+ * 不许写裸色值、不许自绘一层 div——所以它挂在根节点上，同时覆盖控件与歌词。
+ *
+ * `panel` 不加（Card 自带背景），`mode=taskbar` 不加（要透出系统任务栏）。
+ * 根节点留 `data-lyrics-scrim` 给浏览器守卫当判据。
+ */
+test("R50 clean+desktop 的令牌衬底：bg-background/60 + data-lyrics-scrim，panel/任务栏不加", () => {
+  const code = stripComments(read("src/renderer/LyricsWindow.tsx"));
+  assert.match(code, /data-lyrics-scrim=/, "根节点要有衬底锚点（守卫按它判有没有衬底）");
+  assert.match(code, /bg-background\/60/, "衬底用设计令牌（不写裸色值）");
+  assert.match(code, /config\.mode === "desktop" && config\.style === "clean"/,
+    "只有 桌面模式 + clean 才加衬底（面板已有 Card 背景；任务栏要透出系统栏）");
+  assert.match(code, /cn\(/, "条件类名走 cn（不拼字符串）");
+  assert.doesNotMatch(code, /bg-black|bg-white|#[0-9a-fA-F]{3,8}\b/, "不写裸色值");
+  // 衬底挂在既有根节点上：不另起一层 div（否则控件条与歌词区一定会漏掉一处）
+  const rootAt = code.indexOf("<div\n      ref={stageRef}");
+  const rootTag = rootAt === -1 ? "" : code.slice(rootAt, code.indexOf(">", rootAt) + 1);
+  assert.match(rootTag, /data-lyrics-scrim=/, "衬底锚点就在根节点上（不另起一层 div）");
+  assert.match(rootTag, /data-testid="lyrics-window"/, "就是那个既有的根节点");
 });

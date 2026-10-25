@@ -27,16 +27,23 @@ export interface AmllLyricsPanelProps {
   /** 状态机里的跳转信号：变了就通知进度泵（200ms 窗口在 lyric-sync 里） */
   seekGeneration: number
   /**
+   * 颜色令牌（R50）：`foreground` / `muted` / `primary` / `contrast`。
+   *
+   * 写进根节点的 `data-lyrics-color`，真正的颜色变量映射只在 `amll-theme.css`（唯一接线点）。
+   * 值来自**播放器歌词**自己那份配置（`playerLyrics`），不再是桌面歌词窗的 `config.color`
+   * ——两边各有各的颜色。
+   */
+  color?: string
+  /**
    * 自定义歌词颜色（R46）：`#RRGGBB` 或空串。
    *
-   * 空串 = 用设计令牌（`amll-theme.css` 的 `[data-lyrics-color]`）；非空时由适配层的
-   * `applyCustomColor` 在**这一面**的容器上做一次 scoped 变量覆盖——与桌面歌词窗走的是同一个
-   * 函数、同一个配置字段（`lyrics.config.customColor`），不存在第二份颜色状态。
+   * 空串 = 用上面那个令牌；非空时由适配层的 `applyCustomColor` 在**这一面**的容器上做一次
+   * scoped 变量覆盖——与桌面歌词窗走的是同一个函数，但值来自各自的配置（R50 起不再共用）。
    */
   customColor?: string
 }
 
-export function AmllLyricsPanel({ runtime, lines, playing, seekGeneration, customColor = "" }: AmllLyricsPanelProps) {
+export function AmllLyricsPanel({ runtime, lines, playing, seekGeneration, color = "foreground", customColor = "" }: AmllLyricsPanelProps) {
   const player = runtime.player
   const [frame, setFrame] = useState({ time: 0, isSeeking: false })
   const syncRef = useRef<ReturnType<typeof createLyricSync> | null>(null)
@@ -85,7 +92,12 @@ export function AmllLyricsPanel({ runtime, lines, playing, seekGeneration, custo
   }, [customColor])
 
   return (
-    <div ref={stageRef} className="amll-lyrics-stage absolute inset-0 isolate" data-testid="amll-lyrics-panel">
+    <div
+      ref={stageRef}
+      className="amll-lyrics-stage absolute inset-0 isolate"
+      data-testid="amll-lyrics-panel"
+      data-lyrics-color={color}
+    >
       <LyricPlayer
         lyricLines={playerLines}
         currentTime={frame.time}

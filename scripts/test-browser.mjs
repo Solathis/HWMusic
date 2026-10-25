@@ -121,7 +121,20 @@ const songs = Array.from({ length: 36 }, (_, index) => ({
 }));
 let desktopConfig = { ...DEFAULT_LYRICS_CONFIG };
 let desktopRevision = 0;
-let settingsData = {};
+/**
+ * R50：普通 settings 文档（settings:get / settings:set 的夹具后端）。
+ *
+ * 存在 localStorage 里是为了"重载后仍然保留"那一项：真的重新加载页面之后，夹具后端剩下什么
+ * 就取决于这里——扫描用的模块内存会被重建，localStorage 不会。
+ */
+let settingsData = (() => {
+  try { return JSON.parse(localStorage.getItem("guard-settings") || "{}") || {}; } catch { return {}; }
+})();
+const persistSettings = () => localStorage.setItem("guard-settings", JSON.stringify(settingsData));
+/** R50：每次 settings:set 的补丁与时刻（"播放器歌词走的是普通 settings 键"按它判）。 */
+const settingsWrites = [];
+/** R50：settings:set 的夹具行为（拒绝几次）——写盘失败要回滚，这一项得能造出来。 */
+let settingsSetPlan = { failTimes: 0 };
 let dragCalls = 0;
 /** R45B：官方 startResizeDragging 的方向记录（缩放手柄"真的调了官方 API"按它判）。 */
 const resizeCalls = [];
@@ -188,7 +201,17 @@ mockIPC(async (command, args) => {
   if (command === "core_call") {
     switch (args.channel) {
       case "settings:get": return { settings: { schemaVersion: 1, data: settingsData } };
-      case "settings:set": settingsData = { ...settingsData, ...args.payload.patch }; return { settings: { schemaVersion: 1, data: settingsData } };
+      case "settings:set": {
+        const patch = args.payload?.patch ?? {};
+        settingsWrites.push({ patch: JSON.parse(JSON.stringify(patch)), atMs: Math.round(performance.now()) });
+        if (settingsSetPlan.failTimes > 0) {
+          settingsSetPlan = { ...settingsSetPlan, failTimes: settingsSetPlan.failTimes - 1 };
+          throw { kind: "internal", message: "守卫夹具：这一次设置写入被故意拒绝" };
+        }
+        settingsData = { ...settingsData, ...patch };
+        persistSettings();
+        return { settings: { schemaVersion: 1, data: settingsData } };
+      }
       case "library:favorites": return { songs, hasMore: false, skipped: 0, reportedTotal: songs.length };
       case "library:playlists": return { playlists: GUARD_PLAYLISTS, hasMore: false };
       case "library:playlist-detail": {
@@ -336,6 +359,19 @@ function Guard() {
       queueLength: () => runtime.player.snapshot().entries.length,
       pause: () => runtime.player.pause(),
       desktopConfig: () => desktopConfig,
+      /** R50：settings 夹具后端（播放器歌词那一份）。 */
+      settingsData: () => JSON.parse(JSON.stringify(settingsData)),
+      /** R50：每次 settings:set 的补丁（"播放器歌词是普通键"按它判）。 */
+      settingsWrites: () => settingsWrites.map((entry) => JSON.parse(JSON.stringify(entry))),
+      /** R50：把 settings 夹具清空（含 localStorage——重载后不该被上一项污染）。 */
+      resetSettings: () => {
+        settingsData = {};
+        settingsWrites.length = 0;
+        settingsSetPlan = { failTimes: 0 };
+        try { localStorage.removeItem("guard-settings"); } catch {}
+      },
+      /** R50：让接下来 N 次 settings:set 被拒绝（写盘失败 → 回滚）。 */
+      setSettingsPlan: (patch) => { settingsSetPlan = { ...settingsSetPlan, ...(patch ?? {}) }; },
       async configureDesktop(patch) {
         const { coreLyricsConfigure } = await import("../../src/renderer/host-api.ts");
         return coreLyricsConfigure(patch);
@@ -763,6 +799,49 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
     Boolean(closeGeometry) && closeGeometry.clickable && !closeGeometry.overlapsControls
       && Math.abs(closeGeometry.center - closeGeometry.viewportCenter) <= 2 && closeGeometry.top <= 16,
     JSON.stringify(closeGeometry));
+
+  /**
+   * R50（brief 第 1 项）：传输组只剩 上一首 → 播放 → 下一首，歌词开关在**下方工具行**尾部。
+   *
+   * 量几何而不是标记：开关的中心既不许落在"播放与下一首之间"，也不许落在传输行的高度带里；
+   * 它自己约 32px（与音量/模式同档），并且与音量条/播放模式同一条水平线。
+   * 「播放/下一首相邻」用"这段横带里除了它们自己没有任何其它可见按钮"来判。
+   */
+  const stageToggleGeometry = await stage.evaluate((element) => {
+    const toggle = element.querySelector('[data-testid="stage-lyrics-toggle"]');
+    const previous = element.querySelector('button[aria-label="上一首"]');
+    const play = element.querySelector('button[aria-label="播放"], button[aria-label="暂停"]');
+    const next = element.querySelector('button[aria-label="下一首"]');
+    const mode = element.querySelector('button[aria-label^="播放模式："]');
+    const volume = element.querySelector('[role="slider"][aria-label="音量"]');
+    if (!toggle || !previous || !play || !next || !mode || !volume) return { ok: false, missing: true };
+    const rect = (node) => node.getBoundingClientRect();
+    const center = (r) => ({ x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) });
+    const t = rect(toggle), p = rect(previous), pl = rect(play), n = rect(next), m = rect(mode), v = rect(volume);
+    const tc = center(t), plc = center(pl), nc = center(n), mc = center(m), vc = center(v);
+    const betweenPlayAndNext = tc.x > plc.x && tc.x < nc.x;
+    const inTransportRow = Math.abs(tc.y - plc.y) <= pl.height / 2;
+    const rowBelow = tc.y > plc.y;
+    /** 传输组里不许夹着别的按钮：播放与下一首之间的那条横带里，除它们自己没有可见按钮。 */
+    const intruders = [...element.querySelectorAll("button")]
+      .filter((node) => {
+        const r = rect(node);
+        const c = center(r);
+        return r.width > 0 && c.y >= pl.top && c.y <= pl.bottom && c.x > plc.x && c.x < nc.x;
+      })
+      .filter((node) => node !== play && node !== next)
+      .map((node) => node.getAttribute("aria-label") ?? ((node.textContent ?? "").trim() || node.tagName));
+    return {
+      ok: !betweenPlayAndNext && !inTransportRow && rowBelow
+        && Math.abs(t.width - 32) <= 2 && Math.abs(t.height - 32) <= 2
+        && Math.abs(tc.y - mc.y) <= 2 && Math.abs(tc.y - vc.y) <= 2 && tc.x > mc.x
+        && plc.x < nc.x && intruders.length === 0,
+      size: { width: Math.round(t.width), height: Math.round(t.height) },
+      toggle: tc, previous: center(p), play: plc, next: nc, mode: mc, volume: vc,
+      betweenPlayAndNext, inTransportRow, rowBelow, intruders,
+    };
+  });
+  add("playback-stage-lyrics-toggle-tool-row", stageToggleGeometry.ok, JSON.stringify(stageToggleGeometry));
 
   await stage.getByRole("button", { name: /^播放模式：/ }).click();
   const menu = page.locator('[role="menu"]').first();
@@ -1875,14 +1954,16 @@ export async function checkDesktopInteraction(page, guardDir, add) {
 }
 
 /**
- * R46：桌面歌词窗自己的设置面（外观面板）。
+ * R50（brief 第 5 项）：桌面歌词窗自己的设置面回到**齿轮上的紧凑下拉菜单**（R46 的整窗 Sheet 已撤销）。
  *
- * 钉三件事，每一件都是 R45B 那个 DropdownMenu 做不到的：
- * 1. **装得下**：面板被窗口高度约束（`max-h-[100dvh]`），窗口只有 160px 高时面板也不许长到窗口外；
+ * 钉四件事：
+ * 1. **装得下**：菜单不铺满整窗，溢出时由官方 `DropdownMenuContent` 自己滚，不长出窗口；
  * 2. **够得着**：样式/方向/模糊/缩放/弹簧/媒体/颜色**每一个控件**都能滚进视口、命中的是它自己
  *    （不是被别的元素盖住、也不是被容器裁掉）。960×160 与 320×620 两个尺寸都量；
- * 3. **改得动**：取色器写进 `customColor`（一条窄 configure 命令）、关掉面板再打开还在、
- *    「恢复主题色」把覆盖撤回设计令牌，而且歌词像素真的跟着变（桌面歌词窗这一面）。
+ * 3. **锚定齿轮**：菜单贴在齿轮的右端与下方（`align=end` / `side=bottom`），不再遮住整窗；
+ * 4. **改得动**：取色器写进 `customColor`（一条窄 configure 命令）、在菜单里点开关或按取色器
+ *    不会把菜单意外关掉、关掉再打开还在、「恢复主题色」把覆盖撤回设计令牌，
+ *    而且歌词像素真的跟着变（桌面歌词窗这一面）。
  */
 export async function checkDesktopLyricsSettings(page, guardDir, add) {
   const desktop = page.getByTestId("lyrics-window");
@@ -1915,32 +1996,56 @@ export async function checkDesktopLyricsSettings(page, guardDir, add) {
     const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
     return { selector, found: true, inViewport, clickable: Boolean(hit && (node === hit || node.contains(hit))) };
   }), selectors);
-  const panelGeometry = () => page.evaluate(() => {
-    const panel = document.querySelector('[data-testid="lyrics-appearance-panel"]');
-    const root = document.querySelector('[data-testid="lyrics-appearance-scroll"]');
-    // shadcn ScrollArea 的滚动发生在 radix 的 viewport 上（root 自己是 overflow:hidden）
-    const viewport = root?.querySelector('[data-slot="scroll-area-viewport"]') ?? root;
-    if (!panel || !viewport) return null;
-    const rect = panel.getBoundingClientRect();
-    const scrollStyle = getComputedStyle(viewport);
+  const menuGeometry = () => page.evaluate(() => {
+    const menu = document.querySelector('[data-testid="lyrics-appearance-panel"]');
+    const gear = document.querySelector('[data-testid="lyrics-appearance"]');
+    if (!menu || !gear) return null;
+    const rect = menu.getBoundingClientRect();
+    const trigger = gear.getBoundingClientRect();
+    const style = getComputedStyle(menu);
     return {
-      panel: { top: Math.round(rect.top), bottom: Math.round(rect.bottom), left: Math.round(rect.left), right: Math.round(rect.right) },
+      menu: { top: Math.round(rect.top), bottom: Math.round(rect.bottom), left: Math.round(rect.left),
+        right: Math.round(rect.right), width: Math.round(rect.width), height: Math.round(rect.height) },
+      trigger: { top: Math.round(trigger.top), bottom: Math.round(trigger.bottom), right: Math.round(trigger.right) },
       fits: rect.top >= -1 && rect.left >= -1 && rect.bottom <= innerHeight + 1 && rect.right <= innerWidth + 1,
-      /** 内容真的溢出时必须由它自己滚（不溢出时"不滚"是对的，不是缺陷）。 */
-      overflowing: viewport.scrollHeight > viewport.clientHeight,
-      scrollable: /auto|scroll/.test(scrollStyle.overflowY),
+      /** `align="end"`：菜单右端贴着齿轮右端（可能因避让窗口左移一点）。 */
+      anchoredRight: Math.abs(rect.right - trigger.right) <= 12,
+      /** `side="bottom"`（空间不够时 radix 会翻到上面，两档都算锚定）。 */
+      anchoredVertical: rect.top >= trigger.bottom - 2 || rect.bottom <= trigger.top + 2,
+      /** 不再铺满整窗（R46 的 Sheet 是整高右侧面）。 */
+      coversWindow: rect.width >= innerWidth - 8 && rect.height >= innerHeight - 8,
+      overflowing: menu.scrollHeight > menu.clientHeight + 1,
+      scrollable: /auto|scroll/.test(style.overflowY),
       viewport: { width: innerWidth, height: innerHeight },
     };
   });
-  const openPanel = async () => {
+  const openMenu = async () => {
     await desktop.getByTestId("lyrics-appearance").click();
     await page.getByTestId("lyrics-appearance-panel").waitFor();
     await page.waitForTimeout(250);
   };
-  const closePanel = async () => {
+  const closeMenu = async () => {
     await page.keyboard.press("Escape");
     await page.getByTestId("lyrics-appearance-panel").waitFor({ state: "detached" });
   };
+  /**
+   * R50：在菜单里"点一下"不该把菜单关掉（样式/方向是单选项目，选完会关——那是菜单的正常语义；
+   * 开关与取色器不是菜单项，点它们必须留在原地，用户才能连着改两项）。
+   */
+  const menuSurvives = async (selector, { withClick = true } = {}) => page.evaluate(({ target, click }) => new Promise((resolve) => {
+    const node = document.querySelector(target);
+    if (!node) { resolve({ ok: false, reason: "missing" }); return; }
+    const rect = node.getBoundingClientRect();
+    const at = { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
+      bubbles: true, cancelable: true, pointerId: 1, isPrimary: true, pointerType: "mouse", button: 0 };
+    node.dispatchEvent(new PointerEvent("pointerdown", at));
+    node.dispatchEvent(new MouseEvent("mousedown", at));
+    node.dispatchEvent(new PointerEvent("pointerup", at));
+    node.dispatchEvent(new MouseEvent("mouseup", at));
+    // 原生取色器的 click 会尝试弹系统取色框（headless 下无意义），所以只在开关上补 click
+    if (click) node.dispatchEvent(new MouseEvent("click", at));
+    setTimeout(() => resolve({ ok: Boolean(document.querySelector('[data-testid="lyrics-appearance-panel"]')) }), 200);
+  }), { target: selector, click: withClick });
   /** 原生取色器：走 React 认的原生 value setter + input 事件（直接改 .value 会被 React 的 tracker 吞掉）。 */
   const setColor = (value) => page.locator('[data-testid="lyrics-appearance-color"]').evaluate((input, next) => {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
@@ -1965,7 +2070,7 @@ export async function checkDesktopLyricsSettings(page, guardDir, add) {
     await page.setViewportSize(viewport);
     await page.evaluate(() => window.__guard.desktopDocument());
     await page.waitForTimeout(600);
-    await openPanel();
+    await openMenu();
     /**
      * 先选一个自定义颜色再扫：这样「恢复主题色」是**可用**的（没选过色时它是 disabled）。
      * disabled 的控件拿不到命中测试——那不是"够不着"，是"这一档没有意义"；
@@ -1973,70 +2078,89 @@ export async function checkDesktopLyricsSettings(page, guardDir, add) {
      */
     await setColor("#00dd00");
     await page.waitForFunction(() => window.__guard.desktopConfig().customColor === "#00dd00");
-    const geometry = await panelGeometry();
+    const geometry = await menuGeometry();
     const controls = await reachability(CONTROLS);
-    add(`r46-lyrics-settings-reachable-${label}`,
-      Boolean(geometry) && geometry.fits && (!geometry.overflowing || geometry.scrollable)
+    add(`r50-lyrics-menu-reachable-${label}`,
+      Boolean(geometry) && geometry.fits && !geometry.coversWindow && (!geometry.overflowing || geometry.scrollable)
         && controls.length === CONTROLS.length && controls.every((entry) => entry.found && entry.inViewport && entry.clickable),
       JSON.stringify({ geometry, missing: controls.filter((entry) => !entry.found).map((entry) => entry.selector),
         unreachable: controls.filter((entry) => entry.found && !(entry.inViewport && entry.clickable)) }));
-    await page.screenshot({ path: path.join(guardDir, `r46-lyrics-settings-${label}.png`) });
+    await page.screenshot({ path: path.join(guardDir, `r50-lyrics-menu-${label}.png`) });
     if (label === "320x620") {
-      // 面板在小窗里也必须装得下（不是"能撑出窗口靠 overflow 藏起来"）
-      add("r46-lyrics-settings-small-window-bounded", Boolean(geometry) && geometry.panel.bottom <= 621 && geometry.panel.right <= 321,
-        JSON.stringify(geometry?.panel));
+      // 菜单在小窗里也必须装得下（不是"撑出窗口靠 overflow 藏起来"）
+      add("r50-lyrics-menu-small-window-bounded",
+        Boolean(geometry) && geometry.fits && geometry.menu.bottom <= 621 && geometry.menu.right <= 321,
+        JSON.stringify(geometry?.menu));
     }
     // 「恢复主题色」真的能按：按完回到设计令牌（两个尺寸各一次）
     await page.getByTestId("lyrics-appearance-color-reset").click();
     await page.waitForFunction(() => window.__guard.desktopConfig().customColor === "");
-    await closePanel();
+    await closeMenu();
   }
 
-  // 控件真的改配置（样式/方向/开关都走既有窄命令）
+  // 锚定齿轮、不铺满整窗：菜单贴着齿轮的右端与下方（截图对照）
   await page.setViewportSize({ width: 960, height: 160 });
   await page.evaluate(() => window.__guard.desktopDocument());
-  await page.waitForTimeout(500);
-  await openPanel();
+  await page.waitForTimeout(400);
+  await openMenu();
+  const anchored = await menuGeometry();
+  add("r50-lyrics-menu-anchored",
+    Boolean(anchored) && anchored.fits && anchored.anchoredRight && anchored.anchoredVertical && !anchored.coversWindow,
+    JSON.stringify(anchored));
+  // 在菜单里点一下开关 / 按一下取色器，菜单都得留着（否则"改两项"要先关再开）
+  const switchSurvives = await menuSurvives('[data-testid="lyrics-window-enableSpring"]');
+  const colorSurvives = await menuSurvives('[data-testid="lyrics-appearance-color"]', { withClick: false });
+  add("r50-lyrics-menu-stays-open", switchSurvives.ok && colorSurvives.ok,
+    JSON.stringify({ switch: switchSurvives, color: colorSurvives }));
+  await closeMenu();
+
+  // 控件真的改配置（样式/方向是单选项目：选完菜单会关上，所以每次重新打开；开关留在原地）
+  await page.getByTestId("lyrics-appearance").click();
+  await page.getByTestId("lyrics-appearance-panel").waitFor();
   await page.getByTestId("lyrics-style-panel").click();
+  await page.getByTestId("lyrics-appearance-panel").waitFor({ state: "detached" });
+  await openMenu();
   await page.getByTestId("lyrics-layout-vertical").click();
+  await page.getByTestId("lyrics-appearance-panel").waitFor({ state: "detached" });
+  await openMenu();
   await page.getByTestId("lyrics-window-enableBlur").click();
   await page.waitForFunction(() => {
     const config = window.__guard.desktopConfig();
     return config.style === "panel" && config.layout === "vertical" && config.enableBlur === false;
-  });
+  }, undefined, { timeout: 10_000 });
   const applied = await page.evaluate(() => {
     const config = window.__guard.desktopConfig();
     const stage = document.querySelector('[data-testid="lyrics-window"]');
     return { style: config.style, layout: config.layout, enableBlur: config.enableBlur,
       attrStyle: stage?.getAttribute("data-lyrics-style"), attrLayout: stage?.getAttribute("data-lyrics-layout") };
   });
-  add("r46-lyrics-settings-applies", applied.style === "panel" && applied.layout === "vertical"
+  add("r50-lyrics-menu-applies", applied.style === "panel" && applied.layout === "vertical"
     && applied.enableBlur === false && applied.attrStyle === "panel" && applied.attrLayout === "vertical",
   JSON.stringify(applied));
   await configure({ style: "clean", layout: "horizontal", enableBlur: true });
-  await closePanel();
+  await closeMenu();
   await page.waitForTimeout(400);
 
-  // 颜色：取色器 → customColor（一条窄命令）→ 关掉面板歌词像素变绿 → 再打开还是那个色 → 恢复主题色
-  await openPanel();
+  // 颜色：取色器 → customColor（一条窄命令）→ 关掉菜单歌词像素变绿 → 再打开还是那个色 → 恢复主题色
+  await openMenu();
   await setColor("#00dd00");
   await page.waitForFunction(() => window.__guard.desktopConfig().customColor === "#00dd00");
   const storedColor = await page.evaluate(() => window.__guard.desktopConfig().customColor);
-  await closePanel();
+  await closeMenu();
   await paintDesktop();
-  const customInk = await inkContrast(page, activeLine, path.join(guardDir, "r46-lyrics-settings-color-custom.png"));
-  add("r46-lyrics-settings-color-roundtrip", storedColor === "#00dd00" && customInk.changed > 40
+  const customInk = await inkContrast(page, activeLine, path.join(guardDir, "r50-lyrics-menu-color-custom.png"));
+  add("r50-lyrics-menu-color-roundtrip", storedColor === "#00dd00" && customInk.changed > 40
     && customInk.inkRgb !== null && customInk.inkRgb[1] > customInk.inkRgb[0] + 40 && customInk.inkRgb[1] > customInk.inkRgb[2] + 40,
   JSON.stringify({ storedColor, ink: customInk.inkRgb, changed: customInk.changed }));
 
-  await openPanel();
+  await openMenu();
   const reopenedColor = await page.locator('[data-testid="lyrics-appearance-color"]').inputValue();
   await page.getByTestId("lyrics-appearance-color-reset").click();
   await page.waitForFunction(() => window.__guard.desktopConfig().customColor === "");
-  await closePanel();
+  await closeMenu();
   await paintDesktop();
-  const restoredInk = await inkContrast(page, activeLine, path.join(guardDir, "r46-lyrics-settings-color-restored.png"));
-  add("r46-lyrics-settings-color-reset",
+  const restoredInk = await inkContrast(page, activeLine, path.join(guardDir, "r50-lyrics-menu-color-restored.png"));
+  add("r50-lyrics-menu-color-reset",
     reopenedColor.toLowerCase() === "#00dd00"
       && await page.evaluate(() => window.__guard.desktopConfig().customColor) === ""
       && restoredInk.changed > 40
@@ -2049,6 +2173,51 @@ export async function checkDesktopLyricsSettings(page, guardDir, add) {
   await page.waitForTimeout(500);
 }
 
+/** R50：打开 设置 → 歌词（外壳里那一条真实路径）。 */
+async function openPlayerLyricsSettings(page) {
+  const stage = page.getByTestId("playback-stage");
+  if (await stage.count()) {
+    await stage.getByRole("button", { name: "收起歌词", exact: true }).click();
+    await stage.waitFor({ state: "detached" });
+  }
+  if (await page.getByTestId("sidebar-search-rail").count()) await page.getByTestId("sidebar-search-rail").click();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByTestId("settings-page").waitFor();
+  await page.getByRole("tab", { name: "歌词", exact: true }).click();
+  await page.locator("#player-lyrics-custom-color").waitFor();
+}
+
+/** R50：在设置页里写下播放器歌词的自定义颜色（原生取色器路径：value setter + input 事件）。 */
+async function typePlayerLyricsColor(page, value) {
+  await page.locator("#player-lyrics-custom-color").evaluate((input, next) => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+    setter.call(input, next);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }, value);
+}
+
+/**
+ * R50：把**播放器歌词**的自定义颜色写成 `value`（`""` = 恢复主题色），走设置页的真实路径。
+ *
+ * 为什么不用 `configureDesktop`：R50 起主窗面板的颜色来自**普通 settings 键** `playerLyrics`，
+ * 与桌面窗那份 Rust 配置不再是同一份。要让主窗像素变，只能通过用户真正走的那条路：
+ * 设置页 → `settings:set` → `usePlayerLyrics` 的乐观更新。
+ */
+async function setPlayerLyricsColor(page, value) {
+  await openPlayerLyricsSettings(page);
+  if (value === "") {
+    const reset = page.getByTestId("settings-page").getByRole("button", { name: "恢复主题色", exact: true });
+    // 没选过色时「恢复主题色」是 disabled——那时本来就是令牌色，不用点
+    if (await reset.isEnabled()) await reset.click();
+    await page.waitForFunction(() => !window.__guard.settingsData().playerLyrics?.customColor);
+  } else {
+    await typePlayerLyricsColor(page, value);
+    await page.waitForFunction((next) => window.__guard.settingsData().playerLyrics?.customColor === next, value);
+  }
+  await page.getByRole("button", { name: "我的收藏", exact: true }).click();
+}
+
 /**
  * R46：主窗沉浸页的**逐字着色**与**自定义颜色**（与桌面歌词窗同一份适配层）。
  *
@@ -2056,7 +2225,10 @@ export async function checkDesktopLyricsSettings(page, guardDir, add) {
  * 1. 主窗面板同样把行级 LRC 推导成逐字词（`words.length > 1`，一个字一个 span）——
  *    R45B 只接了桌面窗，同一首歌在两个面上差一代；
  * 2. 逐字高亮**真的在动**：同一条当前行在两个播放时刻的像素必须变（不是只有 DOM 里有 span）；
- * 3. 自定义颜色两面都生效：沉浸页像素变绿 → 恢复主题色后回到令牌色。
+ * 3. 自定义颜色生效：沉浸页像素变绿 → 恢复主题色后回到令牌色。
+ *
+ * R50 改了第 3 项的来源：颜色不再是桌面歌词那份配置（`configureDesktop({customColor})`），
+ * 而是**播放器歌词**自己的 settings 键——所以驱动方式换成"设置页 → 取色器 → 打开舞台再看像素"。
  */
 export async function checkImmersiveKaraokeAndColor(page, guardDir, add) {
   const configure = (patch) => page.evaluate((next) => window.__guard.configureDesktop(next), patch);
@@ -2064,6 +2236,7 @@ export async function checkImmersiveKaraokeAndColor(page, guardDir, add) {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.evaluate(() => { document.documentElement.className = "light"; });
   await configure({ ...DESKTOP_BASELINE });
+  await page.evaluate(() => window.__guard.resetSettings());
   await page.evaluate(() => window.__guard.restoreLyrics());
   await page.evaluate(() => window.__guard.setTime(700));
   await page.waitForTimeout(300);
@@ -2094,20 +2267,25 @@ export async function checkImmersiveKaraokeAndColor(page, guardDir, add) {
   add("r46-immersive-karaoke-fill-progress", Boolean(karaokeBox) && fillDiff > 0.02,
     `沉浸页逐字高亮推进：行内像素差异 ${(fillDiff * 100).toFixed(2)}%`);
 
-  await page.evaluate(() => window.__guard.setTime(700));
-  await page.waitForTimeout(400);
-  await configure({ customColor: "#00dd00" });
-  await page.waitForTimeout(900);
-  const customPanel = await inkColor(page, themeLine, path.join(guardDir, "r46-immersive-color-custom.png"));
-  add("r46-immersive-custom-color",
+  const openStageAgain = async () => {
+    await page.getByRole("button", { name: "打开歌词", exact: true }).click();
+    await page.getByTestId("playback-stage").waitFor();
+    await page.evaluate(() => window.__guard.setTime(700));
+    await page.waitForTimeout(900);
+  };
+
+  await setPlayerLyricsColor(page, "#00dd00");
+  await openStageAgain();
+  const customPanel = await inkColor(page, themeLine, path.join(guardDir, "r50-immersive-color-custom.png"));
+  add("r50-immersive-player-lyrics-color",
     customPanel.count > 40 && customPanel.mean !== null
       && customPanel.mean[1] > customPanel.mean[0] + 60 && customPanel.mean[1] > customPanel.mean[2] + 60,
   JSON.stringify({ ink: customPanel.mean, count: customPanel.count }));
 
-  await configure({ customColor: "" });
-  await page.waitForTimeout(900);
-  const restoredPanel = await inkColor(page, themeLine, path.join(guardDir, "r46-immersive-color-restored.png"));
-  add("r46-immersive-custom-color-restored",
+  await setPlayerLyricsColor(page, "");
+  await openStageAgain();
+  const restoredPanel = await inkColor(page, themeLine, path.join(guardDir, "r50-immersive-color-restored.png"));
+  add("r50-immersive-player-lyrics-color-restored",
     restoredPanel.count > 40 && restoredPanel.mean !== null
       && !(restoredPanel.mean[1] > restoredPanel.mean[0] + 60 && restoredPanel.mean[1] > restoredPanel.mean[2] + 60),
   JSON.stringify({ ink: restoredPanel.mean, count: restoredPanel.count }));
@@ -2118,19 +2296,25 @@ export async function checkImmersiveKaraokeAndColor(page, guardDir, add) {
 }
 
 /**
- * R46：主窗设置页的「歌词」分区在 960×600 里**完整可滚**（brief 第 3 项的后半句）。
+ * R46/R50：主窗设置页的「歌词」分区在 960×600 里**完整可滚**。
  *
  * 判据与桌面歌词设置面同一条：每个控件滚进视口后，命中的必须是它自己。
  * 页面外壳本来就是 `overflow-y-auto`（App.tsx），这里验证的是"卡片里没有把控件裁掉的固定高度"。
+ *
+ * R50：颜色控件从「桌面歌词」卡搬到新的「播放器歌词」卡（`#player-lyrics-*`）——
+ * 桌面歌词的颜色只在桌面窗自己的外观菜单里改，所以这里量的是播放器那一枚，
+ * 判据也从"改桌面配置"改成"写普通 settings 键 playerLyrics"。
  */
 export async function checkSettingsPageLyricsCard(page, guardDir, add) {
   const CONFIG_IDS = [
-    "#lyrics-visible", "#lyrics-mode", "#lyrics-size", "#lyrics-color", "#lyrics-custom-color",
+    "#player-lyrics-color", "#player-lyrics-custom-color",
+    "#lyrics-visible", "#lyrics-mode", "#lyrics-size",
     "#lyrics-locked", "#lyrics-click-through", "#lyrics-layout", "#lyrics-style",
     "#lyrics-enableBlur", "#lyrics-enableScale", "#lyrics-enableSpring", "#lyrics-showControls",
   ];
   await page.setViewportSize({ width: 960, height: 600 });
   await page.evaluate(() => window.__guard.pause());
+  await page.evaluate(() => window.__guard.resetSettings());
   if (await page.getByTestId("sidebar-search-rail").count()) await page.getByTestId("sidebar-search-rail").click();
   await page.getByRole("button", { name: "设置", exact: true }).click();
   await page.getByTestId("settings-page").waitFor();
@@ -2143,13 +2327,13 @@ export async function checkSettingsPageLyricsCard(page, guardDir, add) {
    * 而 disabled 控件拿不到命中测试——不是"够不着"，是"这一档没意义"）。
    * 走的是与用户同样的原生取色器路径（value setter + input 事件），不是直接改配置。
    */
-  await page.locator("#lyrics-custom-color").evaluate((input) => {
+  await page.locator("#player-lyrics-custom-color").evaluate((input) => {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
     setter.call(input, "#00dd00");
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
   });
-  await page.waitForFunction(() => window.__guard.desktopConfig().customColor === "#00dd00");
+  await page.waitForFunction(() => window.__guard.settingsData().playerLyrics?.customColor === "#00dd00");
   await page.waitForFunction(() => {
     const settings = document.querySelector('[data-testid="settings-page"]');
     return [...(settings?.querySelectorAll("button") ?? [])]
@@ -2175,17 +2359,175 @@ export async function checkSettingsPageLyricsCard(page, guardDir, add) {
       };
     });
   }, CONFIG_IDS);
-  add("r46-settings-page-lyrics-card-complete",
+  add("r50-settings-page-lyrics-card-complete",
     reachable.length === CONFIG_IDS.length + 1
       && reachable.every((entry) => entry.inViewport && entry.clickable),
   JSON.stringify({ count: reachable.length, unreachable: reachable.filter((entry) => !entry.inViewport || !entry.clickable) }));
-  await page.screenshot({ path: path.join(guardDir, "r46-settings-page-lyrics.png") });
-  // 「恢复主题色」在这里也真的能用：点它 → customColor 回到空（主窗设置页与桌面窗同一份配置）
+  await page.screenshot({ path: path.join(guardDir, "r50-settings-page-lyrics.png") });
+  // 「恢复主题色」在这里也真的能用：点它 → 播放器歌词的 customColor 回到空（普通 settings 键）
   await page.getByTestId("settings-page").getByRole("button", { name: "恢复主题色", exact: true }).click();
-  await page.waitForFunction(() => window.__guard.desktopConfig().customColor === "");
-  add("r46-settings-page-color-reset", await page.evaluate(() => window.__guard.desktopConfig().customColor) === "",
-    "设置页的「恢复主题色」把 customColor 清空（回设计令牌）");
+  await page.waitForFunction(() => window.__guard.settingsData().playerLyrics?.customColor === "");
+  add("r50-settings-page-color-reset",
+    await page.evaluate(() => window.__guard.settingsData().playerLyrics?.customColor) === ""
+      && await page.evaluate(() => window.__guard.desktopConfig().customColor) === "",
+    "设置页的「恢复主题色」把**播放器歌词**的 customColor 清空（桌面歌词那份没被碰）");
   await page.getByRole("button", { name: "我的收藏", exact: true }).click();
+}
+
+/**
+ * R50（brief 第 2 项）：**播放器歌词与桌面歌词的颜色彻底分开**（真浏览器 + 真像素）。
+ *
+ * 六件事，每一件都是"看起来分开了、其实还连着"的地方：
+ * 1. 设置页把播放器歌词设成红色 → 写的是**普通 settings 键** `playerLyrics`（不是 `lyricsWindow`）；
+ * 2. 主窗歌词像素跟着变红；
+ * 3. 把**桌面**歌词改成绿色之后，主窗仍然是红的（R50 之前这两个是同一份 `customColor`）；
+ * 4. 桌面窗只跟自己的配置（绿），不跟播放器那份（红）；
+ * 5. 重新加载页面之后播放器颜色仍在（`settings:get` 读回普通键）；
+ * 6. 写盘失败要**回滚**并在设置页说一句（不是静默停在存不下来的颜色上）。
+ */
+export async function checkPlayerLyricsColorSeparation(page, port, guardDir, add) {
+  const mainLine = '[data-testid="amll-lyrics-panel"] [class*="lyricMainLine"][class*="active"]';
+  const desktopLine = '[data-testid="lyrics-window"] [class*="lyricMainLine"][class*="active"]';
+  const configureDesktop = (patch) => page.evaluate((next) => window.__guard.configureDesktop(next), patch);
+  const isRed = (ink) => Boolean(ink?.mean) && ink.count > 40
+    && ink.mean[0] > ink.mean[1] + 60 && ink.mean[0] > ink.mean[2] + 60;
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await page.evaluate(() => window.__guard.resetSettings());
+  await configureDesktop({ ...DESKTOP_BASELINE });
+  await page.evaluate(() => window.__guard.restoreLyrics());
+  await page.evaluate(() => window.__guard.pause());
+
+  // ——— ① 设置页把播放器歌词设成红色：写的是 playerLyrics 普通键 ———
+  await setPlayerLyricsColor(page, "#ff0000");
+  const writes = await page.evaluate(() => window.__guard.settingsWrites());
+  add("r50-player-lyrics-writes-settings",
+    writes.some((entry) => entry.patch?.playerLyrics?.customColor === "#ff0000")
+      && !writes.some((entry) => Object.prototype.hasOwnProperty.call(entry.patch ?? {}, "lyricsWindow")),
+    JSON.stringify(writes));
+  const desktopUntouched = await page.evaluate(() => window.__guard.desktopConfig().customColor);
+
+  // ——— ② 主窗歌词像素跟着变红（桌面歌词配置一个字节没动）———
+  await page.getByRole("button", { name: "打开歌词", exact: true }).click();
+  await page.getByTestId("playback-stage").waitFor();
+  await page.evaluate(() => { window.__guard.pause(); window.__guard.setTime(700); });
+  await page.waitForTimeout(1000);
+  const redInk = await inkColor(page, mainLine, path.join(guardDir, "r50-player-lyrics-red.png"));
+  add("r50-player-lyrics-main-window-red", desktopUntouched === "" && isRed(redInk),
+    JSON.stringify({ ink: redInk.mean, count: redInk.count, desktopCustomColor: desktopUntouched }));
+
+  // ——— ③ 把桌面歌词改成绿色：主窗**不变**（R50 的分离点）———
+  await configureDesktop({ customColor: "#00dd00" });
+  await page.waitForTimeout(1000);
+  const stillRed = await inkColor(page, mainLine, path.join(guardDir, "r50-player-lyrics-still-red.png"));
+  add("r50-desktop-color-does-not-touch-main", isRed(stillRed),
+    JSON.stringify({ ink: stillRed.mean, count: stillRed.count }));
+  await page.getByTestId("playback-stage").getByRole("button", { name: "收起歌词", exact: true }).click();
+  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+
+  // ——— ④ 桌面窗只跟自己的配置（绿），不跟播放器那份（红）———
+  await page.evaluate(() => window.__guard.desktopBeforeMount());
+  await page.getByTestId("lyrics-window").waitFor();
+  await page.waitForTimeout(900);
+  await page.evaluate(() => window.__guard.desktopDocument());
+  await page.waitForTimeout(900);
+  const desktopGreen = await inkContrast(page, desktopLine, path.join(guardDir, "r50-desktop-lyrics-green.png"));
+  add("r50-desktop-lyrics-follow-own-config",
+    desktopGreen.changed > 40 && desktopGreen.inkRgb !== null
+      && desktopGreen.inkRgb[1] > desktopGreen.inkRgb[0] + 40 && desktopGreen.inkRgb[1] > desktopGreen.inkRgb[2] + 40,
+    JSON.stringify({ ink: desktopGreen.inkRgb, changed: desktopGreen.changed }));
+
+  // ——— ⑤ 重新加载：播放器颜色来自 settings:get（不是内存里的巧合）———
+  await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
+  await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await page.evaluate(() => window.__guard.ready());
+  await page.waitForFunction(() => window.__guard.snapshot().lyrics.status === "ready");
+  await page.evaluate(() => { window.__guard.pause(); window.__guard.setTime(700); });
+  const persisted = await page.evaluate(() => window.__guard.settingsData().playerLyrics ?? null);
+  await page.getByRole("button", { name: "打开歌词", exact: true }).click();
+  await page.getByTestId("playback-stage").waitFor();
+  await page.waitForTimeout(1000);
+  const reloadedInk = await inkColor(page, mainLine, path.join(guardDir, "r50-player-lyrics-reloaded.png"));
+  add("r50-player-lyrics-persisted", persisted?.customColor === "#ff0000" && isRed(reloadedInk),
+    JSON.stringify({ persisted, ink: reloadedInk.mean }));
+  await page.getByTestId("playback-stage").getByRole("button", { name: "收起歌词", exact: true }).click();
+  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+
+  // ——— ⑥ 写盘失败：回滚到上一份，并在设置页说一句 ———
+  await page.evaluate(() => window.__guard.setSettingsPlan({ failTimes: 1 }));
+  await openPlayerLyricsSettings(page);
+  await typePlayerLyricsColor(page, "#ff00ff");
+  const failure = page.getByTestId("settings-page").locator('[role="alert"]').first();
+  await failure.waitFor();
+  const rollback = await page.evaluate(() => ({
+    settings: window.__guard.settingsData().playerLyrics ?? null,
+    writes: window.__guard.settingsWrites().length,
+  }));
+  add("r50-player-lyrics-rollback-on-failure",
+    rollback.settings?.customColor === "#ff0000"
+      && (await page.locator("#player-lyrics-custom-color").inputValue()).toLowerCase() === "#ff0000"
+      && ((await failure.textContent()) ?? "").trim().length > 0,
+    JSON.stringify({ rollback, alert: (await failure.textContent())?.trim().slice(0, 80) }));
+  await page.evaluate(() => window.__guard.setSettingsPlan({ failTimes: 0 }));
+
+  // 复位：设置清空（后面的检查按默认颜色量像素），视口与桌面配置归位
+  await page.evaluate(() => window.__guard.resetSettings());
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await configureDesktop({ ...DESKTOP_BASELINE });
+}
+
+/**
+ * R50（brief 第 3 项）：透明桌面歌词的**衬底**必须让两种"最坏桌面"都读得清。
+ *
+ * 这个窗是透明的，所以量"可读性"只能靠像素：把页面底色当桌面壁纸，改极端的白/黑，
+ * 再看墨色与背景的亮度差（`inkContrast`）。同时看结构：`data-lyrics-scrim` 与根节点算出来的
+ * 背景色——`panel`（Card 自己有背景）与 `mode=taskbar`（要透出系统任务栏）都必须是透明的。
+ */
+export async function checkDesktopLyricsScrim(page, guardDir, add) {
+  const configure = (patch) => page.evaluate((next) => window.__guard.configureDesktop(next), patch);
+  const activeLine = '[data-testid="lyrics-window"] [class*="lyricMainLine"][class*="active"]';
+  /** 模拟桌面：窗口透明，页面底色就是"桌面壁纸"。 */
+  const setWallpaper = (color) => page.evaluate((value) => { document.body.style.background = value; }, color);
+  const rootScrim = () => page.evaluate(() => {
+    const root = document.querySelector('[data-testid="lyrics-window"]');
+    if (!root) return null;
+    return {
+      attr: root.getAttribute("data-lyrics-scrim"),
+      background: getComputedStyle(root).backgroundColor,
+      mode: root.getAttribute("data-lyrics-mode"),
+      style: root.getAttribute("data-lyrics-style"),
+    };
+  });
+
+  await page.setViewportSize({ width: 960, height: 160 });
+  for (const [theme, wallpaper, label] of [["dark", "#ffffff", "white-desktop"], ["light", "#101010", "dark-desktop"]]) {
+    await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
+    await setWallpaper(wallpaper);
+    await configure({ ...DESKTOP_BASELINE, style: "clean", mode: "desktop" });
+    await page.evaluate(() => window.__guard.desktopDocument());
+    await page.waitForTimeout(1000);
+    const scrim = await rootScrim();
+    const pixels = await inkContrast(page, activeLine, path.join(guardDir, `r50-scrim-${label}-line.png`));
+    add(`r50-scrim-readable-${label}`,
+      Boolean(scrim) && scrim.attr === "on" && scrim.background !== "rgba(0, 0, 0, 0)"
+        && pixels.changed > 40 && pixels.contrast > 60,
+      JSON.stringify({ scrim, changed: pixels.changed, contrast: pixels.contrast, ink: pixels.inkRgb }));
+    await page.screenshot({ path: path.join(guardDir, `r50-scrim-${label}-window.png`) });
+
+    for (const [style, mode] of [["panel", "desktop"], ["clean", "taskbar"]]) {
+      await configure({ ...DESKTOP_BASELINE, style, mode });
+      await page.waitForTimeout(500);
+      const plain = await rootScrim();
+      add(`r50-scrim-absent-${style}-${mode}`,
+        Boolean(plain) && plain.attr === "off" && plain.background === "rgba(0, 0, 0, 0)",
+        JSON.stringify(plain));
+    }
+  }
+  await page.evaluate(() => { document.body.style.removeProperty("background"); });
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await configure({ ...DESKTOP_BASELINE });
 }
 
 /**
@@ -3033,6 +3375,11 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     await checked("r46-immersive-karaoke-and-color", () => checkImmersiveKaraokeAndColor(page, guardDir, add));
     await checked("r46-settings-page-lyrics-card", () => checkSettingsPageLyricsCard(page, guardDir, add));
     /**
+     * R50：播放器歌词与桌面歌词的颜色彻底分开（设置页写普通键 → 主窗变红 → 桌面改绿不影响主窗 →
+     * 桌面窗只跟自己的配置 → 重载仍在 → 写盘失败回滚）。放在设置页那一项之后：它自己会重新载入主页。
+     */
+    await checked("r50-player-lyrics-separation", () => checkPlayerLyricsColorSeparation(page, port, guardDir, add));
+    /**
      * R45C：播放栏/沉浸页快捷开关的真行为（延迟 IPC 下的双击、拒绝后恢复、两种模式、菜单层级）。
      * 放在两轮主题之后、分页之前：它自己重新载入主页，只碰播放栏与沉浸页。
      */
@@ -3049,8 +3396,10 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     add("desktop-early-document", earlyDocument?.includes("第一行歌词守卫"), "早于 React 挂载的文档丢失后，就绪握手须补回当前快照");
     const desktop = page.getByTestId("lyrics-window");
     await checkDesktopInteraction(page, guardDir, add);
-    /** R46：桌面歌词窗自己的设置面（小窗可滚、颜色往返）。放在交互验收之后，同一扇桌面窗。 */
-    await checked("r46-desktop-lyrics-settings", () => checkDesktopLyricsSettings(page, guardDir, add));
+    /** R50：桌面歌词窗设置面回到齿轮下拉菜单（小窗可滚、颜色往返、锚定齿轮）。 */
+    await checked("r50-desktop-lyrics-menu", () => checkDesktopLyricsSettings(page, guardDir, add));
+    /** R50：透明桌面歌词的令牌衬底（白桌面/深色主题、深桌面/浅色主题都要读得清）。 */
+    await checked("r50-desktop-lyrics-scrim", () => checkDesktopLyricsScrim(page, guardDir, add));
     /**
      * 官方演出开关（R44 起的既有覆盖，R45B 保留）：还能真的关掉弹簧/模糊、还能真的做缩放。
      * 放在交互验收之后：它要一段"播放中"的稳定画面。

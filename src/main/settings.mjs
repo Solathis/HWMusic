@@ -229,14 +229,32 @@ export function mergeSettings(document, patch) {
 }
 
 /**
+ * rename 的可重试错误码（R50）。
+ *
+ * Windows 上 `MoveFileEx` 替换目标时，只要目标还有**任何一个打开的句柄**（本进程的读、
+ * 杀毒软件扫描、索引服务、另一个渲染进程的回执）就会 `EPERM`/`EACCES`/`EBUSY`。
+ * 实测这种占用常常只持续几毫秒，所以有限重试是最小、最可解释的修复。
+ */
+const RETRYABLE_RENAME_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+
+/** 默认重试间隔（毫秒）：1 次 + 3 次重试 = 最多 4 次尝试，最长多等 170ms。 */
+export const DEFAULT_RENAME_RETRY_DELAYS_MS = Object.freeze([20, 50, 100]);
+
+/**
  * 设置存储。
  *
  * @param {object} options
  * @param {string|null} options.dir 数据目录（宿主的 `--data-dir`，绝对路径；`null` = 没有数据目录）
  * @param {object} [options.fs]     `node:fs/promises` 的子集（测试注入用）
  * @param {Function} [options.log]  日志落点（默认 stderr）
+ * @param {number[]} [options.renameRetryDelaysMs] rename 的重试间隔（测试注入 0 = 不等）
  */
-export function createSettingsStore({ dir = null, fs = nodeFs, log = defaultLog } = {}) {
+export function createSettingsStore({
+  dir = null,
+  fs = nodeFs,
+  log = defaultLog,
+  renameRetryDelaysMs = DEFAULT_RENAME_RETRY_DELAYS_MS,
+} = {}) {
   const persistent = typeof dir === "string" && dir !== "";
   if (persistent && !isAbsolute(dir)) {
     throw new TypeError("createSettingsStore 的数据目录必须是绝对路径（相对路径会随启动目录漂移）");
@@ -304,6 +322,25 @@ export function createSettingsStore({ dir = null, fs = nodeFs, log = defaultLog 
     return { document: normalizeSettingsDocument(parsed), blocked: null };
   }
 
+  /**
+   * rename 替换目标，对 Windows 的**瞬时占用**重试（R50）。
+   *
+   * 只重试 `EPERM`/`EACCES`/`EBUSY`（其它错误一次都不多试：重试只会拖长时间并掩盖原因）。
+   * 每次重试之间等 `renameRetryDelaysMs` 里对应的那一档——真实日志里那种占用只持续几毫秒，
+   * 20/50/100ms 足够；注入 `[0,0,0]` 的测试不真的等。
+   */
+  async function renameInto(from, to) {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await fs.rename(from, to);
+      } catch (cause) {
+        const delay = renameRetryDelaysMs[attempt];
+        if (delay === undefined || !RETRYABLE_RENAME_CODES.has(cause?.code)) throw cause;
+        if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+
   /** 原子写：临时文件（创建即 0600）→ rename 替换。失败保留原文件。 */
   async function writeDocument(document) {
     const target = settingsPath();
@@ -312,7 +349,7 @@ export function createSettingsStore({ dir = null, fs = nodeFs, log = defaultLog 
     try {
       await fs.mkdir(dir, { recursive: true, mode: SETTINGS_DIR_MODE });
       await fs.writeFile(temp, payload, { mode: SETTINGS_FILE_MODE });
-      await fs.rename(temp, target);
+      await renameInto(temp, target);
     } catch (cause) {
       try {
         await fs.unlink(temp);
@@ -333,19 +370,36 @@ export function createSettingsStore({ dir = null, fs = nodeFs, log = defaultLog 
   }
 
   /**
+   * 读写**共用**的同一条 promise 队列（R50）。
+   *
+   * 旧版只有写在这一条队列上（`writeTail`），读只 `await` 调用那一刻的旧尾链，
+   * 两者之间有一条缝：`read()` 让出事件循环之后，插进来的 `save()` 会带着新的读 + 写并发跑。
+   * Node 的读句柄在 Windows 上会阻止 `MoveFileEx` 替换目标，于是 `rename` 报
+   * `EPERM`（真实日志 `.tmp/run/app-20261025-160445.log:19`）。
+   * 读也排进队尾之后，"读句柄"与"替换目标"在结构上不可能同时存在。
+   *
+   * 队列本身已 `catch` 过（一次失败不该毒化后面所有请求），失败的那一笔由调用方收结构化错误。
+   */
+  let queueTail = Promise.resolve();
+  function enqueue(operation) {
+    const accepted = queueTail.then(operation);
+    queueTail = accepted.catch(() => {});
+    return accepted;
+  }
+
+  /**
    * 读设置。**读不到、读坏了都回默认文档**（代理当没配），并把原因记一条日志——不抛、不砸文件。
    *
-   * R44e：本函数是**排空屏障**——先等已受理的写（`writeTail`）落定再读盘。原子 rename 只保证
-   * "不会读到半个文件"，不保证"读到的是刚受理的那一笔"：`set` 刚返回接受、副本还在排队时来一个
-   * `get`，没有这道屏障就会读回旧文档（主题/歌词的退出校验正是这样被骗过）。
+   * R44e：本函数是**排空屏障**——排在已受理的写之后读盘。原子 rename 只保证"不会读到半个文件"，
+   * 不保证"读到的是刚受理的那一笔"：`set` 刚返回接受、副本还在排队时来一个 `get`，
+   * 没有这道屏障就会读回旧文档（主题/歌词的退出校验正是这样被骗过）。
    *
-   * 屏障**只加在 `read` 上**：`save`/`reset` 内部继续直接 `load()`，否则会等自己那条还没落定的
-   * 尾链（自等死锁）。`writeTail` 本身已 `catch` 过，等它不会抛；失败的那一笔由 `save` 的调用方
-   * 收结构化错误。
+   * R50：屏障从"等旧尾链"升级成"自己也排进同一条队列"（原因见上面 `enqueue` 的注释）。
+   * 屏障仍然**只在 `read` 上排队**：`save`/`reset` 内部继续直接 `load()`，否则会等自己那条
+   * 还没落定的尾链（自等死锁）。
    */
-  async function read() {
-    await writeTail;
-    return (await load()).document;
+  function read() {
+    return enqueue(load).then((loaded) => loaded.document);
   }
 
   /**
@@ -353,9 +407,8 @@ export function createSettingsStore({ dir = null, fs = nodeFs, log = defaultLog 
    *
    * @throws {SettingsStoreError} 没有数据目录 / 原文件认不出或读不了 / patch 不合法
    */
-  let writeTail = Promise.resolve();
   function save(patch) {
-    const operation = writeTail.then(async () => {
+    return enqueue(async () => {
       if (!persistent) {
         fail(CORE_ERROR_KINDS.internal, "没有数据目录：设置无法落盘（宿主必须把 --data-dir 交给 sidecar）");
       }
@@ -365,8 +418,6 @@ export function createSettingsStore({ dir = null, fs = nodeFs, log = defaultLog 
       await writeDocument(next);
       return next;
     });
-    writeTail = operation.catch(() => {});
-    return operation;
   }
 
   /** 恢复默认：已知键回默认，未知键保留。 */

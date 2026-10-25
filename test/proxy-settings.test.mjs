@@ -553,6 +553,189 @@ test("R44e 同一 chunk 内的 set/set/get：get 排在两笔已发送的 set �
 });
 
 // ---------------------------------------------------------------------------
+// R50：读也排进同一条队列 + rename 对瞬时占用有限重试
+// ---------------------------------------------------------------------------
+
+/**
+ * R50（brief 第 4 项）的现场证据是真实日志 `.tmp/run/app-20261025-160445.log:19`：
+ *
+ * ```
+ * 歌词配置保存失败：设置落盘失败（EPERM: operation not permitted, rename '…settings.json.5712.4.tmp' -> '…settings.json'）
+ * ```
+ *
+ * 两个原因叠在一起：①`read()` 只 `await` 调用时拿到的旧 `writeTail`，让出事件循环之后
+ * `save()` 可以带着**新的读 + 写**插进来——Node 的读句柄在 Windows 上会阻止 `MoveFileEx`
+ * 替换目标，rename 于是 EPERM；②Windows 上这种占用常常只持续几毫秒，一次失败就放弃太早。
+ * 下面四条分别钉住这两个修复点。
+ */
+test("R50 读与写共用同一条队列：读已开始、save 随后插入也不会并发读写", async (t) => {
+  const dir = await tempDir("r50-read-queued");
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const realFs = await import("node:fs/promises");
+  await writeFile(
+    join(dir, SETTINGS_FILE_NAME),
+    JSON.stringify({ schemaVersion: 1, data: { closeBehavior: "quit" } }),
+    "utf8",
+  );
+
+  const events = [];
+  const overlaps = [];
+  let reading = false;
+  const store = storeAt(dir, { fs: { ...realFs,
+    async readFile(...args) {
+      if (reading) overlaps.push("readFile 与 readFile 并发");
+      reading = true;
+      events.push("read:start");
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      try {
+        return await realFs.readFile(...args);
+      } finally {
+        reading = false;
+        events.push("read:end");
+      }
+    },
+    async writeFile(...args) {
+      if (reading) overlaps.push("writeFile 与 readFile 并发（读句柄会挡住 rename）");
+      events.push("write:start");
+      return realFs.writeFile(...args);
+    },
+    async rename(from, to) {
+      if (reading) overlaps.push("rename 与 readFile 并发");
+      events.push("rename");
+      return realFs.rename(from, to);
+    },
+  } });
+
+  // 同一个 chunk 里：读先受理，写紧接着插进来（真实宿主里 settings:get 与 settings:set 就是这样排的）
+  const reading0 = store.read();
+  const writing = store.save({ closeBehavior: "tray" });
+  const [readDocument, saved] = await Promise.all([reading0, writing]);
+
+  assert.deepEqual(overlaps, [], `读写不许并发：${JSON.stringify(overlaps)}`);
+  assert.equal(events[0], "read:start", "读先跑");
+  const firstWrite = events.indexOf("write:start");
+  assert.ok(firstWrite > 0 && events.slice(0, firstWrite).filter((name) => name === "read:end").length >= 1,
+    `写必须排在已开始的读之后（事件：${events.join(",")}）`);
+  assert.equal(readDocument.data.closeBehavior, "quit", "读排在前：读到的是插入前那一份");
+  assert.equal(saved.data.closeBehavior, "tray", "写仍然成功");
+  assert.equal((await storeAt(dir).read()).data.closeBehavior, "tray", "盘上是最后那一份");
+});
+
+test("R50 rename 连续 EPERM 两次后成功：保存最终成功、无错误、无残留临时文件", async (t) => {
+  const dir = await tempDir("r50-rename-retry");
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const realFs = await import("node:fs/promises");
+  let failures = 2;
+  let attempts = 0;
+  const store = storeAt(dir, {
+    renameRetryDelaysMs: [0, 0, 0],
+    fs: { ...realFs,
+      async rename(from, to) {
+        attempts += 1;
+        if (failures > 0) {
+          failures -= 1;
+          throw Object.assign(new Error(`EPERM: operation not permitted, rename '${from}' -> '${to}'`), { code: "EPERM" });
+        }
+        return realFs.rename(from, to);
+      },
+    },
+  });
+
+  const saved = await store.save({ proxy: fullProxy() });
+  assert.equal(saved.data.proxy.host, "proxy.local", "重试之后这次保存是成功的");
+  assert.equal(attempts, 3, "两次瞬时占用 + 一次成功 = 三次尝试");
+  assert.deepEqual(
+    JSON.parse(await readFile(join(dir, SETTINGS_FILE_NAME), "utf8")).data.proxy.bypass,
+    ["localhost", "127.0.0.1"],
+  );
+  assert.deepEqual(await readdir(dir), [SETTINGS_FILE_NAME], "没有残留临时文件");
+});
+
+test("R50 rename 一直 EPERM：结构化失败、原文件保留、之后读写仍可用", async (t) => {
+  const dir = await tempDir("r50-rename-exhausted");
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const realFs = await import("node:fs/promises");
+  const target = join(dir, SETTINGS_FILE_NAME);
+  const original = `${JSON.stringify({ schemaVersion: 1, data: { closeBehavior: "quit" } }, null, 2)}\n`;
+  await writeFile(target, original, "utf8");
+
+  let broken = true;
+  let attempts = 0;
+  const store = storeAt(dir, {
+    renameRetryDelaysMs: [0, 0, 0],
+    fs: { ...realFs,
+      async rename(from, to) {
+        attempts += 1;
+        if (broken) throw Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" });
+        return realFs.rename(from, to);
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => store.save({ proxy: fullProxy() }),
+    (error) => {
+      assert.ok(error instanceof SettingsStoreError);
+      assert.equal(error.kind, CORE_ERROR_KINDS.internal, "失败仍是 structured internal（错误码/文案不变）");
+      assert.match(error.message, /设置落盘失败/);
+      assert.match(error.message, /EPERM/, "原因原样带出来（不吞、不只说'失败'）");
+      assert.ok(!error.message.includes(PASSWORD), "错误文案不回显凭据");
+      return true;
+    },
+  );
+  assert.equal(attempts, 4, "1 次 + 3 次重试 = 4 次尝试，然后放弃");
+  assert.equal(await readFile(target, "utf8"), original, "原文件一字不动");
+  assert.deepEqual(await readdir(dir), [SETTINGS_FILE_NAME], "临时文件已清掉");
+
+  broken = false;
+  const saved = await store.save({ closeBehavior: "tray" });
+  assert.equal(saved.data.closeBehavior, "tray", "占用消失后下一笔保存照常成功");
+  assert.equal((await store.read()).data.closeBehavior, "tray", "读取也照常可用");
+});
+
+test("R50 rename 只对 EPERM/EACCES/EBUSY 重试：别的错误立刻失败，不掩盖真原因", async (t) => {
+  const dir = await tempDir("r50-rename-codes");
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const realFs = await import("node:fs/promises");
+
+  for (const code of ["EACCES", "EBUSY"]) {
+    let failed = false;
+    let attempts = 0;
+    const store = storeAt(dir, {
+      renameRetryDelaysMs: [0, 0, 0],
+      fs: { ...realFs,
+        async rename(from, to) {
+          attempts += 1;
+          if (!failed) {
+            failed = true;
+            throw Object.assign(new Error(`${code}: 目标被占用`), { code });
+          }
+          return realFs.rename(from, to);
+        },
+      },
+    });
+    await store.save({ closeBehavior: "quit" });
+    assert.equal(attempts, 2, `${code} 是可重试的：第二次成功`);
+  }
+
+  let attempts = 0;
+  const store = storeAt(dir, {
+    renameRetryDelaysMs: [0, 0, 0],
+    fs: { ...realFs,
+      async rename() {
+        attempts += 1;
+        throw Object.assign(new Error("ENOENT: 目标目录不存在"), { code: "ENOENT" });
+      },
+    },
+  });
+  await assert.rejects(() => store.save({ closeBehavior: "quit" }), (error) => {
+    assert.match(error.message, /ENOENT/, "不可重试的错误原样报出来");
+    return true;
+  });
+  assert.equal(attempts, 1, "不可重试的错误一次都不多试（重试只会拖长时间并掩盖原因）");
+});
+
+// ---------------------------------------------------------------------------
 // 请求频道处理器（settings:get / settings:set）
 // ---------------------------------------------------------------------------
 

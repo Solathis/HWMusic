@@ -130,7 +130,9 @@ import {
   modeLabel,
   taskbarStatusText,
 } from "./features/lyrics/lyrics-window.mjs"
+import { DEFAULT_PLAYER_LYRICS } from "./features/lyrics/player-lyrics.mjs"
 import type { LyricsWindowBinding } from "./use-lyrics-window.ts"
+import type { PlayerLyricsBinding } from "./use-player-lyrics.ts"
 
 /**
  * 页大小（收藏页有自己的常量）：与协议层默认的 50 同档。
@@ -845,6 +847,13 @@ export interface SettingsPageProps {
    */
   lyrics?: LyricsWindowBinding | null
   /**
+   * 播放器歌词的颜色（R50）：由外壳的 `usePlayerLyrics` 交下来。
+   *
+   * 它与上面那份 `lyrics` binding **没有关系**：桌面歌词的颜色住在 `lyricsWindow`（Rust 保留键），
+   * 播放器歌词的颜色住在普通 settings 键 `playerLyrics`。缺省 `null` = 外壳还没挂上。
+   */
+  playerLyrics?: PlayerLyricsBinding | null
+  /**
    * 运行日志（R39）：由外壳的 `useNoticeLog()` 交下来。
    *
    * 订阅留在外壳是**必须的**，不是风格问题：`app:notice` 是广播，没人订阅那一刻的提示就丢了，
@@ -896,6 +905,7 @@ export function SettingsPage({
   queue = null,
   trayAvailable = TRAY_AVAILABLE,
   lyrics = null,
+  playerLyrics = null,
   notices = [],
 }: SettingsPageProps) {
   const [form, setForm] = useState(() => proxyFormFromSettings(null))
@@ -1054,8 +1064,21 @@ export function SettingsPage({
   }
 
   const busy = saving || testing
-  /** 已存档的自定义歌词颜色（`#RRGGBB`）；没选过/坏值就是 `null`（= 用设计令牌）。 */
-  const customColorValue = isCustomColor(lyrics?.config.customColor) ? lyrics!.config.customColor : null
+  /**
+   * 播放器歌词的颜色改动（R50）：乐观更新在 hook 里，失败会回滚并抛回来——
+   * 这一层只负责把那句话放到页面级提示里（与其它设置的失败提示同一处）。
+   */
+  async function updatePlayerLyrics(patch: Partial<PlayerLyricsBinding["config"]>) {
+    if (playerLyrics === null) return
+    setFailure(null)
+    try {
+      await playerLyrics.updateConfig(patch)
+    } catch (error) {
+      setFailure(settingsFailureText(error))
+    }
+  }
+  /** 已存档的播放器歌词自定义颜色（`#RRGGBB`）；没选过/坏值就是 `null`（= 用设计令牌）。 */
+  const playerCustomColor = isCustomColor(playerLyrics?.config.customColor) ? playerLyrics!.config.customColor : null
 
   return (
     <div className="m-4 flex max-w-3xl flex-col gap-4" data-testid="settings-page">
@@ -1287,10 +1310,81 @@ export function SettingsPage({
 
         {/* 歌词：桌面歌词窗（在哪显示）与歌词缓存/导入（从哪来）是同一件事的两半 */}
         <TabsContent value="lyrics" className="flex flex-col gap-4">
+          {/*
+            R50：播放器歌词的颜色**自己一份**（普通 settings 键 `playerLyrics`）。
+            R45B 起它借的是桌面歌词的 `customColor`，于是"把桌面歌词改绿"会顺手把主窗也染绿。
+            桌面歌词窗的颜色在它自己的外观面板（齿轮菜单）里改，这里不再出现那些控件
+            （同一份配置有两个改法的入口，用户会以为哪里都能改对）。
+          */}
+          <Card>
+            <CardHeader>
+              <CardTitle>播放器歌词</CardTitle>
+              <CardDescription>主界面沉浸歌词的颜色。桌面歌词窗有自己的外观设置，两者互不影响。</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-3">
+              <div className="flex flex-col gap-1">
+                <Label htmlFor="player-lyrics-color">颜色</Label>
+                <Select
+                  value={playerLyrics?.config.color ?? DEFAULT_PLAYER_LYRICS.color}
+                  disabled={playerLyrics === null}
+                  onValueChange={(value) => void updatePlayerLyrics({ color: value })}
+                >
+                  <SelectTrigger id="player-lyrics-color" className="w-full max-w-xs">
+                    {/* 标签直接写进 SelectValue：radix 没展开过内容时拿不到选项文案（R10 的同一个坑） */}
+                    <SelectValue>{colorTokenLabel(playerLyrics?.config.color)}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent position="popper" align="start" sideOffset={4}>
+                    <SelectGroup>
+                      {LYRICS_COLOR_TOKENS.map((token) => (
+                        <SelectItem key={token.id} value={token.id}>
+                          {colorTokenLabel(token.id)}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                {/*
+                  自定义颜色 = 原生颜色输入（`type=color`）+ 「恢复主题色」。
+                  只写合法的六位 hex（判定来自 lyrics-window.mjs 的 isCustomColor，页面不另抄正则）；
+                  清空 = 回到上面选的设计令牌。落盘走 `settings:set` 的 `playerLyrics` 普通键。
+                  输入框是**非受控**的（`defaultValue` + 按存档值换 `key`）：`type=color` 的受控值
+                  必须始终是一个合法色值，而「还没选过」这件事不该由页面编一个色值出来。
+                */}
+                <div className="flex items-center gap-2">
+                  <Input
+                    key={playerCustomColor ?? "theme"}
+                    id="player-lyrics-custom-color"
+                    type="color"
+                    aria-label="播放器歌词自定义颜色"
+                    className="h-8 w-14 shrink-0 p-0"
+                    defaultValue={playerCustomColor ?? undefined}
+                    disabled={playerLyrics === null}
+                    onChange={(event) => {
+                      const value = event.target.value
+                      if (!isCustomColor(value)) return
+                      void updatePlayerLyrics({ customColor: value })
+                    }}
+                  />
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={!playerCustomColor}
+                    onClick={() => void updatePlayerLyrics({ customColor: "" })}
+                  >
+                    恢复主题色
+                  </Button>
+                </div>
+                {playerCustomColor ? (
+                  <p className="text-xs text-muted-foreground">{`使用自定义颜色 ${playerCustomColor}`}</p>
+                ) : null}
+              </div>
+            </CardContent>
+          </Card>
+
           <Card>
             <CardHeader>
               <CardTitle>桌面歌词</CardTitle>
-              <CardDescription>桌面上的独立歌词窗（无边框、置顶、可拖可锁）。</CardDescription>
+              <CardDescription>桌面上的独立歌词窗（无边框、置顶、可拖可锁）。颜色与自定义颜色在歌词窗自己的外观菜单里改。</CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-3">
               <div className="flex items-center gap-2">
@@ -1347,59 +1441,6 @@ export function SettingsPage({
                       </SelectGroup>
                     </SelectContent>
                   </Select>
-                </div>
-
-                <div className="flex flex-col gap-1">
-                  <Label htmlFor="lyrics-color">颜色</Label>
-                  <Select
-                    value={lyrics?.config.color ?? LYRICS_COLOR_TOKENS[0].id}
-                    disabled={lyrics === null}
-                    onValueChange={(value) => lyrics?.updateConfig({ color: value })}
-                  >
-                    <SelectTrigger id="lyrics-color" className="w-full max-w-xs">
-                      <SelectValue>{colorTokenLabel(lyrics?.config.color)}</SelectValue>
-                    </SelectTrigger>
-                    <SelectContent position="popper" align="start" sideOffset={4}>
-                      <SelectGroup>
-                        {LYRICS_COLOR_TOKENS.map((token) => (
-                          <SelectItem key={token.id} value={token.id}>
-                            {colorTokenLabel(token.id)}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                  {/*
-                    R45B：自定义颜色 = 原生颜色输入（`type=color`）+ 「恢复主题色」。
-                    只写合法的六位 hex（判定来自 lyrics-window.mjs 的 isCustomColor，页面不另抄正则）；
-                    清空 = 回到上面选的设计令牌。落盘仍由 Rust 拥有（这里只发一条窄配置命令）。
-                    输入框是**非受控**的（`defaultValue` + 按存档值换 `key`）：`type=color` 的受控值
-                    必须始终是一个合法色值，而「还没选过」这件事不该由页面编一个色值出来
-                    （仓里的规矩是渲染层不写裸色值，颜色一律来自令牌或用户自己选的那个）。
-                  */}
-                  <div className="flex items-center gap-2">
-                    <Input
-                      key={customColorValue ?? "theme"}
-                      id="lyrics-custom-color"
-                      type="color"
-                      aria-label="自定义歌词颜色"
-                      className="h-8 w-14 shrink-0 p-0"
-                      defaultValue={customColorValue ?? undefined}
-                      disabled={lyrics === null}
-                      onChange={(event) => {
-                        const value = event.target.value
-                        if (!isCustomColor(value)) return
-                        lyrics?.updateConfig({ customColor: value })
-                      }}
-                    />
-                    <Button variant="ghost" size="sm" disabled={!customColorValue}
-                      onClick={() => lyrics?.updateConfig({ customColor: "" })}>
-                      恢复主题色
-                    </Button>
-                  </div>
-                  {customColorValue ? (
-                    <p className="text-xs text-muted-foreground">{`使用自定义颜色 ${customColorValue}`}</p>
-                  ) : null}
                 </div>
 
                 <div className="flex flex-col justify-end gap-2">

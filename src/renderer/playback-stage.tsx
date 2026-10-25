@@ -17,6 +17,7 @@ import { PLAYBACK_MODES } from "./features/playback/player.mjs"
 import { formatDuration, trackAlbumOf, trackArtistsOf, trackCoverUrlOf, trackNameOf } from "./features/library/track-fields.mjs"
 import type { PlayerRuntime } from "./features/playback/player-runtime.ts"
 import type { PlayerState } from "./features/playback/use-player.ts"
+import type { PlayerLyricsConfig } from "./use-player-lyrics.ts"
 import type { LyricsWindowBinding } from "./use-lyrics-window.ts"
 
 export interface PlaybackStageProps {
@@ -29,6 +30,14 @@ export interface PlaybackStageProps {
    * 这里只读状态、只转一次 `setVisible`。不传 = 不渲染这枚按钮。
    */
   lyrics?: LyricsWindowBinding | null
+  /**
+   * 播放器歌词自己的外观（R50）：**主窗面板不读桌面歌词的配置**。
+   *
+   * R45B 起这里传的是 `lyrics.config.customColor`——把播放器歌词和桌面歌词绑成了一件，
+   * 改桌面颜色会顺手改掉主窗。现在两件事各有各的配置：这个 prop 来自普通 settings 键
+   * `playerLyrics`（`usePlayerLyrics`），桌面歌词窗仍读自己的 `lyricsWindow`。
+   */
+  playerLyrics?: PlayerLyricsConfig | null
 }
 
 function sliderKeyValue(event: ReactKeyboardEvent<HTMLDivElement>, value: number, max: number, step: number): number | null {
@@ -43,7 +52,7 @@ function sliderKeyValue(event: ReactKeyboardEvent<HTMLDivElement>, value: number
   }
 }
 
-export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: PlaybackStageProps) {
+export function PlaybackStage({ open, runtime, state, onClose, lyrics = null, playerLyrics = null }: PlaybackStageProps) {
   const coverUrl = trackCoverUrlOf(state.track)
   const coverImage = useAlbumImage(open ? coverUrl : null)
   const lyricsView = lyricsToggleView(lyrics)
@@ -120,18 +129,16 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
         <span>{formatDuration(state.currentTimeMs / 1000)}</span>
         <span>{durationMs > 0 ? formatDuration(durationMs / 1000) : "—"}</span>
       </div>
+      {/*
+        R50：传输组只放传输控件 —— 上一首 → 播放 → 下一首。
+        R45C 那枚歌词开关曾夹在"播放"与"下一首"之间，把这段肌肉记忆劈成两半（播放栏 R46
+        已经搬走，沉浸页漏了这一处）；现在它和音量/静音/播放模式一起排在下面的工具行。
+      */}
       <div className="flex items-center justify-evenly">
         <MediaButton className="size-10" aria-label="上一首" disabled={!hasTrack} onClick={() => void player.previous()}><SkipBackIcon /></MediaButton>
         <MediaButton className="size-14" aria-label={playing ? "暂停" : "播放"} disabled={!hasTrack} onClick={() => void player.toggle()}>
           {playing ? <PauseIcon className="size-8" /> : <PlayIcon className="size-8" />}
         </MediaButton>
-        {/* R45C：播放按钮**右侧**的同一意图开关（语义来自 components.tsx 的 lyricsToggleView，
-            取反交给 binding 的意图机——渲染快照在同一次任务里连点两次时是旧的） */}
-        {lyricsView === null ? null : (
-          <MediaButton className="size-10" aria-label={lyricsView.label} aria-pressed={lyricsView.on} data-testid="stage-lyrics-toggle" onClick={() => lyrics?.toggleVisible("playback-stage")}>
-            <CaptionsIcon className="size-5" />
-          </MediaButton>
-        )}
         <MediaButton className="size-10" aria-label="下一首" disabled={!hasTrack} onClick={() => void player.next()}><SkipForwardIcon /></MediaButton>
       </div>
       <div className="flex items-center gap-2">
@@ -168,6 +175,14 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
             </DropdownMenuRadioGroup>
           </DropdownMenuContent>
         </DropdownMenu>
+        {/* R50：歌词开关落在工具行尾部，与音量/模式同档（size-8 + 图标 size-4）。
+            语义一个字没变：状态/标签来自 components.tsx 的 lyricsToggleView，取反交给
+            binding 的意图机（渲染快照在同一次任务里连点两次时是旧的）。 */}
+        {lyricsView === null ? null : (
+          <MediaButton className="size-8 shrink-0" aria-label={lyricsView.label} aria-pressed={lyricsView.on} data-testid="stage-lyrics-toggle" onClick={() => lyrics?.toggleVisible("playback-stage")}>
+            <CaptionsIcon className="size-4" />
+          </MediaButton>
+        )}
       </div>
       {/*
         R45C：开关失败就在**沉浸页这枚按钮下面**说清（原因 + 下一步 + 重试/关掉）。
@@ -218,7 +233,16 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
           smallControlsSlot={musicControls}
           lyricSlot={(
             <div className="relative isolate h-full min-h-0 w-full" data-testid="playback-stage-lyrics-slot">
-              {hasLyric ? <AmllLyricsPanel runtime={runtime} lines={state.lyrics.lines} playing={playing} seekGeneration={state.seekGeneration} customColor={lyrics?.config.customColor} /> : null}
+              {hasLyric ? (
+                <AmllLyricsPanel
+                  runtime={runtime}
+                  lines={state.lyrics.lines}
+                  playing={playing}
+                  seekGeneration={state.seekGeneration}
+                  color={playerLyrics?.color ?? "foreground"}
+                  customColor={playerLyrics?.customColor ?? ""}
+                />
+              ) : null}
               {notice === null ? null : (
                 <div className="absolute inset-0 flex items-center justify-center p-6">
                   <p role="status" className="max-w-md text-center text-sm text-foreground">{notice}</p>

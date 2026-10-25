@@ -230,5 +230,14 @@ test("R46 主窗面板：withKaraokeWords 逐字 + 自定义颜色 scoped 覆盖
   assert.doesNotMatch(panel, /\.words\b|words\.map/, "仍不自己渲染歌词文本（逐字着色是官方组件的事）");
 
   const stage = stripComments(read(STAGE));
-  assert.match(stage, /customColor=\{lyrics\?\.config\.customColor\}/, "沉浸页把 binding 里的自定义颜色交给面板");
+  /**
+   * R50（有意更改）：沉浸页不再把**桌面歌词**的 `customColor` 交给面板。
+   *
+   * R45B 接线的是 `lyrics?.config.customColor`（Rust 那份桌面歌词配置），于是改桌面歌词颜色
+   * 会顺手改掉主窗——两件事被绑成一件。现在主窗吃的是普通 settings 键 `playerLyrics`
+   * （`usePlayerLyrics`），桌面窗仍吃它自己的 `lyricsWindow`。
+   */
+  assert.match(stage, /customColor=\{playerLyrics/, "沉浸页把**播放器歌词**的自定义颜色交给面板");
+  assert.match(stage, /color=\{playerLyrics/, "颜色令牌也来自播放器歌词那份配置");
+  assert.doesNotMatch(stage, /lyrics\?\.config\.customColor/, "不再引用桌面歌词的 customColor（R50 的分离点）");
 });

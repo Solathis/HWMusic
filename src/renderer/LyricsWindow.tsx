@@ -12,10 +12,17 @@ import { LYRICS_DOCUMENT, LYRICS_PROGRESS, LYRICS_STATE, THEME_CHANGED } from ".
 import { coreLyricsConfigure, coreLyricsControl, onCoreEvent, signalLyricsReady } from "./host-api"
 import { Button } from "./components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "./components/ui/dropdown-menu"
 import { Input } from "./components/ui/input"
 import { Label } from "./components/ui/label"
-import { ScrollArea } from "./components/ui/scroll-area"
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "./components/ui/sheet"
 import { Switch } from "./components/ui/switch"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
 import { LYRICS_SEEK_WINDOW_MS } from "./features/lyrics/lyric-sync.mjs"
@@ -35,6 +42,7 @@ import { applyCustomColor, withKaraokeWords } from "./features/lyrics/amll-adapt
 import { lyricsNoticeText } from "./features/playback/playback-state.mjs"
 import { createThemeAcceptor } from "./features/theme/theme-accept.mjs"
 import { applyThemeChoice } from "./features/theme/theme.mjs"
+import { cn } from "./lib/utils"
 
 /** 广播进来的歌词文档（主窗转发的那一份）。 */
 interface LyricsDocument {
@@ -266,89 +274,84 @@ export function LyricsWindow() {
    * 无障碍名称把"现在是什么 + 点下去会怎样"说全：`aria-pressed` 让人知道这是个按压态开关。
    */
   /**
-   * R46：外观设置面。
+   * R50：外观设置面回到**锚定齿轮的紧凑下拉菜单**（R46 曾换成整窗 Sheet，用户要求恢复原样式）。
    *
-   * 为什么不再是 DropdownMenu：这个窗默认只有 160px 高（960×160），菜单是"往下长"的浮层，
-   * 样式 2 项 + 方向 2 项 + 4 个复选框根本装不下——`.tmp/probe/settings-lyrics.png` 抓到的就是
-   * 被窗口底边切断的菜单（最后两个开关点不到）。换成 shadcn 的 Sheet：面板高度以**窗口**为上限
-   * （`max-h-[100dvh]`），正文区用 shadcn `ScrollArea` 自己滚（仓里的规矩：面板不许自搭滚动容器），
-   * 每个控件都够得着。
+   * 内容保持原样式：样式（透明/面板）单选、方向（横版/竖版）单选、四个复选框
+   * （模糊/缩放/弹簧/媒体按钮），再加一行颜色（原生 `type=color` + 「恢复主题色」，
+   * 写的是既有的 `customColor` 字段，合法 hex 判定来自 `lyrics-window.mjs` 的 `isCustomColor`）。
    *
-   * 颜色（brief 第 3 项）：原生 `type=color` + 「恢复主题色」，写的是既有的 `customColor` 字段
-   * （合法 hex 判定来自 `lyrics-window.mjs` 的 `isCustomColor`，这里不另抄正则），
-   * 落盘仍由 Rust 拥有——这里只发一条窄 `core_lyrics_configure`。
-   */
-  const customColorValue = isCustomColor(config.customColor) ? config.customColor : null
-  /**
-   * 面板开合状态**提到这一层**（受控）：换样式会把 `controls` 所在的子树从 `<div>` 换成 `<Card>`
-   * （结构变了，React 会重挂），面板若自己持有开合状态就会在点「面板」的瞬间自己关掉。
+   * 小窗（960×160）里"装不下"这件事由官方 `DropdownMenuContent` 负责：它自带
+   * `max-h-(--radix-dropdown-menu-content-available-height) overflow-y-auto`，菜单不会长出窗口，
+   * 溢出时自己滚。这里只补两处：`w-64`（触发点是一枚 32px 图标按钮，默认宽度跟着它走，
+   * 文案会被挤成竖排）与 `collisionPadding`（贴窗口边时留出可点的余量）。
+   *
+   * 开合状态**提到这一层**（受控）：换样式会把 `controls` 所在的子树从 `<div>` 换成 `<Card>`
+   * （结构变了，React 会重挂），菜单若自己持有开合状态就会在点「面板」的瞬间自己关掉。
    */
   const [appearanceOpen, setAppearanceOpen] = useState(false)
-  /** 样式/方向的档位按钮：两枚按压态按钮在 160px 高的窗里比下拉菜单稳（菜单会被窗口裁掉）。 */
-  const choiceButton = (active: boolean, label: string, onPick: () => void, testId: string, disabled = false) => (
-    <Button variant={active ? "secondary" : "ghost"} size="sm" aria-pressed={active} data-testid={testId}
-      disabled={disabled} onClick={onPick}>{label}</Button>
-  )
+  const customColorValue = isCustomColor(config.customColor) ? config.customColor : null
   const appearancePanel = (
-    <Sheet open={appearanceOpen} onOpenChange={setAppearanceOpen}>
-      <SheetTrigger asChild>
+    <DropdownMenu open={appearanceOpen} onOpenChange={setAppearanceOpen}>
+      <DropdownMenuTrigger asChild>
         <Button variant="ghost" size="icon-sm" aria-label="桌面歌词外观" data-testid="lyrics-appearance"><Settings2 /></Button>
-      </SheetTrigger>
-      <SheetContent side="right" data-testid="lyrics-appearance-panel"
-        className="w-72 max-w-[calc(100%-0.5rem)] max-h-[100dvh] gap-0 p-0">
-        <SheetHeader className="shrink-0 gap-1 p-3 pb-1">
-          <SheetTitle>桌面歌词外观</SheetTitle>
-          <SheetDescription>小窗里也能改：内容可滚动，设置立即生效并保存。</SheetDescription>
-        </SheetHeader>
-        <ScrollArea data-testid="lyrics-appearance-scroll" className="min-h-0 flex-1">
-          <div className="flex flex-col gap-3 p-3 pt-2">
-            <div className="flex flex-col gap-1">
-              <p className="text-xs text-muted-foreground">样式</p>
-              <div className="flex flex-wrap gap-1">
-                {choiceButton(config.style === "clean", "透明", () => configure({ style: "clean" }), "lyrics-style-clean")}
-                {choiceButton(config.style === "panel", "面板", () => configure({ style: "panel" }), "lyrics-style-panel")}
-              </div>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" side="bottom" collisionPadding={8} className="w-64"
+        data-testid="lyrics-appearance-panel">
+        <DropdownMenuLabel>桌面歌词外观</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>样式</DropdownMenuLabel>
+        {/* 单选（菜单 radio）：`configure` 仍是那条窄命令，落盘仍由 Rust 拥有 */}
+        <DropdownMenuRadioGroup value={config.style} onValueChange={(style) => configure({ style })}>
+          <DropdownMenuRadioItem value="clean" data-testid="lyrics-style-clean">透明</DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="panel" data-testid="lyrics-style-panel">面板</DropdownMenuRadioItem>
+        </DropdownMenuRadioGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>方向（竖版为逐字竖排）</DropdownMenuLabel>
+        <DropdownMenuRadioGroup value={config.layout} onValueChange={(layout) => configure({ layout })}>
+          <DropdownMenuRadioItem value="horizontal" data-testid="lyrics-layout-horizontal">横版</DropdownMenuRadioItem>
+          {/* 任务栏内嵌只支持横版（Rust 侧强制 horizontal）：这里禁用而不是假装可以选 */}
+          <DropdownMenuRadioItem value="vertical" disabled={config.mode === "taskbar"} data-testid="lyrics-layout-vertical">
+            竖版
+          </DropdownMenuRadioItem>
+        </DropdownMenuRadioGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>演出效果</DropdownMenuLabel>
+        {/*
+          四个开关用 shadcn `Switch`：它们是**状态**而不是菜单项，点一下不该关掉菜单
+          （复选框项会关上，用户想连着改两个就得重开）。
+        */}
+        <div className="flex flex-col gap-1 px-1.5 py-1">
+          {([["enableBlur", "模糊"], ["enableScale", "缩放"], ["enableSpring", "弹簧动画"], ["showControls", "媒体按钮"]] as const).map(([key, label]) => (
+            <div key={key} className="flex items-center justify-between gap-2">
+              <Label htmlFor={`lyrics-window-${key}`}>{label}</Label>
+              <Switch id={`lyrics-window-${key}`} data-testid={`lyrics-window-${key}`} checked={config[key]}
+                onCheckedChange={(checked) => configure({ [key]: checked })} />
             </div>
-            <div className="flex flex-col gap-1">
-              <p className="text-xs text-muted-foreground">方向（竖版为逐字竖排）</p>
-              <div className="flex flex-wrap gap-1">
-                {choiceButton(config.layout === "horizontal", "横版", () => configure({ layout: "horizontal" }), "lyrics-layout-horizontal")}
-                {choiceButton(config.layout === "vertical", "竖版", () => configure({ layout: "vertical" }), "lyrics-layout-vertical", config.mode === "taskbar")}
-              </div>
-            </div>
-            <div className="flex flex-col gap-2">
-              {([["enableBlur", "模糊"], ["enableScale", "缩放"], ["enableSpring", "弹簧动画"], ["showControls", "媒体按钮"]] as const).map(([key, label]) => (
-                <div key={key} className="flex items-center justify-between gap-2">
-                  <Label htmlFor={`lyrics-window-${key}`}>{label}</Label>
-                  <Switch id={`lyrics-window-${key}`} data-testid={`lyrics-window-${key}`} checked={config[key]}
-                    onCheckedChange={(checked) => configure({ [key]: checked })} />
-                </div>
-              ))}
-            </div>
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="lyrics-appearance-color">颜色</Label>
-              <div className="flex items-center gap-2">
-                {/* 非受控（`defaultValue` + 按存档值换 key）：`type=color` 的受控值必须始终合法，
-                    而"还没选过"不该由页面编一个色值出来（颜色一律来自令牌或用户自己选的那个）。 */}
-                <Input key={customColorValue ?? "theme"} id="lyrics-appearance-color" data-testid="lyrics-appearance-color"
-                  type="color" aria-label="自定义歌词颜色" className="h-8 w-14 shrink-0 p-0"
-                  defaultValue={customColorValue ?? undefined}
-                  onChange={(event) => {
-                    const value = event.target.value
-                    if (!isCustomColor(value)) return
-                    configure({ customColor: value })
-                  }} />
-                <Button variant="ghost" size="sm" data-testid="lyrics-appearance-color-reset" disabled={customColorValue === null}
-                  onClick={() => configure({ customColor: "" })}>恢复主题色</Button>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {customColorValue === null ? "现在用设计令牌里的颜色" : `使用自定义颜色 ${customColorValue}`}
-              </p>
-            </div>
+          ))}
+        </div>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>颜色</DropdownMenuLabel>
+        <div className="flex flex-col gap-1 px-1.5 py-1">
+          <div className="flex items-center gap-2">
+            {/* 非受控（`defaultValue` + 按存档值换 key）：`type=color` 的受控值必须始终合法，
+                而"还没选过"不该由页面编一个色值出来（颜色一律来自令牌或用户自己选的那个）。 */}
+            <Input key={customColorValue ?? "theme"} id="lyrics-appearance-color" data-testid="lyrics-appearance-color"
+              type="color" aria-label="自定义歌词颜色" className="h-8 w-14 shrink-0 p-0"
+              defaultValue={customColorValue ?? undefined}
+              onChange={(event) => {
+                const value = event.target.value
+                if (!isCustomColor(value)) return
+                configure({ customColor: value })
+              }} />
+            <Button variant="ghost" size="sm" data-testid="lyrics-appearance-color-reset" disabled={customColorValue === null}
+              onClick={() => configure({ customColor: "" })}>恢复主题色</Button>
           </div>
-        </ScrollArea>
-      </SheetContent>
-    </Sheet>
+          <p className="text-xs text-muted-foreground">
+            {customColorValue === null ? "现在用设计令牌里的颜色" : `使用自定义颜色 ${customColorValue}`}
+          </p>
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
   const lockButton = (
     <Button variant="ghost" size="icon-sm" aria-pressed={config.locked}
@@ -398,9 +401,26 @@ export function LyricsWindow() {
     </div>
   )
 
+  /**
+   * R50：透明桌面歌词的**可读性衬底**。
+   *
+   * 这个窗是透明的（浮在桌面/其它窗口之上）：`style=clean` 时窗里本来什么都没有，
+   * 深色主题的近白字与近白图标浮在**白色桌面**上、浅色主题的近黑字浮在**深色桌面**上都读不清。
+   * 所以桌面模式 + clean 给根节点加一层**令牌**衬底（`bg-background/60`，窗口仍然透明），
+   * 它同时盖住控件条与歌词区——两层各自加就一定会漏掉一处。
+   *
+   * 另外两档**不加**：`panel` 已经有 Card 背景；`mode=taskbar` 要透出系统任务栏
+   * （在那上面贴一块半透明背景就是把任务栏涂花了）。
+   */
+  const scrim = config.mode === "desktop" && config.style === "clean"
+
   return <TooltipProvider>
-    <div ref={stageRef} className="amll-lyrics-stage group/locked absolute inset-0 isolate flex flex-col overflow-hidden"
-      data-testid="lyrics-window" data-lyrics-mode={config.mode}
+    <div
+      ref={stageRef}
+      className={cn("amll-lyrics-stage group/locked absolute inset-0 isolate flex flex-col overflow-hidden", scrim && "bg-background/60")}
+      data-testid="lyrics-window"
+      data-lyrics-scrim={scrim ? "on" : "off"}
+      data-lyrics-mode={config.mode}
       data-lyrics-layout={config.mode === "taskbar" ? "horizontal" : config.layout}
       data-lyrics-style={config.style} data-lyrics-size={size}
       data-lyrics-color={config.style === "panel" && config.color === "contrast" ? "foreground" : config.color}

@@ -305,6 +305,56 @@ test("R45C 播放栏/沉浸页：一次点击只发一次 toggle，且不自建�
   assert.match(hook, /toggleVisible/, "取反由意图机决定，不由渲染快照决定");
 });
 
+/**
+ * R50（brief 第 1 项）：沉浸页的传输组**只放传输控件**。
+ *
+ * R45C 把歌词开关塞在"播放"与"下一首"之间（`size-10` / 图标 `size-5`），把
+ * `上一首 → 播放 → 下一首` 的肌肉记忆劈成两半；播放栏 R46 已经搬走，沉浸页漏了这一处。
+ * 现在开关与音量/静音/播放模式同档（`MediaButton size-8` + 图标 `size-4`），挂在下方工具行尾部。
+ *
+ * 这里只钉**源码顺序与尺寸**；几何（中心 y 在传输行下方、外接尺寸约 32px、play/next 相邻）
+ * 由 `scripts/test-browser.mjs` 在真浏览器里量。
+ */
+test("R50 沉浸页：传输组只剩 上一首→播放→下一首，歌词开关移到工具行（size-8 / 图标 size-4）", () => {
+  const stage = stripComments(read(STAGE));
+  const TRANSPORT = 'className="flex items-center justify-evenly"';
+  const TOOLS = 'className="flex items-center gap-2"';
+  const transportAt = stage.indexOf(TRANSPORT);
+  const toolsAt = stage.indexOf(TOOLS);
+  assert.ok(transportAt > -1 && toolsAt > -1 && toolsAt > transportAt, "先传输组、后工具行（两段都在，顺序是契约）");
+
+  const transport = stage.slice(transportAt, toolsAt);
+  const previousAt = transport.indexOf('aria-label="上一首"');
+  const playAt = transport.indexOf('aria-label={playing ? "暂停" : "播放"}');
+  const nextAt = transport.indexOf('aria-label="下一首"');
+  assert.ok(previousAt > -1 && playAt > -1 && nextAt > -1, "传输组里要能找到 上一首/播放/下一首");
+  assert.ok(previousAt < playAt && playAt < nextAt, "传输组的 DOM 顺序必须是 上一首 → 播放 → 下一首");
+  assert.equal(transport.includes("stage-lyrics-toggle"), false, "歌词开关不许夹在传输组里");
+  assert.equal(transport.includes("CaptionsIcon"), false, "传输组里连它的图标都不该出现");
+
+  const toggleAt = stage.indexOf('data-testid="stage-lyrics-toggle"');
+  assert.ok(toggleAt > toolsAt, "开关挂在下方的音量/模式工具行里（不是传输行）");
+  for (const anchor of [
+    'aria-label={state.muted ? "取消静音" : "静音"}',
+    'aria-label="音量"',
+    'aria-label={`播放模式：',
+  ]) {
+    const at = stage.indexOf(anchor);
+    assert.ok(at > toolsAt && at < toggleAt, `工具行顺序是 静音 → 音量 → 播放模式 → 歌词开关（${anchor} 在开关之前）`);
+  }
+
+  const openAt = stage.lastIndexOf("<MediaButton", toggleAt);
+  const closeAt = stage.indexOf("/>", toggleAt) + 2;
+  const toggleMarkup = stage.slice(openAt, closeAt);
+  assert.match(toggleMarkup, /className="size-8 shrink-0"/, "与音量/模式同档：MediaButton size-8");
+  assert.match(toggleMarkup, /<CaptionsIcon className="size-4" \/>/, "图标 size-4（不再是传输组的 size-5）");
+  assert.doesNotMatch(toggleMarkup, /size-10|size-5/, "不许再借用传输组的尺寸");
+  // 语义一个字没变：状态/标签仍只来自 lyricsToggleView，点击仍只转一次 toggleVisible
+  assert.match(toggleMarkup, /aria-label=\{lyricsView\.label\}/);
+  assert.match(toggleMarkup, /aria-pressed=\{lyricsView\.on\}/);
+  assert.match(toggleMarkup, /lyrics\?\.toggleVisible\("playback-stage"\)/);
+});
+
 test("R45C 沉浸页收起：顶部中央 ChevronDown，不再右上角叉号，ESC 照旧", () => {
   const stage = stripComments(read(STAGE));
 
