@@ -16,6 +16,9 @@ import {
   CORE_LYRICS_CONTROL,
   CORE_LYRICS_DOCUMENT,
   CORE_LYRICS_PROGRESS,
+  CORE_LYRICS_SETTINGS_CLOSE,
+  CORE_LYRICS_SETTINGS_OPEN,
+  CORE_LYRICS_SETTINGS_RESIZE,
   CORE_LYRICS_TOGGLE,
   CORE_RENDERER_READY,
   CORE_SET_AUTOSTART,
@@ -173,6 +176,28 @@ export async function coreLyricsDocument(document: unknown): Promise<unknown> {
 /** 推进度（调用方已按 `shouldPushProgress` 节流）。 */
 export async function coreLyricsProgress(progress: unknown): Promise<unknown> {
   return invokeLyrics(CORE_LYRICS_PROGRESS, { progress });
+}
+
+/**
+ * 打开桌面歌词的设置弹出窗（R51）。
+ *
+ * `anchor` 是**调用窗口客户区里的 CSS 像素**矩形（齿轮按钮的 `getBoundingClientRect()`）：
+ * Rust 用调用窗口的客户区原点与缩放比换算到屏幕物理坐标，再右对齐、下方优先、放不下翻上方、
+ * 最后夹进工作区。回执是事实（`{open, visible}`）：`open:false` 表示这次被"刚失焦关掉"的
+ * 短窗口挡了（齿轮二次点击），不显示任何东西。
+ */
+export async function coreLyricsSettingsOpen(anchor: { x: number; y: number; width: number; height: number }): Promise<unknown> {
+  return invokeLyrics(CORE_LYRICS_SETTINGS_OPEN, { anchor });
+}
+
+/** 弹出窗把量到的菜单尺寸（CSS 像素）报给宿主：尺寸与位置都由 Rust 设，页面不碰窗口。 */
+export async function coreLyricsSettingsResize(width: number, height: number): Promise<unknown> {
+  return invokeLyrics(CORE_LYRICS_SETTINGS_RESIZE, { width, height });
+}
+
+/** 关掉弹出窗（Esc / 点菜单外面）。 */
+export async function coreLyricsSettingsClose(): Promise<unknown> {
+  return invokeLyrics(CORE_LYRICS_SETTINGS_CLOSE);
 }
 
 // ---------------------------------------------------------------------------

@@ -9,21 +9,9 @@ import { getCurrentWindow } from "@tauri-apps/api/window"
 import { MoveDiagonal2, GripHorizontal, Lock, Unlock, Pause, Play, SkipBack, SkipForward, Settings2 } from "lucide-react"
 
 import { LYRICS_DOCUMENT, LYRICS_PROGRESS, LYRICS_STATE, THEME_CHANGED } from "../shared/channels.ts"
-import { coreLyricsConfigure, coreLyricsControl, onCoreEvent, signalLyricsReady } from "./host-api"
+import { coreLyricsConfigure, coreLyricsControl, coreLyricsSettingsOpen, onCoreEvent, signalLyricsReady } from "./host-api"
 import { Button } from "./components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "./components/ui/dropdown-menu"
-import { Input } from "./components/ui/input"
-import { Label } from "./components/ui/label"
-import { Switch } from "./components/ui/switch"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
 import { LYRICS_SEEK_WINDOW_MS } from "./features/lyrics/lyric-sync.mjs"
 import {
@@ -31,7 +19,6 @@ import {
   dragRegionEnabled,
   effectiveSizeId,
   estimateTimeMs,
-  isCustomColor,
   lyricsConfigFromSearch,
   normalizeLyricsConfig,
   reanchorProgress,
@@ -269,90 +256,27 @@ export function LyricsWindow() {
     void coreLyricsControl(action).catch(() => setActionError("媒体动作未能发出，请从主窗重试。"))
   }
   /**
-   * 锁定开关（R45B）：`locked=true` 显示 **Lock**（表示已锁），未锁显示 Unlock（表示可以锁）。
+   * R51：外观设置不再是这扇窗里内嵌的下拉菜单，而是**另一扇独立的小窗**（`lyrics-settings`）。
    *
-   * 无障碍名称把"现在是什么 + 点下去会怎样"说全：`aria-pressed` 让人知道这是个按压态开关。
+   * 为什么（用户要求）：桌面歌词窗默认只有 800×128，radix 的菜单浮层被限制在窗口的可用高度里，
+   * 只能滚；菜单必须能长到窗口外面去。齿轮因此退回一枚普通按钮：点它把**自己客户区里的 DIP 矩形**
+   * 交给宿主，位置/尺寸/关闭全由 Rust 定（R51 简报：锚点 = `getBoundingClientRect()`）。
+   *
+   * 二次点击的闪烁由 Rust 侧兜住：那一下点击会让弹出窗失焦（先 hide），紧跟着到达的这笔 open
+   * 落在短窗口里被判为同一次点击的尾巴——不会出现"关掉又被同一次点击打开"。
    */
-  /**
-   * R50：外观设置面回到**锚定齿轮的紧凑下拉菜单**（R46 曾换成整窗 Sheet，用户要求恢复原样式）。
-   *
-   * 内容保持原样式：样式（透明/面板）单选、方向（横版/竖版）单选、四个复选框
-   * （模糊/缩放/弹簧/媒体按钮），再加一行颜色（原生 `type=color` + 「恢复主题色」，
-   * 写的是既有的 `customColor` 字段，合法 hex 判定来自 `lyrics-window.mjs` 的 `isCustomColor`）。
-   *
-   * 小窗（960×160）里"装不下"这件事由官方 `DropdownMenuContent` 负责：它自带
-   * `max-h-(--radix-dropdown-menu-content-available-height) overflow-y-auto`，菜单不会长出窗口，
-   * 溢出时自己滚。这里只补两处：`w-64`（触发点是一枚 32px 图标按钮，默认宽度跟着它走，
-   * 文案会被挤成竖排）与 `collisionPadding`（贴窗口边时留出可点的余量）。
-   *
-   * 开合状态**提到这一层**（受控）：换样式会把 `controls` 所在的子树从 `<div>` 换成 `<Card>`
-   * （结构变了，React 会重挂），菜单若自己持有开合状态就会在点「面板」的瞬间自己关掉。
-   */
-  const [appearanceOpen, setAppearanceOpen] = useState(false)
-  const customColorValue = isCustomColor(config.customColor) ? config.customColor : null
-  const appearancePanel = (
-    <DropdownMenu open={appearanceOpen} onOpenChange={setAppearanceOpen}>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon-sm" aria-label="桌面歌词外观" data-testid="lyrics-appearance"><Settings2 /></Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" side="bottom" collisionPadding={8} className="w-64"
-        data-testid="lyrics-appearance-panel">
-        <DropdownMenuLabel>桌面歌词外观</DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        <DropdownMenuLabel>样式</DropdownMenuLabel>
-        {/* 单选（菜单 radio）：`configure` 仍是那条窄命令，落盘仍由 Rust 拥有 */}
-        <DropdownMenuRadioGroup value={config.style} onValueChange={(style) => configure({ style })}>
-          <DropdownMenuRadioItem value="clean" data-testid="lyrics-style-clean">透明</DropdownMenuRadioItem>
-          <DropdownMenuRadioItem value="panel" data-testid="lyrics-style-panel">面板</DropdownMenuRadioItem>
-        </DropdownMenuRadioGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuLabel>方向（竖版为逐字竖排）</DropdownMenuLabel>
-        <DropdownMenuRadioGroup value={config.layout} onValueChange={(layout) => configure({ layout })}>
-          <DropdownMenuRadioItem value="horizontal" data-testid="lyrics-layout-horizontal">横版</DropdownMenuRadioItem>
-          {/* 任务栏内嵌只支持横版（Rust 侧强制 horizontal）：这里禁用而不是假装可以选 */}
-          <DropdownMenuRadioItem value="vertical" disabled={config.mode === "taskbar"} data-testid="lyrics-layout-vertical">
-            竖版
-          </DropdownMenuRadioItem>
-        </DropdownMenuRadioGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuLabel>演出效果</DropdownMenuLabel>
-        {/*
-          四个开关用 shadcn `Switch`：它们是**状态**而不是菜单项，点一下不该关掉菜单
-          （复选框项会关上，用户想连着改两个就得重开）。
-        */}
-        <div className="flex flex-col gap-1 px-1.5 py-1">
-          {([["enableBlur", "模糊"], ["enableScale", "缩放"], ["enableSpring", "弹簧动画"], ["showControls", "媒体按钮"]] as const).map(([key, label]) => (
-            <div key={key} className="flex items-center justify-between gap-2">
-              <Label htmlFor={`lyrics-window-${key}`}>{label}</Label>
-              <Switch id={`lyrics-window-${key}`} data-testid={`lyrics-window-${key}`} checked={config[key]}
-                onCheckedChange={(checked) => configure({ [key]: checked })} />
-            </div>
-          ))}
-        </div>
-        <DropdownMenuSeparator />
-        <DropdownMenuLabel>颜色</DropdownMenuLabel>
-        <div className="flex flex-col gap-1 px-1.5 py-1">
-          <div className="flex items-center gap-2">
-            {/* 非受控（`defaultValue` + 按存档值换 key）：`type=color` 的受控值必须始终合法，
-                而"还没选过"不该由页面编一个色值出来（颜色一律来自令牌或用户自己选的那个）。 */}
-            <Input key={customColorValue ?? "theme"} id="lyrics-appearance-color" data-testid="lyrics-appearance-color"
-              type="color" aria-label="自定义歌词颜色" className="h-8 w-14 shrink-0 p-0"
-              defaultValue={customColorValue ?? undefined}
-              onChange={(event) => {
-                const value = event.target.value
-                if (!isCustomColor(value)) return
-                configure({ customColor: value })
-              }} />
-            <Button variant="ghost" size="sm" data-testid="lyrics-appearance-color-reset" disabled={customColorValue === null}
-              onClick={() => configure({ customColor: "" })}>恢复主题色</Button>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            {customColorValue === null ? "现在用设计令牌里的颜色" : `使用自定义颜色 ${customColorValue}`}
-          </p>
-        </div>
-      </DropdownMenuContent>
-    </DropdownMenu>
+  const openAppearance = (event: MouseEvent<HTMLButtonElement>) => {
+    setActionError(null)
+    const rect = event.currentTarget.getBoundingClientRect()
+    void coreLyricsSettingsOpen({ x: rect.x, y: rect.y, width: rect.width, height: rect.height })
+      .catch(() => setActionError("设置窗口未能打开，请重试。"))
+  }
+  const appearanceButton = (
+    <Button variant="ghost" size="icon-sm" aria-label="桌面歌词外观" data-testid="lyrics-appearance"
+      onClick={openAppearance}><Settings2 /></Button>
   )
+  /** 锁定开关（R45B）：`locked=true` 显示 **Lock**（表示已锁），未锁显示 Unlock（表示可以锁）；
+   *  `aria-pressed` 让人知道这是个按压态开关，无障碍名称把"现在是什么 + 点下去会怎样"说全。 */
   const lockButton = (
     <Button variant="ghost" size="icon-sm" aria-pressed={config.locked}
       aria-label={config.locked ? "已锁定桌面歌词（点击解锁）" : "锁定桌面歌词"}
@@ -368,7 +292,7 @@ export function LyricsWindow() {
     </div>
   )
   const controls = config.locked ? lockedControls : (
-    <div className="flex shrink-0 items-center justify-center gap-1" data-testid="lyrics-controls">
+    <div className="flex shrink-0 items-center justify-center gap-0.5" data-testid="lyrics-controls">
       <Tooltip>
         <TooltipTrigger asChild>
           <span>
@@ -386,7 +310,7 @@ export function LyricsWindow() {
         <Button variant="ghost" size="icon-sm" aria-label="下一首" onClick={() => control("next")}><SkipForward /></Button>
       </> : null}
       {lockButton}
-      {appearancePanel}
+      {appearanceButton}
     </div>
   )
   const content = (
@@ -426,13 +350,13 @@ export function LyricsWindow() {
       data-lyrics-color={config.style === "panel" && config.color === "contrast" ? "foreground" : config.color}
       data-lyrics-locked={config.locked ? "on" : "off"}>
       {config.style === "panel" ? <Card size="sm" className="h-full min-h-0 gap-0 py-0">
-        {config.mode === "desktop" ? <CardHeader className={config.locked ? "shrink-0 px-2 py-0" : "shrink-0 px-2 py-1"}>
+        {config.mode === "desktop" ? <CardHeader className={config.locked ? "shrink-0 px-1.5 py-0" : "shrink-0 px-1.5 py-0.5"}>
           <CardTitle className="sr-only">桌面歌词</CardTitle>
           <CardDescription className="sr-only">媒体控制与歌词滚动区（竖版为逐字竖排）</CardDescription>
           {controls}
         </CardHeader> : null}
         <CardContent className="flex min-h-0 flex-1 flex-col px-0">{content}</CardContent>
-      </Card> : <>{config.mode === "desktop" ? <div className="shrink-0 p-1">{controls}</div> : null}{content}</>}
+      </Card> : <>{config.mode === "desktop" ? <div className="shrink-0 px-0.5 pt-0.5">{controls}</div> : null}{content}</>}
       {/* R45B：右下角缩放拖柄（未锁的桌面窗才有；锁定/任务栏连按钮都不存在） */}
       {canResize ? <div className="absolute bottom-0 right-0 z-10 p-0.5" data-testid="lyrics-resize-handle">
         <Tooltip>

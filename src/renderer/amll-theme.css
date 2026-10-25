@@ -50,6 +50,23 @@
 }
 
 /*
+ * R51：桌面歌词窗的**歌词左右留白**收小（紧凑默认尺寸那一半）。
+ *
+ * 用的是官方样式自己暴露的那个变量（`.FmKaba_lyricLineWrapper { padding: .4em var(--lyric-line-padding-x) }`，
+ * 官方在 `.amll-lyric-player` 上给 `1em`、窗口窄于 500px 时给 `20px`）——不改官方 CSS，不写死像素，
+ * 也不另造一层容器内边距。窗口变紧凑之后，这 28~56px 的左右留白就是"字还没唱到就被挤掉"的那一块。
+ *
+ * **刻意不动 `.4em` 那对上下内边距**：竖排的折列轴是 `calc(100cqh - 0.8em)`，正是给这 0.4em×2 让路的
+ * （见下面的竖排规则与 test/lyrics-window.test.mjs 的契约）——改了它，竖排的当前行会重新被裁掉上下两端。
+ *
+ * 选择器只命中桌面歌词窗：`data-lyrics-layout` 只有那一个舞台根节点会写（主窗歌词面板只写
+ * `data-lyrics-color`，任务栏那一条 Rust 强制 horizontal 也一样收小）。
+ */
+.amll-lyrics-stage[data-lyrics-layout] .amll-lyric-player {
+  --lyric-line-padding-x: 0.5em;
+}
+
+/*
  * R45B/R46：竖版 = 官方 AMLL 组件上的**真竖排**。
  *
  * 一句话：竖排落在**一行之内**（一行 = 一条横带，带里是从上到下的列，列自右向左），

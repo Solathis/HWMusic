@@ -54,10 +54,18 @@ pub const TASKBAR_SIZE: Size = Size {
     height: 44.0,
 };
 
-/// 桌面模式的窗口尺寸：比任务栏那条高一点，让上下行各露一部分（AMLL 自己排版）。
+/// 桌面模式的窗口尺寸（R51 收紧：960×160 → 800×128）：一条紧凑的显示带，上下行各露一部分
+/// （AMLL 自己排版）。控件行与歌词左右留白同步收小（见 `LyricsWindow.tsx` 与 `amll-theme.css`），
+/// 所以变矮的不是"能看见的歌词"，而是那些空白。
 pub const DESKTOP_SIZE: Size = Size {
-    width: 960.0,
-    height: 160.0,
+    width: 800.0,
+    height: 128.0,
+};
+
+/// 竖版桌面窗的默认尺寸（R51 收紧：320×620 → 260×520，同一比例区间）。
+pub const DESKTOP_VERTICAL_SIZE: Size = Size {
+    width: 260.0,
+    height: 520.0,
 };
 
 /// 桌面模式在任务栏位置之上再抬多少（正好让开任务栏那一条）。
@@ -849,6 +857,9 @@ pub fn schedule_rebuild<R: Runtime>(app: &AppHandle<R>) {
 pub fn begin_shutdown<R: Runtime>(app: &AppHandle<R>) {
     let state = app.state::<LyricsWindowState>();
     let mut lifecycle = lock(&state.lifecycle); lifecycle.shutting_down = true; lifecycle.requested = false;
+    // R51：设置弹出窗**直接销毁**（不排队、不等待）：它不持有任何要落盘的东西，
+    // 所以不该出现在 R44e 的退出预算里，也不该拖慢一次正常退出。
+    crate::lyrics_settings::shutdown(app);
     #[cfg(windows)] {
         let host = app.state::<crate::taskbar_lyrics::Host>(); host.shutdown();
         let generation = lifecycle.live_generation;
@@ -874,9 +885,29 @@ pub fn ready_generation(source: &str, document_generation: Option<u64>, live_gen
     if source == LYRICS_WINDOW_LABEL && empty_read && document_generation == live_generation { document_generation } else { None }
 }
 
+/// 谁可以改歌词配置：主窗、歌词窗，以及 R51 的设置弹出窗（那些控件就在它里面）。
+///
+/// 注意这条**不**等于"谁能用歌词专命令"：媒体控制另有 [`require_lyrics_control_source`]，
+/// 弹出窗不在其中——它能改外观，但没有任何理由替用户按上一首/下一首。
 pub fn require_lyrics_source(label: &str) -> Result<(), CoreError> {
-    if [MAIN_WINDOW_LABEL, LYRICS_WINDOW_LABEL].contains(&label) { return Ok(()); }
-    Err(CoreError::new("forbidden_source", "歌词配置与媒体控制仅接受主窗或歌词窗调用"))
+    if [
+        MAIN_WINDOW_LABEL,
+        LYRICS_WINDOW_LABEL,
+        crate::LYRICS_SETTINGS_WINDOW_LABEL,
+    ]
+    .contains(&label)
+    {
+        return Ok(());
+    }
+    Err(CoreError::new("forbidden_source", "歌词配置仅接受主窗、歌词窗或设置弹出窗调用"))
+}
+
+/// 谁可以发歌词的**媒体控制**：只有主窗与歌词窗（弹出窗只改外观）。
+pub fn require_lyrics_control_source(label: &str) -> Result<(), CoreError> {
+    if [MAIN_WINDOW_LABEL, LYRICS_WINDOW_LABEL].contains(&label) {
+        return Ok(());
+    }
+    Err(CoreError::new("forbidden_source", "歌词媒体控制仅接受主窗或歌词窗调用"))
 }
 
 pub fn validate_configure(label: &str, patch: &Value, retry_save: Option<bool>, restore_if_pristine: Option<Value>) -> Result<(), CoreError> {
@@ -919,7 +950,7 @@ pub fn validate_configure(label: &str, patch: &Value, retry_save: Option<bool>, 
 }
 
 pub fn control_payload(label: &str, payload: &Value) -> Result<Value, CoreError> {
-    require_lyrics_source(label)?;
+    require_lyrics_control_source(label)?;
     if let Some(object) = payload.as_object() {
         if object.len() == 1 {
             if let Some(action) = object.get("action").and_then(Value::as_str).filter(|v| LYRICS_CONTROL_ACTIONS.contains(v)) {
@@ -1036,13 +1067,19 @@ fn work_area<R: Runtime>(app: &AppHandle<R>, preserve_position: bool) -> Result<
         .or_else(|| app.primary_monitor().ok().flatten())
         .ok_or_else(|| CoreError::new("internal", "取不到显示器的工作区：歌词窗按默认位置显示"))?;
 
+    Ok(work_area_rect(&monitor))
+}
+
+/// 一块显示器的工作区（物理像素）。**R51 起是唯一读数点**：歌词窗几何与设置弹出窗的定位
+/// 共用它，谁都不许在别处再写一遍 `monitor.work_area()`（两处各读一次，迟早有一处忘了负坐标这件事）。
+pub fn work_area_rect(monitor: &tauri::Monitor) -> Rect {
     let area = monitor.work_area();
-    Ok(Rect {
+    Rect {
         x: f64::from(area.position.x),
         y: f64::from(area.position.y),
         width: f64::from(area.size.width),
         height: f64::from(area.size.height),
-    })
+    }
 }
 
 /// 建窗（**只在 async 命令里调用**：`build` 内部走一趟主线程往返，同步命令会死锁）。
@@ -1133,6 +1170,8 @@ fn build_lyrics_window<R: Runtime>(
     let events = app.clone();
     window.on_window_event(move |event| {
         if !matches!(event, tauri::WindowEvent::Destroyed) { return; }
+        // R51：歌词窗没了，设置弹出窗也一起收（它锚在歌词窗的齿轮上，没有锚就不该留着）。
+        crate::lyrics_settings::close(&events);
         let mut recover = false;
         if let Some(state) = events.try_state::<LyricsWindowState>() {
             let mut lifecycle = lock(&state.lifecycle);
@@ -1173,7 +1212,7 @@ pub fn geometry_plan(area: Rect, config: &LyricsConfig, scale: f64, current: Opt
     let wanted = if config.mode == LyricsMode::Taskbar { TASKBAR_SIZE }
         // R45B：用户拖过的尺寸优先（它是 DIP，按缩放比换成物理像素后再夹进工作区）
         else if let Some(size) = config.custom_size() { size }
-        else if config.layout == "vertical" { Size { width: 320.0, height: 620.0 } }
+        else if config.layout == "vertical" { DESKTOP_VERTICAL_SIZE }
         else { DESKTOP_SIZE };
     let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
     let size = Size { width: (wanted.width * scale).min(area.width).max(1.0), height: (wanted.height * scale).min(area.height).max(1.0) };
@@ -1341,6 +1380,8 @@ fn apply_toggle<R: Runtime>(
                 .hide()
                 .map_err(|source| CoreError::new("internal", format!("歌词窗隐藏失败：{source}")))?;
         }
+        // R51：歌词窗收起来了，挂在它上面的设置弹出窗一起收（否则会有一份菜单浮在桌面上）。
+        crate::lyrics_settings::close(app);
         return Ok(false);
     }
 
@@ -1526,6 +1567,11 @@ pub async fn core_lyrics_configure(
             if let Err(error) = apply_config(&app, &window, Some(&previous), &snapshot.config) {
                 log::warn!("歌词窗配置已更新，但窗口属性未完全应用（{error}）");
             }
+        }
+        // R51：锁定 / 切任务栏之后设置弹出窗都不该再留着——锁定意味着"这一块不该再被误改"，
+        // 任务栏那条根本不挂控件。放在应用之后：先把窗口本身摆对，再收菜单。
+        if snapshot.config.locked || snapshot.config.mode == LyricsMode::Taskbar {
+            crate::lyrics_settings::close(&app);
         }
     }
     let payload = read_status(&app).await?;
@@ -1859,7 +1905,8 @@ mod tests {
         effects.clear();
         let vertical = visual.apply_patch(&json!({"layout":"vertical"}));
         apply_window_effects(Some(&visual), &vertical, area, 1.25, Some(Point {x:-200.0,y:700.0}), |effect| effects.push(effect));
-        assert_eq!(effects[0], WindowEffect::Geometry(Size {width:400.0,height:775.0}, Point {x:-400.0,y:65.0}));
+        // R51：竖版默认尺寸收紧到 260×520 DIP → 1.25 缩放比下 325×650 物理像素（旧期望是 320×620 → 400×775）
+        assert_eq!(effects[0], WindowEffect::Geometry(Size {width:325.0,height:650.0}, Point {x:-325.0,y:190.0}));
         let taskbar = vertical.apply_patch(&json!({"mode":"taskbar"}));
         let (size, _) = geometry_plan(area, &taskbar, 1.0, None);
         assert_eq!(size, TASKBAR_SIZE);
@@ -1897,6 +1944,91 @@ mod tests {
         let point = taskbar_position(main_monitor(), size);
         assert_eq!(point.x, (1920.0 - 1200.0) / 2.0, "水平居中");
         assert_eq!(point.y, 1040.0 - 44.0, "贴工作区下沿（= 任务栏上沿）");
+    }
+
+    /// R51：默认尺寸收紧（横版 800×128、竖版 260×520），最小尺寸与任务栏尺寸不变。
+    ///
+    /// 为什么这条要有：默认尺寸是**用户什么都不改时看到的那个窗**。它一旦悄悄长回去，
+    /// 用户会以为"改成紧凑"这件事根本没做（而内边距那半已经在渲染层改掉了）。
+    #[test]
+    fn r51_the_default_desktop_sizes_are_compact() {
+        assert_eq!((DESKTOP_SIZE.width, DESKTOP_SIZE.height), (800.0, 128.0));
+        assert_eq!((DESKTOP_VERTICAL_SIZE.width, DESKTOP_VERTICAL_SIZE.height), (260.0, 520.0));
+        assert_eq!((TASKBAR_SIZE.width, TASKBAR_SIZE.height), (1200.0, 44.0), "任务栏尺寸不变");
+        assert_eq!((MIN_WINDOW_WIDTH_DIP, MIN_WINDOW_HEIGHT_DIP), (240.0, 120.0), "最小尺寸不变");
+
+        let area = main_monitor();
+        let horizontal = LyricsConfig::default();
+        let (size, _) = geometry_plan(area, &horizontal, 1.0, None);
+        assert_eq!(size, DESKTOP_SIZE, "横版默认走 DESKTOP_SIZE");
+        let vertical = horizontal.apply_patch(&json!({"layout": "vertical"}));
+        let (size, _) = geometry_plan(area, &vertical, 1.0, None);
+        assert_eq!(size, DESKTOP_VERTICAL_SIZE, "竖版默认走 DESKTOP_VERTICAL_SIZE");
+        // 用户保存过的自定义尺寸不受影响（简报：不碰已保存的尺寸）
+        let custom = horizontal.apply_patch(&json!({"windowWidth": 640.0, "windowHeight": 200.0}));
+        assert_eq!(
+            geometry_plan(area, &custom, 1.0, None).0,
+            Size { width: 640.0, height: 200.0 },
+            "自定义尺寸优先于新的默认值"
+        );
+    }
+
+    /// R51：设置弹出窗的四条关闭路径都接在歌词窗这一侧（隐藏/销毁/锁定或切任务栏/退出）。
+    ///
+    /// 扫的是"这些时刻有没有人去收弹出窗"——真窗行为由任务报告里的真机证据兜住。
+    #[test]
+    fn r51_the_popup_is_closed_on_every_lyrics_lifecycle_event() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs"))
+            .expect("要能读到自己的源码");
+        let production = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let hide_branch = production
+            .split("if !checked {")
+            .nth(1)
+            .expect("关歌词那条分支必须在")
+            .split("return Ok(false);")
+            .next()
+            .unwrap();
+        assert!(
+            hide_branch.contains("crate::lyrics_settings::close(app)"),
+            "歌词窗隐藏时要把设置弹出窗一起收"
+        );
+        let configure = production
+            .split("pub async fn core_lyrics_configure(")
+            .nth(1)
+            .unwrap()
+            .split("#[tauri::command]")
+            .next()
+            .unwrap();
+        assert!(
+            configure.contains("snapshot.config.locked || snapshot.config.mode == LyricsMode::Taskbar"),
+            "锁定或切到任务栏模式之后不能再留一份菜单在桌面上"
+        );
+        assert!(
+            configure.contains("crate::lyrics_settings::close(&app)"),
+            "那条判定之后要真的收窗"
+        );
+        let destroy = production
+            .split("tauri::WindowEvent::Destroyed")
+            .nth(1)
+            .unwrap()
+            .split("let mut recover")
+            .next()
+            .unwrap();
+        assert!(
+            destroy.contains("crate::lyrics_settings::close(&events)"),
+            "歌词窗销毁时弹出窗一起收"
+        );
+        let shutdown = production
+            .split("pub fn begin_shutdown")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg(windows)]")
+            .next()
+            .unwrap();
+        assert!(
+            shutdown.contains("crate::lyrics_settings::shutdown(app)"),
+            "退出时直接销毁弹出窗（不排队、不等待）"
+        );
     }
 
     #[test]

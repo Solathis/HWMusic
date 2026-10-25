@@ -46,6 +46,8 @@ const UI_FILES = [
   "src/renderer/theme-control.tsx",
   // R41b：左下角那枚主题循环按钮（图标 + tooltip 都是 shadcn/lucide，没有自绘）
   "src/renderer/theme-toggle.tsx",
+  // R51：歌词设置弹出窗（菜单本体是官方 DropdownMenu，控件全是 shadcn 原语）
+  "src/renderer/LyricsSettingsPopup.tsx",
 ];
 
 /**

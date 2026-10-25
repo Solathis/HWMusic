@@ -46,7 +46,8 @@ export const CORE_GET_AUTOSTART = "core_get_autostart";
  */
 export const CORE_GET_TRAY_AVAILABLE = "core_get_tray_available";
 
-/** 歌词专命令均 async。toggle/document/progress 限 main；configure/control 限 main/lyrics。
+/** 歌词专命令均 async。toggle/document/progress 限 main；configure 限 main/lyrics/设置弹出窗；
+ * control 限 main/lyrics（弹出窗只改外观，不按播放键）。
  * configure({}) 纯读，回 {config, visible, revision}；restoreIfPristine 仅 main 且 revision=0 恢复。
  * control 仅接受 {action: toggle|previous|next}，转现 player:command，不开放 core_call。
  */
@@ -55,6 +56,23 @@ export const CORE_LYRICS_CONFIGURE = "core_lyrics_configure";
 export const CORE_LYRICS_CONTROL = "core_lyrics_control";
 export const CORE_LYRICS_DOCUMENT = "core_lyrics_document";
 export const CORE_LYRICS_PROGRESS = "core_lyrics_progress";
+
+/**
+ * 歌词设置**弹出窗**的三条命令（R51）：打开 / 报尺寸 / 关闭自己。
+ *
+ * 为什么要有这三条（而不是让渲染层自己开窗）：桌面歌词窗只有 800×128，菜单在这个高度里只能滚。
+ * 菜单搬进一扇独立的小透明窗之后，"放在哪、多大"必须由 **Rust** 决定（锚点换算、下方放不下翻上方、
+ * 夹进工作区、缩放比）——这些都是窗口层的事，而且那扇窗因此**不需要任何 window 权限**。
+ *
+ * - `open({anchor})`：限 `main`/`lyrics`；`anchor` 是**调用窗口客户区里的 CSS 像素**矩形
+ *   （齿轮按钮的 `getBoundingClientRect()`，DIP）。Rust 换算到物理坐标并定位。
+ * - `resize({width, height})`：限 `lyrics-settings`；页面用 `ResizeObserver` 量到菜单内容尺寸后上报，
+ *   Rust 设窗口尺寸并按同一锚点重算位置（首次显示也走这条：量到尺寸才 show，免得闪一下默认尺寸）。
+ * - `close()`：限 `lyrics-settings`；Esc 与点菜单外面由 radix 的 dismiss 回来。
+ */
+export const CORE_LYRICS_SETTINGS_OPEN = "core_lyrics_settings_open";
+export const CORE_LYRICS_SETTINGS_RESIZE = "core_lyrics_settings_resize";
+export const CORE_LYRICS_SETTINGS_CLOSE = "core_lyrics_settings_close";
 
 /**
  * 登录体验的浮动控件（R25 增补）：**登录相关控件的唯一命令**。

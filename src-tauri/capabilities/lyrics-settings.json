@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "lyrics-settings",
+  "description": "桌面歌词设置弹出窗的最小权限：只订阅核心事件（歌词状态与主题广播）。尺寸、位置与关闭全由 Rust 的专命令负责，所以这里不授予任何 window 权限。",
+  "windows": ["lyrics-settings"],
+  "permissions": ["core:event:default"]
+}

@@ -14,6 +14,7 @@ pub mod bridge;
 pub mod close_behavior;
 mod commands;
 pub mod login;
+pub mod lyrics_settings;
 pub mod lyrics_window;
 pub mod taskbar_lyrics;
 mod secure_store;
@@ -36,6 +37,9 @@ pub const MAIN_WINDOW_LABEL: &str = "main";
 /// 桌面歌词窗 label。窗口由 R12 的 `lyrics_window.rs` 起（无边框/透明/置顶/点透），
 /// window-state、歌词专命令来源守卫与几何接管都按同一 label。
 pub const LYRICS_WINDOW_LABEL: &str = "lyrics";
+/// 桌面歌词**设置弹出窗** label（R51）。它是歌词窗外面的另一扇小透明窗：菜单要能超出歌词窗的
+/// 800×128，所以不能留在窗里。窗口与几何归 `lyrics_settings.rs`，它自己**没有任何** window 权限。
+pub const LYRICS_SETTINGS_WINDOW_LABEL: &str = "lyrics-settings";
 /// 托盘**图标** id（菜单项 id 的前缀是 `tray:`，见 `tray::MENU_ID_PREFIX`；两件事别混）。
 pub const TRAY_ID: &str = "tray";
 /// 数据目录覆盖旋钮：只接受绝对路径，空值等同未设置（%APPDATA% 不可写时排障用）。
@@ -632,6 +636,9 @@ pub fn run() {
             // 先登记运行配置与 revision（R44e：**只读**恢复盘上的歌词配置当基线——主窗不再
             // bootstrap 写盘，内存与盘上必须一开始就一致），再起 Rust 拥有的保存任务。
             app.manage(lyrics_window::LyricsWindowState::restore(&data_root));
+            // R51：设置弹出窗的会话内状态（锚点 / 量到的内容尺寸 / 最近失焦关闭的时刻）。
+            // 登记位置与歌词窗相邻：两者说的是同一件事的相邻两半，谁先谁后都不会被读到半份。
+            app.manage(lyrics_settings::SettingsPopupState::default());
             lyrics_window::start_persistence(handle);
             #[cfg(windows)] {
                 app.manage(taskbar_lyrics::Host::default());
@@ -717,6 +724,11 @@ pub fn run() {
             lyrics_window::core_lyrics_control,
             lyrics_window::core_lyrics_document,
             lyrics_window::core_lyrics_progress,
+            // R51：歌词设置的**独立弹出窗**（打开 / 报尺寸 / 关闭）。位置与尺寸由 Rust 定，
+            // 所以这扇窗不授予任何 window 权限（见 capabilities/lyrics-settings.json）。
+            lyrics_settings::core_lyrics_settings_open,
+            lyrics_settings::core_lyrics_settings_resize,
+            lyrics_settings::core_lyrics_settings_close,
             // R25：登录体验的浮动控件（返回 / 主题）。**另开一条命令**而不是放宽 core_call 的
             // 来源守卫：浮动 webview 的 label 不是 main，而 core_call 收的是全部业务频道
             //（守卫与两条动作的边界见 commands.rs 的 `require_login_chrome_source`）。

@@ -17,6 +17,9 @@ import {
   CORE_LYRICS_CONTROL,
   CORE_LYRICS_DOCUMENT,
   CORE_LYRICS_PROGRESS,
+  CORE_LYRICS_SETTINGS_CLOSE,
+  CORE_LYRICS_SETTINGS_OPEN,
+  CORE_LYRICS_SETTINGS_RESIZE,
   CORE_LYRICS_TOGGLE,
 } from "../src/shared/commands.ts";
 import { PLAYBACK_LYRICS, REQUEST_CHANNELS } from "../src/shared/request-channels.ts";
@@ -515,14 +518,18 @@ test("频道：三条 lyrics:* 广播进白名单，且与 Rust 镜像逐字相�
 // 2. 命令面
 // ---------------------------------------------------------------------------
 
-test("命令名：五条具名命令共享真源、注册与最小 capability 一致", () => {
+test("命令名：歌词专命令共享真源、注册与最小 capability 一致", () => {
   assert.equal(CORE_LYRICS_TOGGLE, "core_lyrics_toggle");
   assert.equal(CORE_LYRICS_CONFIGURE, "core_lyrics_configure");
   assert.equal(CORE_LYRICS_CONTROL, "core_lyrics_control");
   assert.equal(CORE_LYRICS_DOCUMENT, "core_lyrics_document");
   assert.equal(CORE_LYRICS_PROGRESS, "core_lyrics_progress");
+  // R51：设置弹出窗的三条命令（打开 / 报尺寸 / 关闭自己）
+  assert.equal(CORE_LYRICS_SETTINGS_OPEN, "core_lyrics_settings_open");
+  assert.equal(CORE_LYRICS_SETTINGS_RESIZE, "core_lyrics_settings_resize");
+  assert.equal(CORE_LYRICS_SETTINGS_CLOSE, "core_lyrics_settings_close");
   const hostApi = read("src/renderer/host-api.ts");
-  for (const [constant, wrapper] of [["TOGGLE","Toggle"], ["CONFIGURE","Configure"], ["CONTROL","Control"], ["DOCUMENT","Document"], ["PROGRESS","Progress"]]) {
+  for (const [constant, wrapper] of [["TOGGLE","Toggle"], ["CONFIGURE","Configure"], ["CONTROL","Control"], ["DOCUMENT","Document"], ["PROGRESS","Progress"], ["SETTINGS_OPEN","SettingsOpen"], ["SETTINGS_RESIZE","SettingsResize"], ["SETTINGS_CLOSE","SettingsClose"]]) {
     assert.match(hostApi, new RegExp(`invokeLyrics\\(CORE_LYRICS_${constant}`));
     assert.match(hostApi, new RegExp(`export async function coreLyrics${wrapper}\\(`));
   }
@@ -535,6 +542,11 @@ test("命令名：五条具名命令共享真源、注册与最小 capability �
     ["core:event:default", "core:window:allow-start-dragging", "core:window:allow-start-resize-dragging"],
   );
   assert.deepEqual(JSON.parse(read("src-tauri/capabilities/main.json")).windows, ["main"]);
+  // R51：设置弹出窗**没有任何 window 权限**（尺寸/位置/关闭都由 Rust 的专命令负责）
+  const popupPermission = JSON.parse(read("src-tauri/capabilities/lyrics-settings.json"));
+  assert.deepEqual(popupPermission.windows, ["lyrics-settings"]);
+  assert.deepEqual(popupPermission.permissions, ["core:event:default"]);
+  assert.doesNotMatch(JSON.stringify(popupPermission), /allow-start|allow-set-(size|position)|allow-close/, "弹出窗不许有窗口权限");
   const rust = rustProduction(rustSource("lyrics_window.rs"));
   for (const [name, values] of [["LYRICS_LAYOUTS", ["horizontal","vertical"]], ["LYRICS_STYLES", ["clean","panel"]], ["LYRICS_CONTROL_ACTIONS", ["toggle","previous","next"]]]) {
     const body = rust.match(new RegExp(`${name}[^=]*=\\s*&\\[([^\\]]+)\\]`))[1];
@@ -542,7 +554,7 @@ test("命令名：五条具名命令共享真源、注册与最小 capability �
   }
 });
 
-test("Rust：五条具名命令都 async、正确来源守卫且注册", () => {
+test("Rust：歌词专命令都 async、正确来源守卫且注册", () => {
   const rust = rustProduction(rustSource("lyrics_window.rs"));
   const lib = read("src-tauri/src/lib.rs");
   for (const [name, guard] of [
@@ -557,6 +569,22 @@ test("Rust：五条具名命令都 async、正确来源守卫且注册", () => {
     assert.ok(body.indexOf(guard) >= 0 && body.indexOf(guard) < 900);
     assert.match(lib, new RegExp(`lyrics_window::${name}\\b`));
   }
+  // R51：弹出窗的三条命令在 lyrics_settings.rs 里，注册在同一个 generate_handler!
+  const popup = rustProduction(rustSource("lyrics_settings.rs"));
+  for (const [name, guard] of [
+    ["core_lyrics_settings_open", "require_settings_open_source(webview.label())"],
+    ["core_lyrics_settings_resize", "require_settings_self_source(webview.label())"],
+    ["core_lyrics_settings_close", "require_settings_self_source(webview.label())"],
+  ]) {
+    assert.match(popup, new RegExp(`pub async fn ${name}\\(`));
+    assert.ok(popup.indexOf(guard) >= 0, `${name} 必须过窄守卫 ${guard}`);
+    assert.match(lib, new RegExp(`lyrics_settings::${name}\\b`), `${name} 要注册`);
+  }
+  // 配置放行弹出窗，媒体控制不放行（它能改外观，没有理由替用户按播放键）
+  assert.match(rust, /pub fn require_lyrics_source/);
+  assert.match(rust, /LYRICS_SETTINGS_WINDOW_LABEL/, "配置守卫里点名了弹出窗");
+  assert.match(rust, /pub fn require_lyrics_control_source/, "媒体控制有自己那条更窄的守卫");
+  assert.match(lib, /pub const LYRICS_SETTINGS_WINDOW_LABEL: &str = "lyrics-settings"/, "窗口 label 与歌词窗常量放在同一处");
 });
 
 test("Rust：建窗属性一次到位（无边框/透明/无阴影/置顶/不进任务栏/按锁定可缩放/不聚焦/隐藏后 show）", () => {
@@ -967,7 +995,8 @@ test("歌词窗入口：lyrics-main.tsx 挂载 LyricsWindow（双入口那一份
     "./amll-theme.css",
     "./styles.css",
   ];
-  for (const file of ["src/renderer/main.tsx", "src/renderer/lyrics-main.tsx"]) {
+  // R51：弹出窗入口也用同一份样式表（菜单的视觉必须与歌词窗里那份逐像素一致）
+  for (const file of ["src/renderer/main.tsx", "src/renderer/lyrics-main.tsx", "src/renderer/lyrics-settings-main.tsx"]) {
     const imports = [...read(file).matchAll(/^import "([^"]+\.css)"/gm)].map((match) => match[1]);
     assert.deepEqual(imports, expectedCss, `${file}：core → full → 变量接线 → 应用样式`);
   }
@@ -1539,71 +1568,56 @@ test("R45B 设置页：颜色选择器 + 恢复主题色（只写合法 hex，�
 });
 
 /**
- * R50（brief 第 5 项）：桌面歌词设置恢复**原样式**——锚定齿轮的紧凑下拉菜单，不是整窗 `Sheet`。
+ * R51（brief 第二项之一）：桌面歌词的设置面**不再内嵌在歌词窗里**，而是另一扇独立小窗。
  *
- * R46 换 Sheet 的理由是"160px 高的窗里，往下长的浮层会被裁"。R50 撤销那个决定：菜单回到
- * 齿轮上（`align="end" side="bottom"`），滚动交给官方 `DropdownMenuContent`——它自带
- * `max-h-(--radix-dropdown-menu-content-available-height) overflow-y-auto`，窗口装不下时自己滚，
- * 这里只补 `w-64`（触发点是一枚图标按钮，默认宽度 `w-(--radix-dropdown-menu-trigger-width)`
- * 会窄到只剩 32px）与 `collisionPadding`（贴窗口边时留出可点的余量）。
+ * 这条用例**有意替换 R50 的那一条**（`R50 桌面歌词设置面：齿轮 DropdownMenu（align=end/side=bottom）…`）：
+ * 菜单内容一个字没改（仍是官方 `DropdownMenu` + 同一批锚点），只是搬到了 `LyricsSettingsPopup.tsx`
+ * 里——所以内容的断言跟着搬到 `test/lyrics-settings-popup.test.mjs`，这里只钉两件事：
  *
- * 内容保持原样式：样式（透明/面板）单选、方向（横版/竖版）单选、四个复选框（模糊/缩放/弹簧/媒体按钮），
- * 再增加"颜色"行（原生 `type=color` + 「恢复主题色」，仍走既有的 `customColor` 字段）。
- * 四个测试锚点（`lyrics-appearance` / `lyrics-appearance-panel` / `lyrics-appearance-color` /
- * `lyrics-appearance-color-reset`）全部保留——真浏览器守卫按它们开面板、改色、恢复。
+ * 1. 歌词窗里**没有**菜单内容了（旧实现整段删掉，不留第二份）；
+ * 2. 齿轮仍是那枚带 `lyrics-appearance` 锚点的按钮，但点它是把**自己客户区里的 DIP 矩形**
+ *    交给宿主（`core_lyrics_settings_open`），位置/尺寸/关闭都不归歌词窗管。
+ *
+ * 为什么必须搬：800×128 的窗里 radix 只能把浮层压进窗口（可用高度就那么多），菜单只能滚。
  */
-test("R50 桌面歌词设置面：齿轮 DropdownMenu（align=end/side=bottom），含样式/方向/四开关/颜色", () => {
+test("R51 歌词窗只剩齿轮：不再内嵌菜单内容，点它把锚点交给弹出窗", () => {
   const source = read("src/renderer/LyricsWindow.tsx");
   const code = stripComments(source);
 
-  // 不再是整窗 Sheet（R46 的决定已撤销）
-  assert.doesNotMatch(code, /components\/ui\/sheet/, "Sheet 原语从这个文件里删净");
-  assert.doesNotMatch(code, /<Sheet\b/, "不再用 Sheet");
-  assert.doesNotMatch(code, /ScrollArea/, "面板不再自搭 ScrollArea（滚动交回官方菜单内容体）");
+  // 内嵌菜单整段删掉（先删后写：旧实现不许留一半）
+  assert.doesNotMatch(code, /components\/ui\/dropdown-menu/, "歌词窗不再引下拉菜单原语");
+  assert.doesNotMatch(code, /<DropdownMenu/, "歌词窗里不再有 DropdownMenu");
+  assert.doesNotMatch(code, /DropdownMenuContent|DropdownMenuRadioGroup|lyrics-style-clean|lyrics-appearance-color/, "菜单内容整段搬走");
+  assert.doesNotMatch(code, /components\/ui\/sheet|<Sheet\b|ScrollArea/, "Sheet/ScrollArea 两条旧路都不许回来");
   assert.doesNotMatch(code, /overflow-[xy]-(?:auto|scroll)/, "不许在这里自搭滚动容器（面板的规矩见 no-self-visual）");
 
-  // 齿轮 + 紧凑下拉
-  assert.match(code, /from "\.\/components\/ui\/dropdown-menu"/, "下拉菜单来自 shadcn 原语");
-  assert.match(code, /<DropdownMenu\b/, "要真的用 DropdownMenu");
-  assert.match(code, /<DropdownMenuTrigger asChild>/, "外观按钮仍是触发点（asChild：不额外包一层）");
-  assert.match(code, /<DropdownMenuContent[^>]*align="end"/, "锚定齿轮的右端（不再铺满整窗）");
-  assert.match(code, /<DropdownMenuContent[^>]*side="bottom"/, "往下开（齿轮在上方控件条里）");
-  assert.match(code, /<DropdownMenuContent[^>]*w-64/, "菜单自己定宽（默认跟着 32px 的图标按钮走，装不下文案）");
-  assert.match(code, /<DropdownMenuContent[^>]*collisionPadding=/, "贴窗口边时留出可点余量（小窗尤其要紧）");
+  // 齿轮：普通按钮 + 打开命令 + 按钮自己的矩形当锚点
   assert.match(code, /aria-label="桌面歌词外观"/, "触发按钮的无障碍名称不变");
-  assert.match(code, /data-testid="lyrics-appearance"/, "设置面要有测试锚点（浏览器守卫按它开菜单）");
-  assert.match(code, /data-testid="lyrics-appearance-panel"/, "菜单内容体要有锚点");
+  assert.match(code, /data-testid="lyrics-appearance"/, "测试锚点保留（浏览器守卫按它点）");
+  assert.match(code, /coreLyricsSettingsOpen\(/, "齿轮走弹出窗的打开命令");
+  assert.match(code, /getBoundingClientRect\(\)/, "锚点取按钮自己的矩形（简报指定的口径）");
+  assert.match(code, /x: rect\.x, y: rect\.y, width: rect\.width, height: rect\.height/, "锚点是客户区 CSS 像素 {x,y,width,height}");
+  assert.match(code, /onClick=\{openAppearance\}/, "点击才发命令（不是挂在渲染上）");
+  assert.doesNotMatch(code, /\.hide\(\)|\.close\(\)|setSize|setPosition/,
+    "歌词窗不摆弹出窗（尺寸/位置/关闭全归宿主；拖动与缩放那两条官方调用不在此列）");
+});
 
-  // 控件齐全（样式、方向、模糊、缩放、弹簧、媒体、颜色）
-  for (const label of ["透明", "面板", "横版", "竖版", "模糊", "缩放", "弹簧动画", "媒体按钮"]) {
-    assert.ok(code.includes(label), `设置面必须包含「${label}」`);
-  }
-  // 样式/方向是**单选**（菜单里的 radio group，不是一堆孤立复选）
-  assert.match(code, /<DropdownMenuRadioGroup/, "单选组来自 shadcn 原语");
-  assert.match(code, /<DropdownMenuRadioItem/, "单选项目来自 shadcn 原语");
-  for (const testid of ["lyrics-style-clean", "lyrics-style-panel", "lyrics-layout-horizontal", "lyrics-layout-vertical"]) {
-    assert.ok(code.includes(testid), `单选项目保留稳定锚点 ${testid}`);
-  }
-  assert.match(code, /configure\(\{ style/, "样式走既有 configure 窄命令");
-  assert.match(code, /configure\(\{ layout/, "方向走既有 configure 窄命令");
-  assert.match(code, /config\.mode === "taskbar"/, "任务栏模式仍禁竖版（Rust 侧强制 horizontal）");
-  // 四个复选框（开关仍用 shadcn Switch，运行时 testid 与之前一致）
-  assert.match(code, /data-testid=\{`lyrics-window-\$\{key\}`\}/, "开关的 testid 由 key 生成（运行时仍是 lyrics-window-<key>）");
-  for (const key of ["enableBlur", "enableScale", "enableSpring", "showControls"]) {
-    assert.ok(code.includes(`["${key}", `), `四个开关保留 ${key}`);
-  }
-
-  // 颜色行：原生取色器 + 恢复主题色，只写合法的 #RRGGBB（判定来自纯逻辑模块）
-  assert.match(code, /data-testid="lyrics-appearance-color"/, "取色器锚点保留");
-  assert.match(code, /data-testid="lyrics-appearance-color-reset"/, "恢复主题色锚点保留");
-  assert.match(code, /type="color"/, "原生颜色输入");
-  assert.match(code, /aria-label="自定义歌词颜色"/, "取色器要有可读名称");
-  assert.match(code, /恢复主题色/, "要能一键回到主题色");
-  assert.match(code, /isCustomColor/, "合法 hex 判定来自 lyrics-window.mjs（页面不另抄正则）");
-  assert.match(code, /configure\(\{ customColor/, "颜色写的是同一个 customColor 字段（没有第二份存储）");
-  assert.doesNotMatch(code, /0-9a-fA-F\]\{6\}|\[0-9a-f\]\{6\}/, "不许在这里另抄一份 hex 正则");
-  assert.doesNotMatch(code, /localStorage|sessionStorage/, "设置面不许自建存储（落盘仍由 Rust 拥有）");
-  assert.doesNotMatch(code, /style=\{\{/, "不许内联视觉样式");
+/**
+ * R51（brief 第二项之二）：默认尺寸收紧成紧凑一档。
+ *
+ * 这条是**有意更改 R44 起的默认值**：横版 960×160 → 800×128、竖版 320×620 → 260×520。
+ * 最小尺寸（240×120）与任务栏（1200×44）不变；用户保存过的自定义尺寸照旧优先。
+ */
+test("R51 默认尺寸紧凑：Rust 常量与几何入口都换了，最小/任务栏/自定义尺寸不动", () => {
+  const rust = rustProduction(rustSource("lyrics_window.rs"));
+  assert.match(rust, /pub const DESKTOP_SIZE: Size = Size \{\s*width: 800\.0,\s*height: 128\.0,/, "横版默认 800×128");
+  assert.match(rust, /pub const DESKTOP_VERTICAL_SIZE: Size = Size \{\s*width: 260\.0,\s*height: 520\.0,/, "竖版默认 260×520");
+  assert.match(rust, /width: 1200\.0,\s*height: 44\.0/, "任务栏尺寸不变");
+  assert.match(rust, /MIN_WINDOW_WIDTH_DIP: f64 = 240\.0/, "最小宽度不变");
+  assert.match(rust, /MIN_WINDOW_HEIGHT_DIP: f64 = 120\.0/, "最小高度不变");
+  const geometry = rust.slice(rust.indexOf("pub fn geometry_plan"), rust.indexOf("pub fn apply_window_effects"));
+  assert.match(geometry, /DESKTOP_VERTICAL_SIZE/, "竖版默认值只有一处真源（几何入口引用常量，不写第二份数字）");
+  assert.doesNotMatch(geometry, /width: 320\.0/, "旧的 320×620 已删");
 });
 
 /**

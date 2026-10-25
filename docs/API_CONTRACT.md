@@ -1404,7 +1404,7 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 `core_call` 与 `core_login_chrome` 的既有来源守卫不放宽。歌词窗没有任意业务 HTTP、登录、文档写入或进度写入权限。
 歌词页先订阅 document/config/progress/theme，再 `configure({})` 回读权威配置，最后 signalReady；主窗补读最新配置、补文档/进度/主题。
 
-**几何**：desktop 横版约 **960×160 DIP**，竖版约 **320×620 DIP**（仍由 AMLL 官方纵向滚动，非中文 writing-mode 竖排）；taskbar 最多 **1200×44 DIP**，实际尺寸由安全空白决定，不能走 desktop 几何/样式分支。
+**几何**：desktop 横版默认 **800×128 DIP**、竖版默认 **260×520 DIP**（R51 收紧，原 960×160 / 320×620；用户拖过的尺寸优先，切换方向/模式会丢弃上一方向的尺寸）；竖版是官方 AMLL 组件上的真竖排（`writing-mode` 落在行内容上）；taskbar 最多 **1200×44 DIP**，实际尺寸由安全空白决定，不能走 desktop 几何/样式分支。
 只 mode/layout 变化重新计算 size/position，颜色、字号、锁、点透、演出选项不重定位。已有用户位置保留并夹入当前歌词窗显示器工作区；首次优先主窗显示器，退主屏。
 window-state 不自动恢复 lyrics 的旧尺寸/坐标，避免异步覆盖配置几何或 Taskbar。拖柄与非交互歌词宿主通过官方 `startDragging()` 拖动，排除按钮/输入/滑块等交互节点。
 
@@ -1670,7 +1670,8 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `LYRICS_DOCUMENT` / `LYRICS_PROGRESS` / `LYRICS_STATE` | `"lyrics:document"` / `"lyrics:progress"` / `"lyrics:state"` | `src/shared/channels.ts` | 文档/进度只由主窗转发，配置由 Rust 广播并携 revision |
 | `CORE_LYRICS_TOGGLE` / `_CONFIGURE` / `_CONTROL` / `_DOCUMENT` / `_PROGRESS` | `core_lyrics_*` 五条具名命令 | `src/shared/commands.ts` | 名字、Rust 注册、来源守卫与最小 capability 一次补齐 |
 | `LYRICS_WINDOW_LABEL` | `"lyrics"` | `src-tauri/src/lib.rs` | 歌词窗 label、来源守卫、window-state 与几何接管 |
-| `TASKBAR_SIZE` / `DESKTOP_SIZE` / `DESKTOP_LIFT` | `1200×44` / `960×160` / `120` DIP | `src-tauri/src/lyrics_window.rs` | desktop vertical=320×620 DIP，按 scale 与工作区夹限 |
+| `TASKBAR_SIZE` / `DESKTOP_SIZE` / `DESKTOP_VERTICAL_SIZE` / `DESKTOP_LIFT` | `1200×44` / `800×128` / `260×520` / `120` DIP | `src-tauri/src/lyrics_window.rs` | R51 收紧桌面默认尺寸；按 scale 与工作区夹限（最小 240×120 不变） |
+| `LYRICS_SETTINGS_WINDOW_LABEL` / `CORE_LYRICS_SETTINGS_OPEN` / `_RESIZE` / `_CLOSE` | `"lyrics-settings"` / `core_lyrics_settings_*` 三条命令 | `src-tauri/src/lib.rs` ↔ `src/shared/commands.ts` | R51：设置弹出窗（独立小窗；尺寸/位置/关闭全由 Rust 定，窗口没有任何 window 权限） |
 | `LYRICS_FONT_STEPS` / `TASKBAR_MAX_FONT_PX` | `sm16/md20/lg28/xl40/xxl56` / `20` | `src/renderer/features/lyrics/lyrics-window.mjs` ↔ `src-tauri/src/lyrics_window.rs` | R12：字号档位与任务栏模式上限（两侧一张表，由 `test/lyrics-window.test.mjs` 逐条钉住；CSS 的 rem 规则在 `amll-theme.css`） |
 | `LYRICS_COLOR_TOKENS` | `foreground`/`muted`/`primary`/`contrast` | 同上（TS 为真源、Rust 为镜像） | R12：歌词颜色的令牌档位（只认设计令牌，绝不接受任意色值） |
 | `MIN_PROGRESS_INTERVAL_MS` | `100` | `src/renderer/features/lyrics/lyrics-window.mjs` | R12：进度节流窗口（rAF 每帧调 `pushProgress`，只有该推的才出 IPC） |
