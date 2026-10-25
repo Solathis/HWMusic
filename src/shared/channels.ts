@@ -101,7 +101,8 @@ export const LYRICS_DOCUMENT = "lyrics:document" as const;
 export const LYRICS_PROGRESS = "lyrics:progress" as const;
 
 /**
- * Rust 配置权威广播：`{config, visible, revision}`；主窗代理 settings 保存并同步设置页。
+ * Rust 权威广播：`{config,visible,requestedVisible,revision,runtimeRevision,taskbar:{supported,attached,reason}}`。
+ * revision 只随 config 变，runtimeRevision 在 owner 线程对全状态单调编号；主窗拒旧运行回执且仅保存 config。
  * URL 只供初值，歌词窗订阅后 configure({}) 回读再发 `{ready:true}`，主窗补最新文档/进度/主题。
  */
 export const LYRICS_STATE = "lyrics:state" as const;
