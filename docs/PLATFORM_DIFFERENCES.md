@@ -170,6 +170,10 @@ webview 仍走代理——这是两套网络栈的行为不一致，如实记（
 「插件没注册」走 `try_state` 而不是 panic）；**真实注册表写入/读取未实测**。
 界面开关跟着**观测到的实际状态**走（写完回读 `is_enabled`），不做乐观翻转。
 
+### 后台验证开关 `HWMUSIC_BACKGROUND_TEST`（只供后台静默验证，不是用户旋钮）
+
+取值为 `1` / `true` 时：主窗建出来**不显示也不激活**（`visible(false)` + `focused(false)`、跳过建窗后的 `set_focus`），window-state 也只恢复尺寸与位置、不恢复最大化（Windows 上那步就是 `ShowWindow(SW_MAXIMIZE)`）；托盘、登录页聚焦、单实例等所有"把窗口拉到前台"的路径统一空转。此时收到第二实例信号，测试实例写一条 info 日志后**退出自己**让位给用户的启动——按 single-instance 插件惯例，用户那次启动也会退出，用户需要再点一次图标（不另做"替用户重新拉起"）。缺省（未设 / `0` / `false` / 空白）与不加开关时的行为完全一致。
+
 ## 7. 任务栏歌词（Beta）：仅 Windows 实验内嵌
 
 用户已授权精确自窗 SetParent 到合法 primary/secondary Shell root，Win10 可用 ReBar/WorkerW。Shell 没有稳定的歌词 API，故功能标 Beta，不保证全部 Windows 10/11 版本。Linux/macOS 明确 unsupported，不提供贴边浮窗冒充任务栏。

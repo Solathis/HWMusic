@@ -88,4 +88,3 @@ export function appendNotice(entries, text, limit = 100, id = 0) {
   const next = [...current, { id, text: trimmed }];
   return next.length > cap ? next.slice(next.length - cap) : next;
 }
-

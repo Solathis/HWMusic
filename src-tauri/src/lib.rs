@@ -184,6 +184,69 @@ pub fn log_plugin_targets(data_root_override: Option<&str>) -> Vec<Target> {
     vec![Target::new(TargetKind::Stdout), file]
 }
 
+/// 后台验证开关：只改启动期的窗口激活，供验证脚本用，不是给用户的旋钮。
+pub const BACKGROUND_TEST_ENV: &str = "HWMUSIC_BACKGROUND_TEST";
+
+/// 开关值解析：`1` / `true`（不分大小写、容忍两端空白）才算开，其余一律当关。
+pub fn background_test_flag(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|value| value.trim().to_ascii_lowercase()).as_deref(),
+        Some("1") | Some("true")
+    )
+}
+
+/// 进程内**唯一**的开关读取点：多处读会出现"建窗看见开、拉前台看见关"的分裂。
+pub fn background_test() -> bool {
+    background_test_flag(std::env::var(BACKGROUND_TEST_ENV).ok().as_deref())
+}
+
+/// 启动期窗口激活（开关只影响这三件事）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartupActivation {
+    pub visible: bool,
+    pub focused: bool,
+    /// 建完之后是否再 `set_focus`（Windows 不保证新建窗口在前台）
+    pub focus_after_build: bool,
+}
+
+/// 正常启动：显示 + 激活 + 建完再聚焦；后台验证：三件都不做。
+pub fn startup_activation(background_test: bool) -> StartupActivation {
+    StartupActivation {
+        visible: !background_test,
+        focused: !background_test,
+        focus_after_build: !background_test,
+    }
+}
+
+/// 第二实例信号的出路。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecondInstanceAction {
+    /// 把已有主窗拉到前台（用户双击图标时的唯一反馈）
+    FocusExisting,
+    /// 后台验证实例让位退出（它不该把用户的启动顶掉，也不该被拉到前台）
+    ExitBackgroundTest,
+}
+
+pub fn second_instance_action(background_test: bool) -> SecondInstanceAction {
+    if background_test {
+        SecondInstanceAction::ExitBackgroundTest
+    } else {
+        SecondInstanceAction::FocusExisting
+    }
+}
+
+/// 窗口状态恢复的标志：后台验证去掉 `MAXIMIZED`。
+///
+/// Windows 上恢复最大化就是 `ShowWindow(SW_MAXIMIZE)`——那会让隐藏的主窗显示出来并抢走前台。
+pub fn window_state_flags(background_test: bool) -> StateFlags {
+    let base = StateFlags::SIZE | StateFlags::POSITION;
+    if background_test {
+        base
+    } else {
+        base | StateFlags::MAXIMIZED
+    }
+}
+
 /// 创建主窗（1280×800，最小 960×640，显式数据目录，接设置里的代理）。
 ///
 /// 返回实际使用的 webview 数据根，由 `run()` 登记为托管状态。目录必须先建：
@@ -194,6 +257,7 @@ pub fn log_plugin_targets(data_root_override: Option<&str>) -> Vec<Target> {
 pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let webview_data = webview_data_root(app)?;
     std::fs::create_dir_all(&webview_data)?;
+    let activation = startup_activation(background_test());
 
     // 标题与 tauri.conf.json 的 productName（= src/shared/app-name.mjs 的显示名）同源
     let title = app
@@ -212,7 +276,9 @@ pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std
     .min_inner_size(MAIN_WINDOW_MIN_WIDTH, MAIN_WINDOW_MIN_HEIGHT)
     .skip_taskbar(false)
     .theme(theme::current_theme(app).to_native())
-    .data_directory(webview_data.clone());
+    .data_directory(webview_data.clone())
+    .visible(activation.visible)
+    .focused(activation.focused);
 
     // 没配代理/配置不可用 → None → 直连（绝不猜一个代理出来）。
     // 走 `proxy_url_argument` 而不是直接 `Url::parse(...)?`：坏到解析不了的写法（清洗漏网的方括号 IPv6）
@@ -256,8 +322,10 @@ pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std
         }
     });
 
-    // 显式聚焦：Windows 下窗口刚建好时不保证在前台
-    window.set_focus()?;
+    // 显式聚焦：Windows 下窗口刚建好时不保证在前台（后台验证实例不显示也不聚焦）
+    if activation.focus_after_build {
+        window.set_focus()?;
+    }
     Ok(webview_data)
 }
 
@@ -567,6 +635,11 @@ pub fn proxy_url_argument(candidate: Option<String>) -> Option<tauri::Url> {
 
 /// 第二个实例启动时把已有主窗拉到前台（single-instance 插件回调）。
 pub fn focus_main<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    // 托盘/单实例/登录窗/失败恢复都经这里：后台验证实例一次都不许被端到前台
+    if background_test() {
+        log::info!("后台验证开关生效：跳过把主窗拉到前台");
+        return;
+    }
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         let _ = window.unminimize();
         let _ = window.show();
@@ -579,11 +652,18 @@ pub fn run() {
     tauri::Builder::default()
         // single-instance 必须最先注册，否则第二个实例会先走完其它插件的初始化
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            focus_main(app)
+            // 后台验证实例收到第二实例信号就退出：用户的启动按插件惯例也退出（需再点一次图标）
+            match second_instance_action(background_test()) {
+                SecondInstanceAction::FocusExisting => focus_main(app),
+                SecondInstanceAction::ExitBackgroundTest => {
+                    log::info!("第二实例启动：后台验证实例让位退出（{BACKGROUND_TEST_ENV} 生效）");
+                    app.exit(0);
+                }
+            }
         }))
         .plugin(
             tauri_plugin_window_state::Builder::default()
-                .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
+                .with_state_flags(window_state_flags(background_test()))
                 // 歌词几何归歌词宿主管理，尤其不能把 Shell child 的坐标写进窗口状态文件。
                 .with_filter(persist_window_state)
                 .skip_initial_state(LYRICS_WINDOW_LABEL)
@@ -824,6 +904,131 @@ mod tests {
     fn window_state_only_persists_main_and_never_shell_child_geometry() {
         assert!(persist_window_state("main"));
         for label in ["lyrics", "login", "login-theme", "login-return"] { assert!(!persist_window_state(label)); }
+    }
+
+    // ---- R67：后台验证开关（只改启动期的窗口激活） ---------------------------------
+
+    /// 开关只认显式的 `1` / `true`：环境里残留的 `0`/`false`/空白一律当没开。
+    #[test]
+    fn the_background_test_switch_only_accepts_explicit_on_values() {
+        for raw in [None, Some(""), Some("   "), Some("0"), Some("false"), Some("FALSE"), Some("yes")] {
+            assert!(!background_test_flag(raw), "{raw:?} 不该把开关打开");
+        }
+        for raw in [Some("1"), Some(" 1 "), Some("true"), Some("True")] {
+            assert!(background_test_flag(raw), "{raw:?} 应当打开开关");
+        }
+    }
+
+    /// 缺省行为必须与现在完全一致：显示主窗、建完再聚焦。
+    #[test]
+    fn the_default_startup_shows_and_focuses_the_main_window() {
+        let activation = startup_activation(false);
+        assert!(activation.visible, "正常启动要显示主窗");
+        assert!(activation.focused, "正常启动要拿到焦点");
+        assert!(activation.focus_after_build, "正常启动建完还要 set_focus（Windows 不保证前台）");
+    }
+
+    /// 开关打开：不显示、不激活、建完也不聚焦（一次都不许把窗口端到用户眼前）。
+    #[test]
+    fn the_background_test_startup_neither_shows_nor_focuses_the_main_window() {
+        let activation = startup_activation(true);
+        assert!(!activation.visible, "后台验证实例不许显示主窗");
+        assert!(!activation.focused, "后台验证实例不许激活主窗");
+        assert!(!activation.focus_after_build, "后台验证实例建完也不许 set_focus");
+    }
+
+    /// 窗口状态恢复：后台验证不恢复 MAXIMIZED——Windows 上那一步就是 `ShowWindow(SW_MAXIMIZE)`。
+    #[test]
+    fn the_window_state_flags_drop_maximized_only_for_background_tests() {
+        let normal = window_state_flags(false);
+        assert!(normal.contains(StateFlags::SIZE));
+        assert!(normal.contains(StateFlags::POSITION));
+        assert!(normal.contains(StateFlags::MAXIMIZED), "正常启动照旧恢复最大化");
+
+        let background = window_state_flags(true);
+        assert!(background.contains(StateFlags::SIZE));
+        assert!(background.contains(StateFlags::POSITION));
+        assert!(!background.contains(StateFlags::MAXIMIZED), "恢复最大化会把隐藏的主窗显示出来");
+
+        for flags in [normal, background] {
+            assert!(!flags.contains(StateFlags::VISIBLE), "VISIBLE 永远不进 flags（插件会 show + set_focus）");
+        }
+    }
+
+    /// 第二实例信号两条出路：正常启动拉主窗；后台验证实例写日志后让位退出。
+    #[test]
+    fn the_second_instance_signal_makes_a_background_test_instance_yield() {
+        assert_eq!(second_instance_action(false), SecondInstanceAction::FocusExisting);
+        assert_eq!(second_instance_action(true), SecondInstanceAction::ExitBackgroundTest);
+    }
+
+    /// 开关的读取只有一处：读两次就会出"建窗看见开、拉前台看见关"的事故。
+    #[test]
+    fn the_background_test_switch_is_read_in_exactly_one_place() {
+        let source = lib_source();
+        let production = production_source(&source);
+        assert_eq!(
+            production.matches("std::env::var(BACKGROUND_TEST_ENV)").count(),
+            1,
+            "开关只在 background_test() 里读一次"
+        );
+    }
+
+    /// 建窗按决策走（显示/激活/建完聚焦三个动作都由 [`startup_activation`] 决定）。
+    #[test]
+    fn the_main_window_creation_follows_the_activation_decision() {
+        let source = lib_source();
+        let production = production_source(&source);
+        let start = production
+            .find("pub fn create_main_window")
+            .expect("找不到建主窗的函数");
+        let create = &production[start..];
+        let body = &create[..create.find("\n}\n").expect("建主窗函数没有闭合")];
+        for expected in [
+            ".visible(activation.visible)",
+            ".focused(activation.focused)",
+            "if activation.focus_after_build {",
+        ] {
+            assert!(body.contains(expected), "建窗必须按决策走：{expected}");
+        }
+    }
+
+    /// 单实例回调：决策分派（拉主窗 / 写日志后退出），不让位就等于测试实例抢用户的启动。
+    #[test]
+    fn the_second_instance_callback_dispatches_the_decision() {
+        let source = lib_source();
+        let plugins = plugins_block(&source);
+        let single = plugins
+            .find("tauri_plugin_single_instance::init(")
+            .expect("必须注册 single-instance");
+        let after = &plugins[single..];
+        let callback = &after[..after.find(".plugin(").unwrap_or(after.len())];
+        assert!(
+            callback.contains("second_instance_action(background_test())"),
+            "回调必须按决策分派：{callback}"
+        );
+        assert!(
+            callback.contains("SecondInstanceAction::FocusExisting => focus_main(app)"),
+            "正常启动照旧拉主窗：{callback}"
+        );
+        assert!(
+            callback.contains("SecondInstanceAction::ExitBackgroundTest =>"),
+            "后台验证实例要让位（不显示、不聚焦）：{callback}"
+        );
+        assert!(callback.contains("app.exit(0)"), "让位就是退出测试实例：{callback}");
+    }
+
+    /// `focus_main` 是全部"拉到前台"的唯一收口（托盘/单实例/登录/失败恢复），开关下它必须空转。
+    #[test]
+    fn focus_main_is_the_single_gate_for_bringing_the_window_forward() {
+        let source = lib_source();
+        let production = production_source(&source);
+        let start = production.find("pub fn focus_main").expect("找不到 focus_main");
+        let focus = &production[start..];
+        let body = &focus[..focus.find("\n}\n").expect("focus_main 没有闭合")];
+        let guard = body.find("background_test()").expect("focus_main 先看开关");
+        let show = body.find(".show()").expect("正常启动要显示主窗");
+        assert!(guard < show, "开关判断必须挡在 show 之前");
     }
 
     // ---- R44e：正常退出的保存准备 -------------------------------------------------
@@ -1555,10 +1760,10 @@ mod tests {
             "第二实例启动时必须 focus_main（否则用户双击图标什么都不会发生）"
         );
 
-        // 2. window-state：flags 与 filter
+        // 2. window-state：flags 与 filter（取值归 `window_state_flags`，开关那一档见 R67 用例）
         assert!(
-            plugins.contains("StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED"),
-            "窗口状态的 flags 是契约：{plugins}"
+            plugins.contains("with_state_flags(window_state_flags(background_test()))"),
+            "窗口状态的 flags 必须走决策函数：{plugins}"
         );
         for forbidden in ["StateFlags::VISIBLE", "StateFlags::DECORATIONS", "StateFlags::FULLSCREEN"] {
             assert!(

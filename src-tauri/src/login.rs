@@ -1521,7 +1521,10 @@ fn build_on_main_thread(
     // 把焦点交给官方页（用户在它里面扫/输）：失败只留痕——页已经建好且能点，聚焦失败不该让整次登录失败。
     // 屏外期间焦点落在客户区之外的那一份上：无碍（用户此刻在门禁页上，键盘焦点本来也不该被它抢走；
     // 摆进内容区之后这一次 `set_focus` 仍然有效，因为焦点从未转给别人）。
-    if let Err(source) = webview.set_focus() {
+    if !foreground_allowed() {
+        // 后台验证实例只读界面，不碰焦点
+        log::info!("后台验证开关生效：登录页不做 set_focus");
+    } else if let Err(source) = webview.set_focus() {
         log::warn!("登录页没能拿到焦点（{source}）：用户可能要自己点一下页面");
     }
 
@@ -2064,6 +2067,11 @@ fn respond(shared: &Arc<CoreShared>, request_id: &str, result: Result<Value, Cor
     }
 }
 
+/// 焦点/前台的唯一闸门：后台验证开关下登录链路一次都不许把窗口端到用户眼前。
+fn foreground_allowed() -> bool {
+    !crate::background_test()
+}
+
 /// 并排第二次登录：把既有的登录页与主窗一起拉到前台（同窗宿主里"既有登录页"就铺在主窗上，
 /// 只把 webview 聚焦是不够的——用户可能正把整个应用最小化在任务栏后面）。
 ///
@@ -2071,6 +2079,10 @@ fn respond(shared: &Arc<CoreShared>, request_id: &str, result: Result<Value, Cor
 /// （unminimize + show + set_focus）——登录页创建时若量不到客户区（最小化的主窗量到的是 `(0,0)`），
 /// 走的也是它，两处必须共用一个语义。
 fn focus_login_view(app: &AppHandle) {
+    if !foreground_allowed() {
+        log::info!("后台验证开关生效：并排登录不拉主窗到前台");
+        return;
+    }
     crate::focus_main(app);
     if let Some(webview) = app.get_webview(LOGIN_WEBVIEW_LABEL) {
         let _ = webview.show();
@@ -2581,6 +2593,32 @@ mod tests {
         assert!(
             production.contains("HostUnmeasurable"),
             "跟随路把「量不到」当一档结果：保持登录页现有几何，不用钳制下限覆盖它"
+        );
+    }
+
+    /// R67：后台验证开关下，登录链路一次都不许拿走焦点或前台（建页聚焦 + 并排登录拉主窗）。
+    #[test]
+    fn the_background_test_switch_gates_every_foreground_action_in_the_login_path() {
+        let production = production_source();
+        let gate = production
+            .find("fn foreground_allowed")
+            .expect("登录链路要有一个焦点闸门（两处各判一次早晚会漏一处）");
+        assert!(
+            production[gate..gate + 200].contains("crate::background_test()"),
+            "闸门读的是后台验证开关"
+        );
+        assert!(
+            production.matches("foreground_allowed()").count() >= 3,
+            "闸门定义 + 建页聚焦 + 并排登录三处都要用它"
+        );
+        let start = production
+            .find("fn focus_login_view")
+            .expect("找不到并排登录的聚焦入口");
+        let window = &production[start..(start + 600).min(production.len())];
+        let guard = window.find("foreground_allowed()").expect("先看闸门");
+        assert!(
+            guard < window.find("crate::focus_main(").expect("正常启动要把主窗拉到前台"),
+            "闸门必须挡在拉主窗之前"
         );
     }
 
