@@ -7,8 +7,9 @@
  * - `resolveUrl`：`coreCall(PLAYBACK_RESOLVE_URL, {trackId})`——通道名来自共享常量；
  *   地址只在这条调用里出现，**不进状态、不写日志、不落盘**；
  * - `guardUrl`：`media-url.mjs`（CSP `media-src` 同源的白名单）；
- * - `persistQueue` / `loadQueue`：`settings:set` 的 `patch.queue`（标识 + 索引 + 安全展示快照）
- *   与 `settings:get` 的同一键（`null` = 删除，语义在 `src/main/settings.mjs`）；
+ * - `persistQueue` / `loadQueue`：`settings:set` 的 `patch.queue`（标识 + 索引 + 安全展示快照
+ *    + 当前曲目的进度）与 `settings:get` 的同一键（`null` = 删除，语义在 `src/main/settings.mjs`）；
+ * - 进度落盘：主窗 `visibilitychange`（hidden）/`pagehide` 时立刻写一次（节流规则在 player.mjs）；
  * - 媒体会话：只在该更新的时候更新（曲目或播放状态变化），避免每帧都去写系统控件；
  * - `player:command`：R11 托盘用的播放控制广播（预登记），认不出的命令只留痕。
  *
@@ -40,8 +41,21 @@ export interface PlayerRuntimeDeps {
   mediaSession?: object | null;
   /** `MediaMetadata` 构造器（测试注入假实现；不传则取全局） */
   metadataCtor?: new (init: object) => object;
+  /** 主窗 document（隐藏前落盘进度用；测试注入假实现，不传则取全局） */
+  documentHost?: DocumentHost | null;
+  /** 主窗 window（pagehide 时落盘；测试注入假实现，不传则取全局） */
+  windowHost?: WindowHost | null;
   log?: (...parts: unknown[]) => void;
 }
+
+/** 监听器只需要这两件事（node 里没有 document/window，所以是可注入的端口）。 */
+export interface DocumentHost {
+  readonly visibilityState?: string;
+  addEventListener(type: string, listener: () => void): void;
+  removeEventListener(type: string, listener: () => void): void;
+}
+
+export type WindowHost = Omit<DocumentHost, "visibilityState">;
 
 export interface PlayerRuntime {
   player: ReturnType<typeof createPlayer>;
@@ -89,6 +103,21 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
     },
     log,
   });
+
+  /**
+   * 主窗隐藏到托盘 / 关闭前最后落盘一次进度。
+   * WebView2 里 visibilitychange 是否必达没有证据（见报告），"暂停"那条路才是主要保障。
+   */
+  const documentHost = deps.documentHost === undefined ? (typeof document === "undefined" ? null : document) : deps.documentHost;
+  const windowHost = deps.windowHost === undefined ? (typeof window === "undefined" ? null : window) : deps.windowHost;
+  const flushOnHide = () => {
+    player.flushPosition();
+  };
+  const onVisibilityChange = () => {
+    if (documentHost?.visibilityState === "hidden") flushOnHide();
+  };
+  documentHost?.addEventListener("visibilitychange", onVisibilityChange);
+  windowHost?.addEventListener("pagehide", flushOnHide);
 
   const mediaSession = createMediaSession({
     ...(deps.mediaSession === undefined ? {} : { session: deps.mediaSession }),
@@ -138,6 +167,8 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
 
   function dispose(): void {
     disposed = true;
+    documentHost?.removeEventListener("visibilitychange", onVisibilityChange);
+    windowHost?.removeEventListener("pagehide", flushOnHide);
     unsubscribeState();
     if (unlisten !== null) unlisten();
     player.pause();

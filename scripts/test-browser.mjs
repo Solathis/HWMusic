@@ -76,6 +76,21 @@ export const PAGINATION_FIXTURE = Object.freeze({
   shortPerPage: 2,
 });
 
+/**
+ * R64 的恢复夹具：队列记录 + 保存的进度（时长 12 秒与假音频一致，5 秒处离结尾还有 7 秒）。
+ * 写进夹具的 settings 后端再重载，走的就是真实启动恢复那条路。
+ */
+export const RESUME_QUEUE = Object.freeze({
+  ids: ["guard-a", "guard-b"],
+  index: 1,
+  metadata: [
+    { id: "guard-a", name: "守卫曲目甲", artists: "守卫艺人", duration: 12, coverUrl: null, albumId: null, albumName: null },
+    { id: "guard-b", name: "守卫恢复曲目", artists: "守卫艺人", duration: 12, coverUrl: null, albumId: null, albumName: null },
+  ],
+  positionMs: 5000,
+  positionTrackId: "guard-b",
+});
+
 /** 判定：有 FAIL 或有 SKIP 都算不过（SKIP 不算成功）。 */
 export function guardVerdict({ pass, fail, skipped }) {
   if (fail > 0) return "FAIL";
@@ -4701,6 +4716,19 @@ function fixtureAudio() {
   return wav;
 }
 
+/** 假音频的路由（带 Range：音频元素要靠它才能 seek 到保存的位置）。 */
+async function routeGuardAudio(page, audio) {
+  await page.route("https://music.dbankcdn.cn/guard.wav", (route) => {
+    const range = route.request().headers().range?.match(/bytes=(\d+)-(\d*)/);
+    const start = range ? Number(range[1]) : 0;
+    const end = range?.[2] ? Math.min(Number(range[2]), audio.length - 1) : audio.length - 1;
+    return route.fulfill({
+      status: range ? 206 : 200, contentType: "audio/wav", body: audio.subarray(start, end + 1),
+      headers: { "accept-ranges": "bytes", ...(range ? { "content-range": `bytes ${start}-${end}/${audio.length}` } : {}) },
+    });
+  });
+}
+
 /** 两帧像素差异比例（0..1）。 */
 function pixelDiffRatio(a, b) {
   if (a.length !== b.length) return 1;
@@ -4881,15 +4909,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     });
     page.on("pageerror", (error) => pageErrors.push(error.message));
     const audio = fixtureAudio();
-    await page.route("https://music.dbankcdn.cn/guard.wav", (route) => {
-      const range = route.request().headers().range?.match(/bytes=(\d+)-(\d*)/);
-      const start = range ? Number(range[1]) : 0;
-      const end = range?.[2] ? Math.min(Number(range[2]), audio.length - 1) : audio.length - 1;
-      return route.fulfill({
-        status: range ? 206 : 200, contentType: "audio/wav", body: audio.subarray(start, end + 1),
-        headers: { "accept-ranges": "bytes", ...(range ? { "content-range": `bytes ${start}-${end}/${audio.length}` } : {}) },
-      });
-    });
+    await routeGuardAudio(page, audio);
 
     for (const [name, background] of [["warm", { r: 230, g: 72, b: 32 }], ["cool", { r: 24, g: 100, b: 232 }]]) {
       const cover = await sharp({ create: { width: 256, height: 256, channels: 3, background } }).png().toBuffer();
@@ -4917,6 +4937,84 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     await checkStartupGate(startupPage, port, guardDir, add);
     add("startup-no-runtime-errors", startupErrors.length === 0, JSON.stringify(startupErrors.slice(0, 3)));
     await startupPage.close();
+
+    /**
+     * R64：保存并恢复上次的播放进度。独立开一页（恢复只发生在**页面加载**时），
+     * 夹具 settings 在页面脚本之前就写好"上次停在 0:05"。
+     */
+    await checked("r64-resume-progress", async () => {
+      const resumePage = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
+      resumePage.setDefaultTimeout(15_000);
+      const resumeErrors = [];
+      resumePage.on("pageerror", (error) => resumeErrors.push(error.message));
+      await routeGuardAudio(resumePage, audio);
+      // 恢复发生在页面加载时，所以夹具必须在页面脚本之前就落进 localStorage（否则整条路走不到）
+      await resumePage.addInitScript((queue) => {
+        try {
+          localStorage.setItem("guard-settings", JSON.stringify({ queue }));
+        } catch {}
+      }, RESUME_QUEUE);
+      await resumePage.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
+      await resumePage.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+      await resumePage.waitForFunction(
+        () => window.__guard.snapshot().restored === true && window.__guard.snapshot().entries.length === 2,
+        null,
+        { timeout: 15_000 },
+      );
+      const bar = resumePage.getByTestId("player-bar");
+      await bar.waitFor();
+
+      const restored = await resumePage.evaluate(() => {
+        const node = document.querySelector('[data-testid="player-bar"]');
+        const state = window.__guard.snapshot();
+        const slider = node?.querySelector('[data-slot="slider"]');
+        return {
+          status: state.status,
+          currentTimeMs: state.currentTimeMs,
+          durationMs: state.durationMs,
+          trackId: state.track?.id ?? null,
+          loaded: state.loaded,
+          text: node?.textContent ?? "",
+          thumb: slider?.querySelector('[data-slot="slider-thumb"]')?.getAttribute("aria-valuenow") ?? null,
+          playLabel: node?.querySelector('button[aria-label="播放"], button[aria-label="暂停"]')?.getAttribute("aria-label") ?? null,
+          seeded: (localStorage.getItem("guard-settings") ?? "").includes("guard-b"),
+        };
+      });
+      const restoredBox = await bar.boundingBox();
+      if (restoredBox) await resumePage.screenshot({ path: path.join(guardDir, "r64-restored-bar.png"), clip: restoredBox });
+      add("r64-restore-shows-saved-progress",
+        restored.status === "idle" && restored.loaded === false && restored.currentTimeMs === 5000
+          && restored.durationMs === 12_000 && restored.trackId === "guard-b"
+          && restored.text.includes("0:05") && restored.text.includes("0:12")
+          && restored.thumb === "5000" && restored.playLabel === "播放",
+        JSON.stringify(restored));
+
+      await bar.getByRole("button", { name: "播放", exact: true }).click();
+      const atClick = await resumePage.evaluate(() => window.__guard.snapshot().currentTimeMs);
+      await resumePage.waitForFunction(
+        () => window.__guard.snapshot().status === "playing" && window.__guard.snapshot().currentTimeMs >= 5000,
+        null,
+        { timeout: 15_000 },
+      );
+      await resumePage.waitForTimeout(1200);
+      const resumed = await resumePage.evaluate(() => ({ ...window.__guard.snapshot() }));
+      const playingBox = await bar.boundingBox();
+      if (playingBox) await resumePage.screenshot({ path: path.join(guardDir, "r64-resumed-playing.png"), clip: playingBox });
+      add("r64-play-continues-from-saved",
+        atClick >= 5000 && resumed.currentTimeMs > 5000 && resumed.status === "playing",
+        JSON.stringify({ atClick, resumed: resumed.currentTimeMs }));
+
+      await bar.getByRole("button", { name: "暂停", exact: true }).click();
+      await resumePage.waitForTimeout(300);
+      const writes = await resumePage.evaluate(() => window.__guard.settingsWrites());
+      const lastQueue = writes.at(-1)?.patch?.queue ?? null;
+      add("r64-pause-persists-position",
+        lastQueue !== null && lastQueue.positionTrackId === "guard-b" && lastQueue.positionMs > 5000
+          && lastQueue.index === 1,
+        JSON.stringify({ lastQueue, writes: writes.length, resumed: resumed.currentTimeMs }));
+      add("r64-no-runtime-errors", resumeErrors.length === 0, JSON.stringify(resumeErrors.slice(0, 3)));
+      await resumePage.close();
+    });
 
     const stage = page.getByTestId("playback-stage");
     const activeLine = '[data-testid="amll-lyrics-panel"] [class*="lyricMainLine"][class*="active"]';

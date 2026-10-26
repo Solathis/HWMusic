@@ -7,17 +7,18 @@
  * - `resolveUrl(trackId)`：取**当次**播放地址（走 core 的 `playback:resolve-url`）；
  * - `guardUrl(url)`：地址闸门（`features/playback/media-url.mjs` → CSP 的 media-src 白名单）。
  *   **构造时缺它就抛**：闸门不能是可选参数，否则"忘了校验"会变成默认放行；
- * - `persistQueue` / `loadQueue`：队列持久化（标识 + 索引 + 安全展示快照，见 queue.mjs）；
+ * - `persistQueue` / `loadQueue`：队列持久化（标识 + 索引 + 安全展示快照 + 当前曲目的进度，见 queue.mjs）；
  * - `log`：只写**不该打扰用户**的失败（落盘失败、恢复失败），**绝不写播放地址**；
- * - `random`：随机的注入点（测试用确定序列）。
+ * - `random`：随机的注入点（测试用确定序列）；`now` / `schedule`：进度节流的时钟与尾随写定时。
  *
- * 四条设计裁决：
+ * 五条设计裁决：
  * 1. **状态里没有音频地址**。播放地址只在当次应答与音频元素之间流转；快照只记 `loaded`。
  *    安全封面属于展示快照，与 signed 音频地址分开。
  * 2. **双击不打架**：每次装载领一个令牌，取地址回来后令牌对不上就整包丢掉（网络乱序是常态）。
  * 3. **播完按模式走**：顺序（播完即停）/ 列表循环 / 单曲循环 / 随机；随机走**轮换排列**——
  *    "上一首"在随机模式下才有意义（真随机退不回去），且一轮内不重复。
  * 4. **换队列 = 停止播放**：队列被替换后，音频里装着的还是上一首，装作没发生只会播错歌。
+ * 5. **进度按"可能马上就没机会写"的时刻落盘**：播放中节流、暂停/切歌/清空/窗口隐藏立刻写。
  */
 import { queueEntriesOf, queueRecordOf, restoredEntries, sanitizeQueueRecord } from "./queue.mjs";
 import { LYRICS_STATUS } from "../lyrics/lyrics-window.mjs";
@@ -59,6 +60,12 @@ export const PLAYER_ERROR_KINDS = {
 /** 默认音量：不加不减地放出来（"默认 70%"是拍脑袋，用户没调过就别替他调）。 */
 export const DEFAULT_VOLUME = 1;
 
+/** 进度写盘的最短间隔：播放中每 5 秒最多一次；异常退出最多丢掉这个窗口的进度。 */
+export const POSITION_WRITE_INTERVAL_MS = 5000;
+
+/** 恢复位置至少要留下这么多可播时间；离结尾更近就当"听完了"，从 0 开始。 */
+export const RESUME_TAIL_MS = 3000;
+
 /** 音频端口会发的事件（真实元素的适配见 audio-element.mjs）。 */
 export const PLAYER_AUDIO_EVENTS = ["ended", "error", "loadedmetadata", "durationchange", "timeupdate", "playing", "waiting"];
 
@@ -89,6 +96,16 @@ export function totalDurationMsOf(track, reportedMs) {
   return seconds === null ? 0 : Math.round(seconds * 1000);
 }
 
+/**
+ * 恢复位置的门：距结尾不足 3 秒（或超出时长）就当作"听完了"，从 0 开始。
+ * 时长未知（0）时原样交出——真实时长要等 `loadedmetadata` 才判得了。
+ */
+export function resumableMs(positionMs, durationMs) {
+  if (typeof positionMs !== "number" || !Number.isFinite(positionMs) || positionMs <= 0) return 0;
+  if (!(typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs > 0)) return Math.round(positionMs);
+  return positionMs > durationMs - RESUME_TAIL_MS ? 0 : Math.round(positionMs);
+}
+
 function textOf(cause) {
   if (cause instanceof Error && typeof cause.message === "string" && cause.message.trim() !== "") return cause.message;
   if (typeof cause === "string" && cause.trim() !== "") return cause;
@@ -113,6 +130,8 @@ function kindOf(cause) {
  * @param {() => Promise<unknown>} [options.loadQueue]
  * @param {(...parts: unknown[]) => void} [options.log]
  * @param {() => number} [options.random]
+ * @param {() => number} [options.now]
+ * @param {(callback: () => void, delayMs: number) => (() => void)} [options.schedule]
  */
 export function createPlayer(options = {}) {
   const { audio, resolveUrl, guardUrl } = options;
@@ -139,6 +158,14 @@ export function createPlayer(options = {}) {
   const loadQueue = typeof options.loadQueue === "function" ? options.loadQueue : async () => null;
   const log = typeof options.log === "function" ? options.log : () => {};
   const random = typeof options.random === "function" ? options.random : Math.random;
+  const now = typeof options.now === "function" ? options.now : () => Date.now();
+  const schedule =
+    typeof options.schedule === "function"
+      ? options.schedule
+      : (callback, delayMs) => {
+          const timer = setTimeout(callback, delayMs);
+          return () => clearTimeout(timer);
+        };
 
   /** 当前装载进音频元素的曲目标识（**地址不留在状态里**，所以这里只记标识）。 */
   let loadedId = null;
@@ -151,6 +178,16 @@ export function createPlayer(options = {}) {
   let cursor = 0;
   /** 音频元素最近报的时长（毫秒；0 = 没报到可用值）。有效总时长见 `totalDurationMsOf`。 */
   let reportedDurationMs = 0;
+  /**
+   * 还没被装载消费的恢复位置（`saved` = 来自磁盘，仍要按真实时长复核结尾门）。
+   * 用户一拖进度就以用户为准（`saved: false`），不再受结尾门约束。
+   */
+  let resume = null;
+  /** 上次写盘尝试的时刻（节流口径）：一次"写盘机会"过了 5 秒才给下一次。 */
+  let lastWriteAt = Number.NEGATIVE_INFINITY;
+  /** 位置变了但还没落盘的标记，以及那次尾随写的取消句柄。 */
+  let positionDirty = false;
+  let trailingCancel = null;
 
   /**
    * 状态是**不可变替换**的：React 的 useSyncExternalStore 靠引用比较认变化。
@@ -224,10 +261,17 @@ export function createPlayer(options = {}) {
     return { ok: true, data };
   }
 
+  /** 当前曲目的进度（只存毫秒；0 与"没有位置"是同一件事）。 */
+  function currentPosition() {
+    if (state.track === null || state.currentTimeMs <= 0) return null;
+    return { trackId: state.track.id, positionMs: state.currentTimeMs };
+  }
+
   /** 写盘：同步发起（不阻塞状态更新），失败只记日志且不含地址。 */
   function persist() {
-    const record = queueRecordOf(state.entries, state.index);
+    const record = queueRecordOf(state.entries, state.index, currentPosition());
     const key = JSON.stringify(record);
+    lastWriteAt = now();
     if (key === persistedKey) return;
     persistedKey = key;
     try {
@@ -238,6 +282,52 @@ export function createPlayer(options = {}) {
     } catch (cause) {
       log("队列持久化失败（队列仍在内存里，下次启动恢复不了）：", textOf(cause));
     }
+  }
+
+  function cancelTrailing() {
+    if (trailingCancel === null) return;
+    const cancel = trailingCancel;
+    trailingCancel = null;
+    try {
+      cancel();
+    } catch {
+      // 定时器自己的失败不该拦住写盘
+    }
+  }
+
+  /** 立刻落盘（暂停、切歌、清空、窗口隐藏这些"可能马上就没机会写"的时刻不走节流）。 */
+  function flushPosition() {
+    cancelTrailing();
+    positionDirty = false;
+    persist();
+    return done({ currentTimeMs: state.currentTimeMs });
+  }
+
+  /** 进度变化：最多 5 秒写一次，并尾随补一次——拖动松手后的最终位置必须落盘。 */
+  function notePosition() {
+    positionDirty = true;
+    const elapsed = now() - lastWriteAt;
+    if (elapsed >= POSITION_WRITE_INTERVAL_MS) {
+      flushPosition();
+      return;
+    }
+    if (trailingCancel !== null) return;
+    trailingCancel = schedule(() => {
+      trailingCancel = null;
+      if (positionDirty) flushPosition();
+    }, POSITION_WRITE_INTERVAL_MS - elapsed);
+  }
+
+  /** 真实时长到了：复核待恢复位置是否已到结尾（元数据没给时长时才需要这一步）。 */
+  function settleResume() {
+    const pending = resume !== null && resume.trackId === state.track?.id ? resume : null;
+    if (pending === null) return;
+    resume = null;
+    if (!pending.saved) return;
+    const settled = resumableMs(pending.positionMs, totalDurationMsOf(state.track, reportedDurationMs));
+    if (settled === pending.positionMs) return;
+    audio.setCurrentTime(settled);
+    publish({ currentTimeMs: settled, seekGeneration: state.seekGeneration + 1 });
   }
 
   /** 随机排列：注入 random（Fisher–Yates）。`leadIndex` 会把"用户刚点的那首"排到本轮开头。 */
@@ -386,6 +476,9 @@ export function createPlayer(options = {}) {
     if (state.mode === "shuffle" && manual) rebuildOrder(index);
 
     const activeToken = (token += 1);
+    const resumeMs = !sameLoaded && resume !== null && resume.trackId === entry.id ? resume.positionMs : null;
+    // 换到别的曲目：盘上的那个位置只属于恢复时的这一首，不许跟着走
+    if (resume !== null && resume.trackId !== entry.id) resume = null;
     // 新曲目没装载前，音频的读数属于上一首：清掉，让总时长退回条目元数据
     if (!sameLoaded) reportedDurationMs = 0;
     publish({
@@ -397,7 +490,7 @@ export function createPlayer(options = {}) {
         ? {}
         : {
             loaded: false,
-            currentTimeMs: 0,
+            currentTimeMs: resumeMs ?? 0,
             durationMs: totalDurationMsOf(entry, reportedDurationMs),
             status: PLAYER_STATUS.loading,
           }),
@@ -413,6 +506,12 @@ export function createPlayer(options = {}) {
       audio.setSource(resolved.url);
       audio.setVolume(state.volume);
       audio.setMuted(state.muted);
+      // 元数据之前写入是规范里的"默认起播位置"：真实元素装载后从这里开始（守卫里实测过）
+      const pendingMs = resume !== null && resume.trackId === entry.id ? resume.positionMs : null;
+      if (pendingMs !== null) {
+        audio.setCurrentTime(pendingMs);
+        publish({ currentTimeMs: pendingMs, seekGeneration: state.seekGeneration + 1 });
+      }
       publish({ loaded: true });
     }
 
@@ -430,6 +529,7 @@ export function createPlayer(options = {}) {
     if (state.status === PLAYER_STATUS.ended) {
       audio.setCurrentTime(0);
       publish({ currentTimeMs: 0, playbackGeneration: state.playbackGeneration + 1 });
+      notePosition();
     }
     return playAudio();
   }
@@ -440,6 +540,8 @@ export function createPlayer(options = {}) {
     }
     audio.pause();
     publish({ status: PLAYER_STATUS.paused });
+    // 暂停是"可能就此关掉应用"的时刻：那一刻的位置立刻落盘，不等节流
+    flushPosition();
     return done({ status: PLAYER_STATUS.paused });
   }
 
@@ -501,6 +603,7 @@ export function createPlayer(options = {}) {
     order = [];
     cursor = 0;
     reportedDurationMs = 0;
+    resume = null;
     stopAudio();
     publish({
       entries,
@@ -600,6 +703,7 @@ export function createPlayer(options = {}) {
     order = [];
     cursor = 0;
     reportedDurationMs = 0;
+    resume = null;
     stopAudio();
     publish({
       entries: [],
@@ -616,7 +720,10 @@ export function createPlayer(options = {}) {
     return done({ queueLength: 0 });
   }
 
-  /** 恢复上次的队列：**只还原队列与索引，不开始播放**（没有用户手势的自动出声是打扰）。 */
+  /**
+   * 恢复上次的队列与进度：**只还原，不开始播放**（没有用户手势的自动出声是打扰）。
+   * 进度按条目元数据先过一遍结尾门；元数据没有时长时留给 `loadedmetadata` 再判。
+   */
   async function restore() {
     let record = null;
     try {
@@ -633,25 +740,33 @@ export function createPlayer(options = {}) {
     }
 
     const entries = restoredEntries(clean);
+    const track = entries[clean.index] ?? null;
+    const durationMs = totalDurationMsOf(track, 0);
+    const positionMs = resumableMs(clean.positionMs ?? 0, durationMs);
+    const savedPosition =
+      positionMs > 0 && track !== null && clean.positionTrackId === track.id
+        ? { trackId: track.id, positionMs, saved: true }
+        : null;
     token += 1;
     loadedId = null;
     order = [];
     cursor = 0;
     reportedDurationMs = 0;
+    resume = savedPosition;
     publish({
       entries,
       index: clean.index,
-      track: entries[clean.index] ?? null,
+      track,
       playbackGeneration: state.playbackGeneration + 1,
       status: PLAYER_STATUS.idle,
       loaded: false,
-      currentTimeMs: 0,
-      durationMs: totalDurationMsOf(entries[clean.index] ?? null, 0),
+      currentTimeMs: positionMs,
+      durationMs,
       error: null,
       restored: true,
     });
     // 读回来的东西不写回去：同内容重写只是多一次磁盘写入（写坏 settings.json 的机会 +1）
-    persistedKey = JSON.stringify(queueRecordOf(entries, clean.index));
+    persistedKey = JSON.stringify(queueRecordOf(entries, clean.index, savedPosition));
     return done({ restored: true, queueLength: entries.length });
   }
 
@@ -660,8 +775,18 @@ export function createPlayer(options = {}) {
     if (!Number.isFinite(value)) return rejectCommand("seek 需要毫秒数字");
     const upper = state.durationMs > 0 ? state.durationMs : Math.max(0, value);
     const target = Math.round(clamp(value, 0, upper));
+    // 还没装载时拖进度只是改"待恢复位置"：此刻对音频说什么都没有意义，用户的选择优先
+    if (resume !== null && !state.loaded && state.track !== null) {
+      resume = { trackId: state.track.id, positionMs: target, saved: false };
+      publish({ currentTimeMs: target, seekGeneration: state.seekGeneration + 1 });
+      notePosition();
+      return done({ currentTimeMs: target });
+    }
     audio.setCurrentTime(target);
     publish({ currentTimeMs: target, seekGeneration: state.seekGeneration + 1 });
+    // 用户自己动了进度：待恢复的那份到此为止，结尾门也不再管它
+    resume = null;
+    notePosition();
     return done({ currentTimeMs: target });
   }
 
@@ -741,6 +866,7 @@ export function createPlayer(options = {}) {
   listen("loadedmetadata", (payload) => {
     reportedDurationMs = millisOfSeconds(payload?.duration) ?? 0;
     publish({ durationMs: totalDurationMsOf(state.track, reportedDurationMs) });
+    settleResume();
   });
   listen("durationchange", (payload) => {
     reportedDurationMs = millisOfSeconds(payload?.duration) ?? 0;
@@ -748,7 +874,9 @@ export function createPlayer(options = {}) {
   });
   listen("timeupdate", (payload) => {
     const currentTimeMs = millisOfSeconds(payload?.currentTime);
-    if (currentTimeMs !== null) publish({ currentTimeMs });
+    if (currentTimeMs === null) return;
+    publish({ currentTimeMs });
+    if (state.status === PLAYER_STATUS.playing) notePosition();
   });
   listen("playing", () => {
     publish({ status: PLAYER_STATUS.playing });
@@ -760,6 +888,7 @@ export function createPlayer(options = {}) {
 
   function dispose() {
     token += 1;
+    cancelTrailing();
     for (const detach of detachers) {
       try {
         detach();
@@ -786,6 +915,7 @@ export function createPlayer(options = {}) {
     next,
     previous,
     seek,
+    flushPosition,
     setVolume,
     setMuted,
     toggleMute,

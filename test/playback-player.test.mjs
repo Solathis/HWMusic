@@ -20,6 +20,8 @@ import {
   PLAYBACK_MODES,
   PLAYER_ERROR_KINDS,
   PLAYER_STATUS,
+  POSITION_WRITE_INTERVAL_MS,
+  RESUME_TAIL_MS,
   createPlayer,
 } from "../src/renderer/features/playback/player.mjs";
 import { PLAYER_COMMANDS, applyPlayerCommand, isPlayerCommand } from "../src/renderer/features/playback/player-commands.mjs";
@@ -30,17 +32,25 @@ const OTHER_SAFE_URL = "https://music.dbankcdn.cn/song/2.mp3";
 /** 假音频端口：记录每条指令，"事件"由测试手动派发。 */
 function fakeAudio() {
   const handlers = new Map();
-  const calls = { sources: [], play: 0, pause: 0, seeks: [], volumes: [], muted: [], disposed: 0 };
+  const calls = { sources: [], play: 0, pause: 0, seeks: [], volumes: [], muted: [], disposed: 0, timeline: [] };
   const audio = {
-    setSource: (src) => calls.sources.push(src),
+    setSource: (src) => {
+      calls.sources.push(src);
+      calls.timeline.push("source");
+    },
     play: () => {
       calls.play += 1;
+      calls.timeline.push("play");
       return Promise.resolve();
     },
     pause: () => {
       calls.pause += 1;
+      calls.timeline.push("pause");
     },
-    setCurrentTime: (ms) => calls.seeks.push(ms),
+    setCurrentTime: (ms) => {
+      calls.seeks.push(ms);
+      calls.timeline.push(`seek:${ms}`);
+    },
     setVolume: (value) => calls.volumes.push(value),
     setMuted: (value) => calls.muted.push(value),
     on: (name, handler) => {
@@ -62,6 +72,42 @@ function fakeAudio() {
   };
 }
 
+/**
+ * 假时钟 + 假定时器：节流按注入的 now() 计时，尾随写由测试手动触发。
+ * `fireDue()` 只跑已到期的那几个（按到期时刻）。
+ */
+function fakeClock(start = 0) {
+  let time = start;
+  const timers = [];
+  return {
+    now: () => time,
+    advance(ms) {
+      time += ms;
+    },
+    schedule(callback, delayMs) {
+      const entry = { callback, at: time + delayMs };
+      timers.push(entry);
+      return () => {
+        const index = timers.indexOf(entry);
+        if (index >= 0) timers.splice(index, 1);
+      };
+    },
+    fireDue() {
+      let fired = 0;
+      for (const entry of [...timers].sort((a, b) => a.at - b.at)) {
+        if (entry.at > time) continue;
+        const index = timers.indexOf(entry);
+        if (index < 0) continue;
+        timers.splice(index, 1);
+        entry.callback();
+        fired += 1;
+      }
+      return fired;
+    },
+    pending: () => timers.length,
+  };
+}
+
 const songs = (count) =>
   Array.from({ length: count }, (_, index) => ({ id: String(1000 + index), name: `歌${index}`, singer: "歌手", duration: 200 }));
 
@@ -73,6 +119,7 @@ function makePlayer(options = {}) {
   const log = [];
   const persisted = [];
   const resolved = [];
+  const clock = options.clock ?? fakeClock();
   const player = createPlayer({
     audio: fake.audio,
     resolveUrl:
@@ -86,8 +133,10 @@ function makePlayer(options = {}) {
     loadQueue: options.loadQueue ?? (async () => null),
     log: options.log ?? ((...parts) => log.push(parts.map(String).join(" "))),
     random: options.random ?? (() => 0),
+    now: clock.now,
+    schedule: clock.schedule,
   });
-  return { player, fake, log, persisted, resolved };
+  return { player, fake, log, persisted, resolved, clock };
 }
 
 test("构造：音频端口、取地址、地址闸门三者缺一不可（闸门是强制的，不是可选项）", () => {
@@ -451,7 +500,7 @@ test("持久化：队列/索引变化时写 ids/index 与安全展示快照，�
   assert.equal(persisted.length, 2, "改模式不算队列变化，模式不持久化");
 
   player.seek(1000);
-  assert.equal(persisted.length, 2, "拖进度不写盘（那会把磁盘当进度条用）");
+  assert.equal(persisted.length, 2, "拖进度不逐帧写盘：5 秒节流 + 拖完的尾随写（见恢复进度那一组）");
 
   await player.next();
   assert.equal(persisted.length, 3);
@@ -837,4 +886,228 @@ test("总时长：换到没有元数据的曲目时，上一首的时长不残�
 
   await player.next();
   assert.equal(player.snapshot().durationMs, 0, "新曲目一没元数据二没读数：回到未知，不显示上一首的时长");
+});
+
+// —— R64 播放进度的保存与恢复 —— //
+
+/** 带位置的记录（index 与 positionTrackId 必须对上，sanitize 才肯收）。 */
+function resumeRecord(positionMs, { duration = 200, ids = ["3001", "3002"], index = 0 } = {}) {
+  const metadata = ids.map((id) => ({ id, name: `曲目${id}`, artists: "歌手", duration }));
+  return { ids, index, metadata, positionMs, positionTrackId: ids[index] };
+}
+
+test("进度写盘：播放中最多每 5 秒一次（按注入的 now 计时），暂停/切歌/清空立即写", async () => {
+  const { player, fake, persisted, clock } = makePlayer();
+  player.setQueue(songs(2), 0);
+  await player.playAt(0);
+  const written = persisted.length;
+
+  fake.emit("timeupdate", { currentTime: 1 });
+  clock.advance(POSITION_WRITE_INTERVAL_MS - 1000);
+  fake.emit("timeupdate", { currentTime: 4 });
+  assert.equal(persisted.length, written, "节流窗口内不写盘");
+
+  clock.advance(1000);
+  fake.emit("timeupdate", { currentTime: 5 });
+  assert.equal(persisted.length, written + 1, "满 5 秒写一次");
+  assert.deepEqual(
+    { positionMs: persisted.at(-1).positionMs, positionTrackId: persisted.at(-1).positionTrackId },
+    { positionMs: 5000, positionTrackId: "1000" },
+  );
+
+  // 暂停是用户动作：不让节流压着，那一刻的位置立刻落盘
+  fake.emit("timeupdate", { currentTime: 9 });
+  player.pause();
+  assert.equal(persisted.at(-1).positionMs, 9000);
+  const afterPause = persisted.length;
+
+  // 暂停中的 timeupdate（浏览器 seek 后也会发）不该再写
+  fake.emit("timeupdate", { currentTime: 9000 });
+  assert.equal(persisted.length, afterPause);
+
+  // 切歌：新的一首从 0 开始，位置字段整对消失
+  await player.next();
+  assert.equal(persisted.at(-1).index, 1);
+  assert.equal("positionMs" in persisted.at(-1), false, "切歌后上一首的位置不许跟着走");
+  assert.equal("positionTrackId" in persisted.at(-1), false);
+
+  player.clear();
+  assert.equal(persisted.at(-1), null, "清空 = 删除这个键");
+});
+
+test("拖动进度：拖动过程中不写盘，拖完的最终位置一定落盘（尾随写）", async () => {
+  const { player, fake, persisted, clock } = makePlayer();
+  player.setQueue(songs(1), 0);
+  await player.playAt(0);
+  clock.advance(POSITION_WRITE_INTERVAL_MS);
+  fake.emit("timeupdate", { currentTime: 10 });
+  const written = persisted.length;
+  assert.equal(persisted.at(-1).positionMs, 10_000);
+
+  for (const ms of [2000, 5000, 8000, 12_000, 15_000]) player.seek(ms);
+  assert.equal(persisted.length, written, "拖动过程中一次都不写（拖一次写一次 = 把磁盘当进度条）");
+  assert.equal(clock.pending(), 1, "只挂一个尾随写");
+
+  clock.advance(POSITION_WRITE_INTERVAL_MS);
+  assert.equal(clock.fireDue(), 1);
+  assert.equal(persisted.length, written + 1, "松手后补一次");
+  assert.equal(persisted.at(-1).positionMs, 15_000, "落盘的是最后一次位置");
+  assert.equal(persisted.at(-1).positionTrackId, "1000");
+});
+
+test("主窗隐藏前 flushPosition：立刻落盘，不等节流", async () => {
+  const { player, fake, persisted, clock } = makePlayer();
+  player.setQueue(songs(1), 0);
+  await player.playAt(0);
+  fake.emit("timeupdate", { currentTime: 7 });
+  assert.equal(persisted.at(-1).positionMs ?? null, null, "节流窗口内还没写");
+
+  player.flushPosition();
+  assert.equal(persisted.at(-1).positionMs, 7000);
+  assert.equal(clock.pending(), 0, "立刻写完就不要留尾随任务");
+});
+
+test("恢复：底栏读数就是保存的位置与时长，状态 idle（暂停），一次都不碰音频", async () => {
+  const { player, fake } = makePlayer({ loadQueue: async () => resumeRecord(51_234) });
+  await player.restore();
+
+  const state = player.snapshot();
+  assert.equal(state.currentTimeMs, 51_234);
+  assert.equal(state.durationMs, 200_000);
+  assert.equal(state.status, PLAYER_STATUS.idle, "恢复 = 暂停等播放键（idle 与既有语义一致）");
+  assert.equal(state.loaded, false);
+  assert.equal(state.track.id, "3001");
+  assert.equal(fake.calls.play, 0, "启动不出声");
+  assert.deepEqual(fake.calls.seeks, [], "没装载就不碰音频");
+  assert.deepEqual(fake.calls.sources, []);
+});
+
+test("首次播放：先取地址再 seek 到保存位置，加载期间进度不闪回 0", async () => {
+  const { player, fake } = makePlayer({ loadQueue: async () => resumeRecord(51_234) });
+  await player.restore();
+
+  // 装载期间每一帧都拿着保存的位置（否则进度条会先闪回 0:00）
+  player.subscribe((state) => {
+    if (state.status === PLAYER_STATUS.loading) {
+      assert.ok(state.currentTimeMs >= 51_234, `加载中进度闪回了 ${state.currentTimeMs}`);
+    }
+  });
+  await player.playAt(0);
+
+  const interesting = fake.calls.timeline;
+  assert.deepEqual(interesting, ["source", "seek:51234", "play"], "顺序：取地址 → 设源 → seek → 播");
+  assert.equal(player.snapshot().currentTimeMs, 51_234);
+  assert.equal(player.snapshot().status, PLAYER_STATUS.playing);
+});
+
+test("恢复后先拖进度再播放：以用户位置为准，保存的位置不再使用", async () => {
+  const { player, fake } = makePlayer({ loadQueue: async () => resumeRecord(51_234) });
+  await player.restore();
+
+  player.seek(20_000);
+  assert.deepEqual(fake.calls.seeks, [], "还没装载时拖进度只是改待恢复位置");
+  assert.equal(player.snapshot().currentTimeMs, 20_000);
+
+  await player.play();
+  assert.deepEqual(fake.calls.seeks, [20_000], "只 seek 用户选的那一处");
+  assert.equal(player.snapshot().currentTimeMs, 20_000);
+});
+
+test("取地址期间用户拖进度：装载后从用户选的位置开始（不许被盘上的位置盖回去）", async () => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const { player, fake } = makePlayer({
+    loadQueue: async () => resumeRecord(51_234),
+    resolveUrl: async () => {
+      await gate;
+      return { ok: true, data: { url: "https://music.dbankcdn.cn/song/3001.mp3" } };
+    },
+  });
+  await player.restore();
+  const playing = player.playAt(0);
+  player.seek(20_000);
+  release();
+  await playing;
+
+  assert.deepEqual(fake.calls.seeks, [20_000], "只 seek 用户选的那一处");
+  assert.equal(player.snapshot().currentTimeMs, 20_000);
+});
+
+
+test("装载后用户再拖进度：待恢复位置作废，loadedmetadata 不会把它改回去", async () => {
+  const { player, fake } = makePlayer({
+    loadQueue: async () => ({ ids: ["4003"], index: 0, positionMs: 10_000, positionTrackId: "4003" }),
+  });
+  await player.restore();
+  await player.playAt(0);
+  player.seek(2000);
+  fake.emit("loadedmetadata", { duration: 11 });
+  assert.equal(player.snapshot().currentTimeMs, 2_000, "用户的位置说了算");
+  assert.deepEqual(fake.calls.seeks, [10_000, 2_000], "没有第二次纠正");
+});
+
+test("恢复边界：距结尾不足 3 秒、id 不对、位置非法都从 0 开始", async () => {
+  const nearEnd = makePlayer({ loadQueue: async () => resumeRecord(200_000 - RESUME_TAIL_MS + 1) });
+  await nearEnd.player.restore();
+  assert.equal(nearEnd.player.snapshot().currentTimeMs, 0, "快听完了就不必从结尾接着放");
+
+  const exactly = makePlayer({ loadQueue: async () => resumeRecord(200_000 - RESUME_TAIL_MS) });
+  await exactly.player.restore();
+  assert.equal(exactly.player.snapshot().currentTimeMs, 200_000 - RESUME_TAIL_MS, "正好剩 3 秒仍算可恢复");
+
+  const beyond = makePlayer({ loadQueue: async () => resumeRecord(999_999) });
+  await beyond.player.restore();
+  assert.equal(beyond.player.snapshot().currentTimeMs, 0, "超出时长 = 非法");
+
+  const mismatched = makePlayer({
+    loadQueue: async () => ({ ...resumeRecord(51_234), positionTrackId: "3002" }),
+  });
+  await mismatched.player.restore();
+  assert.equal(mismatched.player.snapshot().currentTimeMs, 0, "id 与 index 对不上：宁可从头放");
+
+  // 从 0 开始的恢复：首次播放也不该多一次 seek
+  await mismatched.player.playAt(0);
+  assert.deepEqual(mismatched.fake.calls.seeks, []);
+});
+
+test("时长未知：先显示保存的位置，loadedmetadata 报出真实时长后再按结尾门修正", async () => {
+  const noDuration = (ids) => ({ ids, index: 0, positionMs: 10_000, positionTrackId: ids[0] });
+  const keep = makePlayer({ loadQueue: async () => noDuration(["4001"]) });
+  await keep.player.restore();
+  assert.equal(keep.player.snapshot().currentTimeMs, 10_000, "时长未知时按保存的位置显示");
+  await keep.player.playAt(0);
+  assert.deepEqual(keep.fake.calls.seeks, [10_000]);
+  keep.fake.emit("loadedmetadata", { duration: 30 });
+  assert.equal(keep.player.snapshot().currentTimeMs, 10_000, "距结尾还有 20 秒：保持");
+  assert.deepEqual(keep.fake.calls.seeks, [10_000], "不需要再纠正一次");
+
+  const snap = makePlayer({ loadQueue: async () => noDuration(["4002"]) });
+  await snap.player.restore();
+  await snap.player.playAt(0);
+  snap.fake.emit("loadedmetadata", { duration: 11 });
+  assert.equal(snap.player.snapshot().currentTimeMs, 0, "真实时长只有 11 秒：距结尾不足 3 秒，从头放");
+  assert.deepEqual(snap.fake.calls.seeks, [10_000, 0], "已经 seek 过就先要回 0");
+});
+
+test("播放中恢复的位置不重复写盘：读回来的东西不立刻写回去", async () => {
+  const { player, persisted } = makePlayer({ loadQueue: async () => resumeRecord(51_234) });
+  await player.restore();
+  assert.equal(persisted.length, 0, "恢复不写盘（同内容重写只是多一次磁盘写入的机会）");
+  await player.playAt(0);
+  assert.equal(persisted.length, 0, "播放同一个位置也还是同一条记录");
+});
+
+test("异常退出最多丢 5 秒：节流窗口一到，最近的位置一定已经在盘上", async () => {
+  const { player, fake, persisted, clock } = makePlayer();
+  player.setQueue(songs(1), 0);
+  await player.playAt(0);
+  for (let second = 1; second <= 12; second += 1) {
+    clock.advance(1000);
+    fake.emit("timeupdate", { currentTime: second });
+  }
+  const last = persisted.at(-1).positionMs;
+  assert.ok(last !== undefined && last >= 7_000, `最后落盘的位置太旧：${last}`);
+  assert.ok(12_000 - last <= POSITION_WRITE_INTERVAL_MS, "异常退出丢掉的不超过一个节流窗口");
 });

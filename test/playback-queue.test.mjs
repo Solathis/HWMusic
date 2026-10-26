@@ -53,6 +53,58 @@ test("索引夹到合法范围；元信息数量不超过有效队列长度", ()
   assert.equal(QUEUE_SETTING_KEY, "queue");
 });
 
+test("位置只跟当前曲目绑定：positionMs + positionTrackId 同进同出", () => {
+  const entries = queueEntriesOf([SONG, { id: "1002" }]);
+  const metadata = [SNAPSHOT, null];
+  assert.deepEqual(queueRecordOf(entries, 1, { trackId: "1002", positionMs: 51_234 }), {
+    ids: ["1001", "1002"], index: 1, metadata, positionMs: 51_234, positionTrackId: "1002",
+  });
+  assert.equal(queueRecordOf(entries, 0, { trackId: "1001", positionMs: 1200.6 }).positionMs, 1201, "整数毫秒");
+
+  // index 指向的不是这个 id（索引错位）、位置为 0、非有限数、负数：整对字段都不写
+  for (const position of [
+    { trackId: "1002", positionMs: 51_234 },
+    { trackId: "1001", positionMs: 0 },
+    { trackId: "1001", positionMs: Number.NaN },
+    { trackId: "1001", positionMs: Number.POSITIVE_INFINITY },
+    { trackId: "1001", positionMs: -1 },
+    { trackId: "1001", positionMs: "1500" },
+    { trackId: null, positionMs: 1500 },
+    { positionMs: 1500 },
+    "1500",
+  ]) {
+    assert.deepEqual(queueRecordOf(entries, 0, position), { ids: ["1001", "1002"], index: 0, metadata },
+      `非法位置不该落盘：${JSON.stringify(position)}`);
+  }
+  assert.deepEqual(queueRecordOf(entries, 0), { ids: ["1001", "1002"], index: 0, metadata }, "不传位置 = 老记录形状");
+});
+
+test("读回位置：非有限数、负数、与 index 不符、不在 ids 里都当作没有位置", () => {
+  const base = { ids: ["1", "2"], index: 1 };
+  assert.deepEqual(sanitizeQueueRecord({ ...base, positionMs: 43_500, positionTrackId: "2" }), {
+    ids: ["1", "2"], index: 1, positionMs: 43_500, positionTrackId: "2",
+  });
+  for (const [positionMs, positionTrackId] of [
+    [Number.NaN, "2"], [Number.POSITIVE_INFINITY, "2"], [-1, "2"], [-0.5, "2"],
+    ["1500", "2"], [1500, "1"], [1500, "9"], [1500, null], [1500, ""], [1500, undefined],
+    [null, "2"], [0, "2"],
+  ]) {
+    assert.deepEqual(sanitizeQueueRecord({ ...base, positionMs, positionTrackId }), { ids: ["1", "2"], index: 1 },
+      `非法位置要当作没有：${JSON.stringify([positionMs, positionTrackId])}`);
+  }
+  // index 被夹到别的曲目后，原来的位置就错位了：一起丢掉
+  assert.deepEqual(sanitizeQueueRecord({ ids: ["1", "2"], index: 9, positionMs: 1500, positionTrackId: "1" }),
+    { ids: ["1", "2"], index: 1 });
+  // 位置字段也不许执行访问器
+  let reads = 0;
+  const raw = { ids: ["1"], index: 0 };
+  for (const key of ["positionMs", "positionTrackId"]) {
+    Object.defineProperty(raw, key, { enumerable: true, get() { reads += 1; throw new Error("不能调用访问器"); } });
+  }
+  assert.deepEqual(sanitizeQueueRecord(raw), { ids: ["1"], index: 0 });
+  assert.equal(reads, 0);
+});
+
 test("旧 ids/index 记录兼容，顶层任意字段不带进恢复结果", () => {
   assert.deepEqual(sanitizeQueueRecord({ ids: ["1", "2"], index: 9 }), { ids: ["1", "2"], index: 1 });
   assert.deepEqual(sanitizeQueueRecord({ ids: ["1", "  ", ""], index: -1, url: COVER }), { ids: ["1"], index: 0 });

@@ -1,4 +1,4 @@
-/** 队列只保留展示白名单；持久化兼容旧 ids/index，绝不保存音频地址。 */
+/** 队列只保留展示白名单；持久化兼容旧 ids/index，绝不保存音频地址（进度只存毫秒数）。 */
 import {
   trackAlbumIdOf,
   trackAlbumOrNull,
@@ -10,7 +10,8 @@ import {
 import { guardMediaUrl } from "./media-url.mjs";
 
 /** @typedef {{id: string, name: string|null, artists: string|null, duration: number|null, coverUrl: string|null, albumId: string|null, albumName: string|null}} QueueEntry */
-/** @typedef {{ids: string[], index: number, metadata?: Array<QueueEntry|null>}} QueueRecord */
+/** @typedef {{trackId: string, positionMs: number}} QueuePosition */
+/** @typedef {{ids: string[], index: number, metadata?: Array<QueueEntry|null>, positionMs?: number, positionTrackId?: string}} QueueRecord */
 
 export const QUEUE_SETTING_KEY = "queue";
 const METADATA_KEYS = ["name", "artists", "duration", "coverUrl", "albumId", "albumName"];
@@ -75,15 +76,31 @@ function snapshotOf(raw, id) {
   return METADATA_KEYS.some((key) => entry[key] !== null) ? entry : null;
 }
 
+/**
+ * 位置只跟当前曲目绑定：id 必须就是这一索引的曲目，否则整对字段都不算数。
+ * 0 与"没有位置"是同一件事（从头开始），所以不写。
+ * @returns {QueuePosition|null}
+ */
+function positionOf(value, trackId) {
+  if (value === null || typeof value !== "object") return null;
+  const positionMs = ownValue(value, "positionMs");
+  const positionTrackId = textOf(ownValue(value, "trackId"));
+  if (typeof positionMs !== "number" || !Number.isFinite(positionMs) || positionMs <= 0) return null;
+  return positionTrackId === trackId ? { trackId: positionTrackId, positionMs: Math.round(positionMs) } : null;
+}
+
 /** @returns {QueueRecord|null} */
-export function queueRecordOf(entries, index) {
+export function queueRecordOf(entries, index, position = null) {
   const projected = queueEntriesOf(entries);
   if (projected.length === 0) return null;
   const metadata = projected.map((entry) => snapshotOf(entry, entry.id));
+  const at = clampIndex(index, projected.length);
+  const resume = positionOf(position, projected[at].id);
   return {
     ids: projected.map((entry) => entry.id),
-    index: clampIndex(index, projected.length),
+    index: at,
     ...(metadata.some((entry) => entry !== null) ? { metadata } : {}),
+    ...(resume === null ? {} : { positionMs: resume.positionMs, positionTrackId: resume.trackId }),
   };
 }
 
@@ -102,10 +119,16 @@ export function sanitizeQueueRecord(raw) {
     metadata.push(Array.isArray(sourceMetadata) ? snapshotOf(ownValue(sourceMetadata, position), id) : null);
   }
   if (ids.length === 0) return null;
+  const index = clampIndex(ownValue(raw, "index"), ids.length);
+  const positionMs = ownValue(raw, "positionMs");
+  const positionTrackId = textOf(ownValue(raw, "positionTrackId"));
+  const hasPosition =
+    typeof positionMs === "number" && Number.isFinite(positionMs) && positionMs > 0 && positionTrackId === ids[index];
   return {
     ids,
-    index: clampIndex(ownValue(raw, "index"), ids.length),
+    index,
     ...(metadata.some((entry) => entry !== null) ? { metadata } : {}),
+    ...(hasPosition ? { positionMs: Math.round(positionMs), positionTrackId } : {}),
   };
 }
 

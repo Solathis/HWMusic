@@ -192,7 +192,7 @@ class FakeMetadata {
 /** 等一次微任务：广播处理器是"发出去就不管"的（`void`），断言前要让它跑完。 */
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-function makeRuntime({ core = fakeCore(), audio = fakeAudioClass(), session = fakeSession(), log = [] } = {}) {
+function makeRuntime({ core = fakeCore(), audio = fakeAudioClass(), session = fakeSession(), log = [], documentHost = null, windowHost = null } = {}) {
   const subscribed = [];
   const runtime = createPlayerRuntime({
     callCore: core.callCore,
@@ -203,9 +203,35 @@ function makeRuntime({ core = fakeCore(), audio = fakeAudioClass(), session = fa
     createAudio: () => createAudioElementPort({ AudioCtor: audio.FakeAudio, log: () => {} }),
     mediaSession: session.session,
     metadataCtor: FakeMetadata,
+    documentHost,
+    windowHost,
+    // 进度尾随写的定时器：unref 掉，免得 5 秒的挂起任务拖住 node 进程
+    schedule: (callback, delayMs) => {
+      const timer = setTimeout(callback, delayMs);
+      timer.unref?.();
+      return () => clearTimeout(timer);
+    },
     log: (...parts) => log.push(parts.join(" ")),
   });
   return { runtime, core, audio, session, log, subscribed };
+}
+
+/** 假 DOM 宿主：只收监听（`document` 那份带 visibilityState，`window` 那份只发 pagehide）。 */
+function fakeHost(visibilityState = "visible") {
+  const listeners = new Map();
+  return {
+    visibilityState,
+    addEventListener(name, handler) {
+      listeners.set(name, [...(listeners.get(name) ?? []), handler]);
+    },
+    removeEventListener(name, handler) {
+      listeners.set(name, (listeners.get(name) ?? []).filter((entry) => entry !== handler));
+    },
+    fire(name) {
+      for (const handler of [...(listeners.get(name) ?? [])]) handler({});
+    },
+    count: () => [...listeners.values()].reduce((total, list) => total + list.length, 0),
+  };
 }
 
 test("装配：取地址走 playback:resolve-url（通道名来自共享常量），地址过闸门后才装载", async () => {
@@ -373,6 +399,51 @@ test("初始化恢复 metadata 与当前条目一致，不 resolve 音频也不�
   assert.equal(core.of(SETTINGS_SET).length, 0);
   assert.equal(session.metadata.at(-1).init.artwork[0].src, metadata.coverUrl);
   runtime.dispose();
+});
+
+test("R64 初始化恢复播放位置：读数来自队列记录，仍不取地址、不写回磁盘", async () => {
+  const metadata = { id: "1", name: "恢复曲目", artists: "艺人", duration: 200, coverUrl: null, albumId: null, albumName: null };
+  const record = { ids: ["1"], index: 0, metadata: [metadata], positionMs: 42_500, positionTrackId: "1" };
+  const { runtime, core, audio } = makeRuntime({ core: fakeCore({ settings: { queue: record } }) });
+  await runtime.initialize();
+
+  const state = runtime.player.snapshot();
+  assert.equal(state.currentTimeMs, 42_500);
+  assert.equal(state.durationMs, 200_000);
+  assert.equal(state.status, PLAYER_STATUS.idle, "恢复 = 暂停等播放键");
+  assert.equal(core.of(PLAYBACK_RESOLVE_URL).length, 0, "恢复不取地址");
+  assert.equal(audio.created[0].playCalls, 0, "启动不出声");
+  assert.equal(core.of(SETTINGS_SET).length, 0, "读回来的记录不写回去");
+  runtime.dispose();
+});
+
+test("R64 主窗隐藏/关闭前立刻落盘进度（可见时不写，重复位置不重写）", async () => {
+  const documentHost = fakeHost();
+  const windowHost = fakeHost();
+  const { runtime, core, audio } = makeRuntime({ documentHost, windowHost });
+  runtime.player.setQueue([{ id: "1", name: "甲", duration: 200 }], 0);
+  await runtime.player.playAt(0);
+  audio.created[0].currentTime = 3.5;
+  audio.created[0].dispatch("timeupdate");
+  const written = core.of(SETTINGS_SET).length;
+  assert.equal(written, 1, "节流窗口内不写盘（只有 setQueue 那一次）");
+
+  documentHost.fire("visibilitychange");
+  assert.equal(core.of(SETTINGS_SET).length, written, "窗口可见时不写");
+
+  documentHost.visibilityState = "hidden";
+  documentHost.fire("visibilitychange");
+  const hidden = core.of(SETTINGS_SET);
+  assert.equal(hidden.length, written + 1, "隐藏到托盘前写一次");
+  assert.equal(hidden.at(-1).payload.patch.queue.positionMs, 3_500);
+  assert.equal(hidden.at(-1).payload.patch.queue.positionTrackId, "1");
+
+  windowHost.fire("pagehide");
+  assert.equal(core.of(SETTINGS_SET).length, written + 1, "同一位置不重复写");
+
+  runtime.dispose();
+  assert.equal(documentHost.count(), 0, "dispose 摘掉 document 监听");
+  assert.equal(windowHost.count(), 0, "dispose 摘掉 window 监听");
 });
 
 test("dispose：退订广播、摘掉媒体会话（不留幽灵）", async () => {
