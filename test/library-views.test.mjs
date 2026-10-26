@@ -56,19 +56,18 @@ import {
 // 1. 视图枚举与侧边栏导航（唯一真源）
 // ---------------------------------------------------------------------------
 
-test("视图枚举：六个页面 + 设置都在枚举里，且侧边栏条目全部落在枚举内", () => {
+test("视图枚举：七个页面（含设置）都在枚举里，且侧边栏条目全部落在枚举内", () => {
   assert.deepEqual([...VIEW_IDS].sort(), [
     "album",
     "artist",
     "favorites",
     "history",
     "playlist-detail",
-    "playlists",
     "search",
     "settings",
   ]);
 
-  assert.ok(SIDEBAR_VIEWS.length >= 4, "侧边栏至少要覆盖收藏/歌单/历史/设置");
+  assert.ok(SIDEBAR_VIEWS.length >= 3, "侧边栏至少要覆盖收藏/历史/设置");
   const seen = new Set();
   for (const entry of SIDEBAR_VIEWS) {
     assert.equal(isViewId(entry.id), true, `侧边栏条目必须是已知视图：${entry.id}`);
@@ -95,6 +94,13 @@ test("视图枚举：六个页面 + 设置都在枚举里，且侧边栏条目�
   );
   assert.equal(isViewId(VIEW.search), true, "搜索仍是一个可用的视图（结果页要用它）");
   assert.equal(NAV_LIST_TESTID, "nav-list", "导航列表的测试锚点是契约（源码扫描也钉它）");
+  // R62：「我的歌单」不再是视图——列表长在侧栏里（sidebar-playlists.tsx），点进的是 playlist-detail
+  assert.equal(isViewId("playlists"), false, "「我的歌单」没有独立页面了");
+  assert.equal(
+    SIDEBAR_VIEWS.some((entry) => entry.label === "我的歌单"),
+    false,
+    "「我的歌单」不再是导航项（它是侧栏里那组歌单的组标题）",
+  );
 });
 
 test("视图归一：认不出的 id 回落到收藏页（绝不渲染空白），参数原样保留", () => {

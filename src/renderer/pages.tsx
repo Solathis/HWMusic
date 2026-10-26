@@ -1,17 +1,19 @@
 /**
- * 库页面（R8）：歌单 / 歌单详情 / 搜索 / 专辑 / 歌手 / 播放历史，加上留给 R10 的设置页。
+ * 库页面（R8）：歌单详情 / 搜索 / 专辑 / 歌手 / 播放历史，加上留给 R10 的设置页。
  *
  * 收藏页不在这里——它是常驻挂载的（favorites-page.tsx），挂在 `renderPage()` 之外。
+ * 歌单列表也不在这里：它长在侧栏（sidebar-playlists.tsx），共用同一份取数。
  *
- * 所有页面的数据都走同一条路：`coreCall(共享常量里的 library:* 频道, 载荷)`，
+ * 所有页面的数据都走同一条路：`useLibraryResource`（features/library 里那一个 hook）
  * 一次只取一页（`hasMore` 由 sidecar 侧的协议层给，页面不自己猜）。
  * 三种状态分开渲染，且**绝不互相冒充**：
  * - 加载中 → Skeleton；
  * - 失败 → 结构化错误的人话（`libraryFailureText`：端点没配就说"未配置"，不显示空态）；
  * - 真的空 → 一句克制的空态（`libraryEmptyText`）。
  *
- * 端点目前全部未配置（docs/API_CONTRACT.md §2.1），所以"接口尚未配置（待联调确认）。"
- * 就是这些页面今天最常显示的那句话——这是如实，不是坏掉。
+ * 端点默认值来自 `src/main/music-service.mjs` 文件头那张默认端点表；只有在设置文档的
+ * `musicEndpoints` 里把某个键显式设为 `null`（显式关闭）时，协议层才回 `endpoint_unknown`，
+ * 页面才显示"接口尚未配置（待联调确认）。"——这是排障用的确定态，不是默认面貌。
  *
  * R45A3（简报第 12 项"歌曲列表触底加载，不一次加载全部"）：列表分成两种，**不许混为一谈**——
  * - 歌单详情 / 搜索 / 专辑：接口真的认 `page`/`pageSize`，滚到离底 240px 取**下一页**；
@@ -26,7 +28,6 @@ import {
   LIBRARY_ARTIST,
   LIBRARY_HISTORY,
   LIBRARY_PLAYLIST_DETAIL,
-  LIBRARY_PLAYLISTS,
   LIBRARY_SEARCH,
   SETTINGS_GET,
   SETTINGS_SET,
@@ -49,16 +50,16 @@ import {
 } from "./components/ui/select"
 import { Switch } from "./components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs"
-import { CoverArt, EmptyState, GridSkeleton, ListSkeleton, LoadFailed, TrackTable } from "./components"
+import { CoverArt, EmptyState, ListSkeleton, LoadFailed, TrackTable } from "./components"
 import { AmllBackground } from "./AmllBackground.tsx"
 import { LogTerminal } from "./log-terminal.tsx"
 import type { LogEntry } from "./log-terminal.tsx"
 import { RUN_LOG_READ_LIMIT } from "./features/settings/run-log.mjs"
 import { LyricsCacheCard } from "./lyrics-cache-card.tsx"
 import { TaskbarLyricsCard } from "./taskbar-lyrics-card.tsx"
-import { coreCall, getAutostart, isCoreError, setAutostart } from "./host-api"
-import { PlaylistGrid } from "./playlist-grid.tsx"
+import { coreCall, getAutostart, setAutostart } from "./host-api"
 import { libraryEmptyText, libraryFailureText } from "./features/library/library-state.mjs"
+import { useLibraryResource } from "./features/library/use-library-resource.ts"
 import {
   PLAYLIST_ENQUEUE_LABEL,
   PLAYLIST_PLAY_ALL_LABEL,
@@ -136,63 +137,6 @@ const LIST_PAGE_SIZE = PAGINATION_PAGE_SIZE
 export interface View {
   id: string
   params: Record<string, string>
-}
-
-interface Resource<T> {
-  status: "loading" | "ready" | "error"
-  data: T | null
-  failure: { message: string; kind?: string } | null
-}
-
-/**
- * 一次一页的资源取数。
- *
- * 两个刻意的细节：
- * - 载荷用 JSON 做依赖键：调用点写对象字面量是常事，而 effect 的依赖比较是引用比较，
- *   直接把对象放进依赖里就是每渲染一次取一次数；
- * - `select` 放进 ref 而不是依赖数组：它同样是每次渲染都新建的函数，
- *   放进依赖会得到和上面一样的死循环。取值函数不参与"该不该重新取"的判断。
- */
-function useLibraryResource<T>(
-  channel: RequestChannel,
-  payload: unknown,
-  select: (data: never) => T,
-  enabled = true,
-): Resource<T> {
-  const [state, setState] = useState<Resource<T>>({ status: "loading", data: null, failure: null })
-  const selectRef = useRef(select)
-  selectRef.current = select
-  const key = JSON.stringify(payload)
-
-  useEffect(() => {
-    if (!enabled) {
-      setState({ status: "ready", data: null, failure: null })
-      return
-    }
-    let alive = true
-    setState({ status: "loading", data: null, failure: null })
-    void (async () => {
-      try {
-        const data = await coreCall(channel, JSON.parse(key))
-        if (!alive) return
-        setState({ status: "ready", data: selectRef.current(data as never), failure: null })
-      } catch (failure) {
-        if (!alive) return
-        // 错误路径才写控制台；结构化错误的人话由 libraryFailureText 给（这里不编）
-        console.warn(`库页面请求失败（${channel}）：`, failure)
-        setState({
-          status: "error",
-          data: null,
-          failure: isCoreError(failure) ? failure : { message: libraryFailureText(failure) },
-        })
-      }
-    })()
-    return () => {
-      alive = false
-    }
-  }, [channel, key, enabled])
-
-  return state
 }
 
 // ---------------------------------------------------------------------------
@@ -523,26 +467,8 @@ export interface PageNavigationProps {
 }
 
 // ---------------------------------------------------------------------------
-// 歌单：网格 + 详情
+// 歌单详情
 // ---------------------------------------------------------------------------
-
-export function PlaylistsPage({
-  onOpenPlaylist,
-}: {
-  onOpenPlaylist: (playlistId: string, playlist: unknown) => void
-}) {
-  const view = createView(VIEW.playlists)
-  const select = useCallback((data: { playlists?: unknown[] }) => data.playlists ?? [], [])
-  const resource = useLibraryResource<unknown[]>(
-    LIBRARY_PLAYLISTS,
-    { page: 1, pageSize: LIST_PAGE_SIZE },
-    select,
-  )
-
-  if (resource.status === "loading") return <GridSkeleton />
-  if (resource.status === "error") return <LoadFailed text={libraryFailureText(resource.failure)} />
-  return <PlaylistGrid playlists={resource.data ?? []} emptyText={libraryEmptyText(view)} onOpen={onOpenPlaylist} />
-}
 
 /**
  * 歌单详情页（R40 **删除重写**；R45A3 改成真分页）。

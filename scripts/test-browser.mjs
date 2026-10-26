@@ -204,9 +204,26 @@ const SLOW_KEYWORD = ${JSON.stringify(PAGINATION_FIXTURE.slowKeyword)};
 const SLOW_SEARCH_MS = ${PAGINATION_FIXTURE.slowDelayMs};
 const SHORT_KEYWORD = ${JSON.stringify(PAGINATION_FIXTURE.shortKeyword)};
 const GUARD_PLAYLISTS = [
-  { id: "PL-1", name: "守卫歌单", songCount: PAGED_TOTAL, coverUrl: "https://music.dbankcdn.cn/guard-cover-warm.png" },
-  { id: "PL-REPEAT", name: "重复页守卫歌单", songCount: 50, coverUrl: "https://music.dbankcdn.cn/guard-cover-cool.png" },
+  { id: "PL-1", name: "守卫歌单", songCount: PAGED_TOTAL, kind: "owned", coverUrl: "https://music.dbankcdn.cn/guard-cover-warm.png" },
+  { id: "PL-REPEAT", name: "重复页守卫歌单", songCount: 50, kind: "collected", coverUrl: "https://music.dbankcdn.cn/guard-cover-cool.png" },
 ];
+/**
+ * R62：侧栏歌单的四档夹具（查询串给）：默认两张、many（24 张，撑出滚动）、
+ * empty（真空）、error（第一次失败，点「重试」才成功）、slow（4 秒才回，留住骨架那一帧）。
+ */
+const playlistsMode = new URLSearchParams(location.search).get("playlists") ?? "fixture";
+const playlistListCalls = [];
+let playlistFailuresLeft = playlistsMode === "error" ? 1 : 0;
+function guardSidebarPlaylists() {
+  if (playlistsMode !== "many") return GUARD_PLAYLISTS;
+  return Array.from({ length: 24 }, (_, index) => ({
+    id: "PL-MANY-" + (index + 1),
+    name: (index % 3 === 0 ? "这是一个名字很长很长很长很长的歌单守卫 " : "守卫歌单 ") + (index + 1),
+    songCount: 10 + index,
+    kind: index % 2 === 0 ? "owned" : "collected",
+    coverUrl: "https://music.dbankcdn.cn/guard-cover-" + (index % 2 === 0 ? "warm" : "cool") + ".png",
+  }));
+}
 function guardTracks(prefix, count) {
   return Array.from({ length: count }, (_, index) => ({
     id: prefix + "-" + (index + 1),
@@ -249,7 +266,16 @@ mockIPC(async (command, args) => {
         return { settings: { schemaVersion: 1, data: settingsData } };
       }
       case "library:favorites": return { songs, hasMore: false, skipped: 0, reportedTotal: songs.length };
-      case "library:playlists": return { playlists: GUARD_PLAYLISTS, hasMore: false };
+      case "library:playlists": {
+        playlistListCalls.push({ mode: playlistsMode, at: Math.round(performance.now()) });
+        if (playlistFailuresLeft > 0) {
+          playlistFailuresLeft -= 1;
+          throw { kind: "core_unavailable", message: "守卫夹具：这一次歌单列表被故意拒绝" };
+        }
+        // 骨架那一帧只在"请求还没回来"时存在，所以 slow 档必须真的慢
+        if (playlistsMode === "slow") await new Promise((resolve) => setTimeout(resolve, 4000));
+        return { playlists: playlistsMode === "empty" ? [] : guardSidebarPlaylists(), hasMore: false };
+      }
       case "library:playlist-detail": {
         /**
          * R45A3 复审：这条**不再**由夹具自己切片——它走**真协议层**（src/protocols/music.mjs），
@@ -426,6 +452,8 @@ function Guard() {
       /** R45A3 复审：**假上游**（每次都回整张歌单）的请求记录——"整份只取一次"按它判。 */
       playlistFetches: () => playlistProbe.fetches(),
       resetPlaylistFetches: () => { playlistProbe.reset(); },
+      /** R62：侧栏歌单列表取了几次（"只取一次并缓存"按它判）。 */
+      playlistListCalls: () => playlistListCalls.slice(),
       queueLength: () => runtime.player.snapshot().entries.length,
       pause: () => runtime.player.pause(),
       desktopConfig: () => desktopConfig,
@@ -3622,9 +3650,8 @@ export async function checkLibraryPagination(page, guardDir, add) {
   await page.evaluate(() => window.__guard.resetLibraryCalls());
   // 假上游（每次都回整张歌单的那个）的请求记录也要从零开始：这一项的判据之一是"整份只取一次网络"
   await page.evaluate(() => window.__guard.resetPlaylistFetches());
-  await page.getByRole("button", { name: "我的歌单", exact: true }).click();
-  await page.getByTestId("playlist-grid").waitFor();
-  await page.getByRole("button", { name: "打开", exact: true }).first().click();
+  // R62：歌单列表在侧栏（原来的「我的歌单」页已删除），点第一张进详情
+  await page.getByTestId("sidebar-playlist-item").first().click();
   await page.getByTestId("playlist-detail").waitFor();
   const firstPageLoaded = await visibleRowsIn(50).then(() => true).catch(() => false);
   if (!firstPageLoaded) {
@@ -3768,9 +3795,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
   JSON.stringify({ fetches: finalFetches.length }));
 
   // ⑥c 服务端重复整页：停止原因可见，不把本页数量冒充歌单总数
-  await page.getByRole("button", { name: "我的歌单", exact: true }).click();
-  await page.getByTestId("playlist-grid").waitFor();
-  await page.getByTestId("playlist-grid").getByRole("button", { name: "打开", exact: true }).nth(1).click();
+  await page.getByTestId("sidebar-playlist-item").nth(1).click();
   await page.getByTestId("playlist-detail").waitFor();
   await visibleRowsIn(50);
   await wheelContent(20000);
@@ -3892,6 +3917,284 @@ export async function checkLibraryPagination(page, guardDir, add) {
     window.__guard.pause();
   });
 }
+
+/**
+ * R62：侧栏「我的歌单」。五档夹具（默认两张 / 24 张 / slow / error / empty）各走一遍：
+ * 条目上的封面·名字·数量、当前歌单高亮、窄轨只剩封面与 tooltip、骨架、失败重试、空态，
+ * 以及"窗口矮时列表自己滚、导航与账号区不被顶出去"。截图落在 `.tmp/browser-guard/r62-*`。
+ */
+export async function checkSidebarPlaylists(page, port, guardDir, add) {
+  const sidebar = '[data-slot="sidebar-container"]';
+  const items = () => page.getByTestId("sidebar-playlist-item");
+  const scrollBox = '[data-testid="sidebar-playlists"] [data-slot="scroll-area-viewport"]';
+
+  /** 侧栏那一块的定位截图（整条侧栏，宽度 256 / 窄轨 48，审阅看的就是这个）。 */
+  const shotSidebar = async (file, extraWidth = 0) => {
+    const box = await page.locator(sidebar).boundingBox();
+    if (box === null) throw new Error("量不到侧栏的位置");
+    await page.screenshot({
+      clip: { x: box.x, y: box.y, width: Math.max(1, box.width + extraWidth), height: box.height },
+      path: path.join(guardDir, file),
+    });
+  };
+
+  const open = async (mode, { width = 1280, height = 800, theme = "light" } = {}) => {
+    await page.setViewportSize({ width, height });
+    const query = mode === "fixture" ? "" : `?playlists=${mode}`;
+    await page.goto(`http://127.0.0.1:${port}/index.html${query}`, { waitUntil: "load" });
+    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+    await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
+    await page.getByTestId("main-content").waitFor();
+  };
+
+  /** 展开态那两张条目的 DOM 事实：名字、第二行、封面是否真的画出来（`<img>` 的 naturalWidth）。 */
+  const itemFacts = () => page.evaluate(() => {
+    const nodes = [...document.querySelectorAll('[data-testid="sidebar-playlist-item"]')];
+    return nodes.map((node) => {
+      const cover = node.firstElementChild;
+      const image = cover?.querySelector("img") ?? null;
+      return {
+        text: (node.textContent ?? "").trim(),
+        name: (node.querySelector('[data-testid="sidebar-playlist-name"]')?.textContent ?? "").trim(),
+        meta: (node.querySelector('[data-testid="sidebar-playlist-meta"]')?.textContent ?? "").trim(),
+        active: node.getAttribute("data-active"),
+        coverBox: cover === null ? null : Math.round(cover.getBoundingClientRect().width),
+        imageWidth: image?.naturalWidth ?? 0,
+        iconOnly: image === null,
+      };
+    });
+  });
+
+  // ——— ① 默认两张：封面真的加载出来，名字与数量都在（浅色 + 深色各一张） ———
+  await open("fixture");
+  await items().first().waitFor();
+  await page.waitForFunction(() => {
+    const image = document.querySelector('[data-testid="sidebar-playlist-item"] img');
+    return image !== null && image.naturalWidth > 0;
+  }, null, { timeout: 10_000 });
+  const two = await itemFacts();
+  add("r62-sidebar-playlist-items",
+    two.length === 2
+      && two[0].name === "守卫歌单" && two[0].meta === "自建 · 120 首" && two[0].imageWidth > 0
+      && two[1].name === "重复页守卫歌单" && two[1].meta === "收藏 · 50 首" && two[1].imageWidth > 0,
+    JSON.stringify(two));
+  await shotSidebar("r62-sidebar-playlists-light.png");
+  /**
+   * 封面真的画在条目上（不是占位图标）：夹具给的是纯色封面（暖红 / 冷蓝），
+   * 从刚存的截图里把两块封面抠出来算均值——红蓝分量谁大一目了然。
+   */
+  const coverRects = await page.evaluate(() => {
+    const shell = document.querySelector('[data-slot="sidebar-container"]')?.getBoundingClientRect();
+    return [...document.querySelectorAll('[data-testid="sidebar-playlist-item"]')].map((node) => {
+      const box = node.firstElementChild?.getBoundingClientRect() ?? null;
+      if (shell === undefined || box === null) return null;
+      return {
+        left: Math.round(box.left - shell.left),
+        top: Math.round(box.top - shell.top),
+        width: Math.round(box.width),
+        height: Math.round(box.height),
+      };
+    });
+  });
+  const coverMeans = [];
+  for (const rect of coverRects) {
+    if (rect === null) {
+      coverMeans.push(null);
+      continue;
+    }
+    const { data, info } = await sharp(path.join(guardDir, "r62-sidebar-playlists-light.png"))
+      .extract(rect)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const sums = [0, 0, 0];
+    for (let index = 0; index + info.channels - 1 < data.length; index += info.channels) {
+      for (let channel = 0; channel < 3; channel += 1) sums[channel] += data[index + channel];
+    }
+    const pixels = Math.floor(data.length / info.channels);
+    coverMeans.push(sums.map((sum) => Math.round(sum / pixels)));
+  }
+  add("r62-sidebar-cover-pixels",
+    coverMeans.length === 2
+      && coverMeans[0] !== null && coverMeans[1] !== null
+      && coverMeans[0][0] > coverMeans[0][2] + 40
+      && coverMeans[1][2] > coverMeans[1][0] + 40,
+    JSON.stringify({ coverMeans }));
+  await page.evaluate(() => { document.documentElement.className = "dark"; });
+  await page.waitForTimeout(300);
+  await shotSidebar("r62-sidebar-playlists-dark.png");
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+
+  // ①b 数据只取一次：切页、切主题都不重取（侧栏随外壳常驻）
+  const callsAfterMount = await page.evaluate(() => window.__guard.playlistListCalls().length);
+  await page.getByRole("button", { name: "播放历史", exact: true }).click();
+  await page.getByRole("button", { name: "我的收藏", exact: true }).click();
+  await page.getByTestId("favorites-page").waitFor();
+  await page.waitForTimeout(400);
+  const callsAfterSwitch = await page.evaluate(() => window.__guard.playlistListCalls().length);
+  add("r62-sidebar-playlists-fetched-once", callsAfterMount === 1 && callsAfterSwitch === 1,
+    `挂载后 ${callsAfterMount} 次、切页回来 ${callsAfterSwitch} 次`);
+
+  // ——— ② 当前打开的歌单高亮 ———
+  await items().first().click();
+  await page.getByTestId("playlist-detail").waitFor();
+  await page.waitForTimeout(300);
+  const highlight = await page.evaluate(() => {
+    const nodes = [...document.querySelectorAll('[data-testid="sidebar-playlist-item"]')];
+    return {
+      count: nodes.length,
+      active: nodes.filter((node) => node.getAttribute("data-active") === "true").length,
+      activeText: (nodes.find((node) => node.getAttribute("data-active") === "true")?.textContent ?? "").trim(),
+      header: (document.querySelector("main h1, header h1")?.textContent ?? "").trim(),
+    };
+  });
+  add("r62-sidebar-active-playlist",
+    highlight.count === 2 && highlight.active === 1 && highlight.activeText.includes("守卫歌单")
+      && highlight.header === "守卫歌单",
+    JSON.stringify(highlight));
+  await shotSidebar("r62-active-playlist.png");
+
+  // ——— ③ 窄轨：只剩封面，tooltip 说名字与数量 ———
+  await page.locator('[data-slot="sidebar-trigger"]').first().click();
+  await page.waitForFunction(() => {
+    const name = document.querySelector('[data-testid="sidebar-playlist-name"]');
+    return name !== null && name.getClientRects().length === 0;
+  }, null, { timeout: 10_000 });
+  await page.waitForTimeout(300);
+  const rail = await page.evaluate(() => {
+    const nodes = [...document.querySelectorAll('[data-testid="sidebar-playlist-item"]')];
+    const visible = (node) => Boolean(node && node.getClientRects().length > 0);
+    return {
+      railWidth: Math.round(document.querySelector('[data-slot="sidebar-container"]')?.getBoundingClientRect().width ?? 0),
+      covers: nodes.map((node) => {
+        const cover = node.firstElementChild;
+        const image = cover?.querySelector("img") ?? null;
+        const button = node.getBoundingClientRect();
+        const box = cover?.getBoundingClientRect() ?? null;
+        const clipped = box === null ? 0 : Math.max(0, Math.min(box.right, button.right) - Math.max(box.left, button.left));
+        return {
+          visible: visible(node),
+          width: box === null ? 0 : Math.round(box.width),
+          visibleWidth: Math.round(clipped),
+          imageWidth: image?.naturalWidth ?? 0,
+          buttonWidth: Math.round(button.width),
+        };
+      }),
+      nameVisible: visible(document.querySelector('[data-testid="sidebar-playlist-name"]')),
+      metaVisible: visible(document.querySelector('[data-testid="sidebar-playlist-meta"]')),
+      // 组标题在窄轨里被 shadcn 收成 `-mt-8 opacity-0`（仍有 rect），所以判据看透明度
+      labelOpacity: (() => {
+        const label = document.querySelector('[data-testid="sidebar-playlists"] [data-sidebar="group-label"]');
+        return label === null ? null : getComputedStyle(label).opacity;
+      })(),
+    };
+  });
+  add("r62-sidebar-rail-covers-only",
+    rail.railWidth === 48 && rail.nameVisible === false && rail.metaVisible === false && rail.labelOpacity === "0"
+      && rail.covers.length === 2
+      && rail.covers.every((cover) => cover.visible && cover.imageWidth > 0 && cover.buttonWidth === 32)
+      && rail.covers.every((cover) => cover.visibleWidth >= 20),
+    JSON.stringify(rail));
+  await items().first().hover();
+  const railTooltip = page.getByRole("tooltip");
+  await railTooltip.waitFor({ timeout: 5_000 });
+  const railTooltipText = ((await railTooltip.textContent()) ?? "").trim();
+  add("r62-sidebar-rail-tooltip", railTooltipText === "守卫歌单 · 自建 · 120 首", JSON.stringify({ railTooltipText }));
+  await shotSidebar("r62-sidebar-rail-tooltip.png", 260);
+
+  // ——— ④ 加载中：骨架（请求 4 秒才回，这一帧留得住） ———
+  await open("slow");
+  await page.getByTestId("sidebar-playlists-skeleton").waitFor();
+  const skeleton = await page.evaluate(() => ({
+    rows: document.querySelectorAll('[data-testid="sidebar-playlists-skeleton"] [data-sidebar="menu-skeleton"]').length,
+    list: document.querySelectorAll('[data-testid="sidebar-playlist-list"]').length,
+    empty: document.querySelectorAll('[data-testid="sidebar-playlists-empty"]').length,
+  }));
+  add("r62-sidebar-loading-skeleton", skeleton.rows >= 2 && skeleton.list === 0 && skeleton.empty === 0, JSON.stringify(skeleton));
+  await shotSidebar("r62-sidebar-loading-skeleton.png");
+  // 骨架必须让位给真的列表（不是永远转下去）
+  await items().first().waitFor({ timeout: 15_000 });
+  add("r62-sidebar-loading-settles", (await items().count()) === 2, `骨架退场后 ${await items().count()} 张`);
+
+  // ——— ⑤ 失败：一句原因 + 「重试」，点重试真的再取一次 ———
+  await open("error");
+  await page.getByTestId("sidebar-playlists-failure").waitFor();
+  const failureText = ((await page.getByTestId("sidebar-playlists-failure").textContent()) ?? "").trim();
+  const retry = page.getByTestId("sidebar-playlists-failure").getByRole("button", { name: "重试", exact: true });
+  const retryCount = await retry.count();
+  add("r62-sidebar-failure-with-retry", failureText.length > 0 && retryCount === 1,
+    JSON.stringify({ failureText: failureText.slice(0, 40), retryCount }));
+  await shotSidebar("r62-sidebar-failure.png");
+  await retry.click();
+  await items().first().waitFor({ timeout: 15_000 });
+  const retried = await page.evaluate(() => window.__guard.playlistListCalls().length);
+  add("r62-sidebar-retry-recovers", (await items().count()) === 2 && retried === 2, `重试后 ${await items().count()} 张、请求 ${retried} 次`);
+
+  // ——— ⑥ 空态：确实没有歌单才说这一句 ———
+  await open("empty");
+  await page.getByTestId("sidebar-playlists-empty").waitFor();
+  const emptyText = ((await page.getByTestId("sidebar-playlists-empty").textContent()) ?? "").trim();
+  add("r62-sidebar-empty-state", emptyText === "还没有歌单。" && (await items().count()) === 0, JSON.stringify({ emptyText }));
+  await shotSidebar("r62-sidebar-empty.png");
+
+  // ——— ⑦ 窗口矮 + 24 张歌单：列表自己滚，导航与账号区都还在 ———
+  await open("many", { width: 1280, height: 520 });
+  await items().first().waitFor();
+  await page.waitForTimeout(300);
+  const measure = () => page.evaluate((selector) => {
+    const viewport = document.querySelector(selector);
+    const nav = document.querySelector('[data-testid="nav-list"]');
+    const account = document.querySelector('[data-testid="account-area"]');
+    const content = document.querySelector('[data-sidebar="content"]');
+    const box = (node) => (node === null ? null : node.getBoundingClientRect());
+    const navBox = box(nav);
+    const accountBox = box(account);
+    return {
+      items: document.querySelectorAll('[data-testid="sidebar-playlist-item"]').length,
+      scrollTop: Math.round(viewport?.scrollTop ?? -1),
+      scrollHeight: Math.round(viewport?.scrollHeight ?? 0),
+      clientHeight: Math.round(viewport?.clientHeight ?? 0),
+      navVisible: navBox !== null && navBox.height > 0 && navBox.bottom <= window.innerHeight,
+      accountVisible: accountBox !== null && accountBox.height > 0 && accountBox.bottom <= window.innerHeight,
+      contentOverflow: content === null ? -1 : Math.round(content.scrollHeight - content.clientHeight),
+      windowHeight: window.innerHeight,
+    };
+  }, scrollBox);
+  const before = await measure();
+
+  // 名字长了就单行截断，悬停给出全名（展开态也看得到；窄轨那一份由 tooltip 兜）
+  const nameFacts = await page.evaluate(() => {
+    const name = document.querySelector('[data-testid="sidebar-playlist-name"]');
+    if (name === null) return null;
+    return { text: (name.textContent ?? "").trim(), truncated: name.scrollWidth > name.clientWidth + 1 };
+  });
+  await page.getByTestId("sidebar-playlist-name").first().hover();
+  const nameTooltip = page.getByRole("tooltip");
+  await nameTooltip.waitFor({ timeout: 5_000 });
+  const nameTooltipText = ((await nameTooltip.textContent()) ?? "").trim();
+  add("r62-sidebar-name-truncated-tooltip",
+    nameFacts !== null && nameFacts.truncated && nameTooltipText === nameFacts.text,
+    JSON.stringify({ nameFacts, nameTooltipText }));
+  await page.mouse.move(900, 300);
+
+  const listBox = await page.locator(scrollBox).boundingBox();
+  if (listBox === null) throw new Error("量不到侧栏歌单列表的位置");
+  await page.mouse.move(listBox.x + Math.round(listBox.width / 2), listBox.y + 40);
+  await page.mouse.wheel(0, 600);
+  await page.waitForTimeout(300);
+  const after = await measure();
+  add("r62-sidebar-short-window-scrolls",
+    before.items === 24 && before.scrollHeight > before.clientHeight
+      && before.navVisible && before.accountVisible && before.contentOverflow <= 1
+      && after.scrollTop > before.scrollTop
+      && after.navVisible && after.accountVisible,
+    JSON.stringify({ before, after }));
+  await shotSidebar("r62-sidebar-short-window.png");
+
+  // 收尾：回默认夹具与标准窗口（后面还有别项要一个干净的页面）
+  await open("fixture");
+  await items().first().waitFor();
+}
+
 
 /**
  * R66b：主内容区铺满。逐页量内容右边缘到可用区域右边缘的空白，要求不超过页面左内边距 + 8px，且无横向滚动。
@@ -4034,17 +4337,11 @@ export async function checkPageFill(page, guardDir, add) {
     measured.push(await visit(size, "我的收藏", '[data-testid="favorites-page"]'));
     if (size.width === 1900) await page.screenshot({ path: path.join(guardDir, "r66b-favorites-1900.png") });
 
-    // ② 我的歌单（歌单网格自己带 p-4）
-    await step(`${size.width} 我的歌单`, async () => {
-      await page.getByRole("button", { name: "我的歌单", exact: true }).click();
-      await page.getByTestId("playlist-grid").waitFor();
-      await page.waitForTimeout(250);
-    });
-    measured.push(await visit(size, "我的歌单", '[data-testid="playlist-grid"]'));
+    // ② 我的歌单：R62 起歌单列表长在侧栏，这一页连同它的铺满测量一起删除（见 task-62-report.md）
 
     // ②b 歌单详情（同一套内容区；简报只点名了五个页面，这一页顺手一起量，免得"其它页也白"没依据）
     await step(`${size.width} 歌单详情`, async () => {
-      await page.getByTestId("playlist-grid").getByRole("button", { name: "打开", exact: true }).first().click();
+      await page.getByTestId("sidebar-playlist-item").first().click();
       await page.getByTestId("playlist-detail").waitFor();
       await page.waitForTimeout(400);
     });
@@ -4843,6 +5140,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
         await popupPage.close();
       }
     });
+    /** R62：侧栏「我的歌单」（自己开页、自己收尾；排在 r66b 之前，结束后留下干净的默认页）。 */
+    await checked("r62-sidebar-playlists", () => checkSidebarPlaylists(page, port, guardDir, add));
     /** R66b：主内容区宽度。会遍历各主页面并切换窗口尺寸，所以排在倒数第二（下一项自己 goto）。 */
     await checked("r66b-page-fill", () => checkPageFill(page, guardDir, add));
     /** R57：账号区四态（另一页，挂真 App；头像的两种结局都用 page.route 造出来）。 */

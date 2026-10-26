@@ -20,7 +20,7 @@
  * 未登录时那些请求只会全部失败。判定放行才渲染，是从结构上保证这件事，而不是靠判断。
  *
  * 页面切换没有路由库：视图就是一个 `useState` + `renderPage()` 的 switch
- * （页面只有八个，路由库在这里只有依赖和"浏览器历史语义不适用"的麻烦）。
+ * （页面只有七个，路由库在这里只有依赖和"浏览器历史语义不适用"的麻烦）。
  * 唯一的例外是收藏页：它常驻挂载（切页不卸载），所以挂在 switch 之外、用 active 控制显隐。
  */
 import { useCallback, useEffect, useRef, useState } from "react"
@@ -72,6 +72,7 @@ import {
 } from "./components/ui/sidebar"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
 import { EmptyState, PlayerBar, QueuePanel } from "./components"
+import { SidebarPlaylists } from "./sidebar-playlists.tsx"
 import { PlaybackStage } from "./playback-stage.tsx"
 import { ThemeToggle } from "./theme-toggle.tsx"
 import { FavoritesPage } from "./favorites-page.tsx"
@@ -81,7 +82,6 @@ import {
   ArtistPage,
   HistoryPage,
   PlaylistDetailPage,
-  PlaylistsPage,
   SearchPage,
   SettingsPage,
 } from "./pages.tsx"
@@ -111,6 +111,7 @@ import {
   createView,
   isResidentView,
   normalizeView,
+  viewParam,
   viewTitle,
 } from "./features/library/views.mjs"
 import { libraryEmptyText } from "./features/library/library-state.mjs"
@@ -170,7 +171,6 @@ export function App() {
  */
 const NAV_ICONS = {
   [VIEW.favorites]: HeartIcon,
-  [VIEW.playlists]: ListMusicIcon,
   [VIEW.history]: HistoryIcon,
   [VIEW.settings]: SettingsIcon,
 }
@@ -434,8 +434,6 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
   /** 页面切换：一个 switch，没有路由库。收藏页常驻，所以这里没有它的分支。 */
   function renderPage() {
     switch (view.id) {
-      case VIEW.playlists:
-        return <PlaylistsPage onOpenPlaylist={onOpenPlaylist} />
       case VIEW.playlistDetail:
         return <PlaylistDetailPage view={view} onPlayAll={onPlayAll} onEnqueue={onEnqueue} {...navigation} />
       case VIEW.search:
@@ -509,6 +507,14 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>
+          {/*
+            侧栏「我的歌单」：组件自己取一次数、自己兜住加载/失败/空三态；
+            外壳只交当前打开的那张歌单（高亮用）与"点开"这个动作。
+          */}
+          <SidebarPlaylists
+            activePlaylistId={view.id === VIEW.playlistDetail ? viewParam(view, "playlistId") : null}
+            onOpen={onOpenPlaylist}
+          />
         </SidebarContent>
         <SidebarFooter>
           {/*

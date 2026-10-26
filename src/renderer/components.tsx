@@ -9,7 +9,7 @@
  *   所以 UI 层既拿不到播放地址，也不可能出现第二个 `Audio`；
  * - `QueuePanel`：真实队列（当前项高亮、点击跳播、清空）；旧记录只有标识时，
  *   标题如实显示"曲目 &lt;id&gt;"（见 playback-state.mjs）；
- * - `EmptyState` / `LoadFailed` / `GridSkeleton` / `ListSkeleton`：空态、失败态与骨架屏，
+ * - `EmptyState` / `LoadFailed` / `ListSkeleton`：空态、失败态与骨架屏，
  *   文案一律由调用方从 features/library 的纯逻辑模块取（这里不造第二套文案）。
  *
  * 收藏槽位的诚实处理：收藏的**写入**接口还没确认（docs/API_CONTRACT.md §2.1），
@@ -37,7 +37,6 @@ import {
 
 import { Alert, AlertDescription } from "./components/ui/alert"
 import { Button } from "./components/ui/button"
-import { Card } from "./components/ui/card"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -145,21 +144,6 @@ export function LoadFailed({ text }: { text: string }) {
     <Alert variant="destructive" className="m-4" data-testid="load-failed">
       <AlertDescription>{text}</AlertDescription>
     </Alert>
-  )
-}
-
-/** 网格骨架（歌单等卡片列表的加载态）。 */
-export function GridSkeleton({ count = 8 }: { count?: number }) {
-  return (
-    <div className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-4 p-4" data-testid="grid-skeleton">
-      {Array.from({ length: count }, (_, index) => (
-        <Card key={index} size="sm">
-          <Skeleton className="mx-3 aspect-square" />
-          <Skeleton className="mx-3 h-4 w-2/3" />
-          <Skeleton className="mx-3 h-3 w-1/3" />
-        </Card>
-      ))}
-    </div>
   )
 }
 

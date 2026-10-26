@@ -89,7 +89,6 @@ test("令牌扫描范围：自己写的渲染层代码都在网内（含 R8 的�
     "src/renderer/pages.tsx",
     "src/renderer/favorites-page.tsx",
     "src/renderer/components.tsx",
-    "src/renderer/playlist-grid.tsx",
     "src/renderer/log-terminal.tsx",
     "src/renderer/playback-stage.tsx",
     "src/renderer/AmllBackground.tsx",

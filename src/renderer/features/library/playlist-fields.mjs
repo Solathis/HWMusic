@@ -45,7 +45,8 @@ export function playlistSongCountOf(playlist) {
 }
 
 /**
- * 封面地址（R38 起真的被 `PlaylistGrid` 用上了）。
+ * 封面地址：交给侧栏歌单条目（`sidebar-playlists.mjs` 的 `sidebarPlaylistItems`）与歌单详情页头部
+ * （`pages.tsx` 的 `CoverArt` 与 AMLL 底景）显示。
  *
  * 协议层 `normalizePlaylist` 只在 CDN 白名单内才带 `coverUrl`（白名单外的地址在那边就被丢掉），
  * 所以这里读到的要么是白名单内的地址，要么是 null。渲染层只把它交给 `<img src>`——

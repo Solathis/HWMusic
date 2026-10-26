@@ -1,7 +1,7 @@
 /**
  * 主界面的视图模型（R8）：**唯一**的页面枚举与侧边栏导航真源。
  *
- * 刻意不引入路由库：页面只有八个，状态就是 `useState` + `renderPage()` 的 switch；
+ * 刻意不引入路由库：页面只有七个，状态就是 `useState` + `renderPage()` 的 switch；
  * 路由库在这里带来的只有依赖和"浏览器历史与桌面应用语义不匹配"的麻烦。
  *
  * 三条约定：
@@ -13,7 +13,6 @@
 /** 页面枚举（view id 的唯一真源）。 */
 export const VIEW = {
   favorites: "favorites",
-  playlists: "playlists",
   playlistDetail: "playlist-detail",
   search: "search",
   album: "album",
@@ -25,15 +24,15 @@ export const VIEW = {
 export const VIEW_IDS = Object.freeze(Object.values(VIEW));
 
 /**
- * 侧边栏导航（顺序即显示顺序）。专辑/歌手/歌单详情从表格与网格跳进去，不占侧边栏。
+ * 侧边栏导航（顺序即显示顺序）。专辑/歌手/歌单详情从表格、网格与侧栏的歌单列表跳进去，不占导航。
  *
  * R40：**「搜索」不再是一条导航项**——搜索入口是侧栏顶部那个常驻的 `SidebarInput`
  * （用户裁决：常驻搜索框取代导航项，结果仍然渲染在右侧内容区）。`VIEW.search` 依然是
  * 一个视图（内容区的搜索结果页要用它），只是不再占导航列表的一行。
+ * R62：「我的歌单」同理不再是一页——歌单列表直接长在侧栏（`sidebar-playlists.tsx`）。
  */
 export const SIDEBAR_VIEWS = Object.freeze([
   { id: VIEW.favorites, label: "我的收藏" },
-  { id: VIEW.playlists, label: "我的歌单" },
   { id: VIEW.history, label: "播放历史" },
   { id: VIEW.settings, label: "设置" },
 ]);
@@ -46,7 +45,6 @@ export const DEFAULT_VIEW_ID = VIEW.favorites;
 /** 没给名字时各页的标题（不许空串）。 */
 const FALLBACK_TITLES = {
   [VIEW.favorites]: "我的收藏",
-  [VIEW.playlists]: "我的歌单",
   [VIEW.playlistDetail]: "歌单",
   [VIEW.search]: "搜索",
   [VIEW.album]: "专辑",

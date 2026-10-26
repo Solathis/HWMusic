@@ -7,7 +7,7 @@
  *
  * 1. 界面文件必须真的组合 shadcn 原语（不是自己拿 div 拼一个表格/按钮）；
  * 2. 不许手写 `<svg>`/`<canvas>`/`dangerouslySetInnerHTML`（图形一律 lucide-react 图标）；
- * 3. 组件契约（TrackTable / PlayerBar / QueuePanel / GridSkeleton 的导出与关键接线）；
+ * 3. 组件契约（TrackTable / PlayerBar / QueuePanel 的导出与关键接线）；
  * 4. 渲染层不 import 协议层（业务 HTTP 只在 sidecar；渲染层只走 host-api 的 core_call）；
  * 5. 播放器栏 R9 已接通状态机：`data-state` 由状态给，但**UI 层不持有音频、不碰 core**
  *    （地址与音频都在 features/playback 的运行时里；音频元素的唯一实例由
@@ -38,7 +38,8 @@ const UI_FILES = [
   "src/renderer/pages.tsx",
   "src/renderer/favorites-page.tsx",
   "src/renderer/components.tsx",
-  "src/renderer/playlist-grid.tsx",
+  // R62：侧栏「我的歌单」这一组（原「我的歌单」页与 playlist-grid.tsx 一起删除）
+  "src/renderer/sidebar-playlists.tsx",
   "src/renderer/log-terminal.tsx",
   "src/renderer/playback-stage.tsx",
   "src/renderer/login-gate.tsx",
@@ -191,9 +192,9 @@ test("边界：渲染层不 import 协议层（业务 HTTP 只在 sidecar，界�
   assert.doesNotMatch(read("src/renderer/App.tsx"), /\bcoreCall\(/, "App.tsx 是外壳，不直接取数（取数在页面里）");
 });
 
-test("组件契约：TrackTable / PlayerBar / QueuePanel / GridSkeleton 都在 components.tsx 里", () => {
+test("组件契约：TrackTable / PlayerBar / QueuePanel 都在 components.tsx 里", () => {
   const source = read("src/renderer/components.tsx");
-  for (const name of ["TrackTable", "PlayerBar", "QueuePanel", "GridSkeleton", "EmptyState"]) {
+  for (const name of ["TrackTable", "PlayerBar", "QueuePanel", "EmptyState"]) {
     assert.match(source, new RegExp(`export function ${name}\\(`), `components.tsx 必须导出 ${name}`);
   }
   // 表格用 shadcn 的 Table 原语，交互按简报：双击播放 + 键盘可达 + 收藏切换
@@ -313,10 +314,12 @@ test("外壳：侧边栏导航来自 views.mjs 的唯一真源，页面切换是
 });
 
 test("库页面的数据入口：一次一页地走 coreCall，频道名来自共享常量", () => {
+  // R62：取数实现在一处（页面与侧栏歌单共用），所以 coreCall 的断言跟着它走
+  const hook = read("src/renderer/features/library/use-library-resource.ts");
+  assert.match(hook, /coreCall\(/, "库数据只经 coreCall");
+  assert.match(hook, /from\s+"\.\.\/\.\.\/host-api"/, "取数的唯一入口是 host-api");
   const source = read("src/renderer/pages.tsx");
-  assert.match(source, /coreCall\(/, "页面数据只经 coreCall");
   for (const constant of [
-    "LIBRARY_PLAYLISTS",
     "LIBRARY_PLAYLIST_DETAIL",
     "LIBRARY_SEARCH",
     "LIBRARY_ALBUM",
@@ -325,6 +328,11 @@ test("库页面的数据入口：一次一页地走 coreCall，频道名来自�
   ]) {
     assert.match(source, new RegExp(constant), `pages.tsx 要用共享常量 ${constant}（不写字面量频道名）`);
   }
+  assert.match(
+    read("src/renderer/sidebar-playlists.tsx"),
+    /LIBRARY_PLAYLISTS/,
+    "歌单列表的取数在侧栏，也用共享常量（不写字面量频道名）",
+  );
   assert.match(source, /libraryEmptyText|libraryFailureText/, "空态/失败文案来自 library-state.mjs（克制且不冒充）");
   assert.match(
     source,

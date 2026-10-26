@@ -48,7 +48,6 @@ export function isEndpointUnconfigured(error) {
 /** 各页面的空态（都是"确实没有数据"的语气，只有真拿到了空列表才会显示）。 */
 const EMPTY_TEXT = {
   [VIEW.favorites]: "还没有收藏歌曲。",
-  [VIEW.playlists]: "还没有歌单。",
   [VIEW.playlistDetail]: "这个歌单还没有歌曲。",
   [VIEW.history]: "还没有播放记录。",
   [VIEW.search]: "输入关键字开始搜索。",
