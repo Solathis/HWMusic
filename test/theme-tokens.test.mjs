@@ -129,8 +129,16 @@ test("禁止硬编码色：不出现非令牌调色板类、纯黑白工具类�
 const AMLL_SIZE_STYLE_FILES = ["src/renderer/AmllBackground.tsx", "src/renderer/AmllLyricsPanel.tsx"];
 const AMLL_SIZE_STYLE = 'style={{ width: "100%", height: "100%" }}';
 
+/**
+ * 几何契约的内联样式（R60）：气泡面板的隐形触发点位置是**运行时算出来的锚点坐标**，没有任何
+ * Tailwind 类能表达。例外写死成"这一个函数调用 + 这一个文件"，与 R7 的高度常量同一条理由。
+ */
+const GEOMETRY_STYLE_FILES = ["src/renderer/LyricsSettingsPopup.tsx"];
+const GEOMETRY_STYLE = "style={bubbleAnchorBox({ side: geometry.side, arrow: geometry.arrow, panelHeight: panel.height, pad: geometry.pad })}";
+
 test("禁止 <style> 与内联视觉样式：内联 style 只允许几何契约与 AMLL 两处 100% 尺寸", () => {
   const amllStyles = [];
+  const geometryStyles = [];
   for (const relative of handWrittenFiles()) {
     const source = stripComments(read(relative));
     assert.doesNotMatch(
@@ -138,6 +146,10 @@ test("禁止 <style> 与内联视觉样式：内联 style 只允许几何契约�
       /<style[\s>]/,
       `${relative} 不得内联 <style>（CSP script-src 'self' 会阻断内联脚本，样式也不走这条路）`,
     );
+    if (source.includes(GEOMETRY_STYLE)) {
+      assert.ok(GEOMETRY_STYLE_FILES.includes(relative), `${relative} 不是气泡面板，不许写几何契约的内联样式`);
+      geometryStyles.push(relative);
+    }
     for (const match of source.matchAll(/style=\{\{[^}]*\}\}/g)) {
       if (match[0] === AMLL_SIZE_STYLE) {
         assert.ok(
@@ -153,7 +165,11 @@ test("禁止 <style> 与内联视觉样式：内联 style 只允许几何契约�
         `${relative} 的内联 style 只能是几何契约（高度=共享常量）或 AMLL 的 100% 尺寸：${match[0]}`,
       );
     }
-    assert.doesNotMatch(source, /(?:^|\s)style=\{(?!\{)/, `${relative} 不得内联 style={表达式}（视觉一律走工具类）`);
+    assert.doesNotMatch(
+      source.split(GEOMETRY_STYLE).join(""),
+      /(?:^|\s)style=\{(?!\{)/,
+      `${relative} 不得内联 style={表达式}（视觉一律走工具类，几何契约只有气泡面板那一处）`,
+    );
   }
 
   // 例外只有两处（旧仓同款）：一处给背景、一处给歌词组件，多一处就是规则被悄悄放宽
@@ -162,6 +178,7 @@ test("禁止 <style> 与内联视觉样式：内联 style 只允许几何契约�
     [...AMLL_SIZE_STYLE_FILES].sort(),
     `AMLL 的 100% 尺寸内联样式应当恰好两处（背景 + 歌词）：${JSON.stringify(amllStyles)}`,
   );
+  assert.deepEqual(geometryStyles, [...GEOMETRY_STYLE_FILES], "几何契约的内联样式恰好一处（气泡面板的触发点）");
 });
 
 /**

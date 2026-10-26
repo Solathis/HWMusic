@@ -1,42 +1,31 @@
-//! 桌面歌词设置弹出窗（R51）：**独立的小窗**，不是一个装不进 128px 高歌词窗的面板。
+//! 桌面歌词设置气泡（R60）：一扇**独立透明小窗**，里面是一个 shadcn `Popover`。
 //!
-//! ## 为什么要另开一扇窗
+//! ## 为什么仍然是一扇窗
 //!
-//! R50 的设置面是歌词窗内嵌的 `DropdownMenu`：radix 会把浮层限制在**窗口**的可用高度里
-//! （`--radix-dropdown-menu-content-available-height`），于是 800×128 的歌词窗里那份菜单只能滚。
-//! 用户的要求是"允许突破桌面歌词大小限制"——菜单必须能长到窗口外面去。
-//!
-//! 做法：菜单本体（仍是**同一个 shadcn `DropdownMenu`**，内容一个字没改）搬进一扇独立的透明小窗，
-//! 尺寸/位置全由 Rust 决定（这扇窗**不授予任何 window 权限**，见 `capabilities/lyrics-settings.json`）。
+//! 面板必须能长到 800×128 的歌词窗外面去（用户要求"允许突破桌面歌词大小限制"），所以它画在
+//! 自己的一扇透明窗里：尺寸与位置全由 Rust 定，这扇窗**不授予任何 window 权限**。
 //!
 //! ## 几何（纯函数，单测在文件末尾）
 //!
 //! 调用方给的是**它自己客户区里的 CSS 像素锚点**（齿轮按钮的 `getBoundingClientRect()`）。
-//! Rust 用调用窗口的 `inner_position()`（客户区左上角的屏幕物理坐标）与缩放比换算到物理像素，
-//! 然后：
+//! Rust 用调用窗口的 `inner_position()`（客户区左上角的屏幕物理坐标）与缩放比换算到物理像素，然后：
 //!
-//! - 弹出窗**右边缘对齐锚点右边缘**、顶部在锚点下方 [`SETTINGS_POPUP_GAP_DIP`]；
-//! - 下方放不下就**翻到上方**（底边在锚点上方同一个间距处）；
-//! - 最终夹进锚点所在显示器的**工作区**（坐标可以是负的：副屏在主屏左边时工作区原点就是负的）；
-//! - 内容高于工作区就把尺寸截到工作区，剩下交给菜单自己滚。
+//! - 面板**水平以锚点中心为准**，夹进"工作区减去一圈留边"的范围（副屏在主屏左边时坐标是负的）；
+//! - 优先放在锚点**下方**（间距 [`SETTINGS_BUBBLE_GAP_DIP`]），下方放不下才翻到上方；
+//! - 箭头的中心对准锚点中心，被夹紧时沿面板边滑动、但两端各留 [`SETTINGS_ARROW_INSET_DIP`]。
 //!
-//! 窗口比菜单**四周各多 [`SETTINGS_POPUP_PAD_DIP`]**：透明窗里 CSS 的 `shadow-md` 会被窗口边界裁掉，
-//! 留一圈透明白边让菜单看起来与 R50 的浮层一致（那圈不吃点击以外的东西，也不挡任何控件）。
+//! 窗口比面板**四周各多 [`SETTINGS_POPUP_PAD_DIP`]**：那圈透明白边是阴影与"探到面板外的箭头"的容身处，
+//! 面板因此永远贴在窗口留边内侧——页面据此把隐形触发点摆在箭头该指的位置。
 //!
-//! ## 关闭路径（每一条都要关，少一条就是"菜单粘住不走了"）
+//! ## 关闭路径（少一条就是"面板粘住不走"）
 //!
-//! 失焦（= 点到窗口外面）、Esc（radix 的 dismiss 经命令回来）、点菜单外面、锁定、歌词窗隐藏/销毁、
-//! 切到任务栏模式、退出。关闭 = `hide()`（**不销毁**：下次打开要快，页面里量好的尺寸也还在）。
+//! 失焦（= 点到窗口外面）、Esc（radix 的 dismiss 经命令回来）、点面板外面、锁定、歌词窗隐藏/销毁、
+//! 切任务栏模式、退出。关闭 = `hide()`（**不销毁**：下次打开要快，页面里量好的尺寸也还在）。
 //!
-//! **齿轮二次点击不能闪**：点齿轮会让弹出窗失焦 → 先在失焦那一刻 hide，紧接着调用窗口那条
-//! `core_lyrics_settings_open` 才到。所以 Rust 在失焦时记一个时刻，[`SETTINGS_REOPEN_SUPPRESS_MS`]
-//! 之内的"打开"一律判为**同一次点击的尾巴**、拒绝打开（Esc/点外面关掉的不记这个时刻，那两种意图
-//! 与"再点一次齿轮"无关）。
+//! 齿轮二次点击不能闪：点齿轮会让弹出窗失焦（先 hide），紧接着到达的 `core_lyrics_settings_open`
+//! 落在 [`SETTINGS_REOPEN_SUPPRESS_MS`] 之内，判为**同一次点击的尾巴**、不打开。
 //!
-//! ## 退出
-//!
-//! 退出时**不排队、不等待**：`begin_shutdown` 里直接 `destroy()`，不参与 R44e 的保存预算
-//! （弹出窗自己不持有任何要落盘的东西——配置的写者仍是 `lyrics_window` 那条窄命令）。
+//! 退出时直接 `destroy()`：不排队、不等待（弹出窗自己不持有任何要落盘的东西）。
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -56,35 +45,74 @@ use crate::{LYRICS_SETTINGS_WINDOW_LABEL, WebviewDataRoot};
 // 几何（纯函数）
 // ---------------------------------------------------------------------------
 
-/// 弹出窗（菜单本体）与锚点之间的竖直间距（DIP）。
-pub const SETTINGS_POPUP_GAP_DIP: f64 = 4.0;
+/// 面板与锚点之间的竖直间距（DIP）：箭头（约 12 DIP）全落在这一缝里。
+pub const SETTINGS_BUBBLE_GAP_DIP: f64 = 16.0;
 
-/// 透明窗四周留的一圈（DIP）：给菜单的 `shadow-md` 让位，否则阴影会被窗口边界切掉。
-pub const SETTINGS_POPUP_PAD_DIP: f64 = 8.0;
+/// 面板左右两端各留多少（DIP）不给箭头用：箭头菱形半宽约 7 DIP，再让开圆角。
+pub const SETTINGS_ARROW_INSET_DIP: f64 = 12.0;
+
+/// 透明窗四周留的一圈（DIP）：给阴影与"探到面板外的箭头"让位。
+pub const SETTINGS_POPUP_PAD_DIP: f64 = 14.0;
 
 /// 内容尺寸还没报上来时的兜底（DIP）。只有"窗口已存在、页面还没量过"这一种情况会用到它。
 pub const SETTINGS_POPUP_FALLBACK_SIZE: Size = Size {
-    width: 256.0,
+    width: 336.0,
     height: 320.0,
 };
 
 /// 渲染层报上来的尺寸上限（DIP）：拦掉明显是坏值的数（真正的上限是工作区）。
 pub const SETTINGS_POPUP_MAX_DIP: f64 = 100_000.0;
 
-/// 失焦关闭之后多久之内的"打开"算同一次点击（毫秒）。
-///
-/// 为什么需要一个窗口：齿轮那一下点击既会让弹出窗失焦（→ hide），又会让调用窗口发出一笔
-/// `core_lyrics_settings_open`。两支之间只有几十毫秒，没有这一条就会出现"关掉又立刻打开"的闪烁，
-/// 用户再也关不掉这个菜单（R51 简报点名的那条）。
+/// 失焦关闭之后多久之内的"打开"算同一次点击（毫秒）。齿轮那一下既让窗口失焦又发出一笔 open。
 pub const SETTINGS_REOPEN_SUPPRESS_MS: u64 = 400;
 
-/// 缩放比的可信化：非有限/非正一律按 1（与歌词窗几何同一条纪律：宁可少缩放，不要乱缩放）。
+/// 气泡在锚点的哪一侧（字符串与页面 `BUBBLE_SIDES` 同口径）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BubbleSide {
+    Bottom,
+    Top,
+}
+
+impl BubbleSide {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BubbleSide::Bottom => "bottom",
+            BubbleSide::Top => "top",
+        }
+    }
+}
+
+/// 一次摆放的结果，**全部是屏幕物理像素**；`arrow` 是箭头中心距面板左边缘的距离。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BubbleGeometry {
+    pub side: BubbleSide,
+    pub panel: Point,
+    pub window: Rect,
+    pub arrow: f64,
+}
+
+/// 缩放比的可信化：非有限/非正一律按 1（宁可少缩放，不要乱缩放）。
 fn trusted_scale(scale: f64) -> f64 {
     if scale.is_finite() && scale > 0.0 {
         scale
     } else {
         1.0
     }
+}
+
+/// 单轴夹紧：先把"放得下的最大起点"算出来，窗口比工作区还大时退回起点。
+fn clamp_axis(value: f64, start: f64, span: f64, length: f64) -> f64 {
+    let max = start + (span - length).max(0.0);
+    value.max(start).min(max)
+}
+
+/// 箭头中心相对面板左边缘：对准锚点中心，两端各留 `inset`（面板比 `2×inset` 还窄就正中）。
+pub fn arrow_offset(anchor_center: f64, panel_x: f64, panel_width: f64, inset: f64) -> f64 {
+    let inset = inset.max(0.0);
+    if panel_width <= inset * 2.0 {
+        return panel_width / 2.0;
+    }
+    (anchor_center - panel_x).max(inset).min(panel_width - inset)
 }
 
 /// 调用方给的锚点（`{x, y, width, height}`，**调用窗口客户区里的 CSS 像素**）。
@@ -125,7 +153,7 @@ pub fn parse_anchor(value: &Value) -> Result<Rect, CoreError> {
 /// 客户区 DIP 锚点 → **屏幕物理像素**矩形。
 ///
 /// `inner` 是调用窗口客户区左上角的屏幕物理坐标（`Window::inner_position()`），
-/// 所以这里只有一次乘加，没有第二套"屏幕坐标 + 缩放比"的换算（R7 的真机偏差就出在那条路上）。
+/// 所以这里只有一次乘加，没有第二套"屏幕坐标 + 缩放比"的换算。
 pub fn anchor_rect(inner: Point, anchor: Rect, scale: f64) -> Rect {
     let scale = trusted_scale(scale);
     Rect {
@@ -136,61 +164,67 @@ pub fn anchor_rect(inner: Point, anchor: Rect, scale: f64) -> Rect {
     }
 }
 
-/// 单轴夹紧：先把"放得下的最大起点"算出来，窗口比工作区还大时退回起点（与歌词窗同一条纪律）。
-fn clamp_axis(value: f64, start: f64, span: f64, length: f64) -> f64 {
-    let max = start + (span - length).max(0.0);
-    value.max(start).min(max)
-}
-
-/// 菜单位置（物理像素）：右边缘对齐锚点、优先下方、放不下翻上方、最后夹进工作区。
+/// 气泡摆放：方向（下方优先）、面板左上角、窗口矩形、箭头偏移一次算完。
 ///
-/// `gap` 由调用方按缩放比换算好后传入（纯函数不碰 DPI）。
-pub fn settings_popup_placement(anchor: Rect, size: Size, area: Rect, gap: f64) -> Point {
+/// `gap`/`pad`/`inset` 由调用方按缩放比换算好后传入（纯函数不碰 DPI）。
+pub fn bubble_placement(
+    anchor: Rect,
+    panel: Size,
+    area: Rect,
+    gap: f64,
+    pad: f64,
+    inset: f64,
+) -> BubbleGeometry {
+    let center = anchor.x + anchor.width / 2.0;
     let below = anchor.y + anchor.height + gap;
-    let fits_below = below + size.height <= area.y + area.height;
-    let y = if fits_below {
+    let side = if below + panel.height <= area.y + area.height {
+        BubbleSide::Bottom
+    } else {
+        BubbleSide::Top
+    };
+    let wanted_y = if side == BubbleSide::Bottom {
         below
     } else {
-        anchor.y - gap - size.height
+        anchor.y - gap - panel.height
     };
-    Point {
-        x: clamp_axis(anchor.x + anchor.width - size.width, area.x, area.width, size.width),
-        y: clamp_axis(y, area.y, area.height, size.height),
+    // 夹紧范围排除那一圈留边：窗口因此整块落在工作区里（含阴影与箭头）
+    let x = clamp_axis(center - panel.width / 2.0, area.x + pad, area.width - pad * 2.0, panel.width);
+    let y = clamp_axis(wanted_y, area.y + pad, area.height - pad * 2.0, panel.height);
+    BubbleGeometry {
+        side,
+        panel: Point { x, y },
+        window: Rect {
+            x: x - pad,
+            y: y - pad,
+            width: panel.width + pad * 2.0,
+            height: panel.height + pad * 2.0,
+        },
+        arrow: arrow_offset(center, x, panel.width, inset),
     }
 }
 
-/// 内容尺寸（DIP）→ 物理像素，并夹进工作区（比工作区还高的内容交给菜单自己滚）。
-pub fn settings_popup_content_size(content: Size, scale: f64, area: Rect) -> Size {
+/// 内容尺寸（DIP）→ 物理像素，并夹进"工作区减去留边"（再大的内容也只剩这一块地方）。
+pub fn bubble_content_size(content: Size, scale: f64, area: Rect, pad: f64) -> Size {
     let scale = trusted_scale(scale);
     let wanted = Size {
         width: content.width * scale,
         height: content.height * scale,
     };
     Size {
-        width: wanted.width.min(area.width).max(1.0),
-        height: wanted.height.min(area.height).max(1.0),
+        width: wanted.width.min((area.width - pad * 2.0).max(1.0)).max(1.0),
+        height: wanted.height.min((area.height - pad * 2.0).max(1.0)).max(1.0),
     }
 }
 
-/// 窗口尺寸与位置：菜单位置四周各展开 `pad`（那圈透明白边是给阴影的）。
-pub fn settings_popup_window_rect(
-    anchor: Rect,
-    content: Size,
-    area: Rect,
-    gap: f64,
-    pad: f64,
-) -> (Size, Point) {
-    let point = settings_popup_placement(anchor, content, area, gap);
-    (
-        Size {
-            width: content.width + pad * 2.0,
-            height: content.height + pad * 2.0,
-        },
-        Point {
-            x: point.x - pad,
-            y: point.y - pad,
-        },
-    )
+/// 页面要的那三样（CSS 像素）：方向、箭头中心相对面板左边缘、窗口留边。
+///
+/// 面板左上角在页面坐标系里永远等于 `(pad, pad)`（见 [`bubble_placement`]），所以不需要回传坐标。
+fn geometry_payload(geometry: &BubbleGeometry, scale: f64) -> Value {
+    json!({
+        "side": geometry.side.as_str(),
+        "arrow": geometry.arrow / trusted_scale(scale),
+        "pad": SETTINGS_POPUP_PAD_DIP,
+    })
 }
 
 /// 这一次"打开"是不是同一段点击的尾巴（刚因失焦关闭）——纯函数，好让判定可单测。
@@ -219,7 +253,7 @@ pub fn normalize_content_size(width: f64, height: f64) -> Option<Size> {
 // 来源守卫（与仓里既有的窄守卫同款：只放行点名的 label）
 // ---------------------------------------------------------------------------
 
-/// 谁可以要求打开设置弹出窗：歌词窗（R51 的齿轮）与主窗（R52 的设置页会从那里打开同一个窗）。
+/// 谁可以要求打开设置弹出窗：只有歌词窗那枚齿轮。
 pub fn require_settings_open_source(label: &str) -> Result<(), CoreError> {
     if [crate::MAIN_WINDOW_LABEL, crate::LYRICS_WINDOW_LABEL].contains(&label) {
         return Ok(());
@@ -299,23 +333,20 @@ impl SettingsPopupState {
 // 窗口
 // ---------------------------------------------------------------------------
 
-/// 弹出窗的标题（Alt+Tab / 任务视图里的名字；与歌词窗同理，不能留给 tao 的默认 "Tauri App"）。
+/// 弹出窗的标题（Alt+Tab / 任务视图里的名字；不能留给 tao 的默认 "Tauri App"）。
 pub const SETTINGS_POPUP_TITLE: &str = "桌面歌词设置";
 
 /// 弹出窗的 webview 数据目录：`<数据根>/webview2/lyrics-settings`。
 ///
-/// **为什么不与歌词窗共用**（R51 实测选定的方案）：同一份 WebView2 用户数据目录上建两个环境时，
-/// 环境参数（这里就是代理）必须**完全一致**，否则建窗直接失败；共用目录还会让两扇窗的库锁互相
-/// 牵制（关歌词窗/销毁弹出窗的次序会突然变得有意义）。每窗一份独立目录是本仓既有的做法
-/// （主窗、歌词窗、每一次登录窗都各有一份），代价只是多一个几十 MB 的缓存目录。
+/// 不与歌词窗共用：同一份 WebView2 用户数据目录上建两个环境时，环境参数必须完全一致，
+/// 共用还会让两扇窗的库锁互相牵制。每窗一份是本仓既有的做法。
 pub fn popup_data_dir(data_root: &Path) -> PathBuf {
     data_root.join("webview2").join("lyrics-settings")
 }
 
 /// 弹出窗加载的地址：`lyrics-settings.html?<配置>&theme=<档位>`。
 ///
-/// 配置与主题都经查询串同步到位（与歌词窗 [`crate::lyrics_window::lyrics_window_url`] 同一条纪律）：
-/// 页面还没订阅事件时也不会丢掉当前档位/主题，第一帧就是对的。
+/// 配置与主题都经查询串同步到位：页面还没订阅事件时也不会丢掉当前档位/主题，第一帧就是对的。
 pub fn popup_url(config: &LyricsConfig, theme: crate::theme::ThemeChoice) -> String {
     format!(
         "lyrics-settings.html?{}&theme={}",
@@ -356,7 +387,7 @@ fn build_popup<R: Runtime>(
     .shadow(false)
     .always_on_top(true)
     .skip_taskbar(true)
-    // 尺寸由 Rust 按内容报上来的值设：用户可以拖歌词窗，但不该拖这个菜单。
+    // 尺寸由 Rust 按内容报上来的值设：用户可以拖歌词窗，但不该拖这个面板。
     .resizable(false)
     .focused(false)
     .visible(false)
@@ -371,7 +402,7 @@ fn build_popup<R: Runtime>(
         .map_err(|source| CoreError::new("internal", format!("歌词设置弹出窗建不起来：{source}")))?;
     let events = app.clone();
     window.on_window_event(move |event| match event {
-        // 点到窗口外面 = 菜单该收起来了。先 hide 再记时刻：紧跟着到达的那笔 open 会因为这段窗口被拒。
+        // 点到窗口外面 = 面板该收起来了。先 hide 再记时刻：紧跟着到达的那笔 open 会因为这段窗口被拒。
         tauri::WindowEvent::Focused(false) => {
             if let Some(window) = events.get_webview_window(LYRICS_SETTINGS_WINDOW_LABEL) {
                 if window.is_visible().unwrap_or(false) {
@@ -425,30 +456,37 @@ pub fn shutdown<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-/// 按当前锚点摆好窗口（尺寸/位置都从"锚点 + 内容尺寸 + 工作区"重新算）。
+/// 按当前锚点摆好窗口（尺寸/位置都从"锚点 + 内容尺寸 + 工作区"重新算），返回页面要的几何。
 fn apply_geometry<R: Runtime>(
     window: &WebviewWindow<R>,
     anchor: Rect,
     content: Size,
     area: Rect,
-) -> Result<(), CoreError> {
+) -> Result<BubbleGeometry, CoreError> {
     let scale = trusted_scale(window.scale_factor().unwrap_or(1.0));
-    let gap = SETTINGS_POPUP_GAP_DIP * scale;
     let pad = SETTINGS_POPUP_PAD_DIP * scale;
-    let size = settings_popup_content_size(content, scale, area);
-    let (window_size, point) = settings_popup_window_rect(anchor, size, area, gap, pad);
+    let size = bubble_content_size(content, scale, area, pad);
+    let geometry = bubble_placement(
+        anchor,
+        size,
+        area,
+        SETTINGS_BUBBLE_GAP_DIP * scale,
+        pad,
+        SETTINGS_ARROW_INSET_DIP * scale,
+    );
     window
         .set_size(PhysicalSize::new(
-            window_size.width.round().max(1.0) as u32,
-            window_size.height.round().max(1.0) as u32,
+            geometry.window.width.round().max(1.0) as u32,
+            geometry.window.height.round().max(1.0) as u32,
         ))
         .and_then(|_| {
             window.set_position(PhysicalPosition::new(
-                point.x.round() as i32,
-                point.y.round() as i32,
+                geometry.window.x.round() as i32,
+                geometry.window.y.round() as i32,
             ))
         })
-        .map_err(|source| CoreError::new("internal", format!("歌词设置弹出窗摆不到位：{source}")))
+        .map_err(|source| CoreError::new("internal", format!("歌词设置弹出窗摆不到位：{source}")))?;
+    Ok(geometry)
 }
 
 /// 显示（拿到焦点，失焦才会关）。
@@ -468,8 +506,7 @@ fn show<R: Runtime>(window: &WebviewWindow<R>) {
 
 /// 打开（或再次摆好）设置弹出窗。`anchor` 是**调用窗口客户区里的 CSS 像素**矩形。
 ///
-/// 首次打开：建一扇**隐藏**的窗就返回——页面挂载后会 `core_lyrics_settings_resize` 报上来的内容尺寸
-/// 才会真正显示出来（先定位、量好尺寸再显示，用户看不到默认尺寸那一闪）。
+/// 首次打开：建一扇**隐藏**的窗就返回——页面挂载后报上来的内容尺寸才会让它显示出来。
 /// 之后每次打开：用上一次量好的内容尺寸摆好、`show()` + 取焦点。
 #[tauri::command]
 pub async fn core_lyrics_settings_open(
@@ -525,11 +562,20 @@ pub async fn core_lyrics_settings_open(
         // 页面还没量过（首次打开）：等它报尺寸。**不显示**——先定位、量好再显示，避免默认尺寸那一闪。
         return Ok(json!({ "open": true, "visible": false, "measured": false }));
     };
-    if let Err(error) = apply_geometry(&window, anchor_px, content, area) {
-        log::warn!("歌词设置弹出窗没能摆到目标位置（按默认位置显示）：{error}");
-    }
+    let geometry = match apply_geometry(&window, anchor_px, content, area) {
+        Ok(geometry) => geometry,
+        Err(error) => {
+            log::warn!("歌词设置弹出窗没能摆到目标位置（按默认位置显示）：{error}");
+            return Ok(json!({ "open": true, "visible": false, "measured": !fresh }));
+        }
+    };
     show(&window);
-    Ok(json!({ "open": true, "visible": true, "measured": !fresh }))
+    Ok(json!({
+        "open": true,
+        "visible": true,
+        "measured": !fresh,
+        "geometry": geometry_payload(&geometry, scale),
+    }))
 }
 
 /// 弹出窗自己报上来的内容尺寸（CSS 像素）：Rust 设窗口尺寸、按同一个锚点重算位置，再显示。
@@ -570,10 +616,14 @@ pub async fn core_lyrics_settings_resize(
             }
         },
     };
-    let applied = apply_geometry(&window, anchor, content, area);
-    if let Err(error) = &applied {
-        log::warn!("歌词设置弹出窗的尺寸没能应用（{error}）：菜单可能被裁一点");
-    }
+    let scale = trusted_scale(window.scale_factor().unwrap_or(1.0));
+    let applied = match apply_geometry(&window, anchor, content, area) {
+        Ok(geometry) => Ok(geometry),
+        Err(error) => {
+            log::warn!("歌词设置弹出窗的尺寸没能应用（{error}）：面板可能被裁一点");
+            Err(error)
+        }
+    };
     // 首次打开走的就是这条路：量到尺寸之后才显示，所以这里要补 show + 取焦点。
     if !window.is_visible().unwrap_or(false) {
         show(&window);
@@ -583,10 +633,11 @@ pub async fn core_lyrics_settings_resize(
         "width": content.width,
         "height": content.height,
         "visible": window.is_visible().unwrap_or(false),
+        "geometry": applied.ok().map(|geometry| geometry_payload(&geometry, scale)),
     }))
 }
 
-/// 关闭弹出窗（Esc / 点菜单外面都由页面这条命令回来）。
+/// 关闭弹出窗（Esc / 点面板外面都由页面这条命令回来）。
 #[tauri::command]
 pub async fn core_lyrics_settings_close(
     app: AppHandle,
@@ -622,61 +673,105 @@ mod tests {
         rect(0.0, 0.0, 1920.0, 1040.0)
     }
 
-    /// 主屏常见形态：齿轮在歌词窗里靠右，菜单右对齐、贴锚点下方。
-    #[test]
-    fn r51_the_menu_is_right_aligned_under_the_anchor() {
-        let anchor = rect(700.0, 10.0, 28.0, 28.0);
-        let placed = settings_popup_placement(anchor, size(256.0, 180.0), main_monitor(), 4.0);
-        assert_eq!(placed.x + 256.0, anchor.x + anchor.width, "右边缘对齐锚点右边缘");
-        assert_eq!(placed.y, anchor.y + anchor.height + 4.0, "顶部在锚点下方 4");
+    /// 约定：齿轮靠歌词窗右侧，屏幕 960×1080 那种纵向屏也放得下（面板 ≤ 360 高）。
+    fn gear() -> Rect {
+        rect(700.0, 10.0, 28.0, 28.0)
     }
 
-    /// 下方放不下 → 翻到上方（底边在锚点上方同一个间距处）。
+    const PAD: f64 = SETTINGS_POPUP_PAD_DIP;
+    const GAP: f64 = SETTINGS_BUBBLE_GAP_DIP;
+    const INSET: f64 = SETTINGS_ARROW_INSET_DIP;
+
+    /// 默认形态：面板在齿轮下方、水平以齿轮为中心、窗口=面板+四周留边、箭头对准齿轮中心。
     #[test]
-    fn r51_a_crowded_bottom_flips_the_menu_above_the_anchor() {
-        let area = rect(0.0, 0.0, 1920.0, 600.0);
+    fn r60_the_panel_hangs_under_the_gear_with_the_arrow_on_its_centre() {
+        let anchor = gear();
+        let panel = size(336.0, 320.0);
+        let placed = bubble_placement(anchor, panel, main_monitor(), GAP, PAD, INSET);
+        assert_eq!(placed.side, BubbleSide::Bottom);
+        assert_eq!(placed.panel.y, anchor.y + anchor.height + GAP, "面板顶边在齿轮下方 GAP");
+        let centre = anchor.x + anchor.width / 2.0;
+        assert_eq!(placed.panel.x + panel.width / 2.0, centre, "水平以齿轮为中心");
+        assert_eq!(placed.arrow, centre - placed.panel.x, "箭头对着齿轮中心");
+        assert_eq!(
+            placed.window,
+            rect(placed.panel.x - PAD, placed.panel.y - PAD, panel.width + PAD * 2.0, panel.height + PAD * 2.0),
+            "窗口 = 面板四周各一圈留边"
+        );
+    }
+
+    /// 下方放不下 → 翻到上方（面板底边在齿轮上方 GAP）。
+    #[test]
+    fn r60_a_crowded_bottom_flips_the_panel_above_the_gear() {
+        let area = rect(0.0, 0.0, 1920.0, 620.0);
         let anchor = rect(700.0, 520.0, 28.0, 28.0);
-        let placed = settings_popup_placement(anchor, size(256.0, 180.0), area, 4.0);
-        assert_eq!(placed.y + 180.0, anchor.y - 4.0, "翻到锚点上方：底边离锚点 4");
-        assert!(placed.y >= area.y);
+        let placed = bubble_placement(anchor, size(336.0, 320.0), area, GAP, PAD, INSET);
+        assert_eq!(placed.side, BubbleSide::Top);
+        assert_eq!(placed.panel.y + 320.0, anchor.y - GAP, "面板底边离齿轮 GAP");
+        assert!(placed.window.y >= area.y, "窗口仍留在工作区里");
+        assert_eq!(placed.arrow, 714.0 - placed.panel.x, "箭头同样对准齿轮中心");
+        assert_eq!(placed.arrow, 168.0, "没夹紧 ⇒ 箭头正好居中");
     }
 
-    /// 上下一共放不下：夹回工作区顶部（宁可压住锚点，也不许把菜单推出屏幕）。
+    /// 齿轮贴左边缘：面板被夹到留边处，箭头**跟着滑到左侧留边**、不再居中。
     #[test]
-    fn r51_a_menu_taller_than_the_area_stays_inside_it() {
-        let area = rect(0.0, 0.0, 1920.0, 200.0);
-        let anchor = rect(700.0, 60.0, 28.0, 28.0);
-        let placed = settings_popup_placement(anchor, size(256.0, 180.0), area, 4.0);
-        assert_eq!(placed.y, area.y, "夹回工作区顶部");
-        assert!(placed.y + 180.0 <= area.y + area.height);
+    fn r60_a_gear_near_the_left_edge_slides_the_arrow_inwards() {
+        let anchor = rect(100.0, 10.0, 28.0, 28.0);
+        let placed = bubble_placement(anchor, size(336.0, 320.0), main_monitor(), GAP, PAD, INSET);
+        assert_eq!(placed.panel.x, PAD, "面板夹到工作区左侧留边");
+        assert_eq!(placed.arrow, (anchor.x + 14.0) - PAD, "箭头仍指着齿轮（明显不在面板中心）");
+        assert_eq!(placed.arrow, 100.0);
+        assert!(placed.arrow >= INSET, "箭头留在圆角以里");
+
+        // 齿轮整个在工作区外面：箭头退到留边处，绝不出面板
+        let outside = bubble_placement(rect(-900.0, 10.0, 28.0, 28.0), size(336.0, 320.0), main_monitor(), GAP, PAD, INSET);
+        assert_eq!(outside.arrow, INSET);
+        assert_eq!(outside.panel.x, PAD);
     }
 
-    /// 锚点贴右边缘：菜单右对齐会伸出工作区 → 夹回来（右边留 0 也行，但不许出去）。
+    /// 齿轮贴右边缘：面板被夹回来，箭头同样滑到右侧留边（仍指着齿轮）。
     #[test]
-    fn r51_a_menu_hanging_over_the_right_edge_is_clamped_back() {
-        let anchor = rect(1900.0, 10.0, 28.0, 28.0);
-        let placed = settings_popup_placement(anchor, size(256.0, 180.0), main_monitor(), 4.0);
-        assert_eq!(placed.x + 256.0, 1920.0, "夹到工作区右边缘");
-        assert!(placed.x >= 0.0);
+    fn r60_a_gear_near_the_right_edge_slides_the_arrow_inwards_too() {
+        let anchor = rect(1890.0, 10.0, 28.0, 28.0);
+        let placed = bubble_placement(anchor, size(336.0, 320.0), main_monitor(), GAP, PAD, INSET);
+        assert_eq!(placed.panel.x + 336.0, 1920.0 - PAD, "面板夹到工作区右侧留边");
+        assert_eq!(placed.arrow, 336.0 - INSET, "箭头退到右端留边处");
+        assert!(placed.window.x + placed.window.width <= 1920.0, "窗口不出工作区");
+
+        // 齿轮在工作区外（更靠右）：箭头停在右端留边
+        let outside = bubble_placement(rect(3000.0, 10.0, 28.0, 28.0), size(336.0, 320.0), main_monitor(), GAP, PAD, INSET);
+        assert_eq!(outside.arrow, 336.0 - INSET);
     }
 
-    /// 副屏在主屏左边：坐标是负的，**夹紧用的是工作区原点**（粘 0 会把窗扔回主屏）。
+    /// 面板比工作区还宽/还高：夹到留边范围里（窗口不出去）。
     #[test]
-    fn r51_a_monitor_left_of_the_primary_keeps_negative_coordinates() {
+    fn r60_an_oversized_panel_stays_inside_the_work_area() {
+        let area = rect(0.0, 0.0, 300.0, 200.0);
+        let placed = bubble_placement(gear(), size(336.0, 320.0), area, GAP, PAD, INSET);
+        assert_eq!(placed.panel.x, PAD);
+        assert_eq!(placed.panel.y, PAD, "上下都放不下 → 夹回工作区顶部留边");
+        assert_eq!(placed.arrow, 336.0 - INSET, "齿轮远在右方：箭头停到右端留边处");
+        // 面板比两端留边还窄：箭头无从滑起，只能走中点
+        assert_eq!(arrow_offset(500.0, 0.0, 16.0, INSET), 8.0);
+    }
+
+    /// 副屏在主屏左边：坐标是负的，夹紧用**工作区原点**（粘 0 会把窗扔回主屏）。
+    #[test]
+    fn r60_a_monitor_left_of_the_primary_keeps_negative_coordinates() {
         let left = rect(-1920.0, 0.0, 1920.0, 1040.0);
         let anchor = rect(-500.0, 10.0, 28.0, 28.0);
-        let placed = settings_popup_placement(anchor, size(256.0, 180.0), left, 4.0);
-        assert_eq!(placed.x + 256.0, anchor.x + anchor.width);
-        assert!(placed.x < 0.0, "仍在那块屏上：{placed:?}");
+        let placed = bubble_placement(anchor, size(336.0, 320.0), left, GAP, PAD, INSET);
+        assert_eq!(placed.panel.x + 168.0, -486.0, "仍以齿轮为中心");
+        assert!(placed.panel.x < 0.0, "仍在那块屏上：{placed:?}");
+        assert_eq!(placed.arrow, 168.0, "没夹紧 ⇒ 箭头居中");
 
-        // 贴那块屏的左边缘：夹到 -1920，绝不回到 0
-        let hugging = settings_popup_placement(rect(-1920.0, 10.0, 8.0, 8.0), size(256.0, 180.0), left, 4.0);
-        assert_eq!(hugging.x, -1920.0);
+        let hugging = bubble_placement(rect(-1920.0, 10.0, 8.0, 8.0), size(336.0, 320.0), left, GAP, PAD, INSET);
+        assert_eq!(hugging.panel.x, -1920.0 + PAD, "夹到那块屏的左留边，绝不回到 0");
     }
 
-    /// DIP 锚点 → 物理像素：缩放比 1.0 / 1.5 / 2.0 都只乘一次。
+    /// 缩放比 1.5：锚点换算只乘一次，几何随之放大，回报给页面的仍是 CSS 像素。
     #[test]
-    fn r51_the_anchor_is_converted_with_the_window_scale_factor_once() {
+    fn r60_the_geometry_scales_once_and_reports_css_pixels() {
         let anchor = rect(10.0, 20.0, 28.0, 28.0);
         assert_eq!(
             anchor_rect(point(100.0, 200.0), anchor, 1.0),
@@ -691,44 +786,44 @@ mod tests {
             anchor_rect(point(0.0, 0.0), anchor, f64::NAN),
             rect(10.0, 20.0, 28.0, 28.0)
         );
-        // 物理锚点 + 缩放过的尺寸：菜单仍右对齐、仍在下方 4 DIP（=6 物理）
-        let anchor_px = anchor_rect(point(1000.0, 100.0), anchor, 1.5);
-        let placed = settings_popup_placement(anchor_px, size(384.0, 270.0), rect(0.0, 0.0, 2880.0, 1560.0), 6.0);
-        assert_eq!(placed.x + 384.0, anchor_px.x + anchor_px.width);
-        assert_eq!(placed.y, anchor_px.y + anchor_px.height + 6.0);
+
+        let scale = 1.5;
+        let area = rect(0.0, 0.0, 2880.0, 1560.0);
+        let anchor_px = anchor_rect(point(1000.0, 200.0), anchor, scale);
+        let panel = bubble_content_size(size(336.0, 320.0), scale, area, PAD * scale);
+        assert_eq!(panel, size(504.0, 480.0), "内容尺寸乘一次缩放");
+        let placed = bubble_placement(anchor_px, panel, area, GAP * scale, PAD * scale, INSET * scale);
+        assert_eq!(placed.side, BubbleSide::Bottom);
+        assert_eq!(placed.panel.y, anchor_px.y + anchor_px.height + GAP * scale);
+        assert_eq!(placed.arrow, (anchor_px.x + anchor_px.width / 2.0) - placed.panel.x);
+        let payload = geometry_payload(&placed, scale);
+        assert_eq!(payload["side"], json!("bottom"));
+        assert_eq!(payload["pad"], json!(PAD), "页面用的是 CSS 像素，留边就是那个常量");
+        let arrow = payload["arrow"].as_f64().expect("箭头必须是数字");
+        assert!((arrow - panel.width / scale / 2.0).abs() < 1e-9, "回报的箭头是 CSS 像素：{arrow}");
     }
 
-    /// 内容尺寸：DIP → 物理，并夹进工作区（高过工作区就截到工作区高度，由菜单自己滚）。
+    /// 内容尺寸：DIP → 物理，并夹进"工作区减去留边"。
     #[test]
-    fn r51_content_size_is_scaled_and_clamped_into_the_work_area() {
+    fn r60_content_size_is_scaled_and_clamped_into_the_work_area() {
         assert_eq!(
-            settings_popup_content_size(size(256.0, 180.0), 1.5, main_monitor()),
-            size(384.0, 270.0)
+            bubble_content_size(size(336.0, 320.0), 1.5, main_monitor(), PAD * 1.5),
+            size(504.0, 480.0)
         );
         assert_eq!(
-            settings_popup_content_size(size(256.0, 5000.0), 1.0, main_monitor()),
-            size(256.0, 1040.0)
+            bubble_content_size(size(336.0, 5000.0), 1.0, main_monitor(), PAD),
+            size(336.0, 1040.0 - PAD * 2.0),
+            "高过工作区就截到留边以内（面板不压出屏幕）"
         );
         assert_eq!(
-            settings_popup_content_size(size(5000.0, 180.0), 1.0, main_monitor()),
-            size(1920.0, 180.0)
+            bubble_content_size(size(5000.0, 320.0), 1.0, main_monitor(), PAD),
+            size(1920.0 - PAD * 2.0, 320.0)
         );
-    }
-
-    /// 窗口矩形 = 菜单矩形四周各一圈 pad（阴影的容身处），右对齐关系由"菜单"保证。
-    #[test]
-    fn r51_the_window_is_the_menu_plus_a_shadow_ring() {
-        let anchor = rect(700.0, 10.0, 28.0, 28.0);
-        let (window_size, window_point) =
-            settings_popup_window_rect(anchor, size(256.0, 180.0), main_monitor(), 4.0, 8.0);
-        assert_eq!(window_size, size(272.0, 196.0));
-        let menu = settings_popup_placement(anchor, size(256.0, 180.0), main_monitor(), 4.0);
-        assert_eq!(window_point, point(menu.x - 8.0, menu.y - 8.0));
     }
 
     /// 失焦关闭之后的短窗口内，"打开"被拒；过了窗口照旧打开。
     #[test]
-    fn r51_a_second_gear_click_right_after_the_blur_does_not_reopen() {
+    fn r60_a_second_gear_click_right_after_the_blur_does_not_reopen() {
         let now = Instant::now();
         let window = Duration::from_millis(SETTINGS_REOPEN_SUPPRESS_MS);
         assert!(!reopen_suppressed(None, now, window), "没关过就照旧打开");
@@ -742,8 +837,8 @@ mod tests {
             !reopen_suppressed(Some(now), now + window, window),
             "过了窗口就是一次新的打开（用户过一会儿再点齿轮）"
         );
-        // 时刻倒退（`Instant` 在真机上不回退，这条只证明"注入的假时刻不会 panic"）：
-        // `saturating_duration_since` 给 0 ⇒ 仍算"刚关过"，也就是 **fail-closed**（宁可不弹）。
+        // 时刻倒退（真机上不回退，这条只证明注入的假时刻不会 panic）：`saturating_duration_since`
+        // 给 0 ⇒ 仍算"刚关过"，也就是 fail-closed（宁可不弹）。
         assert!(reopen_suppressed(
             Some(now + Duration::from_secs(5)),
             now,
@@ -753,8 +848,8 @@ mod tests {
 
     /// 渲染层报上来的尺寸：坏值一律不覆盖上一次的好值。
     #[test]
-    fn r51_reported_sizes_are_never_guessed() {
-        assert_eq!(normalize_content_size(255.6, 180.4), Some(size(256.0, 180.0)));
+    fn r60_reported_sizes_are_never_guessed() {
+        assert_eq!(normalize_content_size(335.6, 320.4), Some(size(336.0, 320.0)));
         for (width, height) in [
             (0.0, 10.0),
             (-1.0, 10.0),
@@ -769,7 +864,7 @@ mod tests {
 
     /// 来源守卫：只有主窗/歌词窗能要它打开；只有它自己能报尺寸/关掉自己；媒体控制不放行它。
     #[test]
-    fn r51_only_the_named_sources_may_drive_the_popup() {
+    fn r60_only_the_named_sources_may_drive_the_popup() {
         for label in [crate::MAIN_WINDOW_LABEL, crate::LYRICS_WINDOW_LABEL] {
             assert!(require_settings_open_source(label).is_ok());
             assert!(
@@ -787,7 +882,7 @@ mod tests {
             let error = require_settings_open_source(label).expect_err("不是调用方");
             assert_eq!(error.kind.as_deref(), Some("forbidden_source"));
         }
-        // 配置可以写（弹出窗里的控件就是那条窄命令），媒体动作不行
+        // 配置可以写（面板里的控件就是那条窄命令），媒体动作不行
         assert!(crate::lyrics_window::require_lyrics_source(LYRICS_SETTINGS_WINDOW_LABEL).is_ok());
         assert!(crate::lyrics_window::control_payload(
             LYRICS_SETTINGS_WINDOW_LABEL,
@@ -798,7 +893,7 @@ mod tests {
 
     /// 坏锚点一律 `invalid_payload`（宽高为负、NaN、缺字段、不是对象）。
     #[test]
-    fn r51_anchors_are_validated_not_guessed() {
+    fn r60_anchors_are_validated_not_guessed() {
         assert_eq!(
             parse_anchor(&json!({"x": 1.0, "y": 2.0, "width": 3.0, "height": 4.0})),
             Ok(rect(1.0, 2.0, 3.0, 4.0))
@@ -820,7 +915,7 @@ mod tests {
 
     /// 数据目录口径：`<数据根>/webview2/lyrics-settings`（每窗一份，不与歌词窗共用）。
     #[test]
-    fn r51_the_popup_lives_in_its_own_webview_data_directory() {
+    fn r60_the_popup_lives_in_its_own_webview_data_directory() {
         assert_eq!(
             popup_data_dir(Path::new("C:\\root")),
             Path::new("C:\\root").join("webview2").join("lyrics-settings")
@@ -829,7 +924,7 @@ mod tests {
 
     /// 页面地址：入口是 lyrics-settings.html，配置与主题都在查询串里（第一帧就是对的）。
     #[test]
-    fn r51_the_popup_url_carries_the_config_and_the_theme() {
+    fn r60_the_popup_url_carries_the_config_and_the_theme() {
         let config = LyricsConfig::default().apply_patch(&json!({"layout": "vertical", "size": "xl"}));
         let url = popup_url(&config, crate::theme::ThemeChoice::Dark);
         assert!(url.starts_with("lyrics-settings.html?"), "{url}");
@@ -839,7 +934,7 @@ mod tests {
 
     /// 建窗契约（源码扫描：这扇窗的属性一次到位，且它**不销毁**只隐藏）。
     #[test]
-    fn r51_the_popup_window_is_built_with_the_contract_attributes() {
+    fn r60_the_popup_window_is_built_with_the_contract_attributes() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_settings.rs"))
             .expect("要能读到自己的源码");
         let production = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
@@ -857,9 +952,19 @@ mod tests {
             "proxy_url(",
             "resolve_for_webview(",
             "LYRICS_SETTINGS_WINDOW_LABEL",
+            "pub fn bubble_placement",
+            "pub fn bubble_content_size",
+            "pub fn arrow_offset",
+            "\"geometry\": geometry_payload",
         ] {
             assert!(production.contains(required), "建窗契约缺一项：{required}");
         }
+        // 先删后写：旧的"右边缘对齐"定位规则不许留一半
+        assert!(
+            !production.contains("settings_popup_placement")
+                && !production.contains("settings_popup_window_rect"),
+            "旧的右对齐定位规则必须整段删掉"
+        );
         assert!(production.contains("window.hide()"), "关闭 = hide（不销毁）");
         assert!(
             !production[..production.find("pub fn shutdown").unwrap()].contains(".destroy()"),
@@ -874,7 +979,7 @@ mod tests {
 
     /// 三条命令都是 async、都带窄守卫、都在 `lib.rs` 注册（命令名是跨语言契约）。
     #[test]
-    fn r51_every_popup_command_is_async_with_its_narrow_guard() {
+    fn r60_every_popup_command_is_async_with_its_narrow_guard() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_settings.rs"))
             .expect("要能读到自己的源码");
         let production = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];

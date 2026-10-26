@@ -23,13 +23,17 @@ import {
   isCustomColor,
   taskbarFontStepLabel,
 } from "./features/lyrics/lyrics-window.mjs"
+import { useTokenColorHex } from "./features/lyrics/use-token-color.ts"
 import type { LyricsWindowBinding } from "./use-lyrics-window.ts"
 
 export function TaskbarLyricsCard({ lyrics }: { lyrics: LyricsWindowBinding | null }) {
+  /** 令牌颜色跟着主题走（取色器非受控，主题变了靠 key 换一份新的）。 */
+  const themeHex = useTokenColorHex(lyrics?.config.taskbarColor ?? "foreground")
   if (lyrics === null || lyrics.taskbar?.supported !== true) return null
   const config = lyrics.config
-  /** 取色器是非受控的（`type=color` 的受控值必须始终合法），"还没选过"不该由页面编一个色值出来。 */
   const customColor = isCustomColor(config.taskbarCustomColor) ? config.taskbarCustomColor : null
+  /** 未设自定义色时色块显示的是**主题下的真实颜色**，不是浏览器给 `type=color` 的默认黑。 */
+  const swatchValue = customColor ?? themeHex ?? ""
 
   return (
     <Card data-testid="taskbar-lyrics-card">
@@ -56,9 +60,9 @@ export function TaskbarLyricsCard({ lyrics }: { lyrics: LyricsWindowBinding | nu
             </SelectContent>
           </Select>
           <div className="flex flex-wrap items-center gap-2">
-            <Input key={customColor ?? "theme"} id="taskbar-lyrics-custom-color" data-testid="taskbar-lyrics-custom-color"
+            <Input key={swatchValue} id="taskbar-lyrics-custom-color" data-testid="taskbar-lyrics-custom-color"
               type="color" aria-label="任务栏歌词自定义颜色" className="h-8 w-14 shrink-0 p-0"
-              defaultValue={customColor ?? undefined}
+              defaultValue={swatchValue}
               onChange={(event) => {
                 const value = event.target.value
                 if (!isCustomColor(value)) return
@@ -69,7 +73,7 @@ export function TaskbarLyricsCard({ lyrics }: { lyrics: LyricsWindowBinding | nu
               恢复主题色
             </Button>
             <span className="text-xs text-muted-foreground">
-              {customColor === null ? "用上面选的令牌" : "自定义色生效中"}
+              {customColor === null ? "跟随上方选择的颜色" : `使用自定义颜色 ${customColor}`}
             </span>
           </div>
         </div>

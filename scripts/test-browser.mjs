@@ -36,6 +36,7 @@ import { chromium } from "playwright-core";
 import sharp from "sharp";
 
 import { RUN_LOG_EMPTY_TEXT, RUN_LOG_FAILURE_TEXT } from "../src/renderer/features/settings/run-log.mjs";
+import { POPOVER_PAD_DIP } from "../src/renderer/features/lyrics/lyrics-popover.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** 守卫自己的中间产物（.gitignore 已含 .tmp/）。 */
@@ -2657,6 +2658,7 @@ import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 
 import { LyricsSettingsPopup } from "../../src/renderer/LyricsSettingsPopup.tsx";
+import { POPOVER_PAD_DIP } from "../../src/renderer/features/lyrics/lyrics-popover.mjs";
 import { DEFAULT_LYRICS_CONFIG, normalizeLyricsConfig } from "../../src/renderer/features/lyrics/lyrics-window.mjs";
 
 let config = { ...DEFAULT_LYRICS_CONFIG };
@@ -2665,8 +2667,23 @@ let revision = 0;
 const configureCalls = [];
 /** 弹出窗报上来的尺寸（页面自己量、宿主设窗口）。 */
 const resizeCalls = [];
-/** 关闭请求（Esc / 点菜单外面）。 */
+/** 关闭请求（Esc / 点面板外面）。 */
 const closeCalls = [];
+
+/**
+ * 守卫用查询串挑一种气泡几何（宿主那一侧的算法在 Rust 里，这里只给答案）：
+ * centre 箭头居中 / left 左夹紧 / right 右夹紧 / top 翻到上方 / roomy 截图留出齿轮位。
+ */
+const BUBBLE = new URLSearchParams(window.location.search).get("bubble") ?? "centre";
+
+function geometryFor(width) {
+  const inset = 12;
+  if (BUBBLE === "left") return { side: "bottom", arrow: inset, pad: POPOVER_PAD_DIP };
+  if (BUBBLE === "right") return { side: "bottom", arrow: width - inset, pad: POPOVER_PAD_DIP };
+  if (BUBBLE === "top") return { side: "top", arrow: width / 2, pad: POPOVER_PAD_DIP };
+  if (BUBBLE === "roomy") return { side: "bottom", arrow: Math.round(width * 0.3), pad: 48 };
+  return { side: "bottom", arrow: width / 2, pad: POPOVER_PAD_DIP };
+}
 
 mockWindows("lyrics-settings");
 mockIPC(async (command, args) => {
@@ -2682,7 +2699,7 @@ mockIPC(async (command, args) => {
   }
   if (command === "core_lyrics_settings_resize") {
     resizeCalls.push({ width: args.width, height: args.height, atMs: Math.round(performance.now()) });
-    return { applied: true, width: args.width, height: args.height, visible: true };
+    return { applied: true, width: args.width, height: args.height, visible: true, geometry: geometryFor(args.width) };
   }
   if (command === "core_lyrics_settings_close") {
     closeCalls.push(Math.round(performance.now()));
@@ -2696,6 +2713,7 @@ window.__popupGuard = {
   resizeCalls: () => resizeCalls.map((entry) => ({ ...entry })),
   closeCalls: () => closeCalls.slice(),
   config: () => ({ ...config }),
+  bubble: () => BUBBLE,
   reset: () => { configureCalls.length = 0; resizeCalls.length = 0; closeCalls.length = 0; },
 };
 
@@ -2721,19 +2739,21 @@ export function lyricsSettingsHarnessHtml() {
 }
 
 /**
- * R51（brief 第二项之一）：设置弹出窗那一页的**真浏览器**验收。
+ * R60：设置面板那一页的**真浏览器**验收（气泡形态）。
  *
  * 单独一页、单独一扇窗（`?` 里不带主界面）：这一页挂的就是 `LyricsSettingsPopup`，IPC 只给
  * `core_lyrics_configure` / `core_lyrics_settings_resize` / `core_lyrics_settings_close` 三条。
+ * 宿主侧的定位算法在 Rust（`bubble_placement`，纯函数单测）；这里按查询串挑几种它算得出的几何，
+ * 只钉页面这一侧真的照着摆：
  *
- * 钉六件事（都是"看起来搬了、其实没搬"会露馅的地方）：
- * 1. **真的不受歌词窗高度限制**：菜单内容高度明显超过歌词窗的 128px，且 `max-height` 是 `none`
- *    （R50 那份被 radix 的 `--radix-dropdown-menu-content-available-height` 压住）；
- * 2. **菜单左上角就是页面原点**（锚点在原点）：宿主只要把窗口摆到锚点右下方，菜单就对齐了；
- * 3. **尺寸真的报上去了**：`resize` 的宽高等于菜单的 `offsetWidth/offsetHeight`（宿主按它设窗口）；
- * 4. **浅/深两色下每一个控件都可见可点**（含新增的五个字号档位）；
- * 5. **改得动**：字号 / 样式 / 方向 / 开关 / 颜色各改一次，走的都是那条窄命令；
- * 6. **Esc 真的请求关窗**（radix 的 dismiss 回来的是命令，不是自己趴下）。
+ * 1. **面板贴在窗口留边内侧**（`(pad, pad)`），窗口尺寸 = 面板 + 四周留边，面板高度 ≤ 360 且不滚；
+ * 2. **箭头指着锚点**：居中 / 左夹紧 / 右夹紧三种偏移下，箭头中心都落在 `pad + arrow` 上；
+ * 3. **翻到上方**时面板底边贴留边、箭头在面板下方；
+ * 4. **尺寸真的报上去了**（`resize` 的宽高 == 面板的 `offsetWidth/offsetHeight`）；
+ * 5. **浅/深两色下每个控件都可见可点**（含五个字号档位）；
+ * 6. **改任一项都关不掉面板**（单选组/开关/颜色：只发配置，不发关窗）；
+ * 7. **Esc 真的请求关窗**，且关窗不卸面板（宿主只是 hide）；
+ * 8. **色块显示主题下的真实颜色**（未设自定义色时与歌词实际颜色一致）。
  */
 export async function checkLyricsSettingsPopup(page, port, guardDir, add) {
   /** 五个字号档位 + R50 那九个锚点：缺一个就等于"够不着"。 */
@@ -2754,25 +2774,32 @@ export async function checkLyricsSettingsPopup(page, port, guardDir, add) {
     '[data-testid="lyrics-appearance-color"]',
     '[data-testid="lyrics-appearance-color-reset"]',
   ];
-  await page.setViewportSize({ width: 420, height: 720 });
-  await page.goto(`http://127.0.0.1:${port}/lyrics-settings.html`, { waitUntil: "load" });
-  await page.waitForFunction(() => window.__popupGuard !== undefined, null, { timeout: 15_000 });
-  await page.getByTestId("lyrics-appearance-panel").waitFor();
-  await page.waitForTimeout(450);
-
-  /** 菜单此刻的几何 + 它自己算出来的"窗口该多大"。 */
-  const geometry = () => page.evaluate(() => {
-    const menu = document.querySelector('[data-testid="lyrics-appearance-panel"]');
-    if (!menu) return null;
-    const rect = menu.getBoundingClientRect();
-    const style = getComputedStyle(menu);
+  const BASE = `http://127.0.0.1:${port}/lyrics-settings.html`;
+  /** 面板与箭头此刻的几何（页面坐标系 = 窗口客户区）。 */
+  const geometryOf = () => page.evaluate(() => {
+    const panel = document.querySelector('[data-testid="lyrics-appearance-panel"]');
+    const arrow = document.querySelector('[data-slot="popover-arrow"]');
+    if (!panel || !arrow) return null;
+    const box = panel.getBoundingClientRect();
+    const tip = arrow.getBoundingClientRect();
+    const style = getComputedStyle(panel);
     return {
-      top: Math.round(rect.top), left: Math.round(rect.left),
-      width: Math.ceil(menu.offsetWidth), height: Math.ceil(menu.offsetHeight),
+      left: Math.round(box.left), top: Math.round(box.top),
+      width: Math.ceil(panel.offsetWidth), height: Math.ceil(panel.offsetHeight),
+      right: Math.round(box.right), bottom: Math.round(box.bottom),
+      arrow: { x: Math.round(tip.left + tip.width / 2), top: Math.round(tip.top), bottom: Math.round(tip.bottom) },
       maxHeight: style.maxHeight, overflowY: style.overflowY,
       viewport: { width: innerWidth, height: innerHeight },
+      scrollHeight: document.documentElement.scrollHeight,
     };
   });
+  /** 打开某一页（查询串换一种气泡几何就会整页重载）。 */
+  const load = async (bubble) => {
+    await page.goto(bubble === null ? BASE : `${BASE}?bubble=${bubble}`, { waitUntil: "load" });
+    await page.waitForFunction(() => window.__popupGuard !== undefined, null, { timeout: 15_000 });
+    await page.getByTestId("lyrics-appearance-panel").waitFor();
+    await page.waitForTimeout(450);
+  };
   /** 逐个控件：矩形在视口里，且中心点命中的就是它（被别的东西盖住 = 用户按不到）。 */
   const reachability = (selectors) => page.evaluate((list) => list.map((selector) => {
     const node = document.querySelector(selector);
@@ -2789,52 +2816,102 @@ export async function checkLyricsSettingsPopup(page, port, guardDir, add) {
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
   }, value);
+  /** 一个 CSS 颜色（可能是 oklch）→ 真实 sRGB 六位（画布取像素：与渲染层的换算完全独立）。 */
+  const pixelHex = (css) => page.evaluate((color) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    context.fillStyle = color;
+    context.fillRect(0, 0, 1, 1);
+    const [r, g, b] = context.getImageData(0, 0, 1, 1).data;
+    return "#" + [r, g, b].map((value) => value.toString(16).padStart(2, "0")).join("");
+  }, css);
 
-  // ① 不受歌词窗高度限制 + 菜单在页面原点
-  const menu = await geometry();
-  add("r51-popup-menu-unconstrained",
-    Boolean(menu) && menu.height > 128 && menu.maxHeight === "none" && menu.top <= 1 && menu.left <= 1,
-    JSON.stringify(menu));
+  await page.setViewportSize({ width: 420, height: 720 });
+  await load(null);
 
-  // ② 尺寸报上去了（宿主按它设窗口）
+  // ① 面板贴在留边内侧；窗口尺寸 = 面板 + 四周留边；高度 ≤ 360 且不滚
+  const centred = await geometryOf();
+  const pad = POPOVER_PAD_DIP;
+  add("r60-popup-panel-sits-inside-the-window-ring",
+    Boolean(centred) && centred.left === pad && centred.top === pad,
+    JSON.stringify(centred));
+  add("r60-popup-panel-is-compact",
+    Boolean(centred) && centred.height <= 360 && centred.height > 128 && centred.maxHeight === "none",
+    `面板高度 ${centred && centred.height}（目标 ≤ 360，且明显超过歌词窗的 128）`);
+  // 真实窗口 = 面板 + 两侧留边：整页没有滚动条，面板与箭头都在窗口里
+  await page.setViewportSize({ width: centred.width + pad * 2, height: centred.height + pad * 2 });
+  await page.waitForTimeout(250);
+  const windowSized = await geometryOf();
+  add("r60-popup-fits-its-window",
+    Boolean(windowSized) && windowSized.left === pad && windowSized.top === pad
+      && windowSized.right <= windowSized.viewport.width - pad
+      && windowSized.bottom <= windowSized.viewport.height - pad
+      && windowSized.scrollHeight <= windowSized.viewport.height + 1
+      && windowSized.arrow.top >= 0,
+    JSON.stringify({ window: windowSized && windowSized.viewport, panel: windowSized && [windowSized.left, windowSized.top, windowSized.width, windowSized.height], arrow: windowSized && windowSized.arrow }));
+
+  // ② 箭头指着锚点：居中 / 左夹紧 / 右夹紧 / 翻到上方
+  const arrowAt = async (bubble) => {
+    await load(bubble);
+    return geometryOf();
+  };
+  const centre = await arrowAt("centre");
+  add("r60-popup-arrow-points-at-the-anchor",
+    Boolean(centre) && Math.abs(centre.arrow.x - (centre.left + centre.width / 2)) <= 2
+      && centre.arrow.top < centre.top && centre.arrow.top >= 0,
+    JSON.stringify(centre && { arrow: centre.arrow, panel: [centre.left, centre.top, centre.width] }));
+  const left = await arrowAt("left");
+  const right = await arrowAt("right");
+  add("r60-popup-arrow-follows-the-clamp",
+    Boolean(left) && Boolean(right)
+      && Math.abs(left.arrow.x - (left.left + 12)) <= 2 && Math.abs(right.arrow.x - (right.right - 12)) <= 2
+      && left.arrow.x !== Math.round(left.left + left.width / 2),
+    JSON.stringify({ left: left && left.arrow.x, right: right && right.arrow.x, panel: left && [left.left, left.width] }));
+  const above = await arrowAt("top");
+  add("r60-popup-flips-above-the-anchor",
+    Boolean(above) && above.top === pad && Math.abs(above.arrow.x - (above.left + above.width / 2)) <= 2
+      && above.arrow.bottom > above.bottom && above.arrow.bottom <= above.viewport.height,
+    JSON.stringify(above && { arrow: above.arrow, panelBottom: above.bottom, viewport: above.viewport }));
+
+  // ③ 尺寸真的报上去了（宿主按它设窗口）
   const reported = await page.evaluate(() => window.__popupGuard.resizeCalls());
   const lastReport = reported.at(-1) ?? null;
-  add("r51-popup-reports-its-size",
-    Boolean(menu) && Boolean(lastReport) && lastReport.width === menu.width && lastReport.height === menu.height,
-    JSON.stringify({ reported: reported.slice(-2), menu: menu && { width: menu.width, height: menu.height } }));
+  add("r60-popup-reports-its-size",
+    Boolean(above) && Boolean(lastReport) && lastReport.width === above.width && lastReport.height === above.height,
+    JSON.stringify({ reported: reported.slice(-2), panel: above && { width: above.width, height: above.height } }));
 
-  // ③ 浅/深两色：每个控件都可见可点
-  /**
-   * 先选一个自定义颜色再扫：这样「恢复主题色」是**可用**的（没选过色时它是 disabled）。
-   * disabled 的控件拿不到命中测试——那不是"够不着"，是"这一档没有意义"；
-   * 让它可用再量，才是"用户真的能按到它"（与 R50 那条用例同一个处理）。
-   */
+  // ④ 浅/深两色：每个控件都可见可点（先选一个自定义色，让"恢复主题色"可用）
+  await load(null);
   await setColor("#00dd00");
   await page.waitForFunction(() => window.__popupGuard.config().customColor === "#00dd00");
+  const sized = await geometryOf();
+  await page.setViewportSize({ width: sized.width + pad * 2, height: sized.height + pad * 2 });
   for (const theme of ["light", "dark"]) {
     await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
     await page.waitForTimeout(200);
     const controls = await reachability(CONTROLS);
-    add(`r51-popup-controls-reachable-${theme}`,
+    add(`r60-popup-controls-reachable-${theme}`,
       controls.length === CONTROLS.length && controls.every((entry) => entry.found && entry.inViewport && entry.clickable),
       JSON.stringify({ missing: controls.filter((entry) => !entry.found).map((entry) => entry.selector),
         unreachable: controls.filter((entry) => entry.found && !(entry.inViewport && entry.clickable)) }));
-    await page.screenshot({ path: path.join(guardDir, `r51-popup-menu-${theme}.png`) });
   }
   await page.evaluate(() => { document.documentElement.className = "light"; });
   await page.waitForTimeout(150);
 
-  // ④ 改得动：字号（新增）/ 样式 / 方向 / 开关，一条窄命令一次
+  // ⑤ 改得动，且改任一项都关不掉面板
   const c0 = await page.evaluate(() => window.__popupGuard.configureCalls().length);
+  const closes0 = await page.evaluate(() => window.__popupGuard.closeCalls().length);
   await page.getByTestId("lyrics-size-xl").click();
   await page.waitForFunction(() => window.__popupGuard.config().size === "xl");
   const sizeState = await page.evaluate(() => ({
     config: window.__popupGuard.config().size,
-    checked: document.querySelector('[data-testid="lyrics-size-xl"]')?.getAttribute("aria-checked"),
+    state: document.querySelector('[data-testid="lyrics-size-xl"]')?.getAttribute("data-state"),
     calls: window.__popupGuard.configureCalls(),
   }));
-  add("r51-popup-size-applies",
-    sizeState.config === "xl" && sizeState.checked === "true"
+  add("r60-popup-size-applies",
+    sizeState.config === "xl" && sizeState.state === "on"
       && sizeState.calls.length === c0 + 1 && sizeState.calls.at(-1)?.size === "xl",
     JSON.stringify(sizeState));
   await page.getByTestId("lyrics-style-panel").click();
@@ -2842,49 +2919,97 @@ export async function checkLyricsSettingsPopup(page, port, guardDir, add) {
   await page.getByTestId("lyrics-layout-vertical").click();
   await page.waitForFunction(() => window.__popupGuard.config().layout === "vertical");
   const styleLayout = await page.evaluate(() => window.__popupGuard.configureCalls().slice(-2));
-  add("r51-popup-style-layout-apply",
+  add("r60-popup-style-layout-apply",
     styleLayout.at(-2)?.style === "panel" && styleLayout.at(-1)?.layout === "vertical",
     JSON.stringify(styleLayout));
-  const closesBeforeSwitch = await page.evaluate(() => window.__popupGuard.closeCalls().length);
   await page.getByTestId("lyrics-window-enableBlur").click();
   await page.waitForFunction(() => window.__popupGuard.config().enableBlur === false);
-  add("r51-popup-switch-applies", await page.evaluate(() => window.__popupGuard.configureCalls().at(-1)?.enableBlur === false),
+  add("r60-popup-switch-applies", await page.evaluate(() => window.__popupGuard.configureCalls().at(-1)?.enableBlur === false),
     JSON.stringify(await page.evaluate(() => window.__popupGuard.configureCalls().slice(-1))));
-  /**
-   * R52：**开关不该让菜单请求关窗**（菜单项选完会关是 radix 的语义，开关是"点一下不关"那一类）。
-   *
-   * 这条是给真机那条边界兜底的：任务栏模式下"改完外观弹出窗就没了"到底是 Rust 收的还是页面自己
-   * 请求关的，必须能分开——这条量页面这一侧（`core_lyrics_settings_close` 的增量与内容是否还在）。
-   */
-  add("r52-popup-switch-does-not-request-close",
-    await page.evaluate((count) => window.__popupGuard.closeCalls().length, closesBeforeSwitch) === closesBeforeSwitch
+  // 再点一次已选中项（radix 给空串）：什么都不写，也不关面板
+  const callsBeforeDeselect = await page.evaluate(() => window.__popupGuard.configureCalls().length);
+  await page.getByTestId("lyrics-style-panel").click();
+  await page.waitForTimeout(200);
+  add("r60-popup-deselect-writes-nothing",
+    await page.evaluate((count) => window.__popupGuard.configureCalls().length, callsBeforeDeselect) === callsBeforeDeselect
+      && await page.evaluate(() => window.__popupGuard.config().style) === "panel",
+    JSON.stringify({ before: callsBeforeDeselect, calls: await page.evaluate(() => window.__popupGuard.configureCalls()) }));
+  add("r60-popup-changes-do-not-close",
+    await page.evaluate((count) => window.__popupGuard.closeCalls().length, closes0) === closes0
       && await page.getByTestId("lyrics-appearance-panel").count() === 1,
-    JSON.stringify({ closesBeforeSwitch, closes: await page.evaluate(() => window.__popupGuard.closeCalls()) }));
+    JSON.stringify({ closes0, closes: await page.evaluate(() => window.__popupGuard.closeCalls()) }));
 
-  // 五、颜色往返：取色器 → customColor；恢复主题色 → 空串
+  // ⑥ 颜色往返：取色器 → customColor；恢复主题色 → 空串
   await setColor("#00dd00");
   await page.waitForFunction(() => window.__popupGuard.config().customColor === "#00dd00");
   const storedColor = await page.evaluate(() => window.__popupGuard.config().customColor);
   await page.getByTestId("lyrics-appearance-color-reset").click();
   await page.waitForFunction(() => window.__popupGuard.config().customColor === "");
-  add("r51-popup-color-roundtrip", storedColor === "#00dd00"
+  add("r60-popup-color-roundtrip", storedColor === "#00dd00"
     && await page.evaluate(() => window.__popupGuard.configureCalls().some((patch) => patch.customColor === "#00dd00"))
     && await page.evaluate(() => window.__popupGuard.configureCalls().at(-1)?.customColor === ""),
     JSON.stringify({ storedColor, calls: await page.evaluate(() => window.__popupGuard.configureCalls().filter((patch) => "customColor" in patch)) }));
 
-  // 六、Esc：dismiss 回来的是"关窗命令"，页面自己不做主
+  // ⑦ 未设自定义色时色块 = 令牌在当前主题下的真实颜色（与歌词吃的是同一个变量）
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
+    await page.waitForTimeout(300);
+    const actual = await page.evaluate(() => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--foreground)";
+      document.body.appendChild(probe);
+      const css = getComputedStyle(probe).color;
+      probe.remove();
+      return css;
+    });
+    const expected = await pixelHex(actual);
+    const swatch = await page.locator('[data-testid="lyrics-appearance-color"]').inputValue();
+    add(`r60-popup-swatch-follows-theme-${theme}`, swatch === expected,
+      JSON.stringify({ theme, swatch, expected, computed: actual }));
+  }
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await page.waitForTimeout(150);
+
+  // ⑧ Esc：dismiss 回来的是"关窗命令"，页面自己不做主
   const closesBefore = await page.evaluate(() => window.__popupGuard.closeCalls().length);
   await page.keyboard.press("Escape");
   await page.waitForTimeout(200);
-  add("r51-popup-escape-requests-close",
+  add("r60-popup-escape-requests-close",
     await page.evaluate((count) => window.__popupGuard.closeCalls().length > count, closesBefore),
     JSON.stringify(await page.evaluate(() => window.__popupGuard.closeCalls())));
-  // 关窗不许把菜单卸掉（宿主只是 hide：下次显示必须是同一份内容）
-  add("r51-popup-stays-mounted-after-close",
+  // 关窗不许把面板卸掉（宿主只是 hide：下次显示必须是同一份内容）
+  add("r60-popup-stays-mounted-after-close",
     await page.getByTestId("lyrics-appearance-panel").count() === 1,
     "关闭 = 隐藏窗口，页面不重载（open 恒 true，内容不许跟着 dismiss 卸载）");
-}
 
+  /**
+   * ⑨ 截图：浅/深各一张，**箭头指向齿轮**。
+   *
+   * 用 `?bubble=roomy`（留边临时放宽到 48）给"齿轮"留出可见的位置——面板与箭头的关系是同一套规则，
+   * 只是把窗外那块透明留边画出来，好让白色齿轮框落在箭头正上方。
+   */
+  for (const theme of ["light", "dark"]) {
+    await load("roomy");
+    const roomy = await geometryOf();
+    await page.setViewportSize({ width: roomy.width + 96, height: roomy.height + 96 });
+    await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
+    await page.evaluate(() => {
+      const panel = document.querySelector('[data-testid="lyrics-appearance-panel"]').getBoundingClientRect();
+      const arrow = document.querySelector('[data-slot="popover-arrow"]').getBoundingClientRect();
+      const gear = document.createElement("div");
+      gear.dataset.testid = "gear-marker";
+      gear.textContent = "⚙";
+      gear.style.cssText = `position:fixed;display:grid;place-items:center;font-size:16px;`
+        + `left:${Math.round(arrow.left + arrow.width / 2 - 14)}px;top:${Math.round(panel.top - 14 - 28)}px;`
+        + "width:28px;height:28px;border:1px dashed currentColor;border-radius:6px";
+      document.body.appendChild(gear);
+    });
+    await page.waitForTimeout(250);
+    await page.screenshot({ path: path.join(guardDir, `r60-popup-bubble-${theme}.png`) });
+    await page.evaluate(() => document.querySelector('[data-testid="gear-marker"]')?.remove());
+  }
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+}
 
 /** R52：走到 设置 → 歌词（外壳里那一条真实路径）。沉浸页开着就先收起。 */
 async function openSettingsLyricsPane(page) {
@@ -3212,6 +3337,79 @@ export async function checkTaskbarLyricsSettings(page, guardDir, add) {
   await page.evaluate(() => window.__guard.setDesktop(false));
   await page.getByTestId("lyrics-window").waitFor({ state: "detached" });
   await setSupported(false);
+  await page.setViewportSize({ width: 960, height: 600 });
+  await page.waitForTimeout(200);
+}
+
+/**
+ * R60：色块显示的是**当前主题下的真实颜色**（桌面面板与任务栏卡共用一个纯函数）。
+ *
+ * 这一项单独成段：守卫页里壳与歌词窗互斥（`desktop ? <LyricsWindow/> : <LibraryShell/>`），
+ * 而"色块 == 歌词实际颜色"要求两边都读到——先在任务栏歌词窗里用画布取官方播放器真正用的那个
+ * 颜色（独立于渲染层的换算），再回主界面读设置页那张卡的色块，两处必须是同一个十六进制值。
+ */
+export async function checkLyricsColorSwatches(page, guardDir, add) {
+  const CARD = '[data-testid="taskbar-lyrics-card"]';
+  const configure = (patch) => page.evaluate((next) => window.__guard.configureDesktop(next), patch);
+  const setSupported = (value) => page.evaluate((next) => window.__guard.setTaskbarSupported(next), value);
+  /** 官方播放器里探针继承到的颜色 → 画布取像素（与渲染层的换算完全独立）。 */
+  const playerColor = () => page.evaluate(() => {
+    const player = document.querySelector('[data-testid="lyrics-window"] .amll-lyric-player');
+    if (!player) return null;
+    const probe = document.createElement("span");
+    player.appendChild(probe);
+    const css = getComputedStyle(probe).color;
+    probe.remove();
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    context.fillStyle = css;
+    context.fillRect(0, 0, 1, 1);
+    const [r, g, b] = context.getImageData(0, 0, 1, 1).data;
+    return { computed: css, hex: "#" + [r, g, b].map((value) => value.toString(16).padStart(2, "0")).join("") };
+  });
+
+  await page.setViewportSize({ width: 1200, height: 44 });
+  await setSupported(true);
+  await configure({ ...DESKTOP_BASELINE, mode: "taskbar", taskbarColor: "primary", taskbarCustomColor: "",
+    taskbarSize: "txxl", taskbarKaraoke: true });
+  await page.evaluate(() => window.__guard.setDesktop(true));
+  await page.getByTestId("lyrics-window").waitFor();
+  await page.waitForTimeout(500);
+  await page.evaluate(() => window.__guard.desktopDocument());
+  await page.waitForTimeout(250);
+
+  const actual = {};
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
+    await page.waitForTimeout(300);
+    actual[theme] = await playerColor();
+  }
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await page.evaluate(() => window.__guard.setDesktop(false));
+  await page.getByTestId("lyrics-window").waitFor({ state: "detached" });
+  await page.setViewportSize({ width: 960, height: 720 });
+  await openSettingsLyricsPane(page);
+  await page.locator(CARD).waitFor();
+  await page.waitForTimeout(300);
+
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
+    await page.waitForTimeout(350);
+    const swatch = await page.locator("#taskbar-lyrics-custom-color").inputValue();
+    add(`r60-taskbar-swatch-follows-theme-${theme}`,
+      actual[theme] !== null && swatch === actual[theme].hex,
+      JSON.stringify({ theme, swatch, expected: actual[theme] && actual[theme].hex, computed: actual[theme] && actual[theme].computed }));
+    await page.locator(CARD).screenshot({ path: path.join(guardDir, `r60-taskbar-swatch-${theme}.png`) })
+      .catch(async () => { await page.screenshot({ path: path.join(guardDir, `r60-taskbar-swatch-${theme}.png`) }); });
+  }
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await page.waitForTimeout(150);
+
+  // 收尾：能力复位、回桌面基线（后面的用例从干净状态开始）
+  await setSupported(false);
+  await configure({ ...DESKTOP_BASELINE });
   await page.setViewportSize({ width: 960, height: 600 });
   await page.waitForTimeout(200);
 }
@@ -4652,6 +4850,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     await checked("r52-settings-page-lyrics-pane", () => checkSettingsPageLyricsCard(page, guardDir, add));
     /** R59：任务栏歌词的独立外观（设置页那张卡 → 任务栏歌词窗的实际渲染）。 */
     await checked("r59-taskbar-lyrics-settings", () => checkTaskbarLyricsSettings(page, guardDir, add));
+    /** R60：色块显示主题下的真实颜色（与歌词窗里实际用到的颜色逐个主题对上）。 */
+    await checked("r60-lyrics-color-swatches", () => checkLyricsColorSwatches(page, guardDir, add));
     /** R56：设置页「日志」标签（日志文件条目 + 级别标识 + 筛选 + 脱敏 + 空态）。 */
     await checked("r56-settings-log-pane", () => checkSettingsLogPane(page, guardDir, add));
     await checked("r52-immersive-lyrics-color-fixed", () => checkImmersiveLyricsColorIsFixed(page, guardDir, add));
@@ -4726,7 +4926,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
      * R51：设置弹出窗那一页（真组件 + 真产物 CSS）。用**另一页**跑：它会改 viewport 与主题类，
      * 而主页面后面还有几项要用当前的桌面窗状态。
      */
-    await checked("r51-lyrics-settings-popup", async () => {
+    await checked("r60-lyrics-settings-popup", async () => {
       const popupPage = await browser.newPage({ viewport: { width: 420, height: 720 }, colorScheme: "light" });
       popupPage.setDefaultTimeout(15_000);
       popupPage.on("console", (message) => { if (message.type() === "error") consoleErrors.push(`[popup] ${message.text()}`); });

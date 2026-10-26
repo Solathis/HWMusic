@@ -1754,7 +1754,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `CORE_LYRICS_TOGGLE` / `_CONFIGURE` / `_CONTROL` / `_DOCUMENT` / `_PROGRESS` | `core_lyrics_*` 五条具名命令 | `src/shared/commands.ts` | 名字、Rust 注册、来源守卫与最小 capability 一次补齐 |
 | `LYRICS_WINDOW_LABEL` | `"lyrics"` | `src-tauri/src/lib.rs` | 歌词窗 label、来源守卫、window-state 与几何接管 |
 | `TASKBAR_SIZE` / `DESKTOP_SIZE` / `DESKTOP_VERTICAL_SIZE` / `DESKTOP_LIFT` | `1200×44` / `800×128` / `260×520` / `120` DIP | `src-tauri/src/lyrics_window.rs` | R51 收紧桌面默认尺寸；按 scale 与工作区夹限（最小 240×120 不变） |
-| `LYRICS_SETTINGS_WINDOW_LABEL` / `CORE_LYRICS_SETTINGS_OPEN` / `_RESIZE` / `_CLOSE` | `"lyrics-settings"` / `core_lyrics_settings_*` 三条命令 | `src-tauri/src/lib.rs` ↔ `src/shared/commands.ts` | R51：设置弹出窗（独立小窗；尺寸/位置/关闭全由 Rust 定，窗口没有任何 window 权限） |
+| `LYRICS_SETTINGS_WINDOW_LABEL` / `CORE_LYRICS_SETTINGS_OPEN` / `_RESIZE` / `_CLOSE` | `"lyrics-settings"` / `core_lyrics_settings_*` 三条命令 | `src-tauri/src/lib.rs` ↔ `src/shared/commands.ts` | R51：设置弹出窗（独立小窗；尺寸/位置/关闭全由 Rust 定，窗口没有任何 window 权限）。R60 起回执多一个 `geometry: { side: "bottom"\|"top", arrow, pad }`（CSS 像素）：`_RESIZE` 与已量过尺寸的 `_OPEN` 都带，页面按它摆箭头 |
 | `LYRICS_FONT_STEPS` / `TASKBAR_MAX_FONT_PX` | `sm16/md20/lg28/xl40/xxl56` / `20` | `src/renderer/features/lyrics/lyrics-window.mjs` ↔ `src-tauri/src/lyrics_window.rs` | R12：字号档位与任务栏模式上限（两侧一张表，由 `test/lyrics-window.test.mjs` 逐条钉住；CSS 的 rem 规则在 `amll-theme.css`） |
 | `LYRICS_COLOR_TOKENS` | `foreground`/`muted`/`primary`/`contrast` | 同上（TS 为真源、Rust 为镜像） | R12：歌词颜色的令牌档位（只认设计令牌，绝不接受任意色值） |
 | `MIN_PROGRESS_INTERVAL_MS` | `100` | `src/renderer/features/lyrics/lyrics-window.mjs` | R12：进度节流窗口（rAF 每帧调 `pushProgress`，只有该推的才出 IPC） |
