@@ -406,9 +406,10 @@ test("R41b 侧栏：collapsible=icon + 导航 tooltip + 窄轨里搜索只剩一
   assert.match(app, /data-testid="sidebar-search-rail"/, "窄轨里必须留一枚搜索图标按钮（入口不能消失）");
   assert.match(app, /sidebar\.setOpen\(true\)/, "点它先展开侧栏（然后光标才落得到输入框上）");
   assert.match(app, /searchInputRef\.current\?\.focus\(\)/, "展开后把光标交给输入框（用户点的是「搜索」）");
-  // 账号区在窄轨里竖排、名字与 VIP 徽标隐藏（三个图标在 32px 宽的轨道里横着放不下）
-  assert.match(app, /group-data-\[collapsible=icon\]:flex-col/, "窄轨里账号区竖排");
-  assert.match(app, /group-data-\[collapsible=icon\]:hidden/, "窄轨里名字/徽标隐藏（官方 SidebarGroupLabel 同款做法）");
+  // R57：窄轨里账号区**只留头像**（R41b 的"竖排三个图标"作废：48px 轨道里塞不下，也不再塞）
+  assert.match(app, /group-data-\[collapsible=icon\]:justify-center/, "窄轨里账号区居中放那一个头像");
+  assert.match(app, /group-data-\[collapsible=icon\]:hidden/, "窄轨里名字/徽标/主题/退出隐藏");
+  assert.doesNotMatch(app, /group-data-\[collapsible=icon\]:flex-col/, "不再把三个图标竖排进窄轨（R57 改成只剩头像）");
 });
 
 /**

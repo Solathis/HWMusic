@@ -611,9 +611,220 @@ export function startupHarnessHtml() {
 }
 
 /**
+ * R57：左下角账号区的**真浏览器**验收页（独立入口，挂的是真 `App`）。
+ *
+ * 四种状态由查询串给（`?variant=`）：`profile`（有名字+能加载的头像）、`empty`（老会话，
+ * 载荷里没有 profile）、`vip`（会员 + 到期日 + **坏头像**，同时验首字回退）、
+ * `collapsed`（`?variant=profile&collapsed=1`，侧栏窄轨）。
+ *
+ * 夹具里的名字是编的长名字：它必须长到被 `truncate` 切掉，否则"悬停看全名"这件事测不出来。
+ */
+export function accountHarnessSource() {
+  return `import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
+import { emit } from "@tauri-apps/api/event";
+
+import { App } from "../../src/renderer/App.tsx";
+
+const LONG_NAME = "听歌的人间观察员一二三四五六七八九十";
+const AVATAR_OK = "https://music.dbankcdn.cn/guard-avatar.png";
+const AVATAR_BROKEN = "https://music.dbankcdn.cn/guard-avatar-broken.png";
+const params = new URLSearchParams(location.search);
+const variant = params.get("variant") ?? "profile";
+const PROFILES = {
+  profile: { userName: LONG_NAME, avatarUrl: AVATAR_OK },
+  empty: null,
+  vip: { userName: LONG_NAME, avatarUrl: AVATAR_BROKEN, vip: true, vipExpiresOn: "20261231235959" },
+};
+const profile = PROFILES[variant] === undefined ? PROFILES.profile : PROFILES[variant];
+window.__accountGuard = { variant, longName: LONG_NAME, avatarOk: AVATAR_OK, avatarBroken: AVATAR_BROKEN };
+window.__noop = () => {};
+
+mockWindows("main");
+mockIPC(async (command, args) => {
+  if (command === "core_renderer_ready") return 0;
+  if (command === "core_get_tray_available") return false;
+  if (command === "core_login_chrome") return { theme: "light" };
+  if (command === "core_lyrics_configure") return { config: {}, revision: 0, visible: false };
+  if (command === "core_lyrics_toggle") return { config: {}, revision: 0, visible: false };
+  if (command === "core_lyrics_document") return emit("core:event", { channel: "lyrics:document", payload: args.document });
+  if (command === "core_call") {
+    switch (args.channel) {
+      case "auth:get-status":
+        return profile === null ? { loggedIn: true, busy: false } : { loggedIn: true, busy: false, profile };
+      case "auth:cancel-qr": return { cancelled: true };
+      case "settings:get": return { settings: { schemaVersion: 1, data: {} } };
+      case "library:favorites": return { songs: [], hasMore: false, skipped: 0, reportedTotal: 0 };
+      case "library:playlists": return { playlists: [], hasMore: false };
+      // 这一页只量账号区：其余频道给空答案，别让背景请求把控制台刷满
+      default: return null;
+    }
+  }
+  return null;
+}, { shouldMockEvents: true });
+
+createRoot(document.getElementById("root")).render(<StrictMode><App /></StrictMode>);
+`;
+}
+
+/** 账号区守卫页面（生成物，不入库）。 */
+export function accountHarnessHtml() {
+  return `<!doctype html>
+<html lang="zh-CN" class="light">
+  <head>
+    <meta charset="utf-8" />
+    <title>账号区浏览器守卫</title>
+    <link rel="stylesheet" href="./app.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./account.js"></script>
+  </body>
+</html>
+`;
+}
+
+/**
+ * R57：左下角账号区四态的验收（有资料 / 无资料 / 有会员到期 / 窄轨只剩头像）。
+ *
+ * 判据只看**DOM 事实**：有没有头像 `<img>`、是不是首字兜底、名字是否真被截断、
+ * 悬停是否给出全名、会员徽标文案、窄轨里除了头像还剩什么。四种状态各留一张截图。
+ */
+export async function checkAccountArea(page, port, guardDir, add) {
+  const area = '[data-testid="account-area"]';
+  const sidebar = '[data-slot="sidebar-container"]';
+
+  /** 头像那张图的加载结果（`<img>` 不存在 = 走兜底）。 */
+  const avatarState = () =>
+    page.evaluate((selector) => {
+      const root = document.querySelector(selector);
+      const image = root?.querySelector('[data-testid="account-avatar"] img');
+      const fallback = root?.querySelector('[data-testid="account-avatar"] [data-slot="avatar-fallback"]');
+      return {
+        src: image?.getAttribute("src") ?? null,
+        naturalWidth: image?.naturalWidth ?? 0,
+        fallbackText: (fallback?.textContent ?? "").trim(),
+        fallbackHasIcon: Boolean(fallback?.querySelector("svg")),
+      };
+    }, area);
+
+  const accountFacts = () =>
+    page.evaluate((selector) => {
+      const root = document.querySelector(selector);
+      const name = root?.querySelector('[data-testid="account-name"]');
+      const vip = root?.querySelector('[data-testid="account-vip"]');
+      const visible = (node) => Boolean(node && node.getClientRects().length > 0);
+      return {
+        name: (name?.textContent ?? "").trim(),
+        nameVisible: visible(name),
+        nameTruncated: Boolean(name && name.scrollWidth > name.clientWidth + 1),
+        vip: (vip?.textContent ?? "").trim(),
+        vipVisible: visible(vip),
+        avatarVisible: visible(root?.querySelector('[data-testid="account-avatar"]')),
+        themeVisible: visible(root?.querySelector('[data-testid="theme-toggle"]')),
+        logoutVisible: visible(root?.querySelector('button[aria-label="退出登录"]')),
+      };
+    }, area);
+
+  /** 账号区本身的特写（审阅看的就是这一块）；另留一张整条侧栏的定位图。 */
+  const shot = async (file, contextFile) => {
+    await page.locator(area).screenshot({ path: path.join(guardDir, file) });
+    if (contextFile === undefined) return;
+    const box = await page.locator(sidebar).boundingBox();
+    await page.screenshot(box === null ? { path: path.join(guardDir, contextFile) } : { clip: box, path: path.join(guardDir, contextFile) });
+  };
+
+  const open = async (query) => {
+    await page.goto(`http://127.0.0.1:${port}/account.html${query}`, { waitUntil: "load" });
+    await page.getByTestId("account-area").waitFor();
+    await page.waitForTimeout(300);
+  };
+
+  // ——— ① 有资料：头像真的画出来，名字被截断，悬停给全名 ———
+  await open("?variant=profile");
+  await page.waitForFunction(() => {
+    const image = document.querySelector('[data-testid="account-avatar"] img');
+    return image !== null && image.naturalWidth > 0;
+  }, null, { timeout: 10_000 });
+  const withProfile = { avatar: await avatarState(), facts: await accountFacts() };
+  add(
+    "r57-account-profile-avatar",
+    withProfile.avatar.src?.endsWith("/guard-avatar.png") === true &&
+      withProfile.avatar.naturalWidth > 0 &&
+      withProfile.facts.name !== "" &&
+      withProfile.facts.name !== "已登录",
+    JSON.stringify(withProfile),
+  );
+  add("r57-account-name-truncated", withProfile.facts.nameTruncated, JSON.stringify(withProfile.facts));
+  await page.getByTestId("account-name").hover();
+  const tooltip = page.getByRole("tooltip");
+  await tooltip.waitFor({ timeout: 5_000 });
+  const fullName = (await tooltip.textContent())?.trim() ?? "";
+  const expectedName = await page.evaluate(() => window.__accountGuard.longName);
+  add("r57-account-name-tooltip", fullName === expectedName, JSON.stringify({ fullName: fullName.length, expected: expectedName.length }));
+  await shot("r57-account-profile.png", "r57-account-profile-sidebar.png");
+
+  // ——— ② 无资料（旧会话）：兜底"已登录" + 图标占位，徽标一个都不许有 ———
+  await open("?variant=empty");
+  const empty = { avatar: await avatarState(), facts: await accountFacts() };
+  add(
+    "r57-account-empty-fallback",
+    empty.facts.name === "已登录" &&
+      empty.avatar.src === null &&
+      empty.avatar.fallbackHasIcon &&
+      empty.avatar.fallbackText === "" &&
+      empty.facts.vipVisible === false,
+    JSON.stringify(empty),
+  );
+  await shot("r57-account-empty.png");
+
+  // ——— ③ 会员 + 到期日 + 坏头像：徽标写全日期，头像回退首字 ———
+  await open("?variant=vip");
+  await page.waitForFunction(() => {
+    const fallback = document.querySelector('[data-testid="account-avatar"] [data-slot="avatar-fallback"]');
+    return (fallback?.textContent ?? "").trim() !== "";
+  }, null, { timeout: 10_000 });
+  const vip = { avatar: await avatarState(), facts: await accountFacts() };
+  add("r57-account-vip-expiry", vip.facts.vip === "会员 · 至 2026-12-31" && vip.facts.vipVisible, JSON.stringify(vip.facts));
+  add("r57-account-avatar-letter-fallback", vip.avatar.fallbackText === "听", JSON.stringify(vip.avatar));
+  await shot("r57-account-vip-expiry.png");
+
+  // ——— ④ 窄轨：只剩头像（名字/徽标/主题/退出都不在画面上） ———
+  await open("?variant=profile");
+  // 收起只有一条真路：点侧栏那枚开关（provider 不读 cookie，只写 cookie）
+  await page.locator('[data-slot="sidebar-trigger"]').click();
+  await page.waitForFunction(() => {
+    const name = document.querySelector('[data-testid="account-name"]');
+    return name !== null && name.getClientRects().length === 0;
+  }, null, { timeout: 10_000 });
+  await page.waitForTimeout(300);
+  const collapsed = await accountFacts();
+  add(
+    "r57-account-collapsed-avatar-only",
+    collapsed.avatarVisible === true &&
+      collapsed.nameVisible === false &&
+      collapsed.vipVisible === false &&
+      collapsed.themeVisible === false &&
+      collapsed.logoutVisible === false,
+    JSON.stringify(collapsed),
+  );
+  await shot("r57-account-collapsed.png", "r57-account-collapsed-sidebar.png");
+
+  // ——— ⑤ 展开态的两个入口仍在（主题切换 / 退出登录） ———
+  await open("?variant=profile");
+  const entry = {
+    theme: await page.locator('[data-testid="account-area"] [data-testid="theme-toggle"]').count(),
+    logout: await page.locator('[data-testid="account-area"] button[aria-label="退出登录"]').count(),
+  };
+  add("r57-account-controls-kept", entry.theme === 1 && entry.logout === 1, JSON.stringify(entry));
+}
+
+/**
  * R45A1（复审）：启动三态的**真浏览器**行为验收。
  *
  * 钉六件事：
+
  * 1. 首帧（`checking`，状态查询还没落地）**没有**登录页/二维码/任何按钮；
  * 2. 查询失败之后仍是中性启动屏：没有 LoginGate/二维码，但原因、重试、网页登录都在；
  * 3. 点「重新检查登录状态」= **真的再发一次 `auth:get-status`**（计数 +1），
@@ -3575,6 +3786,22 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     logLevel: "warning",
   });
   if (builtPopup.errors.length > 0) throw new Error(`弹出窗守卫页面构建失败：${JSON.stringify(builtPopup.errors)}`);
+  // R57：账号区四态那一页（挂真 App，IPC 只给门禁与空列表）
+  await writeFile(path.join(guardDir, "account.tsx"), accountHarnessSource(), "utf8");
+  const builtAccount = await esbuild.build({
+    absWorkingDir: root,
+    entryPoints: [`${GUARD_DIR}/account.tsx`],
+    outfile: `${GUARD_DIR}/account.js`,
+    bundle: true,
+    format: "esm",
+    platform: "browser",
+    target: "chrome120",
+    jsx: "automatic",
+    loader: { ".css": "css", ".png": "dataurl", ".svg": "dataurl" },
+    define: { "process.env.NODE_ENV": '"production"' },
+    logLevel: "warning",
+  });
+  if (builtAccount.errors.length > 0) throw new Error(`账号区守卫页面构建失败：${JSON.stringify(builtAccount.errors)}`);
   const hasCss = existsSync(path.join(guardDir, "guard.css"));
 
   // 真样式：把渲染层产物里的 CSS 合成一份喂给守卫页面（没样式就没有布局，见 collectRendererCss）
@@ -3598,6 +3825,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
   await writeFile(path.join(guardDir, "index.html"), harnessHtml(true), "utf8");
   await writeFile(path.join(guardDir, "startup.html"), startupHarnessHtml(), "utf8");
   await writeFile(path.join(guardDir, "lyrics-settings.html"), lyricsSettingsHarnessHtml(), "utf8");
+  await writeFile(path.join(guardDir, "account.html"), accountHarnessHtml(), "utf8");
   log(`样式：${cssFiles.map((file) => path.relative(root, file)).join("、")}（${css.length} 字符）`);
 
   const rendererProduct = path.join(root, "out/renderer/index.html");
@@ -4132,6 +4360,25 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     });
     /** R66b：主内容区宽度。会遍历各主页面并切换窗口尺寸，所以排在倒数第二（下一项自己 goto）。 */
     await checked("r66b-page-fill", () => checkPageFill(page, guardDir, add));
+    /** R57：账号区四态（另一页，挂真 App；头像的两种结局都用 page.route 造出来）。 */
+    await checked("r57-account-area", async () => {
+      const accountPage = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light", deviceScaleFactor: 2 });
+      accountPage.setDefaultTimeout(15_000);
+      accountPage.on("console", (message) => { if (message.type() === "error") consoleErrors.push(`[account] ${message.text()}`); });
+      accountPage.on("pageerror", (error) => pageErrors.push(`[account] ${error.message}`));
+      const avatar = await sharp({ create: { width: 128, height: 128, channels: 3, background: { r: 90, g: 150, b: 210 } } }).png().toBuffer();
+      await accountPage.route("https://music.dbankcdn.cn/guard-avatar.png", (route) => route.fulfill({
+        contentType: "image/png", body: avatar, headers: { "access-control-allow-origin": "*" },
+      }));
+      await accountPage.route("https://music.dbankcdn.cn/guard-avatar-broken.png", (route) => route.fulfill({
+        status: 200, contentType: "image/png", body: Buffer.from("invalid image"), headers: { "access-control-allow-origin": "*" },
+      }));
+      try {
+        await checkAccountArea(accountPage, port, guardDir, add);
+      } finally {
+        await accountPage.close();
+      }
+    });
     /** R45C：没有 lyrics binding 的挂载点（另一页，见 checkNoBindingSurface 的说明）。 */
     await checkNoBindingSurface(page, port, add);
     add("no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,

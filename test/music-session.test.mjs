@@ -231,6 +231,17 @@ test("profile：会话记录里的 profile 只搬那三个键（旧会话没有�
   assert.equal(profileOfSessionRecord({ profile: { vip: false } }), null, "只有 false 等于什么都没认出来");
 });
 
+test("R57 会员到期：记录里只有合法到期才会跟着载荷出去（非法值当没有，不编日期）", () => {
+  // 会话记录里这一格是本项目自己的字段（不是服务端键名）：写进去就必须是能显示的那一天
+  for (const raw of ["2026-12-31", "20261231235959", "20261231"]) {
+    assert.equal(profileOfSessionRecord({ profile: { vip: true, vipExpiresOn: raw } }).vipExpiresOn, "2026-12-31", raw);
+  }
+  for (const bad of ["", "  ", "soon", "2026-13-01", "2026-02-30", 20261231, null, {}, true]) {
+    assert.equal(profileOfSessionRecord({ profile: { vip: true, vipExpiresOn: bad } }).vipExpiresOn, undefined, JSON.stringify(bad));
+  }
+  assert.deepEqual(profileOfSessionRecord({ profile: { vipExpiresOn: "2026-12-31" } }), { vipExpiresOn: "2026-12-31" }, "没有 vip 也照搬（到期日自己说明会员身份）");
+});
+
 test("诊断：顶层键名日志只给键名（排序、限量），值一个都不出现", async () => {
   const logged = [];
   const { impl } = fakeFetch({

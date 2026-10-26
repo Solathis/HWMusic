@@ -20,12 +20,16 @@ import {
   ACCOUNT_LOGOUT_DESCRIPTION,
   ACCOUNT_LOGOUT_FAILED_TEXT,
   ACCOUNT_LOGOUT_TITLE,
+  accountAvatarFallbackText,
   accountAvatarUrl,
+  accountFullName,
   accountIsVip,
   accountLogoutFailureText,
   accountNameText,
+  accountVipText,
   profileFromStatusPayload,
 } from "../src/renderer/features/auth/account.mjs";
+import { normalizeVipExpiry } from "../src/shared/vip-expiry.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const read = (relative) => readFileSync(`${repoRoot}${relative}`, "utf8");
@@ -93,11 +97,80 @@ test("接线：资料与登录状态来自同一份载荷；账号区只用这�
   assert.doesNotMatch(gate, /\.userId\b/, "userId 不是给人看的（不显示账号标识）");
 
   const app = read("src/renderer/App.tsx");
-  for (const helper of ["accountNameText(", "accountAvatarUrl(", "accountIsVip(", "accountLogoutFailureText("]) {
+  for (const helper of ["accountNameText(", "accountAvatarUrl(", "accountVipText(", "accountLogoutFailureText("]) {
     assert.match(app, new RegExp(helper.replace("(", "\\(")), `账号区要用纯逻辑模块的 ${helper}）`);
   }
   assert.match(app, /data-testid=\{ACCOUNT_AREA_TESTID\}/, "账号区要有测试锚点（CDP 取证也靠它）");
   assert.match(app, /data-testid=\{ACCOUNT_VIP_TESTID\}/, "VIP 徽标要有锚点");
-  // 徽标只在为真时渲染（不是靠 CSS 藏起来）
-  assert.match(app, /\{accountVip \?/, "VIP 徽标由 accountIsVip 的结论决定");
+  // 徽标只在有会员事实时渲染（不是靠 CSS 藏起来）
+  assert.match(app, /accountVipText/, "会员徽标由 accountVipText 的结论决定");
+});
+
+/* ------------------------------------------------------------------ R57 */
+
+test("R57 到期时间：只认「能显示成某一天」的形状，其余一律当没有（不编日期）", () => {
+  for (const [input, expected] of [
+    ["2026-12-31", "2026-12-31"],
+    [" 2026-12-31 ", "2026-12-31"],
+    ["20261231", "2026-12-31"],
+    ["20261231235959", "2026-12-31"],
+    ["2026-12-31T23:59:59Z", "2026-12-31"],
+    ["2026-12-31 23:59:59", "2026-12-31"],
+  ]) {
+    assert.equal(normalizeVipExpiry(input), expected, input);
+  }
+  for (const bad of [null, undefined, "", "   ", "soon", "2026-13-01", "2026-02-30", "0000-00-00", 20261231, true, {}, []]) {
+    assert.equal(normalizeVipExpiry(bad), null, JSON.stringify(bad) ?? String(bad));
+  }
+});
+
+test("R57 会员徽标文案：没有会员事实就不显示；有到期日才写成「会员 · 至 …」", () => {
+  assert.equal(accountVipText(null), null);
+  assert.equal(accountVipText({}), null);
+  assert.equal(accountVipText({ vip: false }), null);
+  assert.equal(accountVipText({ vip: true }), "会员");
+  assert.equal(accountVipText({ vip: true, vipExpiresOn: "2026-12-31" }), "会员 · 至 2026-12-31");
+  assert.equal(accountVipText({ vipExpiresOn: "2026-12-31" }), "会员 · 至 2026-12-31", "有到期日本身就说明是会员");
+  assert.equal(accountVipText({ vip: true, vipExpiresOn: "坏值" }), "会员", "到期日认不出就只说会员");
+  assert.equal(accountIsVip({ vipExpiresOn: "2026-12-31" }), true);
+});
+
+test("R57 头像兜底：有名字就取首字（拉丁字母大写），没名字就交给图标占位", () => {
+  assert.equal(accountAvatarFallbackText({ userName: "听歌的人" }), "听");
+  assert.equal(accountAvatarFallbackText({ userName: "alice" }), "A");
+  assert.equal(accountAvatarFallbackText({ userName: "  alice  " }), "A");
+  assert.equal(accountAvatarFallbackText({ userName: "🎵听歌" }), "🎵", "按码点取，不把代理对切坏");
+  assert.equal(accountAvatarFallbackText(null), null);
+  assert.equal(accountAvatarFallbackText({}), null);
+  assert.equal(accountAvatarFallbackText({ userName: "   " }), null);
+  assert.equal(accountFullName({ userName: "听歌的人" }), "听歌的人", "悬停显示的是全名");
+  assert.equal(accountFullName(null), null, "兜底那句「已登录」不值得悬停（没有更多信息）");
+  assert.equal(accountFullName({}), null);
+});
+
+test("R57 载荷：到期时间跟着 profile 一起进来（旧载荷没有这一格照旧能认）", () => {
+  assert.deepEqual(
+    profileFromStatusPayload({ profile: { userName: "名字", vip: true, vipExpiresOn: "20261231", userId: "SNS-1" } }),
+    { userName: "名字", vip: true, vipExpiresOn: "2026-12-31" },
+  );
+  assert.deepEqual(profileFromStatusPayload({ profile: { vip: true, vipExpiresOn: "坏值" } }), { vip: true }, "坏值丢弃，不丢 vip");
+  assert.deepEqual(profileFromStatusPayload({ profile: { vipExpiresOn: "2026-12-31" } }), { vipExpiresOn: "2026-12-31" });
+});
+
+test("R57 接线：账号区用官方组件（头像可回退、名称截断+悬停全名、徽标用 Badge、折叠只剩头像）", () => {
+  const app = read("src/renderer/App.tsx");
+  // 头像：图片 + 兜底两档都在（图片挂了要落到首字/图标）
+  assert.match(app, /<AvatarImage/, "头像走 AvatarImage");
+  assert.match(app, /ACCOUNT_AVATAR_TESTID/, "头像要有锚点");
+  assert.match(app, /accountAvatarFallbackText\(/, "兜底用 accountAvatarFallbackText");
+  // 名称：截断 + 悬停显示全名（Tooltip 是官方组件）
+  assert.match(app, /accountFullName\(/, "悬停全名来自 accountFullName");
+  assert.match(app, /<TooltipTrigger asChild>[\s\S]{0,400}?ACCOUNT_NAME_TESTID/, "名称悬停提示用 Tooltip");
+  assert.match(app, /truncate/, "名称要截断");
+  // 会员：官方 Badge 承载文案
+  assert.match(app, /const accountVipLabel = accountVipText\(profile\)/, "徽标文案来自 accountVipText");
+  assert.match(app, /accountVipLabel === null \? null : \(/, "没有会员事实就不渲染徽标");
+  assert.match(app, /<Badge/, "会员标识用 Badge");
+  // 折叠成图标时只剩头像（名字那一列、主题、退出一起藏）
+  assert.match(app, /group-data-\[collapsible=icon\]:hidden">\s*\{accountFullNameText/, "名字整列在窄轨里隐藏");
 });

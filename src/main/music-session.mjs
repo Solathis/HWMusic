@@ -32,6 +32,7 @@ import { randomBytes } from "node:crypto";
 
 import { err, ok } from "../shared/result.ts";
 import { isSafeMediaUrl } from "../protocols/safe-media-url.mjs";
+import { normalizeVipExpiry } from "../shared/vip-expiry.mjs";
 
 /** 音乐业务域（公开契约 §1"业务域"）。 */
 export const HUAWEI_MUSIC_BASE = "https://api-drcn.music.dbankcloud.cn";
@@ -373,6 +374,9 @@ export function profileOfSessionRecord(value) {
   const avatarUrl = textOf(raw.avatarUrl);
   if (avatarUrl !== null) profile.avatarUrl = avatarUrl;
   if (raw.vip === true) profile.vip = true;
+  // R57：到期日是本项目自己的字段（不是服务端键名），只搬**认得出那一天**的值
+  const vipExpiresOn = normalizeVipExpiry(raw.vipExpiresOn);
+  if (vipExpiresOn !== null) profile.vipExpiresOn = vipExpiresOn;
   return Object.keys(profile).length === 0 ? null : profile;
 }
 

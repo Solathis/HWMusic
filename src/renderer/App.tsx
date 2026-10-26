@@ -25,7 +25,6 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
-  CrownIcon,
   HistoryIcon,
   HeartIcon,
   ListMusicIcon,
@@ -52,6 +51,7 @@ import {
   AlertDialogTrigger,
 } from "./components/ui/alert-dialog"
 import { Avatar, AvatarFallback, AvatarImage } from "./components/ui/avatar"
+import { Badge } from "./components/ui/badge"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "./components/ui/sheet"
 import {
   Sidebar,
@@ -70,7 +70,7 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "./components/ui/sidebar"
-import { TooltipProvider } from "./components/ui/tooltip"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
 import { EmptyState, PlayerBar, QueuePanel } from "./components"
 import { PlaybackStage } from "./playback-stage.tsx"
 import { ThemeToggle } from "./theme-toggle.tsx"
@@ -88,17 +88,19 @@ import {
 import { STARTUP_VIEW, startupViewOf } from "./features/auth/startup-view.mjs"
 import {
   ACCOUNT_AREA_TESTID,
+  ACCOUNT_AVATAR_TESTID,
   ACCOUNT_LOGOUT_CANCEL,
   ACCOUNT_LOGOUT_CONFIRM,
   ACCOUNT_LOGOUT_DESCRIPTION,
   ACCOUNT_LOGOUT_TITLE,
   ACCOUNT_NAME_TESTID,
-  ACCOUNT_VIP_LABEL,
   ACCOUNT_VIP_TESTID,
+  accountAvatarFallbackText,
   accountAvatarUrl,
-  accountIsVip,
+  accountFullName,
   accountLogoutFailureText,
   accountNameText,
+  accountVipText,
 } from "./features/auth/account.mjs"
 import { usePlayer } from "./features/playback/use-player.ts"
 import { useLyricsWindow } from "./use-lyrics-window.ts"
@@ -406,10 +408,12 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
     [runtime],
   )
 
-  /** 账号资料的三项投影（缺什么兜什么，绝不编：见 features/auth/account.mjs）。 */
+  /** 账号资料的四项投影（缺什么兜什么，绝不编：见 features/auth/account.mjs）。 */
   const accountName = accountNameText(profile)
   const accountAvatar = accountAvatarUrl(profile)
-  const accountVip = accountIsVip(profile)
+  const accountInitial = accountAvatarFallbackText(profile)
+  const accountFullNameText = accountFullName(profile)
+  const accountVipLabel = accountVipText(profile)
 
   /**
    * 退出登录（R38 从设置页搬到这里）。
@@ -508,43 +512,55 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
         </SidebarContent>
         <SidebarFooter>
           {/*
-            账号区（R38）：头像 + 名字 + VIP 徽标 + 主题 + 退出登录。
-            资料来自 `auth:status` 载荷的可选 `profile`（门禁那一层解析后交下来）——
-            旧会话没有 profile 时这里显示兜底（头像占位 + "已登录"），**不造假数据**。
-            退出走 `AlertDialog` 二次确认：误触的代价是重新扫码。
-
-            R41b：主题那枚纯图标按钮挂在「退出登录」**左边**（`ml-auto` 把两个按钮一起推到右端），
-            窄轨里账号区改成竖排（三个 24~28px 的图标在 32px 宽的轨道里横着放不下）——
-            名字与 VIP 徽标在窄轨里隐藏（官方 `SidebarGroupLabel` 同款做法：收起时 `hidden`）。
+            账号区（R38/R57）：头像 + 名字（悬停全名）+ 会员徽标 + 主题 + 退出登录。
+            资料来自 `auth:status` 的可选 `profile`；没有资料就是兜底（图标 + "已登录"），不造假。
+            窄轨里只留头像：名字/徽标/主题/退出一起隐藏。
           */}
           <div
-            className="flex flex-wrap items-center gap-2 px-1 py-0.5 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:gap-1 group-data-[collapsible=icon]:px-0"
+            className="flex items-center gap-2 px-1 py-0.5 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0"
             data-testid={ACCOUNT_AREA_TESTID}
           >
-            <Avatar size="sm">
+            <Avatar size="sm" data-testid={ACCOUNT_AVATAR_TESTID}>
               {accountAvatar === null ? null : <AvatarImage src={accountAvatar} alt="" />}
               <AvatarFallback>
-                <UserIcon className="size-3.5" />
+                {accountInitial === null ? (
+                  <UserIcon className="size-3.5" />
+                ) : (
+                  <span className="text-xs font-medium">{accountInitial}</span>
+                )}
               </AvatarFallback>
             </Avatar>
-            <span
-              className="min-w-0 truncate text-sm group-data-[collapsible=icon]:hidden"
-              data-testid={ACCOUNT_NAME_TESTID}
-            >
-              {accountName}
-            </span>
-            {accountVip ? (
-              <CrownIcon
-                className="size-3.5 shrink-0 text-muted-foreground group-data-[collapsible=icon]:hidden"
-                aria-label={ACCOUNT_VIP_LABEL}
-                data-testid={ACCOUNT_VIP_TESTID}
-              />
-            ) : null}
+            <div className="flex min-w-0 flex-1 flex-col group-data-[collapsible=icon]:hidden">
+              {accountFullNameText === null ? (
+                <span className="min-w-0 truncate text-sm" data-testid={ACCOUNT_NAME_TESTID}>
+                  {accountName}
+                </span>
+              ) : (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="min-w-0 truncate text-sm" data-testid={ACCOUNT_NAME_TESTID}>
+                      {accountName}
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">{accountFullNameText}</TooltipContent>
+                </Tooltip>
+              )}
+              {accountVipLabel === null ? null : (
+                <Badge variant="secondary" className="mt-0.5 w-fit" data-testid={ACCOUNT_VIP_TESTID}>
+                  {accountVipLabel}
+                </Badge>
+              )}
+            </div>
             {/* 主题三态循环（R41b）：与设置页「外观」卡的 Select 同源同向（同一份接线） */}
-            <ThemeToggle className="ml-auto group-data-[collapsible=icon]:ml-0" />
+            <ThemeToggle className="shrink-0 group-data-[collapsible=icon]:hidden" />
             <AlertDialog>
               <AlertDialogTrigger asChild>
-                <Button variant="ghost" size="icon-sm" aria-label={ACCOUNT_LOGOUT_TITLE}>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={ACCOUNT_LOGOUT_TITLE}
+                  className="shrink-0 group-data-[collapsible=icon]:hidden"
+                >
                   <LogOutIcon />
                 </Button>
               </AlertDialogTrigger>

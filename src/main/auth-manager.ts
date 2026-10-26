@@ -245,7 +245,7 @@ export interface RestoreStatus {
  * 取值来自 [`statusPayload`] 唯一的构造点，形状与 `src/renderer/login-gate.tsx` 的 `AccountProfile`、
  * `docs/API_CONTRACT.md` §2.6 的载荷说明一致（三处说的是同一件事）。
  */
-export type AuthProfile = { userName?: string; avatarUrl?: string; vip?: boolean };
+export type AuthProfile = { userName?: string; avatarUrl?: string; vip?: boolean; vipExpiresOn?: string };
 
 /**
  * `auth:status` 的载荷形状（**广播与 `auth:get-status` 应答共用，唯一一处定义**）。

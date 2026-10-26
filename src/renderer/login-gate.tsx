@@ -99,7 +99,7 @@ import { profileFromStatusPayload } from "./features/auth/account.mjs"
  * 类型写在 TS 这一侧而不是从 `.mjs` 里 import：那个模块是纯 JS（跑在 node 测试里），
  * 形状的唯一真源是它的 `profileFromStatusPayload`——类型只是给编辑器用的镜像。
  */
-export type AccountProfile = { userName?: string; avatarUrl?: string; vip?: boolean } | null
+export type AccountProfile = { userName?: string; avatarUrl?: string; vip?: boolean; vipExpiresOn?: string } | null
 import {
   LOGIN_GATE_EVENT,
   LOGIN_GATE_PHASE,
@@ -153,6 +153,7 @@ export interface AuthStatusPayload {
     userName?: string
     avatarUrl?: string
     vip?: boolean
+    vipExpiresOn?: string
   }
 }
 

@@ -176,6 +176,29 @@ DNS  api-drcn.music.dbankcloud.cn                  → 2407:c080:1400:61:40a0:d5
 理由是"路径可能存在 ≠ 请求形状已确认"——R32 拿到的正是**请求与响应形状**，所以接线了。
 **仍然没有实测的**是"用本项目的账号走完这些请求"（见 §2.1 第 3 条那张表）。
 
+#### 1.5.2 账号资料 / 会员到期：**没有可用端点（R57 结论：不可行）**
+
+问题：恢复会话时（账号 AT 早已过期，手里只有 1 小时 AT 换来的音乐会话）能不能拉到"名字 / 头像 /
+会员到期时间"？结论是**不能**，三条证据都指向"没有这条端点"，因此**不猜端点、不猜字段**：
+
+1. **官方没有可读的 H5/Web 音乐前端**：`music.dbankcloud.cn`、`music.dbankcloud.com`、
+   `www|web|h5|m|api|portal.music.dbankcloud.cn`、`music-{h5,web}-*.hicloud.com` 等 12 个候选主机
+   全部 `ENOTFOUND`（40 次 DNS 查询，零 HTTP）；可达的两个都与此无关——
+   `music.hicloud.com` 是华为官网的音乐**营销页**（静态站，脚本经 Referer 才放行，无任何资料接口），
+   `music.cloud.huawei.com` 是网关错误页（`An error occurred. code: 4xx`）。
+   ⇒ 简报优先要求的那条路（下载公开静态 JS 找 userinfo/会员端点）**在本产品上不存在**。
+2. **公开参考实现没有这个端点**：`.tmp/reference-repo` 全库出现的音乐服务路径共 15 条（favorite /
+   playlist / recentlyplayed / search / album / artist / play / recommend / loginex），
+   **userinfo 只有 `loginex` 一条**；其研究文档里那句"本人资料接口返回 `memberShip=6`"**没有留下路径**。
+3. **本机只读探测 15 条候选路径全部 404**（用 `.tmp/live-data` 的已登录会话，共 17 次请求、
+   间隔 ≥1.2 s、只发读查询、从未碰写端点；2 次对照为收藏最小页 200 + `resultCode:000000`，
+   证明会话/头/网关都是通的）：见 §2.6 的 R57 段列出的 15 条路径。**404 是真答复，不是会话问题**。
+
+**为什么不能退而求其次"登录时多存一份"**：登录期只有 `loginex` 一个来源，它的**顶层 13 个键已证没有
+名字/头像**（R38/R40 真机取证），而 `queryAllSubInfoResp` / `queryAppConfigDetailResp` 两个容器内部的键名
+**至今没有证据**（R40 的键名日志随日志轮转丢失）。所以现在既不新增候选键，也不新增刷新流程；
+下次扫码登录时 sidecar 会记下那两个容器的**键名**（只记键名、不记值），那才是"能不能补"的下一步证据。
+
 ### 1.6 宿主契约（R7）：登录窗的导航 URL 如何交给 `consumeCallback`
 
 `src/protocols/login-callback.mjs` 的 `runLoginFlow({host, ...}).consumeCallback(url)` **可以安全地喂进登录窗的每一个导航 URL**：
@@ -298,7 +321,8 @@ core_login_chrome {action:"theme", theme:"light"|...}     → {theme: ..., revis
 
 ```
 auth:status → {loggedIn: boolean, busy: boolean, message?: string,
-               profile?: {userName?: string, avatarUrl?: string, vip?: boolean}}
+               profile?: {userName?: string, avatarUrl?: string, vip?: boolean,
+                          vipExpiresOn?: string}}
 ```
 
 - 为什么结论走广播而不是 `core_call` 的返回值：渲染层那条调用链（Rust `core_call`）有 60 秒上限，
@@ -330,6 +354,24 @@ auth:status → {loggedIn: boolean, busy: boolean, message?: string,
   这条链的响应形状一直缺实证，所以兑换点加了**只记键名**的日志（token 响应顶层 / `id_token`
   claims / loginex 响应顶层 / loginex 两个容器的一层；**值一律不进日志**），
   会话记录里只多一个由它们提取出的 `profile`（**claims 原文与 id_token 都不落盘**）。
+- **可选 `vipExpiresOn`（R57 增补，「会员 · 至 2026-12-31」的那个日期）**：**本项目自己的字段，
+  不是服务端键名**。只认「能显示成某一天」的形状（`YYYY-MM-DD` / `YYYYMMDD` / 14 位
+  `YYYYMMDDHHMMSS` 取日期段），校验在 `src/shared/vip-expiry.mjs` 一处；认不出就**不写**
+  （界面只说"会员"）。**当前没有任何生产者**：R57 的端点调研结论是**不可行**（见 §1.5.2），
+  所以恢复期与登录期都不会填写它；界面与守卫用注入载荷覆盖这一档。
+- **§1.5.2 R57 端点调研结论：拿账号资料/会员到期的（恢复期可用）端点是「不可行」**。
+  证据分三条：① 官方**没有**可下载的 H5/Web 音乐前端——`music.dbankcloud.cn` / `music.dbankcloud.com` /
+  `web|h5|m|api|portal.music.*` 等 12 个候选域名全部 **ENOTFOUND**，仅 `music.hicloud.com`（华为官网音乐
+  营销页，Joomla/Vue 静态站）与 `music.cloud.huawei.com`（网关错误页）可达，两者都没有账号资料接口；
+  ② 参考实现（`.tmp/reference-repo`）全库只有 `loginex` 这一个 userinfo 路径，没有任何资料端点；
+  ③ 用 `.tmp/live-data` 的已登录会话做了 **17 次只读探测**（含 2 次对照），15 条候选路径
+  （`music-odpapp-service/v5/service/userinfo/{query,detail,getuserinfo,queryAllSubInfo,queryAppConfigDetail,getUserInfo,queryUserInfo}`、
+  `music-userbasic-service/v1/service/userinfo/{detail,query}`、`music-user-service/v1/service/user/info`、
+  `music-userbehavior-service/v1/service/userinfo/{query,get}`、`music-social-service/v1/service/userinfo/query`、
+  `music-member-service/v1/service/membership/detail`）**全部 HTTP 404**，而同一轮的对照
+  （`favorite/simple/all` 最小页）**200 + `resultCode:000000`** ⇒ 会话与 Digest 头都是通的，404 是真答复。
+  **结论：不猜端点、不猜字段**；恢复期刷新流程不实现，界面维持兜底；
+  会员到期只在有证据的字段出现时才显示。详细过程见 `.superpowers/.../task-57-report.md`。
 - **可选 `restoring: true`（R53 增补）**：**快照与恢复期间的广播都可能带 `restoring:true`；恢复结论广播不带**。
   sidecar 先建 RPC（注册 `auth:get-status`）再 `await restore()`，而 restore 要发一次网络验证（真机 1–3 秒）；
   渲染层挂载即查，那一问落在恢复期间，此时会话还没读出来——`{loggedIn:false}` 的普通载荷会被门禁当成
@@ -2156,3 +2198,15 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
      （`limit=1623` 反而 HTTP 400）⇒ 服务端不能分页，维持"一次取回 + 本地切片"；参考实现也只有 `start`/`limit`。
   4. **收藏首页为空已查清**：同一会话历史 200 条、同一端点扫描 `contentTypes:["1","4","5","7"]` 只回 2 条
      且都是歌单 ⇒ 不是会话/参数问题，该账号确实没有收藏歌曲（界面上是如实空态）。
+- 2026-10-26（Task R57）：**账号资料/会员到期的端点调研结论 = 不可行；账号区改成"有资料就能显示"的形态**。
+  1. **新增 §1.5.2（不可行结论 + 三条证据）**：12 个候选 H5/Web 主机全部 ENOTFOUND；
+     参考实现只有 `loginex` 一个 userinfo 路径；用已登录会话做的 15 条候选路径只读探测**全部 404**
+     （17 次请求、2 次对照 200 + `000000`）。**不猜端点、不猜字段**，恢复期刷新流程不实现。
+  2. **`auth:status.profile` 增可选 `vipExpiresOn`**（§2.6）：本项目自己的字段，只认「能显示成某一天」的
+     形状（`YYYY-MM-DD` / `YYYYMMDD` / 14 位 `YYYYMMDDHHMMSS`），校验只有一处
+     （`src/shared/vip-expiry.mjs`）。**当前没有生产者**——它是给"哪天有证据"准备的落点，
+     界面与守卫用注入载荷覆盖这一档。
+  3. **账号区（左下角）**：头像（`AvatarImage`，加载失败/无地址回退首字，连名字都没有才回退图标）、
+     名称（`truncate` + `Tooltip` 显示全名）、会员徽标（shadcn `Badge`，`会员` / `会员 · 至 …`）；
+     主题切换与退出登录入口保留；**侧栏收起成图标轨时只留头像**（R41b 的"竖排三个图标"作废）。
+     头像地址仍只走已有媒体白名单，**CSP `img-src` 一行未改**。
