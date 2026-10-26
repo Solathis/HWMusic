@@ -19,6 +19,7 @@ import {
   dragRegionEnabled,
   effectiveSizeId,
   estimateTimeMs,
+  karaokeFrame,
   lyricsConfigFromSearch,
   normalizeLyricsConfig,
   reanchorProgress,
@@ -82,7 +83,7 @@ export function LyricsWindow() {
   // 初值来自建窗时拼的查询串（Rust 侧按当前配置拼）：渲染层还没订阅事件时也不会丢配置
   const [config, setConfig] = useState(() => lyricsConfigFromSearch(window.location.search))
   const [lyricDocument, setLyricDocument] = useState<LyricsDocument>(INITIAL_DOCUMENT)
-  const [frame, setFrame] = useState({ time: 0, isSeeking: false })
+  const [frame, setFrame] = useState({ time: 0, isSeeking: false, playing: false })
 
   const progressRef = useRef<LyricsProgress | null>(null)
   const seekDeadlineRef = useRef(0)
@@ -146,6 +147,9 @@ export function LyricsWindow() {
             seekGeneration: Number.isInteger(seekGeneration) ? seekGeneration : 0,
             atMs: Date.now(),
           }
+          // 播放态与时刻**当场**进状态：官方组件的逐字扫亮由它驱动，等帧循环就等于把推进
+          // 绑架在帧率上（置顶窗被遮挡、挂到任务栏下的子窗都可能长时间没有帧）
+          setFrame(karaokeFrame(progressRef.current, Date.now(), Date.now() < seekDeadlineRef.current))
         },
       ).then(keep),
     ]).then(async () => {
@@ -167,12 +171,17 @@ export function LyricsWindow() {
     }
   }, [])
 
-  // 逐帧把估计时间推给组件（rAF；卸载停帧，后台不留循环）
+  // 逐帧把估计时间推给组件（rAF；卸载停帧，后台不留循环）。
+  // 只更新时刻与跳转窗，`playing` 由进度消息自己更新——那才是唯一来源。
   useEffect(() => {
     let handle = 0
     const tick = () => {
       const now = Date.now()
-      setFrame({ time: estimateTimeMs(progressRef.current, now), isSeeking: now < seekDeadlineRef.current })
+      setFrame((previous) => ({
+        ...previous,
+        time: estimateTimeMs(progressRef.current, now),
+        isSeeking: now < seekDeadlineRef.current,
+      }))
       handle = requestAnimationFrame(tick)
     }
     handle = requestAnimationFrame(tick)
@@ -304,8 +313,8 @@ export function LyricsWindow() {
       </Tooltip>
       {config.showControls ? <>
         <Button variant="ghost" size="icon-sm" aria-label="上一首" onClick={() => control("previous")}><SkipBack /></Button>
-        <Button variant="ghost" size="icon-sm" aria-label={progressRef.current?.playing ? "暂停" : "播放"} onClick={() => control("toggle")}>
-          {progressRef.current?.playing ? <Pause /> : <Play />}
+        <Button variant="ghost" size="icon-sm" aria-label={frame.playing ? "暂停" : "播放"} onClick={() => control("toggle")}>
+          {frame.playing ? <Pause /> : <Play />}
         </Button>
         <Button variant="ghost" size="icon-sm" aria-label="下一首" onClick={() => control("next")}><SkipForward /></Button>
       </> : null}
@@ -316,7 +325,7 @@ export function LyricsWindow() {
   const content = (
     <div className="relative isolate min-h-0 flex-1" onMouseDownCapture={startDrag}>
       {hasLyric ? <LyricPlayer className="h-full w-full" lyricLines={playerLines}
-        currentTime={frame.time} isSeeking={frame.isSeeking} playing={progressRef.current?.playing === true}
+        currentTime={frame.time} isSeeking={frame.isSeeking} playing={frame.playing}
         enableBlur={config.enableBlur} enableScale={config.enableScale} enableSpring={config.enableSpring}
         alignAnchor="center" alignPosition={0.5} /> : null}
       {notice === null ? null : <div className="absolute inset-0 flex items-center justify-center p-2">

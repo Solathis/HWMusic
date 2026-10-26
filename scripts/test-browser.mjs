@@ -462,6 +462,16 @@ function Guard() {
       async desktopPlaying(playing) {
         await emit("core:event", { channel: "lyrics:progress", payload: { timeMs: 700, playing, seekGeneration: 100 } });
       },
+      /**
+       * R58：任意时刻 + 任意播放态的进度（逐字遮罩只在 playing 为真时自行前进，
+       * 所以夹具必须能把"同一行、两个时刻、两种播放态"分别造出来）。
+       */
+      async desktopProgress(progress) {
+        const next = progress !== null && typeof progress === "object" ? progress : {};
+        await emit("core:event", { channel: "lyrics:progress", payload: {
+          timeMs: 0, playing: false, seekGeneration: 100, ...next,
+        } });
+      },
       async ready() {
         await runtime.initialize();
         await runtime.player.playQueue(songs, 0);
@@ -1668,6 +1678,177 @@ export async function checkDesktopSurface(page, guardDir, add) {
   }
   await page.setViewportSize({ width: 800, height: 128 });
   await page.evaluate(() => window.__guard.configureDesktop({ mode: "desktop", style: "clean", color: "foreground", showControls: true }));
+}
+
+/**
+ * R58：桌面/任务栏歌词的**行内逐字扫亮**——同一行两个时刻已唱字变多、同一时刻已唱明显浓于未唱；
+ * 再把 rAF 摘掉（真窗里=窗没有帧），进度消息仍必须把官方组件从暂停推到播放（这是扫描推进的前提）。
+ */
+export async function checkLyricsKaraoke(page, guardDir, add) {
+  const activeLine = '[data-testid="lyrics-window"] [class*="lyricMainLine"][class*="active"]';
+  const configure = (patch) => page.evaluate((next) => window.__guard.configureDesktop(next), patch);
+  /** 当前行的逐字状态：字形框、官方遮罩位置、官方逐词动画的播放态。 */
+  const readWords = () => page.evaluate((selector) => {
+    const stage = document.querySelector('[data-testid="lyrics-window"]');
+    const player = stage?.querySelector(".amll-lyric-player");
+    const line = document.querySelector(selector);
+    const playerRect = player?.getBoundingClientRect();
+    return {
+      active: line?.textContent ?? null,
+      player: playerRect ? { top: Math.round(playerRect.top), height: Math.round(playerRect.height) } : null,
+      mode: stage?.dataset.lyricsMode ?? null,
+      words: [...(line?.querySelectorAll("span") ?? [])]
+        .filter((span) => span.children.length === 0 && (span.textContent ?? "").length === 1)
+        .map((span) => {
+          const range = document.createRange();
+          range.selectNodeContents(span);
+          const rect = range.getBoundingClientRect();
+          const fade = (span.getAnimations ? span.getAnimations() : []).find((animation) => animation.id.startsWith("fade-word"));
+          return {
+            text: span.textContent,
+            box: [rect.left, rect.top, rect.width, rect.height],
+            mask: Math.round(Number.parseFloat(getComputedStyle(span).maskPosition) || 0),
+            playState: fade?.playState ?? null,
+            inside: playerRect
+              ? rect.top >= playerRect.top - 1 && rect.bottom <= playerRect.bottom + 1
+                && rect.left >= playerRect.left - 1 && rect.right <= playerRect.right + 1
+              : false,
+          };
+        }),
+    };
+  }, activeLine);
+  /**
+   * 一个字盒里的墨色分位：浅色主题看 p5（已唱是深墨，未唱被压到 40% 透明度而变浅），
+   * 深色主题反过来看 p95。取分位而不是均值：字形只占盒子的一部分。
+   */
+  const charInk = async (png, box, meta) => {
+    const left = Math.max(0, Math.round(box[0]));
+    const top = Math.max(0, Math.round(box[1]));
+    const width = Math.min(meta.width - left, Math.round(box[2]));
+    const height = Math.min(meta.height - top, Math.round(box[3]));
+    if (width <= 0 || height <= 0) return null;
+    const raw = await sharp(png).extract({ left, top, width, height }).removeAlpha().raw().toBuffer();
+    const lums = [];
+    for (let index = 0; index < raw.length; index += 3) {
+      lums.push(raw[index] * 0.299 + raw[index + 1] * 0.587 + raw[index + 2] * 0.114);
+    }
+    lums.sort((a, b) => a - b);
+    const at = (quantile) => Math.round(lums[Math.min(lums.length - 1, Math.floor(lums.length * quantile))]);
+    return { p5: at(0.05), p95: at(0.95) };
+  };
+  const sungInk = (ink, theme) => (ink === null ? null : theme === "dark" ? ink.p95 : ink.p5);
+  const isSung = (value, theme) => value !== null && (theme === "dark" ? value >= 150 : value <= 120);
+  /** 开一轮进度泵（每 100ms 一条，时间按真实经过推进）；下一轮会先掐掉上一轮。 */
+  const startProgress = (fromMs, spanMs = 2400) => page.evaluate(({ from, span }) => {
+    clearTimeout(window.__r58Driver);
+    const started = performance.now();
+    const tick = () => {
+      const at = performance.now() - started;
+      void window.__guard.desktopProgress({ timeMs: from + Math.round(at), playing: true, seekGeneration: 100 });
+      if (at < span) window.__r58Driver = setTimeout(tick, 100);
+    };
+    tick();
+  }, { from: fromMs, span: spanMs });
+  const stopProgress = () => page.evaluate(() => { clearTimeout(window.__r58Driver); });
+  /** 等一会儿，读逐字状态并截图。 */
+  const readAt = async (label, dwellMs, theme) => {
+    await page.waitForTimeout(dwellMs);
+    const state = await readWords();
+    const png = await page.screenshot({ type: "png", path: path.join(guardDir, `r58-${label}.png`) });
+    const meta = await sharp(png).metadata();
+    const inks = [];
+    for (const word of state.words) inks.push(await charInk(png, word.box, meta));
+    return { ...state, inks, sung: inks.map((ink) => sungInk(ink, theme)) };
+  };
+  const runMode = async (label, config, viewport, theme) => {
+    await page.setViewportSize(viewport);
+    await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
+    await configure(config);
+    await page.waitForTimeout(400);
+    await page.evaluate(() => window.__guard.desktopDocument());
+    await page.waitForTimeout(250);
+    await startProgress(600);
+    const early = await readAt(`${label}-t1`, 700, theme);
+    const late = await readAt(`${label}-t2`, 1400, theme);
+    await stopProgress();
+    const earlySung = early.sung.filter((value) => isSung(value, theme)).length;
+    const lateSung = late.sung.filter((value) => isSung(value, theme)).length;
+    const sungValues = early.sung.filter((value) => isSung(value, theme));
+    const unsungValues = early.sung.filter((value) => !isSung(value, theme));
+    const contrast = sungValues.length && unsungValues.length
+      ? Math.round(theme === "dark" ? Math.min(...sungValues) - Math.max(...unsungValues)
+        : Math.max(...unsungValues) - Math.min(...sungValues))
+      : 0;
+    add(`r58-${label}-sweep`,
+      early.active === late.active && Boolean(early.active) && early.words.length >= 5
+        && early.words.every((word) => word.inside)
+        && lateSung - earlySung >= 2 && lateSung >= 5 && contrast >= 40,
+      JSON.stringify({ active: early.active, player: early.player, ink1: early.sung, ink2: late.sung,
+        sung: [earlySung, lateSung], contrast, mask1: early.words.map((word) => word.mask) }));
+    return late;
+  };
+
+  const baseline = { ...DESKTOP_BASELINE, locked: true, showControls: false };
+  /** 重挂歌词窗：拿一份"还没有任何进度"的干净起点（这时官方组件必然是暂停态）。 */
+  const remount = async () => {
+    await page.evaluate(() => window.__guard.setDesktop(false));
+    await page.getByTestId("lyrics-window").waitFor({ state: "detached" });
+    await page.evaluate(() => window.__guard.setDesktop(true));
+    await page.getByTestId("lyrics-window").waitFor();
+    await page.waitForTimeout(400);
+  };
+
+  /**
+   * 播放态由进度消息驱动。重挂之后官方组件停在暂停态，再把 rAF 摘掉：此后只剩进度消息能带来
+   * 重渲染的时机，官方组件的逐词动画必须从 paused 变 running——否则整行扫亮停在换行那一刻。
+   */
+  await page.setViewportSize({ width: 800, height: 128 });
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await configure({ ...DESKTOP_BASELINE });
+  await remount();
+  await page.evaluate(() => window.__guard.desktopDocument());
+  await page.waitForTimeout(400);
+  const beforeStub = await readWords();
+  await page.evaluate(() => { window.__r58Raf = window.requestAnimationFrame; window.requestAnimationFrame = () => 0; });
+  for (const timeMs of [900, 1400, 1900, 2400, 2900]) {
+    await page.evaluate((ms) => window.__guard.desktopProgress({ timeMs: ms, playing: true, seekGeneration: 100 }), timeMs);
+    await page.waitForTimeout(120);
+  }
+  await page.waitForTimeout(400);
+  const whilePlaying = await readWords();
+  const playingLabel = await page.getByTestId("lyrics-controls").locator('[aria-label="暂停"], [aria-label="播放"]').first().getAttribute("aria-label");
+  add("r58-playing-follows-progress",
+    beforeStub.words.length >= 5 && beforeStub.words.every((word) => word.playState === "paused")
+      && whilePlaying.words.length >= 5 && whilePlaying.words.every((word) => word.playState !== "paused")
+      && playingLabel === "暂停" && whilePlaying.active === beforeStub.active,
+    JSON.stringify({ before: beforeStub.words.map((word) => word.playState), maskBefore: beforeStub.words.map((word) => word.mask),
+      after: whilePlaying.words.map((word) => word.playState), maskAfter: whilePlaying.words.map((word) => word.mask),
+      playingLabel, active: whilePlaying.active }));
+  await page.evaluate(() => { window.requestAnimationFrame = window.__r58Raf; window.__r58Raf = undefined; });
+  // 帧循环是 effect 起的，摘过一次就断了：重挂一次让后来的用例有正常的帧
+  await remount();
+
+  await runMode("desktop-clean", { ...baseline }, { width: 800, height: 128 }, "light");
+  await runMode("desktop-panel", { ...baseline, style: "panel", color: "contrast" }, { width: 800, height: 128 }, "dark");
+  await runMode("taskbar-clean", { ...baseline, mode: "taskbar", size: "md" }, { width: 1200, height: 44 }, "light");
+  // 竖版（R61 整体重做）：只记录现状，不断言
+  await page.setViewportSize({ width: 260, height: 520 });
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await configure({ ...baseline, layout: "vertical" });
+  await page.waitForTimeout(500);
+  await page.evaluate(() => window.__guard.desktopDocument());
+  await page.waitForTimeout(300);
+  await startProgress(600);
+  const vertical = await readAt("vertical-status", 700, "light");
+  await stopProgress();
+  add("r58-vertical-status", true,
+    JSON.stringify({ note: "竖版只记录现状（R61 重做）", active: vertical.active, player: vertical.player,
+      sung: vertical.sung, mask: vertical.words.map((word) => word.mask) }));
+
+  await page.setViewportSize({ width: 800, height: 128 });
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await configure({ ...DESKTOP_BASELINE });
+  await page.waitForTimeout(300);
 }
 
 /** 桌面歌词窗的默认起点（每一项断言前都先归位：前面的用例会一路改配置）。 */
@@ -4343,6 +4524,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       }
     }
     await checkDesktopSurface(page, guardDir, add);
+    /** R58：行内逐字扫亮（桌面横版 clean/panel、任务栏、竖版现状、播放态随进度消息）。 */
+    await checked("r58-lyrics-karaoke", () => checkLyricsKaraoke(page, guardDir, add));
     /**
      * R51：设置弹出窗那一页（真组件 + 真产物 CSS）。用**另一页**跑：它会改 viewport 与主题类，
      * 而主页面后面还有几项要用当前的桌面窗状态。

@@ -422,3 +422,16 @@ export function reanchorProgress(lastPush, nowMs) {
   if (push === null) return null;
   return { ...push, atMs: Number.isFinite(Number(nowMs)) ? Number(nowMs) : push.atMs };
 }
+
+/**
+ * 进度消息 → 官方歌词组件要的那一帧 `{time, isSeeking, playing}`。
+ * `playing` 只认消息里的 true：官方组件按它决定逐字扫亮要不要前进，而这个窗在没有帧的时候
+ * （被遮挡的置顶窗、挂在任务栏下的子窗）不会有别的重渲染时机。
+ */
+export function karaokeFrame(lastPush, nowMs, isSeeking) {
+  return {
+    time: estimateTimeMs(lastPush, nowMs),
+    isSeeking: isSeeking === true,
+    playing: lastPush !== null && typeof lastPush === "object" && lastPush.playing === true,
+  };
+}

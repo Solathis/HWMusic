@@ -42,6 +42,7 @@ import {
   fontStepLabel,
   importPlanOf,
   isCustomColor,
+  karaokeFrame,
   lyricsConfigFromSearch,
   lyricsStatusFromFailure,
   modeLabel,
@@ -928,6 +929,15 @@ test("进度重锚：窗从隐藏变可见时把锚点挪到当下（不许一�
   assert.equal(estimateTimeMs(anchored, 90000), 5000, "重锚之后停在原处（等 100ms 内的新推送）");
   assert.equal(reanchorProgress(null, 1), null, "还没收到进度就是 null");
   assert.equal(reanchorProgress(push, Number.NaN).atMs, 1000, "坏时钟保持原锚点");
+});
+
+test("逐字帧状态：playing 跟着进度消息走（不等帧循环）", () => {
+  const push = { timeMs: 5000, playing: true, seekGeneration: 3, atMs: 1000 };
+  assert.deepEqual(karaokeFrame(push, 1050), { time: 5050, isSeeking: false, playing: true }, "播放中：时刻插值 + 播放态");
+  assert.equal(karaokeFrame({ ...push, playing: false }, 9000).playing, false, "暂停消息立刻就是 false");
+  assert.equal(karaokeFrame({ ...push, playing: false }, 9000).time, 5000, "暂停时时刻停住");
+  assert.deepEqual(karaokeFrame(null, 1000, true), { time: 0, isSeeking: true, playing: false }, "还没收到进度：零值 + 跳转窗透传");
+  assert.equal(karaokeFrame({ timeMs: 5000, playing: "yes", atMs: 0 }, 0).playing, false, "只有真正的 true 才算播放");
 });
 
 test("配置提示与档位标签可读", () => {
