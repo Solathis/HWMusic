@@ -12,6 +12,10 @@ import {
   CORE_GET_AUTOSTART,
   CORE_GET_TRAY_AVAILABLE,
   CORE_LOGIN_CHROME,
+  CORE_LOCAL_BASE_URL,
+  CORE_LOCAL_IMPORT,
+  CORE_LOCAL_LIST,
+  CORE_LOCAL_REMOVE,
   CORE_LYRICS_CONFIGURE,
   CORE_LYRICS_CONTROL,
   CORE_LYRICS_DOCUMENT,
@@ -238,6 +242,33 @@ export async function coreLoginChrome<T = unknown>(payload: LoginChromeRequest):
   } catch (failure) {
     throw normalizeFailure(failure);
   }
+}
+
+// ---------------------------------------------------------------------------
+// 本地曲库（R65）：四条命令，全部只对主窗开放（Rust 侧 `require_main_webview`）
+// ---------------------------------------------------------------------------
+
+/** 本地曲库协议基址（平台不同：Windows 是 `http://hwlocal.localhost`，mac/Linux 是 `hwlocal://localhost`）。 */
+export async function coreLocalBaseUrl(): Promise<{ baseUrl?: string }> {
+  return invokeLyrics<{ baseUrl?: string }>(CORE_LOCAL_BASE_URL);
+}
+
+/** 曲库快照（每条**没有路径**；`available` 说的是文件还在不在）。 */
+export async function coreLocalList(): Promise<unknown> {
+  return invokeLyrics(CORE_LOCAL_LIST);
+}
+
+/**
+ * 导入：`paths` 省略 = 开系统对话框（`folder: true` 是选文件夹）。
+ * 传了 `paths` 就不弹对话框（守卫与测试走这条，见 `silent-testing-protocol.md`）。
+ */
+export async function coreLocalImport(payload: { paths?: string[]; folder?: boolean } = {}): Promise<unknown> {
+  return invokeLyrics(CORE_LOCAL_IMPORT, payload);
+}
+
+/** 从曲库里移除一条（**不删文件**：用户的原文件不是我们的东西）。 */
+export async function coreLocalRemove(id: string): Promise<unknown> {
+  return invokeLyrics(CORE_LOCAL_REMOVE, { id });
 }
 
 /**

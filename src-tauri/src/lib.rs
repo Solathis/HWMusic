@@ -16,6 +16,8 @@ mod commands;
 pub mod login;
 pub mod lyrics_settings;
 pub mod lyrics_window;
+/// R65：本地曲库（选文件 / 元数据 / 索引 / 按 id 提供音频与封面）与自定义协议
+pub mod local_library;
 pub mod taskbar_lyrics;
 pub mod run_log;
 mod secure_store;
@@ -671,6 +673,42 @@ pub fn run() {
         )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
+        // R65：对话框插件**只从 Rust 侧用**（`local_library::pick_paths`）。登记插件本身不给
+        // 渲染层任何能力：JS 那条 `plugin:dialog|*` 要经 capabilities 授权，而本应用没有那条权限
+        // （见 `src-tauri/capabilities/main.json` 与 `test/packaging.test.mjs` 的扫描）。
+        .plugin(tauri_plugin_dialog::init())
+        /*
+          R65：本地曲库的自定义 URI 协议（`hwlocal`）。判定全在 `local_library::handle_protocol`（纯函数）：
+          只按 **id** 查索引（路径不进 URL）、只服务主窗（其它来源 webview 一律 404）、音频支持 Range。
+          磁盘读放在阻塞线程池上：同步读一个几十 MB 的文件会把那一帧的其它请求一起堵住。
+        */
+        .register_asynchronous_uri_scheme_protocol(local_library::PROTOCOL_SCHEME, |context, request, responder| {
+            let app = context.app_handle().clone();
+            let label = context.webview_label().to_string();
+            let path = request.uri().path().to_string();
+            let range = request
+                .headers()
+                .get("range")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            tauri::async_runtime::spawn_blocking(move || {
+                let outcome = match crate::webview_data_root(&app) {
+                    Ok(root) => local_library::handle_protocol(&root, &label, &path, range.as_deref()),
+                    Err(error) => {
+                        log::warn!("本地曲库协议拿不到数据根：{error}");
+                        local_library::ProtocolOutcome::not_found_for_data_root()
+                    }
+                };
+                let mut builder = tauri::http::Response::builder().status(outcome.status);
+                for (name, value) in &outcome.headers {
+                    builder = builder.header(name, value);
+                }
+                let response = builder
+                    .body(outcome.body)
+                    .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()));
+                responder.respond(response);
+            });
+        })
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -805,6 +843,12 @@ pub fn run() {
             commands::core_get_tray_available,
             // R56：设置页「日志」标签的数据源（主窗来源守卫 + 返回前脱敏）
             commands::core_read_run_log,
+            // R65：本地曲库四条命令（选文件 / 快照 / 导入 / 移除）。对话框只在 Rust 侧开，
+            // 路径只在宿主里，渲染层拿到的每条记录只有 id 与元数据。
+            local_library::core_local_base_url,
+            local_library::core_local_list,
+            local_library::core_local_import,
+            local_library::core_local_remove,
             lyrics_window::core_lyrics_toggle,
             lyrics_window::core_lyrics_configure,
             lyrics_window::core_lyrics_control,

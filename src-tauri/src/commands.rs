@@ -86,6 +86,8 @@ pub const HOST_REQUEST_CHANNELS: &[&str] = &[
     "host:secure-encrypt",
     "host:secure-decrypt",
     "host:notify",
+    // R65：本地曲目的歌词来源（载荷只有 id；返回原始字节，解码在 sidecar）
+    "host:local-lyrics-source",
 ];
 
 /// 主窗来源守卫：只有主窗那个 **webview** 能调 `core_call`（登录页、歌词窗、托盘一律拒绝）。
@@ -544,6 +546,8 @@ pub enum HostRoute {
     OpenLogin,
     /// 取消进行中的登录（R7）：把结论槽结算成 Cancelled
     CancelLogin,
+    /// 本地曲目的歌词原始字节（R65）：只有 id，路径与"同名文件"的判定都在 `local_library`
+    LocalLyrics,
     /// 路由表不认识这个频道
     Unknown,
 }
@@ -555,6 +559,7 @@ pub fn route_host_request(channel: &str) -> HostRoute {
         "host:secure-decrypt" => HostRoute::SecureDecrypt,
         "host:open-login" => HostRoute::OpenLogin,
         "host:cancel-login" => HostRoute::CancelLogin,
+        "host:local-lyrics-source" => HostRoute::LocalLyrics,
         _ => HostRoute::Unknown,
     }
 }
@@ -574,6 +579,9 @@ pub enum HostPlan {
     /// 取消登录（R7）：答复里要带"到底取消掉了没有"，那个答案只有 app 知道（计划阶段拿不到），
     /// 所以由 `apply_host_request` 算完**立刻**答复。
     CancelLogin,
+    /// 本地曲目歌词（R65）：要读索引与磁盘（app 才拿得到数据根），计划阶段只校验载荷，
+    /// 所以这里带上解析好的曲目 id，由 `apply_host_request` 去读字节。
+    LocalLyrics(String),
 }
 
 pub fn plan_host_request(id: &str, channel: &str, payload: &Value) -> HostPlan {
@@ -615,6 +623,30 @@ pub fn plan_host_request(id: &str, channel: &str, payload: &Value) -> HostPlan {
         },
         // 取消要读运行时状态（有没有进行中的登录），所以答复在 `apply_host_request` 里算。
         HostRoute::CancelLogin => HostPlan::CancelLogin,
+        // 本地歌词：载荷校验（形状不合法当场拒），读盘留给落地那一步
+        HostRoute::LocalLyrics => match payload
+            .get("trackId")
+            .and_then(Value::as_str)
+            .or_else(|| payload.get("id").and_then(Value::as_str))
+        {
+            Some(raw) => match crate::local_library::track_id_of_argument(raw) {
+                Some(track_id) => HostPlan::LocalLyrics(track_id),
+                None => HostPlan::Respond(ResponseFrame::err(
+                    id,
+                    CoreError::new(
+                        "invalid_payload",
+                        "宿主要求 host:local-lyrics-source 的 trackId 形状不对（要 32 位十六进制）",
+                    ),
+                )),
+            },
+            None => HostPlan::Respond(ResponseFrame::err(
+                id,
+                CoreError::new(
+                    "invalid_payload",
+                    "宿主要求 host:local-lyrics-source 需要字符串字段 trackId",
+                ),
+            )),
+        },
         HostRoute::Unknown => HostPlan::Respond(ResponseFrame::err(
             id,
             CoreError::new(
@@ -766,6 +798,15 @@ pub fn apply_host_request(
         HostPlan::CancelLogin => {
             let frame = match crate::login::cancel_login(app) {
                 Ok(cancelled) => ResponseFrame::ok(id, Some(serde_json::json!({ "cancelled": cancelled }))),
+                Err(error) => ResponseFrame::err(id, error),
+            };
+            respond_frame(shared, frame);
+        }
+        HostPlan::LocalLyrics(track_id) => {
+            // 本地磁盘读：同步做完再答复（几十 KB，不值得为它起线程）。
+            // "这首歌没有歌词"回 `data: null`——那是正常情形，不是错误。
+            let frame = match crate::local_library::lyrics_source_for_track(app, &track_id) {
+                Ok(data) => ResponseFrame::ok(id, Some(data)),
                 Err(error) => ResponseFrame::err(id, error),
             };
             respond_frame(shared, frame);

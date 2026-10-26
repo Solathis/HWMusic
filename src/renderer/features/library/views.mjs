@@ -13,6 +13,8 @@
 /** 页面枚举（view id 的唯一真源）。 */
 export const VIEW = {
   favorites: "favorites",
+  /** R65：本地歌曲（导入的本机音频文件，曲库由 Rust 拥有，渲染层只拿 id） */
+  local: "local",
   playlistDetail: "playlist-detail",
   search: "search",
   album: "album",
@@ -30,9 +32,11 @@ export const VIEW_IDS = Object.freeze(Object.values(VIEW));
  * （用户裁决：常驻搜索框取代导航项，结果仍然渲染在右侧内容区）。`VIEW.search` 依然是
  * 一个视图（内容区的搜索结果页要用它），只是不再占导航列表的一行。
  * R62：「我的歌单」同理不再是一页——歌单列表直接长在侧栏（`sidebar-playlists.tsx`）。
+ * R65：「本地歌曲」紧挨「我的收藏」（两件事同属"我自己有什么东西可听"）。
  */
 export const SIDEBAR_VIEWS = Object.freeze([
   { id: VIEW.favorites, label: "我的收藏" },
+  { id: VIEW.local, label: "本地歌曲" },
   { id: VIEW.history, label: "播放历史" },
   { id: VIEW.settings, label: "设置" },
 ]);
@@ -45,6 +49,7 @@ export const DEFAULT_VIEW_ID = VIEW.favorites;
 /** 没给名字时各页的标题（不许空串）。 */
 const FALLBACK_TITLES = {
   [VIEW.favorites]: "我的收藏",
+  [VIEW.local]: "本地歌曲",
   [VIEW.playlistDetail]: "歌单",
   [VIEW.search]: "搜索",
   [VIEW.album]: "专辑",

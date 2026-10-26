@@ -22,6 +22,7 @@
 | DPAPI 会话加密 | **verified**（本机真跑过 `cargo test`；1 条半程端到端 ignored） | untested（`#[cfg(not(windows))]` 一行 stub，本机不参与编译） | untested（同上） |
 | HTTP 代理（webview 侧） | **verified（代码级）** + untested（真抓包） | untested | untested（需 `macos-proxy` feature 且**仅 14+**） |
 | 任务栏歌词 | 实验内嵌 Beta；Windows 单屏真实验证，多屏/高 DPI/自动隐藏未验 | unsupported | unsupported |
+| 本地曲库协议（`hwlocal`） | **verified（代码级 + 浏览器守卫）**；真 WebView2 播放与 Range 未验 | untested（URL 形态是 `hwlocal://localhost/<id>`） | untested（同上） |
 | 开机自启 | untested（真实注册表写入**刻意没测**，见 §6） | untested | untested（`MacosLauncher::LaunchAgent`） |
 | 本机 `vite build` 临时目录 | **已验证需要 TEMP 指向仓内**（沙箱限制） | untested | untested |
 
@@ -186,7 +187,23 @@ webview 仍走代理——这是两套网络栈的行为不一致，如实记（
 
 实测边界（R47 `a62a0ad`，Windows 11 单屏 1920×1080 / dpi 96，正常完整性副本 + 真实 Explorer）：`attached:true`，`GetParent(歌词窗) == Shell_TrayWnd (0x20072)`，子窗 `8,1034 680×44`（宽度由 `safe_slot` 现算）、visible、`enabled=false`（输入交父窗）；同一时刻 show/hide 差分：槽位内 5235 / 5374 / 5394 px 变化，空段与任务栏按钮区 **0**，托盘仅 Explorer 自身活动；`WindowFromPoint` 17 个点全部命中 Explorer，无一点命中本应用；`mode:desktop` 后 `underTaskbar=0`、桌面窗恢复，`mode:taskbar` 往返再次 attached，退出后无残留。**未验**：多显示器 / `Shell_SecondaryTrayWnd`、高 DPI（scale≠1）、自动隐藏、`TaskbarCreated` 重建后的重挂、长时间 z-order、Windows 10、Linux/macOS、NSIS/release 安装包。仓库 `target/debug` 目录带 Low 完整性标签，直接跑该 exe 会 `access_denied`——那是构建目录 ACL 的环境现象，不是产品路径。失败路径（17 按钮零覆盖）仍然只是"降级正确"，不算内嵌成功。
 
-## 8. 只在一端存在的东西（不要误当跨平台能力）
+## 8. 本地曲库（R65）：协议 URL、文件对话框、支持格式
+
+| 项 | Windows | Linux | macOS |
+|---|---|---|---|
+| 音频 / 封面协议 URL | `http://hwlocal.localhost/<id>`（封面 `/<id>/cover`） | `hwlocal://localhost/<id>` | `hwlocal://localhost/<id>` |
+| 基址来源 | `core_local_base_url`（`protocol_base()`，`#[cfg(windows)]` 分支） | 同左 | 同左 |
+| 选文件对话框 | `tauri-plugin-dialog` 的 **Rust API**（`spawn_blocking` 里等，主线程不被占住） | 同左（未实测） | 同左（未实测） |
+
+- **URL 形态由宿主算，渲染层不写死**：Windows 的 webview 只认 `http://<scheme>.localhost` 形态，mac/Linux 是 `hwlocal://localhost`。
+  渲染层的 `normalizeLocalBaseUrl` 只接受这两种，认不出就回 `null`（界面说"本地播放不可用"），不拼一个注定 404 的地址。
+- **文件对话框只从 Rust 侧调用**：capabilities 不给任何 webview `dialog` 权限，JS 也拿不到真实绝对路径；
+  渲染层只发 `core_local_import`（`paths` 省略 = 弹系统对话框）。对话框在阻塞线程池上等——Windows 上同步等模态框会把事件循环锁死。
+- **支持哪些格式由 WebView2 / Chromium 决定**，不是由我们的清单决定：`SUPPORTED_FORMATS` = mp3 / flac / m4a / aac / ogg / opus / wav。
+  其它格式（ape、wma 等）在导入时直接拒绝并说明理由——导进来再发现播不了，比不导入更糟。
+  这一条在 Linux（WebKitGTK）与 macOS（WKWebView）上的实际可播集合**未实测**，不要按 Windows 的结论推断。
+
+## 9. 只在一端存在的东西（不要误当跨平台能力）
 
 | 项 | 只在哪 | 说明 |
 |---|---|---|
@@ -199,7 +216,7 @@ webview 仍走代理——这是两套网络栈的行为不一致，如实记（
 | **`--proxy-server` 的浏览器参数路径** | Windows/Linux 的 webview | macOS 走 feature 门；且 80 端口的代理会被 `url` crate 归一成无端口，拼出 `--proxy-server=http://host:`（按 URL 规范空端口 = 默认端口，**预期等效但未实测**） |
 | **本机 TEMP 限制** | 本仓的开发机 | `vite build` / esbuild / tauri 在受限会话里需要把 `TEMP`/`TMP` 指向仓内 `.tmp/temp`；CI runner 不受影响 |
 
-## 9. 未验证平台的诚实结论
+## 10. 未验证平台的诚实结论
 
 Linux 与 macOS 的每一格都是 `untested`，**本仓不宣称支持它们**。交付形态是 Windows 桌面应用：
 

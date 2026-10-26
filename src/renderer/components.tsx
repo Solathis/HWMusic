@@ -31,12 +31,14 @@ import {
   ShuffleIcon,
   SkipBackIcon,
   SkipForwardIcon,
+  TrashIcon,
   Volume1Icon,
   Volume2Icon,
   VolumeXIcon,
 } from "lucide-react"
 
 import { Alert, AlertDescription } from "./components/ui/alert"
+import { Badge } from "./components/ui/badge"
 import { Button } from "./components/ui/button"
 import {
   DropdownMenu,
@@ -178,6 +180,18 @@ export interface TrackTableProps extends TrackRowActions {
   /** 未接（默认）：收藏写入接口还没确认，按钮如实禁用 */
   onToggleFavorite?: (song: unknown) => void
   favoritedIds?: string[]
+  /**
+   * 收藏心形这一列要不要出现（默认出现）。本地歌曲传 `false`：
+   * "收藏一首本机文件"没有语义（收藏是账号侧的东西），摆一个按不动的按钮只会让人以为坏了。
+   */
+  showFavorite?: boolean
+  /**
+   * 文件已经不在的曲目 id（R65）：这些行被标出来（那句"文件不在"就写在行里），
+   * 而**不是**从列表里消失——用户在曲库里得看得见它，才能决定要不要移除。
+   */
+  unavailableIds?: string[]
+  /** 移除这一行（本地歌曲那一列：占的正是收藏心形的位置） */
+  onRemove?: (song: unknown, index: number) => void
 }
 
 /**
@@ -220,10 +234,14 @@ export function TrackTable({
   onPlayNext,
   onEnqueue,
   favoritedIds = [],
+  showFavorite = true,
+  unavailableIds = [],
+  onRemove,
 }: TrackTableProps) {
   if (songs.length === 0) return <EmptyState text={emptyText} />
 
   const favorited = new Set(favoritedIds)
+  const unavailable = new Set(unavailableIds)
 
   return (
     /*
@@ -250,7 +268,7 @@ export function TrackTable({
             <TableHead className={TRACK_COLUMN_WIDTHS.artist}>艺人</TableHead>
             <TableHead>专辑</TableHead>
             <TableHead className={`${TRACK_COLUMN_WIDTHS.duration} text-right`}>时长</TableHead>
-            <TableHead className={TRACK_COLUMN_WIDTHS.favorite} />
+            {showFavorite || onRemove !== undefined ? <TableHead className={TRACK_COLUMN_WIDTHS.favorite} /> : null}
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -259,6 +277,7 @@ export function TrackTable({
             const albumId = trackAlbumIdOf(song)
             const artistId = trackArtistIdOf(song)
             const isFavorited = id !== null && favorited.has(id)
+            const isUnavailable = id !== null && unavailable.has(id)
             return (
               <TrackRowMenu
                 key={`${id ?? "row"}-${index}`}
@@ -286,6 +305,12 @@ export function TrackTable({
                     <div className="flex min-w-0 items-center gap-2">
                       <CoverArt coverUrl={trackCoverUrlOf(song)} className="size-9 rounded-md" iconClassName="size-4" />
                       <span className="truncate">{trackNameOf(song)}</span>
+                      {/* R65：文件不在就写在这里。行本身留着（用户还看得见它、还能移除它） */}
+                      {isUnavailable ? (
+                        <Badge variant="outline" className="shrink-0" data-testid="track-unavailable">
+                          文件不在
+                        </Badge>
+                      ) : null}
                     </div>
                   </TableCell>
                   <TableCell>
@@ -319,24 +344,39 @@ export function TrackTable({
                   <TableCell className="text-right tabular-nums text-muted-foreground">
                     {formatDuration(trackDurationOf(song))}
                   </TableCell>
-                  <TableCell>
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-pressed={isFavorited}
-                      disabled={onToggleFavorite === undefined}
-                      aria-label={
-                        onToggleFavorite === undefined
-                          ? "收藏（写入接口待联调确认）"
-                          : isFavorited
-                            ? "取消收藏"
-                            : "收藏"
-                      }
-                      onClick={() => onToggleFavorite?.(song)}
-                    >
-                      <HeartIcon className={isFavorited ? "fill-current" : undefined} />
-                    </Button>
-                  </TableCell>
+                  {onRemove !== undefined ? (
+                    // 本地曲目：这一格是「移除」（不是心形）。移除只把这条记录从曲库里去掉，不碰用户的文件。
+                    <TableCell>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label="从本地曲库移除"
+                        data-testid="track-remove"
+                        onClick={() => onRemove(song, index)}
+                      >
+                        <TrashIcon />
+                      </Button>
+                    </TableCell>
+                  ) : showFavorite ? (
+                    <TableCell>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-pressed={isFavorited}
+                        disabled={onToggleFavorite === undefined}
+                        aria-label={
+                          onToggleFavorite === undefined
+                            ? "收藏（写入接口待联调确认）"
+                            : isFavorited
+                              ? "取消收藏"
+                              : "收藏"
+                        }
+                        onClick={() => onToggleFavorite?.(song)}
+                      >
+                        <HeartIcon className={isFavorited ? "fill-current" : undefined} />
+                      </Button>
+                    </TableCell>
+                  ) : null}
                 </TableRow>
               </TrackRowMenu>
             )

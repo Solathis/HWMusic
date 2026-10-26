@@ -140,3 +140,52 @@ export function restoredEntries(record) {
     id, name: null, artists: null, duration: null, coverUrl: null, albumId: null, albumName: null,
   });
 }
+
+/**
+ * 恢复队列时跳过**文件已不在**的本地曲目（R65）：等播放时才失败，用户看到的是"按了播放没反应"，
+ * 而且"下一首"会一直卡在它上面。只动本地曲目（在线曲目没有"文件在不在"这回事）；
+ * 被丢的正好是当前曲目就退到它前面最近的一首，进度字段一并清掉；全丢光回 `null`。
+ */
+export function dropUnavailableLocalEntries(raw, availableIds) {
+  const clean = sanitizeQueueRecord(raw);
+  if (clean === null) return { record: null, skipped: 0 };
+
+  const available = availableIds instanceof Set ? availableIds : new Set(availableIds ?? []);
+  const kept = [];
+  let currentAt = null;
+  let fallbackAt = null;
+  let skipped = 0;
+
+  for (let position = 0; position < clean.ids.length; position += 1) {
+    const id = clean.ids[position];
+    const isLocal = typeof id === "string" && id.startsWith("local:");
+    if (isLocal && !available.has(id)) {
+      skipped += 1;
+      continue;
+    }
+    if (position <= clean.index) fallbackAt = kept.length;
+    if (position === clean.index) currentAt = kept.length;
+    kept.push({ id, metadata: clean.metadata?.[position] ?? null, origin: position });
+  }
+
+  if (skipped === 0) return { record: clean, skipped: 0 };
+  if (kept.length === 0) return { record: null, skipped };
+
+  const index = currentAt ?? Math.max(0, Math.min(fallbackAt ?? 0, kept.length - 1));
+  const survivors = new Set(kept.map((entry) => entry.id));
+  const position =
+    clean.positionTrackId !== undefined && survivors.has(clean.positionTrackId)
+      ? { positionMs: clean.positionMs, positionTrackId: clean.positionTrackId }
+      : {};
+
+  const metadata = kept.map((entry) => entry.metadata);
+  return {
+    record: {
+      ids: kept.map((entry) => entry.id),
+      index,
+      ...(metadata.some((entry) => entry !== null) ? { metadata } : {}),
+      ...position,
+    },
+    skipped,
+  };
+}

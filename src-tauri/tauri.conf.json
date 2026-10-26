@@ -12,7 +12,7 @@
   "app": {
     "windows": [],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https://*.dbankcdn.cn https://*.tingmall.com https://*.kuke.com data:; media-src 'self' blob: https://*.dbankcdn.cn https://*.tingmall.com https://*.kuke.com; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https://*.dbankcdn.cn https://*.tingmall.com https://*.kuke.com data: http://hwlocal.localhost hwlocal:; media-src 'self' blob: https://*.dbankcdn.cn https://*.tingmall.com https://*.kuke.com http://hwlocal.localhost hwlocal:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
     }
   },
   "bundle": {

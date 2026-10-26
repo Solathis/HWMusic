@@ -192,12 +192,20 @@ export const HOST_SECURE_ENCRYPT = "host:secure-encrypt" as const;
 export const HOST_SECURE_DECRYPT = "host:secure-decrypt" as const;
 export const HOST_NOTIFY = "host:notify" as const;
 
+/**
+ * 本地曲目的歌词来源（R65 增补）：载荷 `{trackId}`（`local:<32 位十六进制>`），应答 `data` = `{bytes, source, name?}`。
+ * 回的是**原始字节**的 base64 而不是文本：编码识别（BOM → UTF-8 → GBK）只由 sidecar 的 `decodeLyricsBuffer` 做一份。
+ * 载荷不带路径：路径与"同名 `.lrc` → `.txt` → 内嵌"这三档都由 Rust 定（那是文件系统的事）；上限 512 KiB 两侧各判一次。
+ */
+export const HOST_LOCAL_LYRICS_SOURCE = "host:local-lyrics-source" as const;
+
 export const HOST_REQUEST_CHANNELS = [
   HOST_OPEN_LOGIN,
   HOST_CANCEL_LOGIN,
   HOST_SECURE_ENCRYPT,
   HOST_SECURE_DECRYPT,
   HOST_NOTIFY,
+  HOST_LOCAL_LYRICS_SOURCE,
 ] as const;
 
 export type HostRequestChannel = (typeof HOST_REQUEST_CHANNELS)[number];

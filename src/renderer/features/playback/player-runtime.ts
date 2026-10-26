@@ -17,15 +17,18 @@
  * （两个 Audio 同时出声、系统控件指向另一个实例）。React 严格模式会双挂载，
  * 所以单例必须建在模块层，而不是组件的 ref 里。
  */
-import { PLAYER_COMMAND } from "../../../shared/channels.ts";
-import { PLAYBACK_RESOLVE_URL, SETTINGS_GET, SETTINGS_SET } from "../../../shared/request-channels.ts";
+import { toast } from "sonner";
+import { PLAYER_COMMAND } from "../../../shared/channels.ts";import { PLAYBACK_RESOLVE_URL, SETTINGS_GET, SETTINGS_SET } from "../../../shared/request-channels.ts";
+import { LOCAL_TRACK_PREFIX, isLocalTrackId, localHexId } from "../../../shared/local-track.ts";
 import { coreCall, onCoreEvent } from "../../host-api.ts";
+import { fetchLocalLibrary, localBaseUrlCached } from "../library/local-bridge.ts";
+import { describeSkippedLocalTracks, localMediaUrl } from "../library/local-library.mjs";
 import { createAudioElementPort } from "./audio-element.mjs";
 import { guardMediaUrl } from "./media-url.mjs";
 import { createMediaSession } from "./media-session.mjs";
 import { createPlayer } from "./player.mjs";
 import { applyPlayerCommand } from "./player-commands.mjs";
-import { QUEUE_SETTING_KEY } from "./queue.mjs";
+import { dropUnavailableLocalEntries, QUEUE_SETTING_KEY } from "./queue.mjs";
 
 /** core 调用的返回形状（`settings:get` / `settings:set`）。 */
 interface SettingsAnswer {
@@ -45,6 +48,15 @@ export interface PlayerRuntimeDeps {
   documentHost?: DocumentHost | null;
   /** 主窗 window（pagehide 时落盘；测试注入假实现，不传则取全局） */
   windowHost?: WindowHost | null;
+  /**
+   * 本地曲目的协议基址（不传则问宿主一次并缓存，见 `localBaseUrlCached`）。
+   * 注入点存在的原因：`local:` 曲目的播放地址只由它拼出来，这条路径必须能在 node 里测。
+   */
+  localBaseUrl?: () => Promise<string | null>;
+  /** 本地曲库快照（只取 id 与可用性；不传则问宿主）。恢复队列时用它判"文件还在不在" */
+  localLibraryIds?: () => Promise<{ id: string; available: boolean }[]>;
+  /** 一句话提示（队列里有本歌曲目被跳过时用；不传则只留痕） */
+  notify?: (text: string) => void;
   log?: (...parts: unknown[]) => void;
 }
 
@@ -88,10 +100,50 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
   // 只在错误路径留痕（`console.warn` 是既有约定；`console.log` 被扫描禁止）
   const log: (...parts: unknown[]) => void = deps.log ?? ((...parts) => console.warn("[hwmusic-renderer]", ...parts));
 
+  /** 本地曲库的协议基址（注入点优先；默认问宿主一次并缓存）。 */
+  const localBaseUrl = deps.localBaseUrl ?? localBaseUrlCached;
+
+  /** 本地曲库快照（注入点优先；默认问宿主）。恢复队列时只用到 id 与可用性。 */
+  const readLocalTracks =
+    deps.localLibraryIds ?? (async () => (await fetchLocalLibrary()).tracks.map((song) => ({ id: song.localId, available: song.available })));
+
+  /**
+   * 恢复队列时用得上的本地曲目：**只取 id 与可用性**，不碰元数据（那属于页面）。
+   *
+   * 宿主问不到（曲库不可用 / 命令失败）时回 `null` = "这一次不判"：宁可让一条死链留在队列里
+   * （播到它时报错），也不要在不知道的情况下把用户队列里的条目删掉。
+   */
+  async function localAvailableIds(): Promise<Set<string> | null> {
+    try {
+      const tracks = await readLocalTracks();
+      if (!Array.isArray(tracks)) return null;
+      return new Set(
+        tracks
+          .filter((track) => track !== null && typeof track === "object" && track.available !== false)
+          .map((track) => `${LOCAL_TRACK_PREFIX}${String(track.id ?? "")}`),
+      );
+    } catch (cause) {
+      log("本地曲库这次读不到（队列里的本地曲目按原样保留）：", cause);
+      return null;
+    }
+  }
+
   const player = createPlayer({
     audio: createAudio() as never,
     // coreCall 成功时直接给 data；失败时**抛出** core 错误（kind/message 会被状态机原样保留）
-    resolveUrl: async (trackId: string) => ({ ok: true as const, data: (await callCore(PLAYBACK_RESOLVE_URL, { trackId })) as never }),
+    resolveUrl: async (trackId: string) => {
+      if (isLocalTrackId(trackId)) {
+        // 本地曲目**不走在线的 playback:resolve-url**：那个 id 在华为侧不存在，
+        // 问了只会换来一个陌生错误。地址由协议按 id 拼（拖进度靠协议的 Range 支持）。
+        const baseUrl = await localBaseUrl();
+        const hexId = localHexId(trackId);
+        const url = baseUrl === null || hexId === null ? null : localMediaUrl(baseUrl, hexId);
+        return url === null
+          ? { ok: false as const, error: { kind: "local_unavailable", message: "本地曲库不可用（这首歌现在打不开）" } }
+          : { ok: true as const, data: { url } as never };
+      }
+      return { ok: true as const, data: (await callCore(PLAYBACK_RESOLVE_URL, { trackId })) as never };
+    },
     guardUrl: deps.guardUrl ?? guardMediaUrl,
     persistQueue: async (record: import("./queue.mjs").QueueRecord | null) => {
       await callCore(SETTINGS_SET, { patch: { [QUEUE_SETTING_KEY]: record } });
@@ -99,7 +151,18 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
     loadQueue: async () => {
       const answer = (await callCore(SETTINGS_GET)) as SettingsAnswer | null;
       const data = answer?.settings?.data;
-      return data !== null && typeof data === "object" ? (data[QUEUE_SETTING_KEY] ?? null) : null;
+      const record = data !== null && typeof data === "object" ? (data[QUEUE_SETTING_KEY] ?? null) : null;
+      // 恢复时跳过"文件已不在"的本地曲目（R65）：留在队列里只会变成一条永远播不出来的条目。
+      // 曲库读不到（`null`）就整段跳过判定——不知道的时候不许动用户的队列。
+      const availableIds = await localAvailableIds();
+      const filtered =
+        availableIds === null ? { record, skipped: 0 } : dropUnavailableLocalEntries(record, availableIds);
+      if (filtered.skipped > 0) {
+        const text = describeSkippedLocalTracks(filtered.skipped);
+        if (typeof deps.notify === "function") deps.notify(text);
+        else log(text);
+      }
+      return filtered.record;
     },
     log,
   });
@@ -185,7 +248,11 @@ let runtime: PlayerRuntime | null = null;
 /** 取（首次调用时创建并恢复队列的）播放运行时。 */
 export function getPlayerRuntime(): PlayerRuntime {
   if (runtime === null) {
-    runtime = createPlayerRuntime();
+    runtime = createPlayerRuntime({
+      // 一句话提示走 shadcn 的 Toaster（R65）：队列里"文件已不在"的本地曲目要在界面上说出来，
+      // 只留一行控制台警告等于没说。
+      notify: (text) => toast(text),
+    });
     void runtime.initialize();
   }
   return runtime;

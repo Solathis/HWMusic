@@ -60,6 +60,12 @@ import { LyricsCacheCard } from "./lyrics-cache-card.tsx"
 import { TaskbarLyricsCard } from "./taskbar-lyrics-card.tsx"
 import { coreCall, getAutostart, setAutostart } from "./host-api"
 import { libraryEmptyText, libraryFailureText } from "./features/library/library-state.mjs"
+import {
+  describeImportSummary,
+  describeRejectedImports,
+  unavailableLocalSongIds,
+} from "./features/library/local-library.mjs"
+import { fetchLocalLibrary, importLocalTracks, removeLocalTrack } from "./features/library/local-bridge.ts"
 import { useLibraryResource } from "./features/library/use-library-resource.ts"
 import {
   PLAYLIST_ENQUEUE_LABEL,
@@ -722,6 +728,125 @@ export function HistoryPage({ ...navigation }: PageNavigationProps) {
       sentinelRef={reveal.sentinelRef}
       observe={hasRevealableItems(reveal.state)}
     />
+  )
+}
+
+// ---------------------------------------------------------------------------
+// 本地歌曲（R65）
+// ---------------------------------------------------------------------------
+
+/**
+ * 本地歌曲页（R65）：导入/移除、`TrackTable` 列表、状态行只说事实；移除只删曲库记录，**不删用户的文件**。
+ * 列表跟着命令回执里的整库快照走，不在这一页缓存后自己 += 增删（否则另一个窗口导入过、或导入失败一半时会和真相分家）。
+ * 文件已不在的行**留着**并标出来：用户得看得见它才能决定要不要清掉。
+ */
+export function LocalSongsPage({ ...navigation }: PageNavigationProps) {
+  const view = createView(VIEW.local)
+  const [state, setState] = useState<{ tracks: unknown[]; baseUrl: string | null; available: boolean }>({
+    tracks: [],
+    baseUrl: null,
+    available: true,
+  })
+  const [status, setStatus] = useState("")
+  const [failure, setFailure] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+
+  const apply = useCallback((answer: { tracks: unknown[]; baseUrl: string | null; available?: boolean }) => {
+    setState({ tracks: answer.tracks, baseUrl: answer.baseUrl, available: answer.available !== false })
+  }, [])
+
+  const reload = useCallback(async () => {
+    setLoading(true)
+    setFailure(null)
+    try {
+      apply(await fetchLocalLibrary())
+    } catch (cause) {
+      setFailure(libraryFailureText(cause))
+    } finally {
+      setLoading(false)
+    }
+  }, [apply])
+
+  useEffect(() => {
+    void reload()
+  }, [reload])
+
+  const onImport = useCallback(
+    async (folder: boolean) => {
+      if (busy) return
+      setBusy(true)
+      setFailure(null)
+      try {
+        const answer = await importLocalTracks(folder ? { folder: true } : {})
+        apply(answer)
+        const summary = describeImportSummary(answer)
+        const rejected = describeRejectedImports(answer.rejected)
+        setStatus(rejected === "" ? summary : `${summary}${rejected}`)
+      } catch (cause) {
+        setFailure(libraryFailureText(cause))
+      } finally {
+        setBusy(false)
+      }
+    },
+    [apply, busy],
+  )
+
+  const onRemove = useCallback(
+    async (song: unknown) => {
+      const id = typeof song === "object" && song !== null ? String((song as { id?: unknown }).id ?? "") : ""
+      if (id === "") return
+      setFailure(null)
+      try {
+        const answer = await removeLocalTrack(id)
+        apply(answer)
+        setStatus(answer.removed ? "已从本地曲库移除（文件仍在原处）。" : "这条记录已经不在了。")
+      } catch (cause) {
+        setFailure(libraryFailureText(cause))
+      }
+    },
+    [apply],
+  )
+
+  const unavailableIds = unavailableLocalSongIds(state.tracks)
+
+  return (
+    <div className="flex flex-col" data-testid="local-songs-page">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-3">
+        <p className="text-sm text-muted-foreground" data-testid="local-songs-status">
+          {status === "" ? (state.tracks.length === 0 ? "" : `共 ${state.tracks.length} 首本地歌曲。`) : status}
+        </p>
+        <div className="flex items-center gap-2">
+          <Button variant="secondary" size="sm" disabled={busy} onClick={() => void onImport(false)} data-testid="local-import-files">
+            导入文件…
+          </Button>
+          <Button variant="ghost" size="sm" disabled={busy} onClick={() => void onImport(true)} data-testid="local-import-folder">
+            导入文件夹…
+          </Button>
+        </div>
+      </div>
+
+      {failure === null ? null : (
+        <Alert variant="destructive" className="mx-4 mb-3" data-testid="local-songs-failure">
+          <AlertDescription>{failure}</AlertDescription>
+        </Alert>
+      )}
+
+      {loading ? (
+        <ListSkeleton />
+      ) : (
+        <TrackTable
+          songs={state.tracks}
+          emptyText={libraryEmptyText(view)}
+          onActivate={(song, index) => navigation.onActivateTrack(song, index, state.tracks)}
+          onPlayNext={navigation.rowActions?.onPlayNext}
+          onEnqueue={navigation.rowActions?.onEnqueue}
+          showFavorite={false}
+          unavailableIds={unavailableIds}
+          onRemove={(song) => void onRemove(song)}
+        />
+      )}
+    </div>
   )
 }
 

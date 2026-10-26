@@ -129,6 +129,58 @@ test("CSP 一致性：常量后缀与 tauri.conf.json 的 img-src/media-src 白�
   }
   assert.deepEqual([...cspMediaHosts].sort(), [...MEDIA_URL_HOST_SUFFIXES].sort(), "CSP 与 safe-media-url 白名单必须同源");
   assert.deepEqual(directive("connect-src"), ["'self'", "ipc:", "http://ipc.localhost"], "渲染层不得有对外直连通道");
+
+  // R65：本地曲库的自定义协议只加在 media-src / img-src 两个指令上（音频 + 封面），
+  // default-src / connect-src 一个字都不许动——AMLL 背景那侧是靠 `new Image()` 预载，
+  // 不走 fetch，所以放宽 connect-src 没有任何理由。
+  for (const name of ["img-src", "media-src"]) {
+    const sources = directive(name);
+    assert.ok(sources.includes("http://hwlocal.localhost"), `${name} 必须放行 Windows 形态的本地协议`);
+    assert.ok(sources.includes("hwlocal:"), `${name} 必须放行 mac/Linux 形态的本地协议`);
+  }
+  for (const name of ["default-src", "connect-src", "script-src"]) {
+    assert.ok(
+      !directive(name).some((source) => source.includes("hwlocal")),
+      `${name} 不许出现本地协议（那等于放宽整条链）`,
+    );
+  }
+});
+
+test("R65：本地曲库协议按 id 形状放行（Windows 与 mac/Linux 两种形态），其余一律拒绝", () => {
+  const hex = "0123456789abcdef0123456789abcdef";
+  assert.deepEqual(parseSafeMediaUrl(`http://hwlocal.localhost/${hex}`), {
+    ok: true,
+    url: `http://hwlocal.localhost/${hex}`,
+    host: "hwlocal.localhost",
+    suffix: null,
+  });
+  assert.deepEqual(parseSafeMediaUrl(`hwlocal://localhost/${hex}/cover`), {
+    ok: true,
+    url: `hwlocal://localhost/${hex}/cover`,
+    host: "localhost",
+    suffix: null,
+  });
+
+  for (const bad of [
+    // id 形状不对：不可猜的 id 是"没导入就拿不到"的唯一凭据，形状本身就是过滤器
+    "http://hwlocal.localhost/",
+    "http://hwlocal.localhost/0123456789abcdef",
+    "http://hwlocal.localhost/0123456789ABCDEF0123456789abcdef",
+    `http://hwlocal.localhost/${hex}0`,
+    // 多出来的路径段 / 查询串 / 片段：协议只认两种形状
+    `http://hwlocal.localhost/${hex}/cover/extra`,
+    `http://hwlocal.localhost/${hex}?x=1`,
+    `http://hwlocal.localhost/${hex}#frag`,
+    `http://hwlocal.localhost/../${hex}`,
+    // 换域（哪怕长得像）：基址由宿主给，不认识的域一律拒绝
+    `http://hwlocal.localhost.evil.com/${hex}`,
+    `http://evil.example/${hex}`,
+    `hwlocal://evil.example/${hex}`,
+    `hwlocal://localhost:8080/${hex}`,
+    `hwlocal://user@localhost/${hex}`,
+  ]) {
+    assert.equal(safeMediaUrl(bad), null, `必须拒绝：${bad}`);
+  }
 });
 
 test("广播频道：R16 起是 app:notice + auth:status + auth:qr + player:command + 托盘那两条 + 歌词窗那三条 + 主题那条（每个新增都在共享常量表里，不另立清单）", () => {

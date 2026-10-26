@@ -1623,7 +1623,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 > 按**代码事实**补齐（真源：`src/shared/request-channels.ts` 的两份清单，Rust 侧为镜像副本）。
 > 本节只登记，不改任何实现。
 
-**请求频道（渲染层 → core，唯一业务通道 `core_call`）** —— 共 20 条，真源 `REQUEST_CHANNELS`：
+**请求频道（渲染层 → core，唯一业务通道 `core_call`）** —— 共 21 条，真源 `REQUEST_CHANNELS`：
 
 | 频道 | 载荷 | 应答 `data` | 失败类别 | 落地 |
 |---|---|---|---|---|
@@ -1662,7 +1662,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 
 另：`patch` 里某个键给 `null` = **删除该键**（§2.6 的队列清理依赖这条语义）。
 
-**宿主要求（core → 宿主，经 `rpc.callHost`）** —— 共 5 条，真源 `HOST_REQUEST_CHANNELS`：
+**宿主要求（core → 宿主，经 `rpc.callHost`）** —— 共 6 条，真源 `HOST_REQUEST_CHANNELS`：
 
 | 频道 | 入 | 出 | 落地 |
 |---|---|---|---|
@@ -1671,6 +1671,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `host:secure-decrypt` | `{cipher}` | `{plaintext}` | R5：只认 `data.plaintext`；解不开 → `invalid_cipher`（**不当成「没登录」**）；后端不可用 → `secure_store_unavailable`，**没有"失败降级成明文"这条分支** |
 | `host:open-login` | 见 §1.7 | 见 §1.7（长轮询：窗收场后才答复） | R7 |
 | `host:cancel-login` | 见 §1.7 | 见 §1.7 | R7 |
+| `host:local-lyrics-source` | `{trackId}`（`local:<32 hex>` 或裸 id） | `{bytes, source, name?}`（`bytes` = 原始字节的 base64，`source` ∈ `lrc`/`txt`/`embedded`）；没有歌词 → `data:null` | R65：查找顺序 同名 `.lrc` → `.txt` → 内嵌；上限 512 KiB；id 形状不对 → `invalid_payload`。见 §2.14 |
 
 - 出向 `callHost` **只放行宿主白名单**：非白名单当场回 `unknown_channel` 且**不写帧**（`src/host/rpc.mjs`）。
 - `host:notify` 的**端到端没被跑过**（R3 的 sidecar 不主动发起宿主要求）：Rust 单测覆盖了决策与
@@ -1763,6 +1764,39 @@ R63 按下面四条标准逐条查过，**一条都没满足**，所以 `src/ren
 **什么时候可以翻这个闸门**：拿到满足四条标准的端点证据（路径/方法/参数/成功判据/**追加语义**）
 → 写进本节的逐端点表 → 协议层加一条写通道（不自动重试）→ 再把
 `ADD_TO_PLAYLIST_SUPPORTED` 改成 `true`（菜单项、子菜单、提示都在那一处之后才出现）。
+
+### 2.14 本地曲库（R65）：四条命令、`hwlocal` 协议与 `host:local-lyrics-source`
+
+本地曲库由 Rust 拥有：选文件、读元数据、存索引、按 id 提供音频与封面。**渲染层与 sidecar 永远拿不到原始路径**，只拿 id。
+
+**四条命令**（真源 `src/shared/commands.ts`；Rust `local_library.rs`，每条都过 `require_main_webview`，只对主窗开放）：
+
+| 命令 | 入 | 出 | 备注 |
+|---|---|---|---|
+| `core_local_base_url` | 无 | `{baseUrl}` | 平台形态见 PLATFORM_DIFFERENCES §8；渲染层缓存一次，不猜 |
+| `core_local_list` | 无 | `{tracks[], available}` | 快照；`available` 说的是文件还在不在（每条一个） |
+| `core_local_import` | `{paths?: string[], folder?: boolean}` | `{tracks[], available, added, updated, rejected[], truncated}` | `paths` 省略 = 弹系统对话框（`folder:true` 选文件夹）；取消不是错误 |
+| `core_local_remove` | `{id}`（收 `local:<32 hex>` 与裸 id 两种） | `{removed, tracks[], available}` | **只删索引记录，不删用户的文件** |
+
+- 每条记录只有 `id`（128 位随机、32 位十六进制，不可枚举）与元数据：`title` / `artists` / `album` / `duration` / `format` / `importedAt` / `available` / `hasCover`。
+  **没有 `path`**——这是"没导入就拿不到"这条保证的落点。
+- 索引落在数据目录下的 `local-library.json`（先写临时文件再 rename）；同一路径重复导入按去重更新。
+
+**`hwlocal` 协议**（真源 `local_library.rs` 的 `handle_protocol`，注册在 `lib.rs`）：
+
+- 路径只有两种：`/<id>`（音频）与 `/<id>/cover`（封面）。渲染层拼地址走 `localMediaPath`，验地址走 `parseLocalMediaUrl`（共同真源 `src/shared/local-track.ts` 的 id 形状）。
+- 只服务**主窗**：来源 label 不是 `main`（歌词窗、内嵌官方登录页、浮动控件）一律 404。歌词窗不取本地封面/音频。
+- 未知 id、未导入、路径形状不对、格式不支持、封面没有内嵌图 → **404**（界面用占位图，不是裂图）。
+- 音频支持 `Range`：单区间回 **206 + `Content-Range`**，起点越界回 **416**，认不出的 `Range` 按整份 200 处理。拖动进度靠这条。
+- 封面响应带 `access-control-allow-origin: *`：AMLL 取色用 CORS 模式的 `new Image()` + `getImageData`，不带这个头会抛 `SecurityError`。**没有回显 `Origin`**（未取证的真实 WebView2 行为见 task-65 报告）。
+- CSP 只在 `img-src` 与 `media-src` 加了这两个来源（`http://hwlocal.localhost`、`hwlocal:`），`default-src` / `connect-src` 未动。
+
+**宿主要求 `host:local-lyrics-source`**（登记见 §2.11；真源 `HOST_LOCAL_LYRICS_SOURCE`）：
+
+- 载荷 `{trackId}`（`local:<32 hex>` 或裸 id）；应答 `data` = `{bytes, source, name?}`，`bytes` 是**原始字节的 base64**（编码识别只由 sidecar 的 `decodeLyricsBuffer` 做一份：UTF-8 / UTF-16 / GBK）。
+- Rust 侧的查找顺序：同目录同名 **`.lrc`** → 同名 **`.txt`** → **内嵌歌词标签**；外挂文件是用户自己放的（看得见、改得动），所以优先。
+- 没导入 / 没有歌词 → `data` 为 `null`（不是错误）；`trackId` 形状不对 → `invalid_payload`；字节上限 512 KiB（`LYRICS_SOURCE_MAX_BYTES`，与 `LYRICS_IMPORT_MAX_BYTES` 同值）。
+- sidecar 侧的优先级：**用户手动导入**（`lyrics-cache` 的 `readLocal(trackId)`）> 本请求给的字节；两者都没有才回落到在线歌词。
 
 ## 3. 本地常量（唯一真源位置）
 

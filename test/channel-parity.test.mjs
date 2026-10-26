@@ -266,6 +266,8 @@ test("一致性：宿主要求频道（Node 共享常量 ↔ Rust commands.rs �
   assert.deepEqual(sorted(rust), sorted(HOST_REQUEST_CHANNELS));
   assert.deepEqual(sorted(HOST_REQUEST_CHANNELS), [
     "host:cancel-login",
+    // R65：本地曲目的歌词来源（Rust 读同名 .lrc/.txt 或内嵌标签，按 id 回原始字节）
+    "host:local-lyrics-source",
     "host:notify",
     "host:open-login",
     "host:secure-decrypt",

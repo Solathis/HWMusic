@@ -25,6 +25,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
+  FileMusicIcon,
   HistoryIcon,
   HeartIcon,
   ListMusicIcon,
@@ -72,6 +73,7 @@ import {
 } from "./components/ui/sidebar"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
 import { EmptyState, PlayerBar, QueuePanel } from "./components"
+import { Toaster } from "./components/ui/sonner"
 import { SidebarPlaylists } from "./sidebar-playlists.tsx"
 import { PlaybackStage } from "./playback-stage.tsx"
 import { ThemeToggle } from "./theme-toggle.tsx"
@@ -81,6 +83,7 @@ import {
   AlbumPage,
   ArtistPage,
   HistoryPage,
+  LocalSongsPage,
   PlaylistDetailPage,
   SearchPage,
   SettingsPage,
@@ -157,6 +160,9 @@ export function App() {
       <div className="h-full w-full" data-shell="app-shell">
         <LibraryShell profile={gate.profile} />
       </div>
+      {/* 一句话提示的唯一出口（R65：队列恢复时跳过本地曲目要能说出来）。
+          shadcn 的 Toaster 原语，样式全走主题变量——不在这里写任何裸色值。 */}
+      <Toaster position="bottom-center" />
     </TooltipProvider>
   )
 }
@@ -171,6 +177,7 @@ export function App() {
  */
 const NAV_ICONS = {
   [VIEW.favorites]: HeartIcon,
+  [VIEW.local]: FileMusicIcon,
   [VIEW.history]: HistoryIcon,
   [VIEW.settings]: SettingsIcon,
 }
@@ -461,6 +468,10 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
         return <ArtistPage view={view} {...navigation} />
       case VIEW.history:
         return <HistoryPage {...navigation} />
+      case VIEW.local:
+        // 本地歌曲（R65）：页面自己向宿主取快照（导入/移除的回执就带着新快照），
+        // 外壳只交"双击播放"与行菜单那两个动作——与其余页同一条接法。
+        return <LocalSongsPage {...navigation} />
       case VIEW.settings:
         // 设置页只读地显示队列状态（管理队列在播放队列面板里）：状态由外壳交下去，页面不自己取；
         // 托盘可用性同理（R11：查一次、交下去，页面不自己问宿主）；

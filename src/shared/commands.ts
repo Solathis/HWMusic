@@ -103,3 +103,13 @@ export const CORE_LYRICS_SETTINGS_CLOSE = "core_lyrics_settings_close";
  * 不是"请求已受理"。
  */
 export const CORE_LOGIN_CHROME = "core_login_chrome";
+
+/**
+ * 本地曲库的四条命令（R65）：全部在 Rust 侧、挂主窗来源守卫——**路径**只由宿主持有，渲染层只拿 id；
+ * 把"选文件"交给页面（`<input type="file">` 或 dialog 插件的 JS API）等于把任意文件的读取权开给 webview。
+ * 回执都是**事实**（`{baseUrl}` / `{tracks, available}` / `{added, updated, rejected, tracks, available}` / `{removed, tracks, available}`），不是"请求已受理"。
+ */
+export const CORE_LOCAL_BASE_URL = "core_local_base_url";
+export const CORE_LOCAL_LIST = "core_local_list";
+export const CORE_LOCAL_IMPORT = "core_local_import";
+export const CORE_LOCAL_REMOVE = "core_local_remove";

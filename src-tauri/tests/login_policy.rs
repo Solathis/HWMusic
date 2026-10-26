@@ -10,7 +10,6 @@ use std::cell::Cell;
 use std::path::Path;
 use std::time::Duration;
 
-use huawei_music_desktop_lib::bridge::CoreError;
 use huawei_music_desktop_lib::login::{
     abandon_build_data_dir, abandon_build_data_dir_with,
     chrome_navigation_allowed, chrome_rects, deadline_conclusion, deliver_build_result, layout_for,

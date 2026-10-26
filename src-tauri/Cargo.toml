@@ -31,10 +31,18 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-log = "2"
+# R65 本地曲库：选文件的**只有一个** Rust 侧调用点（`local_library::pick_files`），
+# capabilities 里没有 `dialog:*` 权限，渲染层调不到它。版本与其余插件同一主版本。
+tauri-plugin-dialog = "=2.8.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
 base64 = "0.22"
+# R65 本地曲库：读音频文件的标签（标题/歌手/专辑/时长/内嵌封面/内嵌歌词）。
+# 只读标签、不做音频解码，也不带图像处理（封面按原字节透传）。
+lofty = "=0.25.5"
+# R65 本地曲库：曲目 id 必须是不可猜的 128 位随机数（用它而不是 uuid：只要随机字节）。
+getrandom = "=0.3.4"
 
 # DPAPI（CryptProtectData）与本地内存 API 仅 Windows 编译，由 R5 消费
 [target.'cfg(windows)'.dependencies]

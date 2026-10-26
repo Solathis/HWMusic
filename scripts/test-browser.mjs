@@ -265,8 +265,40 @@ function pagedAnswer(channel, payload, prefix, options) {
     hasMore: start + perPage < total,
   };
 }
+/**
+ * R65：本地曲库夹具（查询串给）：默认三条（第二条带封面、第三条的文件已不在）、empty（一首都没有）。
+ * 回执照真命令的契约只给 id 与元数据；移除之后回的是"整库快照"，所以这张表自己记住剩下什么。
+ */
+const localMode = new URLSearchParams(location.search).get("local") ?? "fixture";
+const localFixture = () => [
+  { id: "0123456789abcdef0123456789abcdef", title: "本地守卫曲目一", artists: "本地守卫艺人", album: "本地守卫专辑", duration: 12, format: "wav", hasCover: false, available: true },
+  { id: "fedcba9876543210fedcba9876543210", title: "本地守卫曲目二", artists: "本地守卫艺人二", album: null, duration: 95, format: "flac", hasCover: true, available: true },
+  { id: "00112233445566778899aabbccddeeff", title: "文件不在的本地曲目", artists: "", album: null, duration: null, format: "mp3", hasCover: false, available: false },
+];
+let localTracks = localMode === "empty" ? [] : localFixture();
+const localRemoveCalls = [];
+const localImportCalls = [];
+let localBaseUrlCalls = 0;
+/** 宿主两条命令都收 "local:" 前缀与裸 id 两种写法（Rust 侧自己剥前缀）。 */
+const localIdOf = (value) => String(value ?? "").replace(/^local:/, "");
+const localSnapshot = () => localTracks.map((track) => ({ ...track }));
 mockWindows("main");
 mockIPC(async (command, args) => {
+  if (command === "core_local_base_url") {
+    localBaseUrlCalls += 1;
+    return { baseUrl: "http://hwlocal.localhost" };
+  }
+  if (command === "core_local_list") return { tracks: localSnapshot(), available: true };
+  if (command === "core_local_import") {
+    localImportCalls.push(JSON.parse(JSON.stringify(args?.payload ?? {})));
+    return { tracks: localSnapshot(), available: true, added: 0, updated: 0, rejected: [] };
+  }
+  if (command === "core_local_remove") {
+    const target = localIdOf(args?.id);
+    localRemoveCalls.push({ id: String(args?.id ?? "") });
+    localTracks = localTracks.filter((track) => track.id !== target);
+    return { removed: true, tracks: localSnapshot(), available: true };
+  }
   if (command === "core_call") {
     switch (args.channel) {
       case "settings:get": return { settings: { schemaVersion: 1, data: settingsData } };
@@ -470,6 +502,11 @@ function Guard() {
       resetPlaylistFetches: () => { playlistProbe.reset(); },
       /** R62：侧栏歌单列表取了几次（"只取一次并缓存"按它判）。 */
       playlistListCalls: () => playlistListCalls.slice(),
+      /** R65：本地曲库夹具的调用记录与当前整库（移除之后少了哪一行按它判）。 */
+      localRemoveCalls: () => localRemoveCalls.map((entry) => ({ ...entry })),
+      localImportCalls: () => localImportCalls.map((entry) => ({ ...entry })),
+      localTracks: () => localTracks.map((track) => ({ ...track })),
+      localBaseUrlCalls: () => localBaseUrlCalls,
       queueLength: () => runtime.player.snapshot().entries.length,
       pause: () => runtime.player.pause(),
       desktopConfig: () => desktopConfig,
@@ -4449,6 +4486,187 @@ export async function checkRowContextMenus(page, port, guardDir, add) {
 
 
 /**
+ * R65：侧栏「本地歌曲」。导航入口（长在「音乐库」组里）、表格三列与「文件不在」标记、
+ * 空态与导入按钮、播放地址（协议 + 32 位 id，不含任何路径）、专属右键菜单、移除。
+ * 假的本地曲库只在 IPC 边界；本地协议由 page.route 接住（顺带证明渲染层真的按 id 去取）。截图落在 `.tmp/browser-guard/r65-*`。
+ */
+export async function checkLocalSongs(page, port, guardDir, add) {
+  const menu = page.getByTestId("row-context-menu");
+  const pageRoot = page.getByTestId("local-songs-page");
+  /** 只数本地歌曲页自己的行：别的页面的表格可能还挂在 DOM 里（页面切换不是立刻卸载）。 */
+  const rows = () => pageRoot.locator("tbody tr");
+  /** 本地协议上的每一次真实请求（音频 + 封面）：地址形状是"渲染层只拿 id"的外部证据。 */
+  const mediaRequests = [];
+  const cover = await sharp({ create: { width: 48, height: 48, channels: 3, background: { r: 120, g: 90, b: 200 } } }).png().toBuffer();
+  const audio = fixtureAudio();
+  await page.route("http://hwlocal.localhost/**", (route) => {
+    const url = route.request().url();
+    mediaRequests.push(url);
+    if (/^http:\/\/hwlocal\.localhost\/[0-9a-f]{32}\/cover$/.test(url)) {
+      return route.fulfill({ contentType: "image/png", body: cover });
+    }
+    return route.fulfill({ status: 200, contentType: "audio/wav", body: audio, headers: { "accept-ranges": "bytes" } });
+  });
+  const audioUrls = () => mediaRequests.filter((url) => !url.endsWith("/cover"));
+  const resetMedia = () => { mediaRequests.length = 0; };
+
+  const open = async (mode = "fixture", theme = "light") => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    const query = mode === "fixture" ? "" : `?local=${mode}`;
+    await page.goto(`http://127.0.0.1:${port}/index.html${query}`, { waitUntil: "load" });
+    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+    await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
+    await page.getByTestId("main-content").waitFor();
+    await page.getByRole("button", { name: "本地歌曲", exact: true }).click();
+    await pageRoot.waitFor();
+  };
+  /** 每行的 DOM 事实：单元格文案、不可用标记、移除按钮、以及"有没有收藏心形"。 */
+  const rowFacts = () => page.evaluate(() => {
+    const node = document.querySelector('[data-testid="local-songs-page"] [data-testid="track-table"]');
+    if (node === null) return [];
+    return [...node.querySelectorAll("tbody tr")].map((row) => ({
+      cells: [...row.querySelectorAll("td")].map((cell) => (cell.textContent ?? "").trim()),
+      labels: [...row.querySelectorAll("button")].map((button) => (button.getAttribute("aria-label") ?? "").trim()),
+      disabledButtons: row.querySelectorAll("button[disabled]").length,
+      unavailable: row.querySelector('[data-testid="track-unavailable"]') !== null,
+      remove: row.querySelector('[data-testid="track-remove"]') !== null,
+    }));
+  });
+  const menuItems = () => page.evaluate(() => {
+    const node = document.querySelector('[data-testid="row-context-menu"]');
+    if (node === null) return null;
+    return [...node.querySelectorAll('[role="menuitem"]')].map((item) => (item.textContent ?? "").trim());
+  });
+  /** 菜单淡入/缩放收尾（opacity=1 且没有在跑的动画）——截图不许拍在半透明那一帧。 */
+  const waitMenuSettled = async () => {
+    const settled = await page.waitForFunction(() => {
+      const node = document.querySelector('[data-testid="row-context-menu"]');
+      if (node === null) return false;
+      const opacity = getComputedStyle(node).opacity;
+      const running = node.getAnimations().filter((animation) => animation.playState === "running").length;
+      return opacity === "1" && running === 0 ? { opacity, running } : false;
+    }, null, { timeout: 5_000 });
+    await page.waitForTimeout(80);
+    return settled.jsonValue();
+  };
+
+  // ——— ① 侧栏「音乐库」组里的入口，点进去就是本地歌曲页 ———
+  await open("fixture");
+  const navFact = await page.evaluate(() => {
+    const list = document.querySelector('[data-testid="nav-list"]');
+    if (list === null) return null;
+    const group = list.closest('[data-sidebar="group"]');
+    return {
+      groupLabel: (group?.querySelector('[data-sidebar="group-label"]')?.textContent ?? "").trim(),
+      labels: [...list.querySelectorAll("button")].map((node) => (node.textContent ?? "").trim()),
+    };
+  });
+  add("r65-local-nav-entry",
+    navFact !== null && navFact.groupLabel === "音乐库" && navFact.labels.includes("本地歌曲"),
+    JSON.stringify(navFact));
+  await rows().first().waitFor();
+  add("r65-local-page-opens",
+    (await pageRoot.count()) === 1 && (await rows().count()) === 3,
+    `本地歌曲页 1 个、${await rows().count()} 行`);
+
+  // ——— ② 表格三列 + 「文件不在」标记 + 没有收藏心形（那一格是移除） ———
+  const facts = await rowFacts();
+  add("r65-local-table-columns",
+    facts.length === 3
+      && facts[0].cells[1] === "本地守卫曲目一" && facts[0].cells[2] === "本地守卫艺人" && facts[0].cells[4] === "0:12"
+      && facts[1].cells[1] === "本地守卫曲目二" && facts[1].cells[2] === "本地守卫艺人二" && facts[1].cells[4] === "1:35",
+    JSON.stringify(facts.map((row) => row.cells)));
+  add("r65-local-unavailable-marked",
+    facts.length === 3 && facts[2].unavailable === true && facts[2].cells[1].includes("文件不在的本地曲目")
+      && facts[0].unavailable === false,
+    JSON.stringify(facts.map((row) => ({ unavailable: row.unavailable, cells: row.cells.slice(1, 2) }))));
+  add("r65-local-no-favorite-heart",
+    facts.length === 3 && facts.every((row) => row.remove === true
+      && row.labels.includes("从本地曲库移除") && !row.labels.some((label) => label.includes("收藏"))),
+    JSON.stringify(facts.map((row) => row.labels)));
+  // 在线歌手/专辑的链接在这里没有去处：按钮如实禁用（不是点了没反应）
+  add("r65-local-artist-album-disabled", facts[0].disabledButtons === 2, `禁用按钮 ${facts[0].disabledButtons} 个`);
+
+  await page.screenshot({ path: path.join(guardDir, "r65-local-light.png") });
+  await page.evaluate(() => { document.documentElement.className = "dark"; });
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: path.join(guardDir, "r65-local-dark.png") });
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+
+  // ——— ③ 空态：没有本地曲目时那句话 + 导入按钮 ———
+  await open("empty");
+  const emptyNode = pageRoot.getByRole("status");
+  await emptyNode.waitFor();
+  const emptyText = ((await emptyNode.textContent()) ?? "").trim();
+  add("r65-local-empty-state",
+    emptyText === "还没有导入本地歌曲。" && (await page.getByTestId("local-import-files").isVisible())
+      && (await rows().count()) === 0,
+    JSON.stringify({ emptyText }));
+  await page.screenshot({ path: path.join(guardDir, "r65-local-empty.png") });
+
+  // ——— ④ 双击播放：播放器取的是 `http://hwlocal.localhost/<32 位 id>`，地址里没有路径 ———
+  await open("fixture");
+  await rows().first().waitFor();
+  resetMedia();
+  await rows().nth(0).dblclick();
+  await page.waitForFunction(() => window.__guard.snapshot().status === "playing", null, { timeout: 10_000 });
+  const playedTrack = await page.evaluate(() => ({
+    id: window.__guard.snapshot().track?.id ?? null,
+    entries: window.__guard.snapshot().entries.length,
+  }));
+  add("r65-local-play-url",
+    playedTrack.id === "local:0123456789abcdef0123456789abcdef"
+      && audioUrls().length >= 1
+      && audioUrls().every((url) => url === "http://hwlocal.localhost/0123456789abcdef0123456789abcdef"),
+    JSON.stringify({ played: playedTrack, audioUrls: audioUrls() }));
+
+  // ——— ⑤ 右键：专属三项，没有「加入歌单」；用菜单里的「播放」也走同一个地址规则 ———
+  await page.evaluate(() => window.__guard.pause());
+  resetMedia();
+  await rows().nth(1).click({ button: "right" });
+  await menu.waitFor({ timeout: 5_000 });
+  const localMenuItems = await menuItems();
+  add("r65-local-menu-items",
+    JSON.stringify(localMenuItems) === JSON.stringify(["播放", "下一首播放", "加入播放队列"])
+      && !localMenuItems.includes("加入歌单"),
+    JSON.stringify(localMenuItems));
+  const settled = await waitMenuSettled();
+  await page.screenshot({ path: path.join(guardDir, "r65-local-menu.png") });
+  await page.getByTestId("row-menu-play").click();
+  await page.waitForFunction(() => window.__guard.snapshot().track?.id === "local:fedcba9876543210fedcba9876543210"
+    && window.__guard.snapshot().status === "playing", null, { timeout: 10_000 });
+  await page.waitForTimeout(300);
+  add("r65-local-menu-play-url",
+    audioUrls().length >= 1 && audioUrls().every((url) => url === "http://hwlocal.localhost/fedcba9876543210fedcba9876543210"),
+    JSON.stringify({ audioUrls: audioUrls(), settled }));
+
+  // ——— ⑥ 移除：宿主真的收到 remove，列表少一行，状态行只说事实 ———
+  await page.evaluate(() => window.__guard.pause());
+  await open("fixture");
+  await rows().first().waitFor();
+  await page.getByTestId("track-remove").first().click();
+  await page.waitForFunction(() => window.__guard.localTracks().length === 2, null, { timeout: 5_000 }).catch(() => {});
+  const removeCalls = await page.evaluate(() => window.__guard.localRemoveCalls());
+  const remaining = await page.evaluate(() => window.__guard.localTracks().map((track) => track.id));
+  const statusText = ((await page.getByTestId("local-songs-status").textContent()) ?? "").trim();
+  add("r65-local-remove",
+    removeCalls.length === 1 && removeCalls[0].id === "local:0123456789abcdef0123456789abcdef"
+      && remaining.length === 2 && remaining[0] === "fedcba9876543210fedcba9876543210"
+      && (await rows().count()) === 2 && statusText === "已从本地曲库移除（文件仍在原处）。",
+    JSON.stringify({ removeCalls, remaining, rows: await rows().count(), statusText }));
+
+  // 收尾：队列先换掉（重载后谁在渲染，谁就会替这条协议发请求），再离开本地页、卸掉路由、回默认页
+  await page.evaluate(() => window.__guard.queueWithTrackDuration(12));
+  await page.waitForTimeout(200);
+  await page.getByRole("button", { name: "我的收藏", exact: true }).click();
+  await page.getByTestId("favorites-page").waitFor();
+  await page.unroute("http://hwlocal.localhost/**");
+  await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
+  await page.getByTestId("main-content").waitFor();
+  await page.getByTestId("favorites-page").waitFor();
+}
+
+/**
  * R66b：主内容区铺满。逐页量内容右边缘到可用区域右边缘的空白，要求不超过页面左内边距 + 8px，且无横向滚动。
  * 1900 宽下再人为恢复 768px 上限量一次，证明判据抓得住这类缺陷；960×600 检查设置卡片回到单列。
  * 明细写入 `.tmp/browser-guard/r66b-page-fill.json`。
@@ -5479,6 +5697,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     await checked("r62-sidebar-playlists", () => checkSidebarPlaylists(page, port, guardDir, add));
     /** R63：行的专属右键菜单（自己开页、自己收尾；排在 r66b 之前）。 */
     await checked("r63-row-context-menu", () => checkRowContextMenus(page, port, guardDir, add));
+    /** R65：侧栏「本地歌曲」（自己开页、自己收尾；假的本地协议由它自己 route 接住）。 */
+    await checked("r65-local-songs", () => checkLocalSongs(page, port, guardDir, add));
     /** R66b：主内容区宽度。会遍历各主页面并切换窗口尺寸，所以排在倒数第二（下一项自己 goto）。 */
     await checked("r66b-page-fill", () => checkPageFill(page, guardDir, add));
     /** R57：账号区四态（另一页，挂真 App；头像的两种结局都用 page.route 造出来）。 */

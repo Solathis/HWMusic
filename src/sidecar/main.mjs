@@ -26,6 +26,7 @@ import { dataDirFromArgv } from "../main/data-dir.mjs";
 import { createLoginHost } from "../main/huawei.ts";
 import { createLyricsCache } from "../main/lyrics-cache.mjs";
 import { createThirdPartyLyrics } from "../main/lyrics-fallback.mjs";
+import { createLocalLyricsResolver } from "../main/local-lyrics.mjs";
 import { createMusicService } from "../main/music-service.mjs";
 import { applyStartupProxy, testProxyConnection } from "../main/proxy.mjs";
 import { createMusicSessionVerifier } from "../main/session-verifier.mjs";
@@ -44,6 +45,7 @@ import {
   AUTH_LOGIN,
   AUTH_LOGOUT,
   AUTH_QR_START,
+  HOST_LOCAL_LYRICS_SOURCE,
   REQUEST_CHANNELS,
   SETTINGS_GET,
   SETTINGS_SET,
@@ -158,7 +160,16 @@ for (const [channel, handler] of Object.entries(createLyricsHandlers({ api: musi
 // 同一个 music 服务（同一张端点表）：`playback:resolve-url` 拿的是**当次**播放地址——
 // 处理器把地址原样放进这一次的应答，不写日志、不落盘（见 src/host/playback-handlers.mjs）。
 // 端点仍未配置 → 协议层如实回 `endpoint_unknown`，渲染层显示"接口尚未配置"。
-for (const [channel, handler] of Object.entries(createPlaybackHandlers({ api: musicService.api }))) {
+//
+// R65：`local:` 曲目的歌词走本地那一链（手动导入 → 同名 `.lrc`/`.txt`/内嵌标签 → 没有），
+// 由 `createLocalLyricsResolver` 实现；它要的宿主要求口是**惰性引用** `rpc`（装配发生在它之前，
+// 调用发生在之后），所以这里传的是箭头函数而不是 `rpc.callHost`。
+const localLyrics = createLocalLyricsResolver({
+  cache: lyricsCache,
+  localLyricsSource: (payload) => rpc.callHost(HOST_LOCAL_LYRICS_SOURCE, payload),
+  log: (text) => log(text),
+});
+for (const [channel, handler] of Object.entries(createPlaybackHandlers({ api: musicService.api, localLyrics }))) {
   dispatcher.register(channel, handler);
 }
 

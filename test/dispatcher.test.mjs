@@ -20,6 +20,7 @@ import {
   HOST_OPEN_LOGIN,
   HOST_REQUEST_CHANNELS,
   HOST_SECURE_DECRYPT,
+  HOST_LOCAL_LYRICS_SOURCE,
   HOST_SECURE_ENCRYPT,
   LIBRARY_ALBUM,
   LIBRARY_ARTIST,
@@ -403,7 +404,7 @@ test("host-services：notify 走 host:notify 且文本透传", async () => {
   assert.deepEqual(calls, [{ channel: HOST_NOTIFY, payload: { text: "已复制链接" } }]);
 });
 
-test("host-services：登录三频道 + secure-* 频道名正确、payload/选项透传、宿主错误原样返回不抛", async () => {
+test("host-services：登录三频道 + secure-* + 本地歌词来源的频道名正确、payload/选项透传、宿主错误原样返回不抛", async () => {
   const calls = [];
   const services = createHostServices({
     callHost: async (channel, payload, options) => {
@@ -416,18 +417,21 @@ test("host-services：登录三频道 + secure-* 频道名正确、payload/选�
   const cancel = await services.cancelLogin({});
   const enc = await services.secureEncrypt({ plaintext: "x" });
   const dec = await services.secureDecrypt({ ciphertext: "y" });
+  // R65：本地曲目的歌词原始字节（只发 id，不发路径——路径只存在 Rust 的索引里）
+  const lyrics = await services.localLyricsSource({ trackId: "local:0123456789abcdef0123456789abcdef" });
 
-  for (const result of [login, cancel, enc, dec]) {
+  for (const result of [login, cancel, enc, dec, lyrics]) {
     assert.equal(result.ok, false);
     assert.equal(result.error.kind, "core_gone");
   }
   assert.deepEqual(
     calls.map((call) => call.channel),
-    [HOST_OPEN_LOGIN, HOST_CANCEL_LOGIN, HOST_SECURE_ENCRYPT, HOST_SECURE_DECRYPT],
+    [HOST_OPEN_LOGIN, HOST_CANCEL_LOGIN, HOST_SECURE_ENCRYPT, HOST_SECURE_DECRYPT, HOST_LOCAL_LYRICS_SOURCE],
   );
   assert.deepEqual(calls[0].payload, { partition: "login-1" });
   // 开窗是长轮询：调用超时必须能透传到桥上（默认 60 秒会把"还在扫码"判成超时）
   assert.deepEqual(calls[0].options, { timeoutMs: 660_000 });
   assert.deepEqual(calls[1].payload, {}, "取消没有载荷");
-  assert.deepEqual(HOST_REQUEST_CHANNELS.length, 5);
+  assert.deepEqual(calls[4].payload, { trackId: "local:0123456789abcdef0123456789abcdef" });
+  assert.equal(HOST_REQUEST_CHANNELS.length, 6);
 });

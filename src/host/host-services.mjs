@@ -7,7 +7,9 @@
  * - `host:secure-decrypt`：入 `{cipher}` → 出 `{plaintext}`（R5）；
  * - `host:open-login`（R7；R25 起载荷为 `{url, partition}`，`topInset` 已退休）→ 出登录结论
  *   （长轮询：窗收场后才答复）；
- * - `host:cancel-login`（R7）：入 `{}` → 出 `{cancelled}`。
+ * - `host:cancel-login`（R7）：入 `{}` → 出 `{cancelled}`；
+ * - `host:local-lyrics-source`（R65）：入 `{trackId}` → 出 `{bytes, source, name?}`
+ *   （本地曲目同名 `.lrc`/`.txt`/内嵌歌词的**原始字节**，base64；解码在 sidecar）。
  *
  * 返回值是帧内结果（`{ok:true,data}` / `{ok:false,error}`），这里原样透传：不改写成成功、不吞错。
  * 消费方见 `src/main/session-store.mjs`（只认 `data.cipher` / `data.plaintext`）与
@@ -15,6 +17,7 @@
  */
 import {
   HOST_CANCEL_LOGIN,
+  HOST_LOCAL_LYRICS_SOURCE,
   HOST_NOTIFY,
   HOST_OPEN_LOGIN,
   HOST_SECURE_DECRYPT,
@@ -36,5 +39,10 @@ export function createHostServices({ callHost }) {
     secureEncrypt: (payload = {}) => callHost(HOST_SECURE_ENCRYPT, payload),
     /** DPAPI 解密；payload 由 R5 定形。 */
     secureDecrypt: (payload = {}) => callHost(HOST_SECURE_DECRYPT, payload),
+    /**
+     * 本地曲目的歌词原始字节（R65）：`{trackId}` → `{bytes, source, name?}`。
+     * 不指定超时：这是本地磁盘读，走默认 60 秒足够；返回的是帧，调用方自己判 `ok`。
+     */
+    localLyricsSource: (payload = {}, options) => callHost(HOST_LOCAL_LYRICS_SOURCE, payload, options),
   };
 }
