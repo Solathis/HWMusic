@@ -31,6 +31,7 @@ import {
   LYRICS_MODES,
   LYRICS_STATUS,
   MIN_PROGRESS_INTERVAL_MS,
+  TASKBAR_FONT_STEPS,
   TASKBAR_MAX_FONT_PX,
   TASKBAR_REASONS,
   taskbarStatusText,
@@ -43,6 +44,7 @@ import {
   importPlanOf,
   isCustomColor,
   karaokeFrame,
+  lyricsAppearance,
   lyricsConfigFromSearch,
   lyricsStatusFromFailure,
   modeLabel,
@@ -51,6 +53,7 @@ import {
   reanchorProgress,
   resizableEnabled,
   shouldPushProgress,
+  taskbarFontStepLabel,
   themeFromSearch,
 } from "../src/renderer/features/lyrics/lyrics-window.mjs";
 import { createLyricsBridge } from "../src/renderer/features/lyrics/lyrics-bridge.mjs";
@@ -708,6 +711,14 @@ test("配置：字号档位 / 颜色令牌 / 上限在 TS 与 Rust 两侧逐条�
       `Rust 的字号档位表必须含 (${step.id}, ${step.px})（两侧一张表）`,
     );
   }
+  // R59：任务栏有自己的档位表（44px 高的槽位只放得下一行），两侧同样逐条相等
+  for (const step of TASKBAR_FONT_STEPS) {
+    assert.match(
+      rust,
+      new RegExp(`\\("${step.id}",\\s*${step.px}\\)`),
+      `Rust 的任务栏档位表必须含 (${step.id}, ${step.px})`,
+    );
+  }
   for (const token of LYRICS_COLOR_TOKENS) {
     assert.match(rust, new RegExp(`"${token.id}"`), `Rust 的颜色令牌表必须含 ${token.id}`);
   }
@@ -717,6 +728,15 @@ test("配置：字号档位 / 颜色令牌 / 上限在 TS 与 Rust 两侧逐条�
     "任务栏模式的字号上限两侧同值（简报：字号 ≤ 20）",
   );
   assert.equal(TASKBAR_MAX_FONT_PX, 20);
+  assert.equal(Math.max(...TASKBAR_FONT_STEPS.map((step) => step.px)), TASKBAR_MAX_FONT_PX,
+    "任务栏档位表的最高一档就是上限（表不许偷偷长大）");
+  // 默认值两侧同源：任何一个默认值对不上，重启后的观感就会与本次运行不同
+  for (const [name, value] of [
+    ["DEFAULT_TASKBAR_SIZE", DEFAULT_LYRICS_CONFIG.taskbarSize],
+    ["DEFAULT_TASKBAR_COLOR", DEFAULT_LYRICS_CONFIG.taskbarColor],
+  ]) {
+    assert.match(rust, new RegExp(`pub const ${name}: &str = "${value}"`), `两侧默认值要一致：${name}`);
+  }
   assert.match(rust, /"desktop"/, "模式词表两侧同源");
   assert.match(rust, /"taskbar"/);
   assert.deepEqual([...LYRICS_MODES], ["desktop", "taskbar"]);
@@ -724,7 +744,8 @@ test("配置：字号档位 / 颜色令牌 / 上限在 TS 与 Rust 两侧逐条�
 
 test("配置：CSS 里每个档位都有字号规则，且 rem 值与 px 对得上", () => {
   const css = read("src/renderer/amll-theme.css");
-  for (const step of LYRICS_FONT_STEPS) {
+  // R59：桌面档位与任务栏档位各一套规则（id 不重叠，所以选择器也不需要模式限定）
+  for (const step of [...LYRICS_FONT_STEPS, ...TASKBAR_FONT_STEPS]) {
     const match = css.match(new RegExp(`\\[data-lyrics-size="${step.id}"\\][^{]*\\{[^}]*--amll-lp-font-size:\\s*([0-9.]+)rem`));
     assert.ok(match, `amll-theme.css 必须给档位 ${step.id} 一条 --amll-lp-font-size 规则（否则设置项点了没反应）`);
     assert.equal(Number(match[1]) * 16, step.px, `档位 ${step.id} 的 rem 与 px 对不上（16px = 1rem）`);
@@ -819,22 +840,79 @@ test("配置纯逻辑：认不出的值一律不猜（落回上一个合法值�
   assert.deepEqual(normalizeLyricsConfig(undefined, undefined), DEFAULT_LYRICS_CONFIG);
 });
 
-test("配置纯逻辑：任务栏模式的有效字号 ≤ 20px（配置值本身保留，切回来能还原）", () => {
+/**
+ * R59 **有意替换** R44 的「任务栏模式把桌面档位压到 ≤20px」那一条：
+ * 任务栏现在有自己的一列档位（`TASKBAR_FONT_STEPS`），桌面选的字号不再参与任务栏的渲染。
+ */
+test("配置纯逻辑：任务栏模式读任务栏档位（桌面档位原样保留，两边互不改写）", () => {
   const big = { ...DEFAULT_LYRICS_CONFIG, size: "xxl" };
   assert.equal(effectiveSizeId(big), "xxl", "桌面模式按用户选的档位");
-  assert.equal(effectiveSizeId({ ...big, mode: "taskbar" }), "md", "任务栏模式压到 ≤20px 的最大档位");
-  assert.equal(effectiveSizeId({ ...DEFAULT_LYRICS_CONFIG, mode: "taskbar", size: "sm" }), "sm", "本来就小就不动它");
+  assert.equal(effectiveSizeId({ ...big, mode: "taskbar" }), DEFAULT_LYRICS_CONFIG.taskbarSize,
+    "任务栏模式只读 taskbarSize（桌面档位不参与）");
+  assert.equal(effectiveSizeId({ ...big, mode: "taskbar", taskbarSize: "tsm" }), "tsm", "任务栏自己的档位照收");
+  assert.equal(effectiveSizeId({ ...big, mode: "taskbar", taskbarSize: "huge" }),
+    DEFAULT_LYRICS_CONFIG.taskbarSize, "认不出的任务栏档位落默认（绝不猜）");
 
   // 保留配置值：切回桌面模式还是用户选的那个
   const taskbar = normalizeLyricsConfig({ mode: "taskbar" }, big);
   assert.equal(taskbar.size, "xxl");
-  assert.equal(effectiveSizeId(taskbar), "md");
+  assert.equal(effectiveSizeId(taskbar), DEFAULT_LYRICS_CONFIG.taskbarSize);
 
-  for (const step of LYRICS_FONT_STEPS) {
-    const effective = effectiveSizeId({ ...DEFAULT_LYRICS_CONFIG, mode: "taskbar", size: step.id });
-    const px = LYRICS_FONT_STEPS.find((entry) => entry.id === effective).px;
-    assert.ok(px <= TASKBAR_MAX_FONT_PX, `任务栏模式下 ${step.id} 的有效字号必须 ≤ ${TASKBAR_MAX_FONT_PX}px，实际 ${px}`);
+  for (const step of TASKBAR_FONT_STEPS) {
+    const effective = effectiveSizeId({ ...DEFAULT_LYRICS_CONFIG, mode: "taskbar", taskbarSize: step.id });
+    const px = TASKBAR_FONT_STEPS.find((entry) => entry.id === effective).px;
+    assert.ok(px <= TASKBAR_MAX_FONT_PX, `任务栏档位 ${step.id} 的实际字号必须 ≤ ${TASKBAR_MAX_FONT_PX}px，实际 ${px}`);
   }
+});
+
+test("配置纯逻辑：任务栏外观四字段（默认 / 坏值不猜 / 两模式各读各的）", () => {
+  // 默认值：逐字默认开（R58 修好的观感就是默认观感）
+  assert.equal(DEFAULT_LYRICS_CONFIG.taskbarSize, "txxl");
+  assert.equal(DEFAULT_LYRICS_CONFIG.taskbarColor, "foreground");
+  assert.equal(DEFAULT_LYRICS_CONFIG.taskbarCustomColor, "");
+  assert.equal(DEFAULT_LYRICS_CONFIG.taskbarKaraoke, true);
+  assert.equal(TASKBAR_FONT_STEPS.find((step) => step.id === "txxl").px, 20,
+    "默认任务栏字号 = R58 渲染出来的 20px");
+
+  const base = { ...DEFAULT_LYRICS_CONFIG, mode: "taskbar", taskbarSize: "tlg", taskbarColor: "primary",
+    taskbarCustomColor: "#112233", taskbarKaraoke: false };
+  assert.deepEqual(normalizeLyricsConfig({}, base), base, "空 patch = 原样");
+  // 坏值一个都不许覆盖：桌面档位不是任务栏档位、色值不是令牌、自定义色不是 hex、布尔只认真正的布尔
+  assert.deepEqual(
+    normalizeLyricsConfig({ taskbarSize: "lg", taskbarColor: "#fff", taskbarCustomColor: "red", taskbarKaraoke: "yes" }, base),
+    base,
+  );
+  const patched = normalizeLyricsConfig(
+    { taskbarSize: "tsm", taskbarColor: "muted", taskbarCustomColor: "#00dd00", taskbarKaraoke: true }, base);
+  assert.equal(patched.taskbarSize, "tsm");
+  assert.equal(patched.taskbarColor, "muted");
+  assert.equal(patched.taskbarCustomColor, "#00dd00");
+  assert.equal(patched.taskbarKaraoke, true);
+
+  // 查询串：Rust 建窗时把四个键拼进去，渲染层按同一条解析链读回
+  const fromQuery = lyricsConfigFromSearch(
+    "?mode=taskbar&taskbarSize=txl&taskbarColor=muted&taskbarCustomColor=%2300DD00&taskbarKaraoke=0");
+  assert.equal(fromQuery.taskbarSize, "txl");
+  assert.equal(fromQuery.taskbarColor, "muted");
+  assert.equal(fromQuery.taskbarCustomColor, "#00DD00");
+  assert.equal(fromQuery.taskbarKaraoke, false);
+  assert.deepEqual(lyricsConfigFromSearch("?taskbarSize=huge&taskbarKaraoke=yes"),
+    DEFAULT_LYRICS_CONFIG, "查询串里的坏值落默认");
+
+  // 两模式各读各的：任务栏模式只读任务栏四字段，桌面模式只读原字段
+  const taskbarView = lyricsAppearance({ ...DEFAULT_LYRICS_CONFIG, mode: "taskbar", size: "xl", color: "contrast",
+    customColor: "#ff0000", taskbarSize: "tsm", taskbarColor: "primary", taskbarCustomColor: "#00dd00", taskbarKaraoke: false });
+  assert.deepEqual(taskbarView, { size: "tsm", color: "primary", customColor: "#00dd00", karaoke: false });
+  const desktopView = lyricsAppearance({ ...DEFAULT_LYRICS_CONFIG, size: "xl", color: "contrast",
+    customColor: "#ff0000", taskbarSize: "tsm", taskbarColor: "primary", taskbarCustomColor: "#00dd00", taskbarKaraoke: false });
+  assert.deepEqual(desktopView, { size: "xl", color: "contrast", customColor: "#ff0000", karaoke: true },
+    "桌面模式读原字段，且逐字高亮恒开（任务栏的开关不许影响它）");
+
+  // 档位标签：认不出的按默认档位说（界面不出现空串）
+  for (const step of TASKBAR_FONT_STEPS) {
+    assert.equal(taskbarFontStepLabel(step.id), step.label);
+  }
+  assert.equal(taskbarFontStepLabel("huge"), TASKBAR_FONT_STEPS.find((step) => step.id === DEFAULT_LYRICS_CONFIG.taskbarSize).label);
 });
 
 test("配置纯逻辑：拖动区与点透（锁定时不挂拖动区；任务栏模式一律点透）", () => {
@@ -1000,7 +1078,7 @@ test("歌词窗：官方 AMLL 渲染与受限命令，不调任意业务请求",
 test("歌词窗：data 属性全部来自纯逻辑模块（字号/颜色/模式/拖动/点透）", () => {
   const source = read("src/renderer/LyricsWindow.tsx");
   assert.match(source, /lyrics-window\.mjs/, "配置与判定必须来自纯逻辑模块（可单测）");
-  for (const helper of ["normalizeLyricsConfig", "effectiveSizeId", "dragRegionEnabled", "lyricsConfigFromSearch"]) {
+  for (const helper of ["normalizeLyricsConfig", "lyricsAppearance", "dragRegionEnabled", "lyricsConfigFromSearch"]) {
     assert.match(source, new RegExp(helper), `歌词窗要用 ${helper}（不在这里另写一份判定）`);
   }
   assert.match(source, /data-lyrics-size=/, "字号档位经 data 属性交给 CSS（内联样式禁令的必然结果）");
@@ -1602,6 +1680,8 @@ test("R45B fix4 竖版小窗：溢出交给播放器的原生滚动条，而滚�
 test("R52 设置页没有颜色控件（沉浸页禁止改色，桌面歌词颜色只在弹出窗里改）", () => {
   const page = read("src/renderer/pages.tsx");
   const settings = page.slice(page.indexOf("export function SettingsPage("));
+  // R59：任务栏歌词的自定义颜色在独立组件 `taskbar-lyrics-card.tsx` 里——设置页**文件本身**
+  // 仍然不许出现桌面歌词那一套颜色控件（两件事的入口不同：桌面在弹出窗，任务栏在设置页卡）。
   for (const gone of ['type="color"', "恢复主题色", "customColor", "isCustomColor"]) {
     assert.equal(settings.includes(gone), false, `设置页不许再有 ${gone}`);
   }
@@ -1690,4 +1770,88 @@ test("R50 clean+desktop 的令牌衬底：bg-background/60 + data-lyrics-scrim�
   const rootTag = rootAt === -1 ? "" : code.slice(rootAt, code.indexOf(">", rootAt) + 1);
   assert.match(rootTag, /data-lyrics-scrim=/, "衬底锚点就在根节点上（不另起一层 div）");
   assert.match(rootTag, /data-testid="lyrics-window"/, "就是那个既有的根节点");
+});
+
+// ---------------------------------------------------------------------------
+// 7. R59：任务栏歌词的独立设置（颜色 / 逐字高亮 / 字号）
+// ---------------------------------------------------------------------------
+
+const TASKBAR_CARD = "src/renderer/taskbar-lyrics-card.tsx";
+
+/**
+ * R59：歌词窗按**模式**读外观——任务栏只读任务栏那四个字段，桌面只读原字段。
+ *
+ * 逐字关闭不是"换一套渲染"：仍由官方 `LyricPlayer` 画，只是喂进去的行不经 `withKaraokeWords`
+ * 推导（行级 ⇒ 官方按行渐变），所以这里钉的是"分流点在纯逻辑模块 + 组件只消费"。
+ */
+test("R59 歌词窗：外观按模式分流，逐字关闭时不经 withKaraokeWords", () => {
+  const source = read("src/renderer/LyricsWindow.tsx");
+  const code = stripComments(source);
+
+  assert.match(code, /lyricsAppearance\(/, "外观来自纯逻辑模块 lyricsAppearance（组件里不写第二份判定）");
+  assert.match(code, /appearance\.karaoke/, "逐字开关来自它");
+  assert.match(code, /appearance\.color/, "颜色来自它");
+  assert.match(code, /appearance\.customColor/, "自定义颜色来自它");
+  assert.match(code, /data-lyrics-karaoke=/, "逐字开关要有 data 锚点（守卫按它判）");
+  // 逐字关闭 = 不推导，但仍交给官方组件
+  assert.match(code, /appearance\.karaoke\s*\?\s*withKaraokeWords\(/, "开着才推导逐字词");
+  assert.match(code, /useMemo\([\s\S]{0,200}withKaraokeWords/, "推导结果仍进 useMemo（不每帧重算）");
+  assert.match(code, /<LyricPlayer/, "两种模式都仍由官方 LyricPlayer 渲染");
+  assert.doesNotMatch(code, /data-lyrics-(?:size|color)=\{config\.(?:size|color|customColor)/,
+    "外观值不再直读桌面字段（必须经 appearance；`config.style` 不是外观色/字号的来源）");
+});
+
+test("R59 设置页「任务栏歌词（Beta）」卡：令牌 Select + 自定义色 + 恢复主题色 + 逐字开关 + 字号", () => {
+  const card = read(TASKBAR_CARD);
+  const code = stripComments(card);
+
+  // 只挂在设置页的歌词标签里，且是独立组件（设置页不再膨胀，R41 的缓存卡同一做法）
+  const pages = read("src/renderer/pages.tsx");
+  assert.match(pages, /import \{ TaskbarLyricsCard \} from "\.\/taskbar-lyrics-card\.tsx"/, "卡片是独立组件");
+  const pane = pages.slice(pages.indexOf('<TabsContent value="lyrics"'), pages.indexOf("</TabsContent>", pages.indexOf('<TabsContent value="lyrics"')));
+  assert.match(pane, /<TaskbarLyricsCard lyrics=\{lyrics\} \/>/, "挂在「歌词」标签页里");
+
+  // 控件：颜色（令牌 Select + 自定义色 + 恢复主题色）、逐字开关、字号 Select
+  for (const id of ["taskbar-lyrics-color", "taskbar-lyrics-size", "taskbar-lyrics-karaoke",
+    "taskbar-lyrics-custom-color", "taskbar-lyrics-color-reset"]) {
+    assert.ok(card.includes(`id="${id}"`) || card.includes(`data-testid="${id}"`), `卡片要有 #${id}`);
+  }
+  for (const component of ["Card", "CardHeader", "CardTitle", "CardContent", "Select", "SelectTrigger", "SelectItem", "Switch", "Button", "Label", "Input"]) {
+    assert.ok(card.includes(component), `只用仓里已有的 shadcn/ui 组件：缺 ${component}`);
+  }
+  assert.match(code, /LYRICS_COLOR_TOKENS\.map/, "颜色令牌来自纯逻辑模块的唯一真源");
+  assert.match(code, /TASKBAR_FONT_STEPS\.map/, "任务栏字号档位来自纯逻辑模块");
+  assert.match(code, /colorTokenLabel\(/, "令牌文案来自纯逻辑模块（不在这里另写一份中文）");
+  assert.match(code, /taskbarFontStepLabel\(/, "档位文案同理");
+  assert.match(code, /isCustomColor/, "合法 hex 判定仍来自纯逻辑模块");
+  assert.match(code, /type="color"/, "自定义色沿用桌面歌词的取色器做法");
+  assert.match(code, /恢复主题色/, "一键回设计令牌");
+  assert.doesNotMatch(code, /style=\{\{/, "不许内联视觉样式");
+  assert.doesNotMatch(code, /<p\b/, "不写说明性段落（一行提示足够）");
+
+  // 写入：只发 taskbar* 四个键，且走既有窄命令（壳层绑定）
+  assert.match(code, /updateConfig\(\{ taskbarColor/, "令牌 Select 写 taskbarColor");
+  assert.match(code, /updateConfig\(\{ taskbarSize/, "字号 Select 写 taskbarSize");
+  assert.match(code, /updateConfig\(\{ taskbarKaraoke/, "逐字 Switch 写 taskbarKaraoke");
+  assert.match(code, /updateConfig\(\{ taskbarCustomColor/, "取色器与恢复按钮写 taskbarCustomColor");
+  for (const desktopKey of ["customColor:", "size:", "color:", "locked:", "mode:"]) {
+    assert.equal(code.includes(`{ ${desktopKey}`), false, `任务栏卡不许写桌面字段：${desktopKey}`);
+  }
+
+  // 只在 Windows 显示：走既有能力查询（不得在 UI 里硬编码平台判断）
+  assert.match(code, /taskbar\?\.supported/, "能力来自宿主回报的 taskbar.supported");
+  for (const hardcoded of ["navigator.platform", "navigator.userAgent", 'navigator.userAgentData', "win32", "Windows NT"]) {
+    assert.equal(code.includes(hardcoded), false, `不许在 UI 里硬编码平台判断：${hardcoded}`);
+  }
+});
+
+test("R59 桌面歌词设置面板不含任务栏字段（两套配置各有各的入口）", () => {
+  const popup = read("src/renderer/LyricsSettingsPopup.tsx");
+  // 弹出窗认识 `mode === "taskbar"`（竖版在任务栏下禁用），但**不认识**任务栏那四个外观字段
+  for (const field of ["taskbarSize", "taskbarColor", "taskbarCustomColor", "taskbarKaraoke"]) {
+    assert.equal(popup.includes(field), false, `桌面歌词的齿轮菜单不许出现 ${field}`);
+  }
+  const card = read(TASKBAR_CARD);
+  assert.equal(card.includes("coreLyricsSettingsOpen"), false, "任务栏卡不去开桌面歌词的弹出窗");
+  assert.equal(card.includes("coreLyricsConfigure"), false, "卡片不直接发命令（写入经壳层绑定）");
 });

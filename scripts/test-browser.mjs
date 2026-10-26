@@ -124,6 +124,14 @@ const songs = Array.from({ length: 36 }, (_, index) => ({
 let desktopConfig = { ...DEFAULT_LYRICS_CONFIG };
 let desktopRevision = 0;
 /**
+ * R59：任务栏能力（宿主回报的 \`taskbar.supported\`）。
+ *
+ * 守卫里可以切换它，用来验"非 Windows 不渲染那张卡"：能力只能来自宿主查询，
+ * 页面里不许自己判断平台。
+ */
+let taskbarSupported = false;
+const taskbarStatus = () => ({ supported: taskbarSupported, attached: false, reason: taskbarSupported ? "disabled" : "unsupported" });
+/**
  * R50：普通 settings 文档（settings:get / settings:set 的夹具后端）。
  *
  * 存在 localStorage 里是为了"重载后仍然保留"那一项：真的重新加载页面之后，夹具后端剩下什么
@@ -300,9 +308,9 @@ mockIPC(async (command, args) => {
     if ((!args.restoreIfPristine || desktopRevision === 0) && Object.keys(args.config).length) {
       configureCalls.push({ ...args.config });
       desktopConfig = { ...desktopConfig, ...args.config }; desktopRevision += 1;
-      await emit("core:event", { channel: "lyrics:state", payload: { config: desktopConfig, revision: desktopRevision, visible: false } });
+      await emit("core:event", { channel: "lyrics:state", payload: { config: desktopConfig, revision: desktopRevision, visible: false, taskbar: taskbarStatus() } });
     }
-    return { config: desktopConfig, revision: desktopRevision, visible: false };
+    return { config: desktopConfig, revision: desktopRevision, visible: false, taskbar: taskbarStatus() };
   }
   if (command === "core_lyrics_toggle") {
     const checked = args.checked === true;
@@ -417,6 +425,18 @@ function Guard() {
       queueLength: () => runtime.player.snapshot().entries.length,
       pause: () => runtime.player.pause(),
       desktopConfig: () => desktopConfig,
+      /**
+       * R59：切换任务栏能力回报（true = Windows）。
+       *
+       * 必须经**真实广播**回来：能力是宿主状态的一部分，设置页读的是 lyrics:state 那一份，
+       * 直接调命令不会更新桥（那样量到的就不是产品路径）。
+       */
+      async setTaskbarSupported(value) {
+        taskbarSupported = value === true;
+        await emit("core:event", { channel: "lyrics:state", payload: {
+          config: desktopConfig, revision: desktopRevision, visible: false, taskbar: taskbarStatus(),
+        }});
+      },
       /** R50：settings 夹具后端（播放器歌词那一份）。 */
       settingsData: () => JSON.parse(JSON.stringify(settingsData)),
       /** R50：每次 settings:set 的补丁（"播放器歌词是普通键"按它判）。 */
@@ -1855,6 +1875,8 @@ export async function checkLyricsKaraoke(page, guardDir, add) {
 const DESKTOP_BASELINE = {
   mode: "desktop", layout: "horizontal", style: "clean", color: "foreground", customColor: "",
   locked: false, showControls: true, size: "lg", enableBlur: true, enableScale: true, enableSpring: true,
+  // R59：任务栏那一套字段与桌面各存一份（一起归位，免得上一项改过的值漏到下一项）
+  taskbarSize: "txxl", taskbarColor: "foreground", taskbarCustomColor: "", taskbarKaraoke: true,
 };
 
 /**
@@ -3020,6 +3042,178 @@ export async function checkSettingsPageLyricsCard(page, guardDir, add) {
   // 复位：桌面模式 + 回收藏页（后面的用例从干净状态开始）
   await page.evaluate(() => window.__guard.configureDesktop({ mode: "desktop" }));
   await page.getByRole("button", { name: "我的收藏", exact: true }).click();
+}
+
+/**
+ * R59：任务栏歌词的**独立外观**（颜色 / 逐字高亮 / 字号）——设置在设置页，与桌面歌词不共用。
+ *
+ * 五项各钉一处"看起来做了、其实没做"的地方：
+ * 1. 能力回报为假（非 Windows）时那张卡**不渲染**；能力来自宿主查询，页面不判断平台；
+ * 2. 卡片里的控件写进去的只有 `taskbar*` 四个键（不碰桌面字段），且每次一条窄命令；
+ * 3. 任务栏模式的歌词窗按任务栏颜色/字号渲染：令牌换档 ⇒ 计算出的色值真的变，档位换档 ⇒ 字号真的变；
+ * 4. 逐字关闭 ⇒ 不再有逐字 span（行级 ⇒ 官方按行渐变），但仍是官方 `LyricPlayer` 在画；
+ * 5. 改任务栏字段**不影响桌面模式**（桌面窗的字号与颜色照旧）。
+ */
+export async function checkTaskbarLyricsSettings(page, guardDir, add) {
+  const CARD = '[data-testid="taskbar-lyrics-card"]';
+  const activeLineSelector = '[data-testid="lyrics-window"] [class*="lyricMainLine"][class*="active"]';
+  const configure = (patch) => page.evaluate((next) => window.__guard.configureDesktop(next), patch);
+  const setSupported = (value) => page.evaluate((next) => window.__guard.setTaskbarSupported(next), value);
+  /** 能力回报经广播回到主窗：给它一点时间重画（不给断言留"可能还没到"的口子）。 */
+  const refreshStatus = async () => { await page.waitForTimeout(400); };
+  /** 歌词窗此刻的外观事实（data 属性 + 计算出的变量 + 逐字 span 数）。 */
+  const readStage = () => page.evaluate((selector) => {
+    const stage = document.querySelector('[data-testid="lyrics-window"]');
+    const line = document.querySelector(selector);
+    const spans = [...(line?.querySelectorAll("span") ?? [])]
+      .filter((span) => span.children.length === 0 && (span.textContent ?? "").length === 1);
+    const style = stage === null ? null : getComputedStyle(stage);
+    return {
+      mode: stage?.dataset.lyricsMode ?? null,
+      size: stage?.dataset.lyricsSize ?? null,
+      karaoke: stage?.dataset.lyricsKaraoke ?? null,
+      colorAttr: stage?.getAttribute("data-lyrics-color") ?? null,
+      colorVar: style?.getPropertyValue("--amll-lp-color").trim() ?? null,
+      fontVar: style?.getPropertyValue("--amll-lp-font-size").trim() ?? null,
+      inlineColor: stage?.style.getPropertyValue("--amll-lp-color").trim() ?? "",
+      player: Boolean(stage?.querySelector(".amll-lyric-player")),
+      chars: spans.length,
+      active: (line?.textContent ?? "").slice(0, 40),
+    };
+  }, activeLineSelector);
+
+  await page.setViewportSize({ width: 960, height: 720 });
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await page.evaluate(() => window.__guard.pause());
+  await openSettingsLyricsPane(page);
+
+  // ① 能力为假：这张卡不渲染（非 Windows 的路径）
+  await setSupported(false);
+  await refreshStatus();
+  const hiddenCards = await page.evaluate((selector) => document.querySelectorAll(selector).length, CARD);
+  add("r59-taskbar-card-needs-capability", hiddenCards === 0,
+    JSON.stringify({ supported: false, cards: hiddenCards }));
+
+  // ② 能力为真：卡片出现，三组控件都在
+  await setSupported(true);
+  await refreshStatus();
+  await page.locator(CARD).waitFor();
+  const controls = await page.evaluate((selector) => {
+    const card = document.querySelector(selector);
+    const has = (id) => Boolean(card?.querySelector(`#${id}`));
+    return {
+      color: has("taskbar-lyrics-color"), size: has("taskbar-lyrics-size"), karaoke: has("taskbar-lyrics-karaoke"),
+      custom: has("taskbar-lyrics-custom-color"), reset: has("taskbar-lyrics-color-reset"),
+      desktopGone: Boolean(card?.querySelector("#lyrics-size, #lyrics-style, #lyrics-layout")),
+      text: (card?.textContent ?? "").trim().slice(0, 80),
+    };
+  }, CARD);
+  add("r59-taskbar-card-controls",
+    controls.color && controls.size && controls.karaoke && controls.custom && controls.reset && controls.desktopGone === false,
+    JSON.stringify(controls));
+
+  // 浅/深两色各一张（卡片本体，不是整页）
+  for (const theme of ["light", "dark"]) {
+    await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
+    await page.waitForTimeout(250);
+    await page.locator(CARD).screenshot({ path: path.join(guardDir, `r59-taskbar-card-${theme}.png`) }).catch(async () => {
+      await page.screenshot({ path: path.join(guardDir, `r59-taskbar-card-${theme}.png`) });
+    });
+  }
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await page.waitForTimeout(150);
+
+  // ③ 改得动：颜色令牌 / 字号 / 逐字开关 / 自定义色与恢复主题色——每次一条窄命令，只写 taskbar*
+  await page.evaluate(() => window.__guard.resetConfigureCalls());
+  await page.getByTestId("taskbar-lyrics-color").click();
+  await page.getByTestId("taskbar-color-primary").click();
+  await page.waitForFunction(() => window.__guard.desktopConfig().taskbarColor === "primary");
+  await page.getByTestId("taskbar-lyrics-size").click();
+  await page.getByTestId("taskbar-size-tsm").click();
+  await page.waitForFunction(() => window.__guard.desktopConfig().taskbarSize === "tsm");
+  await page.getByTestId("taskbar-lyrics-karaoke").click();
+  await page.waitForFunction(() => window.__guard.desktopConfig().taskbarKaraoke === false);
+  await page.locator("#taskbar-lyrics-custom-color").evaluate((input, next) => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+    setter.call(input, next);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }, "#00dd00");
+  await page.waitForFunction(() => window.__guard.desktopConfig().taskbarCustomColor === "#00dd00");
+  const writes = await page.evaluate(() => window.__guard.configureCalls());
+  const onlyTaskbarKeys = writes.length >= 4
+    && writes.every((patch) => Object.keys(patch).every((key) => key.startsWith("taskbar")));
+  add("r59-taskbar-card-writes-only-taskbar-keys",
+    onlyTaskbarKeys
+      && writes.some((patch) => patch.taskbarColor === "primary")
+      && writes.some((patch) => patch.taskbarSize === "tsm")
+      && writes.some((patch) => patch.taskbarKaraoke === false)
+      && writes.some((patch) => patch.taskbarCustomColor === "#00dd00"),
+    JSON.stringify(writes));
+
+  // ④ 任务栏模式的歌词窗按任务栏字段渲染
+  await page.evaluate(() => window.__guard.setDesktop(true));
+  await page.getByTestId("lyrics-window").waitFor();
+  await page.setViewportSize({ width: 1200, height: 44 });
+  await configure({ ...DESKTOP_BASELINE, mode: "taskbar", taskbarColor: "primary", taskbarSize: "tsm",
+    taskbarCustomColor: "", taskbarKaraoke: false });
+  await page.waitForTimeout(400);
+  await page.evaluate(() => window.__guard.desktopDocument());
+  await page.waitForTimeout(250);
+
+  const taskbarFirst = await readStage();
+  await page.screenshot({ path: path.join(guardDir, "r59-taskbar-color.png") });
+  add("r59-taskbar-uses-its-own-color-and-size",
+    taskbarFirst.mode === "taskbar" && taskbarFirst.colorAttr === "primary"
+      && taskbarFirst.size === "tsm" && taskbarFirst.fontVar !== "" && taskbarFirst.player,
+    JSON.stringify({ colorAttr: taskbarFirst.colorAttr, colorVar: taskbarFirst.colorVar,
+      size: taskbarFirst.size, fontVar: taskbarFirst.fontVar }));
+
+  // ⑤ 逐字关闭：没有逐字 span，但仍是官方组件画的那一行
+  await page.screenshot({ path: path.join(guardDir, "r59-taskbar-karaoke-off.png") });
+  add("r59-taskbar-karaoke-off-falls-back-to-lines",
+    taskbarFirst.karaoke === "off" && taskbarFirst.chars === 0 && taskbarFirst.player
+      && taskbarFirst.active.length > 0,
+    JSON.stringify({ karaoke: taskbarFirst.karaoke, chars: taskbarFirst.chars, active: taskbarFirst.active }));
+
+  // ⑥ 换一档字号 + 打开逐字 + 换自定义色：三样都必须真的变
+  await configure({ taskbarSize: "txxl", taskbarKaraoke: true, taskbarCustomColor: "#00dd00" });
+  await page.waitForTimeout(400);
+  await page.evaluate(() => window.__guard.desktopDocument());
+  await page.waitForTimeout(250);
+  const taskbarSecond = await readStage();
+  await page.screenshot({ path: path.join(guardDir, "r59-taskbar-size.png") });
+  add("r59-taskbar-size-and-karaoke-switch",
+    taskbarSecond.size === "txxl" && taskbarSecond.fontVar !== taskbarFirst.fontVar
+      && taskbarSecond.karaoke === "on" && taskbarSecond.chars >= 5
+      && taskbarSecond.inlineColor === "#00dd00",
+    JSON.stringify({ size: [taskbarFirst.size, taskbarSecond.size],
+      font: [taskbarFirst.fontVar, taskbarSecond.fontVar], karaoke: taskbarSecond.karaoke,
+      chars: taskbarSecond.chars, inlineColor: taskbarSecond.inlineColor }));
+
+  // ⑦ 桌面模式不受任务栏字段影响：同一套 taskbar* 值下，桌面字号/颜色仍是桌面自己的
+  await page.setViewportSize({ width: 800, height: 128 });
+  await configure({ ...DESKTOP_BASELINE, mode: "desktop", size: "sm", color: "muted", customColor: "#ff8800",
+    taskbarSize: "tsm", taskbarColor: "primary", taskbarCustomColor: "#00dd00", taskbarKaraoke: false });
+  await page.waitForTimeout(400);
+  await page.evaluate(() => window.__guard.desktopDocument());
+  await page.waitForTimeout(250);
+  const desktopStage = await readStage();
+  await page.screenshot({ path: path.join(guardDir, "r59-desktop-unaffected.png") });
+  add("r59-desktop-unaffected-by-taskbar-fields",
+    desktopStage.mode === "desktop" && desktopStage.size === "sm" && desktopStage.colorAttr === "muted"
+      && desktopStage.karaoke === "on" && desktopStage.inlineColor === "#ff8800"
+      && desktopStage.fontVar !== taskbarSecond.fontVar,
+    JSON.stringify({ size: desktopStage.size, colorAttr: desktopStage.colorAttr, karaoke: desktopStage.karaoke,
+      inlineColor: desktopStage.inlineColor, fontVar: desktopStage.fontVar }));
+
+  // 收尾：回桌面基线、能力复位、离开歌词窗（后面的用例从干净状态开始）
+  await configure({ ...DESKTOP_BASELINE });
+  await page.evaluate(() => window.__guard.setDesktop(false));
+  await page.getByTestId("lyrics-window").waitFor({ state: "detached" });
+  await setSupported(false);
+  await page.setViewportSize({ width: 960, height: 600 });
+  await page.waitForTimeout(200);
 }
 
 /**
@@ -4456,6 +4650,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
      */
     await checked("r46-immersive-karaoke", () => checkImmersiveKaraoke(page, guardDir, add));
     await checked("r52-settings-page-lyrics-pane", () => checkSettingsPageLyricsCard(page, guardDir, add));
+    /** R59：任务栏歌词的独立外观（设置页那张卡 → 任务栏歌词窗的实际渲染）。 */
+    await checked("r59-taskbar-lyrics-settings", () => checkTaskbarLyricsSettings(page, guardDir, add));
     /** R56：设置页「日志」标签（日志文件条目 + 级别标识 + 筛选 + 脱敏 + 空态）。 */
     await checked("r56-settings-log-pane", () => checkSettingsLogPane(page, guardDir, add));
     await checked("r52-immersive-lyrics-color-fixed", () => checkImmersiveLyricsColorIsFixed(page, guardDir, add));

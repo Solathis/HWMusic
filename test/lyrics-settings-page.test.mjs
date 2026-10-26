@@ -4,8 +4,9 @@
  * 这里钉的是"跨层的那几件事"——真交互在浏览器守卫（`scripts/test-browser.mjs` 的
  * `checkSettingsPageLyricsCard` / `checkImmersiveLyricsColorIsFixed`），本文件管：
  *
- * 1. 设置页「歌词」标签**只剩一张桌面歌词卡**：显示 / 窗口位置 / 锁定 / 鼠标穿透。
- *    样式/方向/字号/效果/颜色的控件 id 一个都不许留在页面里（它们只在 R51 弹出窗里），
+ * 1. 设置页「歌词」标签：桌面歌词卡（显示 / 窗口位置 / 锁定 / 鼠标穿透）与 R59 的任务栏歌词卡
+ *    （独立组件 `taskbar-lyrics-card.tsx`）。
+ *    桌面歌词样式/方向/字号/效果/颜色的控件 id 一个都不许留在页面里（它们只在 R51 弹出窗里），
  *    也**没有**「外观设置」按钮——桌面歌词外观只在歌词窗自己的齿轮菜单里改（R52 收尾还原）；
  * 2. 沉浸式歌词禁止改色：`AmllLyricsPanel` 没有颜色 prop、不写 `data-lyrics-color`、不调
  *    `applyCustomColor`；外壳不再挂 `usePlayerLyrics`；R50 那三个文件已删除；
@@ -47,9 +48,11 @@ test("R52 设置页「歌词」：只留一张桌面歌词卡（没有外观入�
   for (const label of ["显示桌面歌词", "窗口位置", "锁定位置", "鼠标穿透"]) {
     assert.ok(pane.includes(label), `控件文案：${label}`);
   }
-  // 只剩一张卡（桌面歌词）+ 缓存卡：卡片标题不许再出现第二个
+  // 只剩一张桌面歌词卡 + R59 的任务栏卡（**独立组件**，标题不在这一页的源码里）+ 缓存卡
   const titles = [...pane.matchAll(/<CardTitle>([^<]+)<\/CardTitle>/g)].map((found) => found[1]);
-  assert.deepEqual(titles, ["桌面歌词"], "歌词页只剩一张卡");
+  assert.deepEqual(titles, ["桌面歌词"], "页面里写的卡片标题只有桌面歌词（任务栏卡在自己的组件里）");
+  // R59（有意更改）：任务栏歌词的外观只在设置页这张卡里改，与桌面歌词的弹出窗不共用
+  assert.ok(pane.includes("<TaskbarLyricsCard lyrics={lyrics} />"), "任务栏歌词卡挂在这一页");
   assert.ok(pane.includes("<LyricsCacheCard lyrics={lyrics} />"), "缓存卡保持不动（R41 的挂点）");
 
   // 搬进弹出窗的那些控件一个都不许留下（"两个入口"= 用户会以为哪里都能改对）

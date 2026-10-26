@@ -1,0 +1,104 @@
+/**
+ * 设置页的「任务栏歌词（Beta）」卡（R59）：颜色 / 逐字高亮 / 字号。
+ *
+ * 为什么在设置页、而不在歌词窗的齿轮菜单里：任务栏歌词与桌面歌词是**两套**配置
+ * （字号、颜色、逐字开关各存一份），共用一处设置就会互相改写；而任务栏那扇窗被挂到系统
+ * 任务栏之下并且整窗点透，它自己没有可点的控件——外观只能在主窗里改。
+ *
+ * 为什么单独一个组件：设置页本身不再膨胀（与 R41 的缓存卡同一个做法），桌面歌词那一套
+ * 外观控件也就不会与这里混在一起。
+ *
+ * 平台判断走宿主回报的 `taskbar.supported`（能力查询的唯一真源），非 Windows 连这张卡都不渲染。
+ */
+import { Button } from "./components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card"
+import { Input } from "./components/ui/input"
+import { Label } from "./components/ui/label"
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "./components/ui/select"
+import { Switch } from "./components/ui/switch"
+import {
+  LYRICS_COLOR_TOKENS,
+  TASKBAR_FONT_STEPS,
+  colorTokenLabel,
+  isCustomColor,
+  taskbarFontStepLabel,
+} from "./features/lyrics/lyrics-window.mjs"
+import type { LyricsWindowBinding } from "./use-lyrics-window.ts"
+
+export function TaskbarLyricsCard({ lyrics }: { lyrics: LyricsWindowBinding | null }) {
+  if (lyrics === null || lyrics.taskbar?.supported !== true) return null
+  const config = lyrics.config
+  /** 取色器是非受控的（`type=color` 的受控值必须始终合法），"还没选过"不该由页面编一个色值出来。 */
+  const customColor = isCustomColor(config.taskbarCustomColor) ? config.taskbarCustomColor : null
+
+  return (
+    <Card data-testid="taskbar-lyrics-card">
+      <CardHeader>
+        <CardTitle>任务栏歌词（Beta）</CardTitle>
+        <CardDescription>贴在任务栏上的那条歌词：颜色、字号、逐字高亮。</CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="taskbar-lyrics-color">颜色</Label>
+          <Select value={config.taskbarColor} onValueChange={(value) => lyrics.updateConfig({ taskbarColor: value })}>
+            <SelectTrigger id="taskbar-lyrics-color" data-testid="taskbar-lyrics-color" className="w-full max-w-xs">
+              {/* 标签直接写进 SelectValue：radix 在没展开过内容时拿不到选项文案（R10 的同一个坑） */}
+              <SelectValue>{colorTokenLabel(config.taskbarColor)}</SelectValue>
+            </SelectTrigger>
+            <SelectContent position="popper" align="start" sideOffset={4}>
+              <SelectGroup>
+                {LYRICS_COLOR_TOKENS.map((token) => (
+                  <SelectItem key={token.id} value={token.id} data-testid={`taskbar-color-${token.id}`}>
+                    {colorTokenLabel(token.id)}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          <div className="flex flex-wrap items-center gap-2">
+            <Input key={customColor ?? "theme"} id="taskbar-lyrics-custom-color" data-testid="taskbar-lyrics-custom-color"
+              type="color" aria-label="任务栏歌词自定义颜色" className="h-8 w-14 shrink-0 p-0"
+              defaultValue={customColor ?? undefined}
+              onChange={(event) => {
+                const value = event.target.value
+                if (!isCustomColor(value)) return
+                lyrics.updateConfig({ taskbarCustomColor: value })
+              }} />
+            <Button id="taskbar-lyrics-color-reset" data-testid="taskbar-lyrics-color-reset" variant="ghost" size="sm"
+              disabled={customColor === null} onClick={() => lyrics.updateConfig({ taskbarCustomColor: "" })}>
+              恢复主题色
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              {customColor === null ? "用上面选的令牌" : "自定义色生效中"}
+            </span>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Switch id="taskbar-lyrics-karaoke" data-testid="taskbar-lyrics-karaoke" checked={config.taskbarKaraoke}
+            onCheckedChange={(checked) => lyrics.updateConfig({ taskbarKaraoke: checked })} />
+          <Label htmlFor="taskbar-lyrics-karaoke">逐字高亮</Label>
+          <span className="text-xs text-muted-foreground">关闭后整行点亮</span>
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="taskbar-lyrics-size">字号</Label>
+          <Select value={config.taskbarSize} onValueChange={(value) => lyrics.updateConfig({ taskbarSize: value })}>
+            <SelectTrigger id="taskbar-lyrics-size" data-testid="taskbar-lyrics-size" className="w-full max-w-xs">
+              <SelectValue>{taskbarFontStepLabel(config.taskbarSize)}</SelectValue>
+            </SelectTrigger>
+            <SelectContent position="popper" align="start" sideOffset={4}>
+              <SelectGroup>
+                {TASKBAR_FONT_STEPS.map((step) => (
+                  <SelectItem key={step.id} value={step.id} data-testid={`taskbar-size-${step.id}`}>
+                    {taskbarFontStepLabel(step.id)}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}

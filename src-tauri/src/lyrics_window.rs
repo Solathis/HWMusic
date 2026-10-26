@@ -147,6 +147,12 @@ impl LyricsMode {
 pub const LYRICS_FONT_STEPS: &[(&str, u32)] =
     &[("sm", 16), ("md", 20), ("lg", 28), ("xl", 40), ("xxl", 56)];
 
+/// 任务栏专用字号档位（R59）：44px 高的槽位只放得下一行当前歌词，所以上限压到 20px，
+/// 档距 2px（桌面那张表最密的一档跨度是 8px，套到 12–20px 的区间里只剩两档可用）。
+/// id 与桌面那张表不重叠：两张表互不通用，`taskbarSize` 收桌面档位一律判非法。
+pub const TASKBAR_FONT_STEPS: &[(&str, u32)] =
+    &[("tsm", 12), ("tmd", 14), ("tlg", 16), ("txl", 18), ("txxl", 20)];
+
 /// 任务栏模式的字号上限（简报钉死：≤ 20）。
 pub const TASKBAR_MAX_FONT_PX: u32 = 20;
 
@@ -203,6 +209,10 @@ fn size_patch(patch: &serde_json::Map<String, Value>, key: &str, min: f64) -> Op
 pub const DEFAULT_LYRICS_SIZE: &str = "lg";
 /// 默认颜色令牌。
 pub const DEFAULT_LYRICS_COLOR: &str = "foreground";
+/// 任务栏的默认字号：取上限那一档——R44 起任务栏把桌面 `lg` 压到的就是 20px（观感不变）。
+pub const DEFAULT_TASKBAR_SIZE: &str = "txxl";
+/// 任务栏的默认颜色令牌。
+pub const DEFAULT_TASKBAR_COLOR: &str = "foreground";
 
 pub const LYRICS_LAYOUTS: &[&str] = &["horizontal", "vertical"];
 pub const LYRICS_STYLES: &[&str] = &["clean", "panel"];
@@ -226,6 +236,12 @@ pub struct LyricsConfig {
     pub enable_scale: bool,
     pub enable_spring: bool,
     pub show_controls: bool,
+    /// 任务栏模式的外观（R59）：与桌面那三样各存一份——两扇窗的观感是两件事。
+    pub taskbar_size: String,
+    pub taskbar_color: String,
+    pub taskbar_custom_color: String,
+    /// 任务栏的逐字高亮（默认开）。关掉 = 不经逐字词推导，官方组件按行渐变。
+    pub taskbar_karaoke: bool,
 }
 
 impl Default for LyricsConfig {
@@ -245,21 +261,26 @@ impl Default for LyricsConfig {
             enable_scale: true,
             enable_spring: true,
             show_controls: true,
+            taskbar_size: DEFAULT_TASKBAR_SIZE.to_string(),
+            taskbar_color: DEFAULT_TASKBAR_COLOR.to_string(),
+            taskbar_custom_color: String::new(),
+            taskbar_karaoke: true,
         }
     }
 }
 
 impl LyricsConfig {
+    /// 实际渲染的字号档位：两种模式各读自己那一列（R59 之后桌面选的档位不参与任务栏）。
+    ///
+    /// 认不出的档位（盘上被手改过）落默认，绝不 panic，也不把坏值透给 CSS。
     pub fn effective_size(&self) -> &str {
         if self.mode != LyricsMode::Taskbar {
             return self.size.as_str();
         }
-        let chosen = LYRICS_FONT_STEPS.iter().find(|(id, _)| *id == self.size);
-        if let Some((id, px)) = chosen {
-            if *px <= TASKBAR_MAX_FONT_PX { return id; }
+        if TASKBAR_FONT_STEPS.iter().any(|(id, _)| *id == self.taskbar_size) {
+            return self.taskbar_size.as_str();
         }
-        LYRICS_FONT_STEPS.iter().filter(|(_, px)| *px <= TASKBAR_MAX_FONT_PX)
-            .next_back().map(|(id, _)| *id).unwrap_or(DEFAULT_LYRICS_SIZE)
+        DEFAULT_TASKBAR_SIZE
     }
 
     pub fn apply_patch(&self, patch: &Value) -> LyricsConfig {
@@ -270,12 +291,15 @@ impl LyricsConfig {
             ("layout", &mut next.layout, LYRICS_LAYOUTS),
             ("style", &mut next.style, LYRICS_STYLES),
             ("color", &mut next.color, LYRICS_COLOR_TOKENS),
+            ("taskbarColor", &mut next.taskbar_color, LYRICS_COLOR_TOKENS),
         ] {
             if let Some(value) = patch.get(key).and_then(Value::as_str).filter(|v| allowed.contains(v)) { *target = value.into(); }
         }
         if let Some(value) = patch.get("size").and_then(Value::as_str).filter(|v| LYRICS_FONT_STEPS.iter().any(|(id, _)| id == v)) { next.size = value.into(); }
+        if let Some(value) = patch.get("taskbarSize").and_then(Value::as_str).filter(|v| TASKBAR_FONT_STEPS.iter().any(|(id, _)| id == v)) { next.taskbar_size = value.into(); }
         // R45B：自定义颜色（空串 = 回设计令牌）；坏形状不覆盖上一个合法值
         if let Some(value) = patch.get("customColor").and_then(Value::as_str).filter(|v| custom_color_ok(v)) { next.custom_color = value.into(); }
+        if let Some(value) = patch.get("taskbarCustomColor").and_then(Value::as_str).filter(|v| custom_color_ok(v)) { next.taskbar_custom_color = value.into(); }
         // R45B：窗口 DIP 尺寸（`null` = 没有自定义尺寸；小数取整并夹进最小尺寸）
         if let Some(size) = size_patch(patch, "windowWidth", MIN_WINDOW_WIDTH_DIP) { next.window_width = size; }
         if let Some(size) = size_patch(patch, "windowHeight", MIN_WINDOW_HEIGHT_DIP) { next.window_height = size; }
@@ -283,6 +307,7 @@ impl LyricsConfig {
             ("locked", &mut next.locked), ("clickThrough", &mut next.click_through),
             ("enableBlur", &mut next.enable_blur), ("enableScale", &mut next.enable_scale),
             ("enableSpring", &mut next.enable_spring), ("showControls", &mut next.show_controls),
+            ("taskbarKaraoke", &mut next.taskbar_karaoke),
         ] { if let Some(value) = patch.get(key).and_then(Value::as_bool) { *target = value; } }
         next
     }
@@ -311,10 +336,13 @@ impl LyricsConfig {
             "clickThrough": self.click_through, "enableBlur": self.enable_blur,
             "enableScale": self.enable_scale, "enableSpring": self.enable_spring,
             "showControls": self.show_controls, "effectiveSize": self.effective_size(),
+            // R59：任务栏那扇窗的外观（与桌面各存一份）
+            "taskbarSize": self.taskbar_size, "taskbarColor": self.taskbar_color,
+            "taskbarCustomColor": self.taskbar_custom_color, "taskbarKaraoke": self.taskbar_karaoke,
         })
     }
 
-    /// **落盘合同**：只有 `DEFAULT_LYRICS_CONFIG` 那 14 个字面键。
+    /// **落盘合同**：只有 `DEFAULT_LYRICS_CONFIG` 那 18 个字面键。
     ///
     /// 刻意与 [`LyricsConfig::payload`] 分开：`effectiveSize` 是派生值（由 mode+size 算出来的），
     /// taskbar 的附着/可见/revision/dirty/saveError 是运行时状态——把它们写进 `settings.json`
@@ -328,6 +356,8 @@ impl LyricsConfig {
             "clickThrough": self.click_through, "enableBlur": self.enable_blur,
             "enableScale": self.enable_scale, "enableSpring": self.enable_spring,
             "showControls": self.show_controls,
+            "taskbarSize": self.taskbar_size, "taskbarColor": self.taskbar_color,
+            "taskbarCustomColor": self.taskbar_custom_color, "taskbarKaraoke": self.taskbar_karaoke,
         })
     }
 
@@ -338,12 +368,14 @@ impl LyricsConfig {
 
     pub fn query(&self) -> String {
         format!(
-            "mode={}&size={}&color={}&customColor={}&windowWidth={}&windowHeight={}&locked={}&clickThrough={}&layout={}&style={}&enableBlur={}&enableScale={}&enableSpring={}&showControls={}",
+            "mode={}&size={}&color={}&customColor={}&windowWidth={}&windowHeight={}&locked={}&clickThrough={}&layout={}&style={}&enableBlur={}&enableScale={}&enableSpring={}&showControls={}&taskbarSize={}&taskbarColor={}&taskbarCustomColor={}&taskbarKaraoke={}",
             self.mode.as_str(), self.size, self.color, encode_custom_color(&self.custom_color),
             dip_param(self.window_width), dip_param(self.window_height),
             u8::from(self.locked), u8::from(self.click_through),
             self.layout, self.style, u8::from(self.enable_blur), u8::from(self.enable_scale),
             u8::from(self.enable_spring), u8::from(self.show_controls),
+            self.taskbar_size, self.taskbar_color,
+            encode_custom_color(&self.taskbar_custom_color), u8::from(self.taskbar_karaoke),
         )
     }
 }
@@ -937,8 +969,13 @@ pub fn validate_configure(label: &str, patch: &Value, retry_save: Option<bool>, 
             "style" => value.as_str().is_some_and(|v| LYRICS_STYLES.contains(&v)),
             "color" => value.as_str().is_some_and(|v| LYRICS_COLOR_TOKENS.contains(&v)),
             "size" => value.as_str().is_some_and(|v| LYRICS_FONT_STEPS.iter().any(|(id, _)| *id == v)),
+            // R59：任务栏那四个键各收各的（档位表不通用：桌面档位在 `taskbarSize` 里就是非法值）
+            "taskbarColor" => value.as_str().is_some_and(|v| LYRICS_COLOR_TOKENS.contains(&v)),
+            "taskbarSize" => value.as_str().is_some_and(|v| TASKBAR_FONT_STEPS.iter().any(|(id, _)| *id == v)),
+            "taskbarKaraoke" => value.is_boolean(),
             // R45B：自定义颜色只收空串或 `#RRGGBB`；窗口尺寸只收 null 或有限正数
             "customColor" => value.as_str().is_some_and(custom_color_ok),
+            "taskbarCustomColor" => value.as_str().is_some_and(custom_color_ok),
             "windowWidth" | "windowHeight" => value.is_null()
                 || value.as_f64().is_some_and(|size| size.is_finite() && size > 0.0),
             "locked" | "clickThrough" | "enableBlur" | "enableScale" | "enableSpring" | "showControls" => value.is_boolean(),
@@ -2157,46 +2194,169 @@ mod tests {
         assert!(!patched.click_through);
     }
 
-    /// 简报钉死的上限：任务栏模式的有效字号 ≤ 20px，且**配置值本身保留**（切回桌面能还原）。
+    /// 简报钉死的上限：任务栏档位表每一档都 ≤ 20px（R59 之后上限由表本身保证）。
+    ///
+    /// R59 **有意替换** R44 的"把桌面档位压到 ≤20px"那一条：任务栏现在有自己的一列档位
+    /// （`TASKBAR_FONT_STEPS`），桌面选的字号不再参与任务栏的渲染。
     #[test]
-    fn taskbar_mode_caps_the_effective_font_size_without_losing_the_choice() {
-        for (id, px) in LYRICS_FONT_STEPS {
-            let config = LyricsConfig {
-                mode: LyricsMode::Taskbar,
-                size: (*id).to_string(),
-                ..LyricsConfig::default()
-            };
-            let effective = config.effective_size();
-            let effective_px = LYRICS_FONT_STEPS
-                .iter()
-                .find(|(step, _)| step == &effective)
-                .map(|(_, px)| *px)
-                .expect("生效档位必须在表里");
+    fn taskbar_font_steps_never_exceed_the_pinned_ceiling() {
+        assert_eq!(
+            TASKBAR_FONT_STEPS.iter().map(|(_, px)| *px).max(),
+            Some(TASKBAR_MAX_FONT_PX),
+            "最大一档就是简报钉死的上限（否则档位表可以偷偷长大）"
+        );
+        for (id, px) in TASKBAR_FONT_STEPS {
+            assert!(*px <= TASKBAR_MAX_FONT_PX, "{id}（{px}px）超过上限");
+        }
+        // 桌面档位与任务栏档位是两张表：id 不许重叠（重叠就没法各自校验）
+        for (id, _) in LYRICS_FONT_STEPS {
             assert!(
-                effective_px <= TASKBAR_MAX_FONT_PX,
-                "{id}（{px}px）在任务栏模式下必须被压到 ≤{TASKBAR_MAX_FONT_PX}px，实际 {effective}（{effective_px}px）"
+                !TASKBAR_FONT_STEPS.iter().any(|(taskbar_id, _)| taskbar_id == id),
+                "档位 id 两侧不许同名：{id}"
             );
         }
+    }
 
-        let big = LyricsConfig {
-            size: "xxl".to_string(),
+    // ---- R59：任务栏歌词的独立外观（颜色 / 逐字高亮 / 字号）--------------------------
+
+    /// 四个任务栏字段各有默认值，且默认值本身合法（不靠"碰巧表里第一个"）。
+    #[test]
+    fn r59_taskbar_appearance_defaults_are_valid_choices() {
+        let config = LyricsConfig::default();
+        assert_eq!(config.taskbar_size, DEFAULT_TASKBAR_SIZE);
+        assert_eq!(config.taskbar_color, DEFAULT_TASKBAR_COLOR);
+        assert_eq!(config.taskbar_custom_color, "");
+        assert!(config.taskbar_karaoke, "逐字高亮默认开：R58 修好的观感就是默认观感");
+        assert!(TASKBAR_FONT_STEPS.iter().any(|(id, _)| *id == DEFAULT_TASKBAR_SIZE));
+        assert!(LYRICS_COLOR_TOKENS.contains(&DEFAULT_TASKBAR_COLOR));
+        // 默认字号沿用 R58 的实际观感（旧逻辑把桌面 lg=28px 压到 20px 那一档）
+        let default_px = TASKBAR_FONT_STEPS
+            .iter()
+            .find(|(id, _)| *id == DEFAULT_TASKBAR_SIZE)
+            .map(|(_, px)| *px);
+        assert_eq!(default_px, Some(20), "默认任务栏字号 = R58 渲染出来的 20px");
+    }
+
+    /// 坏值不覆盖上一个合法值：认不出的档位/令牌/自定义色/非布尔一律丢掉。
+    #[test]
+    fn r59_taskbar_fields_never_guess_and_validation_rejects_bad_values() {
+        let base = LyricsConfig {
+            taskbar_size: "tlg".to_string(),
+            taskbar_color: "primary".to_string(),
+            taskbar_custom_color: "#112233".to_string(),
+            taskbar_karaoke: false,
             ..LyricsConfig::default()
         };
-        assert_eq!(big.effective_size(), "xxl", "桌面模式原样");
-        let taskbar = LyricsConfig {
-            mode: LyricsMode::Taskbar,
-            ..big.clone()
-        };
-        assert_eq!(taskbar.effective_size(), "md", "xxl 压到 20px 那一档");
-        assert_eq!(taskbar.size, "xxl", "用户选的档位保留着");
+        let bogus = base.apply_patch(&json!({
+            // 桌面档位不是任务栏档位（两张表，不许混用）
+            "taskbarSize": "lg",
+            "taskbarColor": "#fff",
+            "taskbarCustomColor": "red",
+            "taskbarKaraoke": "yes",
+        }));
+        assert_eq!(bogus, base, "坏值一个都不许覆盖");
 
-        // 认不出的档位（盘上被人改过）：落默认，绝不 panic
+        let patched = base.apply_patch(&json!({
+            "taskbarSize": "txl",
+            "taskbarColor": "contrast",
+            "taskbarCustomColor": "",
+            "taskbarKaraoke": true,
+        }));
+        assert_eq!(patched.taskbar_size, "txl");
+        assert_eq!(patched.taskbar_color, "contrast");
+        assert_eq!(patched.taskbar_custom_color, "", "空串 = 回设计令牌");
+        assert!(patched.taskbar_karaoke);
+
+        for patch in [
+            json!({"taskbarSize": "tlg"}),
+            json!({"taskbarColor": "muted"}),
+            json!({"taskbarCustomColor": "#00dd00"}),
+            json!({"taskbarCustomColor": ""}),
+            json!({"taskbarKaraoke": false}),
+        ] {
+            assert!(
+                validate_configure(crate::MAIN_WINDOW_LABEL, &patch, None, None).is_ok(),
+                "合法补丁必须收：{patch}"
+            );
+        }
+        for patch in [
+            json!({"taskbarSize": "lg"}),
+            json!({"taskbarSize": "tsm2"}),
+            json!({"taskbarColor": "#fff"}),
+            json!({"taskbarCustomColor": "#12"}),
+            json!({"taskbarCustomColor": true}),
+            json!({"taskbarKaraoke": 1}),
+            json!({"taskbarKaraoke": "on"}),
+        ] {
+            let error = validate_configure(crate::MAIN_WINDOW_LABEL, &patch, None, None)
+                .expect_err("坏值必须被拒（拒 = 保留上一次合法值）");
+            assert_eq!(error.kind.as_deref(), Some("invalid_payload"), "{patch}");
+        }
+    }
+
+    /// 落盘往返 + 查询串：四个键各自到位，`#` 照旧转义；旧盘缺键时按默认。
+    #[test]
+    fn r59_taskbar_fields_round_trip_through_persisted_query_and_restore() {
+        let config = LyricsConfig {
+            taskbar_size: "tsm".to_string(),
+            taskbar_color: "muted".to_string(),
+            taskbar_custom_color: "#00DD00".to_string(),
+            taskbar_karaoke: false,
+            ..LyricsConfig::default()
+        };
+        let persisted = config.persisted();
+        assert_eq!(persisted["taskbarSize"], "tsm");
+        assert_eq!(persisted["taskbarColor"], "muted");
+        assert_eq!(persisted["taskbarCustomColor"], "#00DD00");
+        assert_eq!(persisted["taskbarKaraoke"], false);
+        assert_eq!(LyricsConfig::restored(Some(&persisted)), config, "往返一字不差");
+
+        let query = config.query();
+        assert!(query.contains("taskbarSize=tsm"), "{query}");
+        assert!(query.contains("taskbarColor=muted"), "{query}");
+        assert!(query.contains("taskbarCustomColor=%2300DD00"), "`#` 必须转义：{query}");
+        assert!(query.contains("taskbarKaraoke=0"), "布尔写成 0/1：{query}");
+
+        // 旧 settings.json 没有这四个键：按默认（不是空串、不是 false）
+        let old = LyricsConfig::restored(Some(&json!({"mode": "taskbar", "size": "lg", "color": "primary"})));
+        assert_eq!(old.taskbar_size, DEFAULT_TASKBAR_SIZE);
+        assert_eq!(old.taskbar_color, DEFAULT_TASKBAR_COLOR);
+        assert_eq!(old.taskbar_custom_color, "");
+        assert!(old.taskbar_karaoke);
+
+        // 盘上的坏值同样不猜（整格按默认，不 panic）
+        let broken = LyricsConfig::restored(Some(&json!({
+            "taskbarSize": 7, "taskbarColor": "neon", "taskbarKaraoke": "no", "taskbarCustomColor": "#12"
+        })));
+        assert_eq!(broken, LyricsConfig::default());
+    }
+
+    /// 各读各的：任务栏模式读 `taskbarSize`，桌面模式读 `size`，两边互不改写。
+    #[test]
+    fn r59_each_mode_reads_its_own_size() {
+        let config = LyricsConfig {
+            mode: LyricsMode::Taskbar,
+            size: "xxl".to_string(),
+            taskbar_size: "tlg".to_string(),
+            ..LyricsConfig::default()
+        };
+        assert_eq!(config.effective_size(), "tlg", "任务栏模式只读任务栏字号");
+        assert_eq!(config.size, "xxl", "桌面档位原样保留（切回去不丢）");
+        assert_eq!(config.apply_patch(&json!({"mode": "desktop"})).effective_size(), "xxl");
+        // 认不出的任务栏档位（盘上被手改过）：落默认，绝不 panic
         let broken = LyricsConfig {
             mode: LyricsMode::Taskbar,
-            size: "huge".to_string(),
+            taskbar_size: "huge".to_string(),
             ..LyricsConfig::default()
         };
-        assert_eq!(broken.effective_size(), "md");
+        assert_eq!(broken.effective_size(), DEFAULT_TASKBAR_SIZE);
+        // 桌面模式完全不受任务栏字段影响
+        let desktop = LyricsConfig {
+            taskbar_size: "tsm".to_string(),
+            size: "sm".to_string(),
+            ..LyricsConfig::default()
+        };
+        assert_eq!(desktop.effective_size(), "sm");
     }
 
     #[test]
@@ -2510,7 +2670,10 @@ mod tests {
         LyricsConfig::default().apply_patch(&patch)
     }
 
-    /// 落盘合同恰好是 14 个字面键：不含 `effectiveSize`（派生值）与 taskbar/revision/visible/dirty。
+    /// 落盘合同恰好是 18 个字面键：不含 `effectiveSize`（派生值）与 taskbar/revision/visible/dirty。
+    ///
+    /// R59 **有意扩到 18 个**：任务栏歌词的外观（字号/颜色/自定义色/逐字开关）是用户配置，
+    /// 必须落盘并在重启后恢复。
     #[test]
     fn r44e_the_persisted_contract_is_exactly_the_config_keys() {
         let persisted = LyricsConfig::default().persisted();
@@ -2521,9 +2684,12 @@ mod tests {
             "enableBlur", "enableScale", "enableSpring", "showControls",
             // R45B：歌词颜色与窗口尺寸也是用户配置（要落盘、要重启恢复）
             "customColor", "windowWidth", "windowHeight",
+            // R59：任务栏歌词的独立外观（不与桌面共用）
+            "taskbarSize", "taskbarColor", "taskbarCustomColor", "taskbarKaraoke",
         ];
         expected.sort_unstable();
         assert_eq!(keys, expected, "只写合同 config 字段");
+        assert_eq!(keys.len(), 18, "落盘键数就是 18");
         assert!(persisted.get("effectiveSize").is_none(), "派生值不入盘");
         for forbidden in ["revision", "visible", "dirty", "saveError", "requestedVisible", "taskbar"] {
             assert!(persisted.get(forbidden).is_none(), "{forbidden} 是运行时状态，不入盘");

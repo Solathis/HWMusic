@@ -1484,16 +1484,18 @@ window-state 不自动恢复 lyrics 的旧尺寸/坐标，避免异步覆盖配�
 > 由 `a_monitor_left_of_the_primary_keeps_its_negative_origin` 与
 > `every_monitor_keeps_the_window_inside_its_own_work_area` 两条用例钉住。
 
-**配置**：`{mode:'desktop'|'taskbar', layout:'horizontal'|'vertical', style:'clean'|'panel', size, color, locked, clickThrough, enableBlur, enableScale, enableSpring, showControls}`。
+**配置**：`{mode:'desktop'|'taskbar', layout:'horizontal'|'vertical', style:'clean'|'panel', size, color, locked, clickThrough, enableBlur, enableScale, enableSpring, showControls, taskbarSize, taskbarColor, taskbarCustomColor, taskbarKaraoke}`。
 默认 desktop/horizontal/clean/lg/foreground，locked/clickThrough=false，四个演出/控件布尔=true。AMLL 官方 props 控制模糊/缩放/弹簧，panel 使用 shadcn Card 语义 surface；宿主隔离 AMLL 合成以保证浅暗文字可见。panel+contrast 的有效字色使用既有 foreground 令牌，配置仍保留 contrast，切回 clean 还原。
-字号档位为 16/20/28/40/56px；颜色只认 foreground/muted/primary/contrast 令牌。任务栏模式有效字号 ≤20px 且强制横条点透，保留用户原档位；clean/panel 均不渲染任何控件带，showControls 不改变 44px 歌词可用高度。
+字号档位为 **桌面 16/20/28/40/56px**（`sm|md|lg|xl|xxl`）与 **任务栏 12/14/16/18/20px**（`tsm|tmd|tlg|txl|txxl`）两张表，id 不重叠、互不通用（`taskbarSize` 收桌面档位一律 `invalid_payload`）。颜色只认 foreground/muted/primary/contrast 令牌。
+**任务栏外观独立（R59）**：`taskbarSize`（默认 `txxl` = 20px）、`taskbarColor`（默认 `foreground`）、`taskbarCustomColor`（`#RRGGBB` 或空串，默认空）、`taskbarKaraoke`（逐字高亮，默认 `true`）。`mode=taskbar` 时歌词窗**只读**这四个字段（字号/颜色/自定义色/逐字），`mode=desktop` 只读 `size`/`color`/`customColor` 且逐字恒开；两套值各存一份，改一边不动另一边。逐字关闭 = 不经逐字词推导（行级数组直接交给官方 `LyricPlayer`，按行渐变），仍是同一个官方组件。任务栏模式强制横条点透；clean/panel 均不渲染任何控件带，showControls 不改变 44px 歌词可用高度。
+任务栏这张卡只在**宿主回报 `taskbar.supported === true`**（Windows）时渲染，配置入口在主窗设置页「任务栏歌词（Beta）」卡（窄命令 `core_lyrics_configure`），不出现在桌面歌词的齿轮弹出窗里。
 锁定仅禁拖，解锁/媒体仍可点击；点透整窗不接鼠标，须在主窗设置恢复。
 
 **恢复/保存（R44e：唯一写者是 sidecar）**：Rust 持有本次运行的权威配置与 revision，**启动时只读**恢复
 `settings.json` 的 `data.lyricsWindow` 当基线（坏文件/坏字段按默认，不回写默认值）。
 **落盘由 Rust 的保存任务拥有**（独立线程，与 WebView / React 生命周期无关）：单在途 + 最新待写，
 成功后只确认对应快照（期间来了新值继续写），失败保留运行值、标 `dirty`/`saveError` 并**停止自动重试**；
-`retrySave` 或下一次改动才重试。写入的字段是合同里的 11 个 config 键，**不含** `visible`/`revision`/`effectiveSize`/`dirty`。
+`retrySave` 或下一次改动才重试。写入的字段是合同里的 **18 个** config 键（R59 起含 `taskbarSize`/`taskbarColor`/`taskbarCustomColor`/`taskbarKaraoke`），**不含** `visible`/`revision`/`effectiveSize`/`dirty`。旧 `settings.json` 缺这些键时按默认值恢复，坏值不覆盖运行值。
 同一 status 订阅按 `revision` + `runtimeRevision` 接收，旧回执不倒退；渲染层不再有保存队列，
 主窗观察者卸载、渲染层崩溃、登出门禁都不影响落盘。失败文案由渲染层按稳定代码翻译（`saveErrorText`），
 设置页与歌词窗都能显示"未保存/未确认 + 重试"。sidecar 的 `load→merge→rename` 在**唯一一条写尾链**上串行，

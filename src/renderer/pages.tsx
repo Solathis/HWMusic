@@ -55,6 +55,7 @@ import { LogTerminal } from "./log-terminal.tsx"
 import type { LogEntry } from "./log-terminal.tsx"
 import { RUN_LOG_READ_LIMIT } from "./features/settings/run-log.mjs"
 import { LyricsCacheCard } from "./lyrics-cache-card.tsx"
+import { TaskbarLyricsCard } from "./taskbar-lyrics-card.tsx"
 import { coreCall, getAutostart, isCoreError, setAutostart } from "./host-api"
 import { PlaylistGrid } from "./playlist-grid.tsx"
 import { libraryEmptyText, libraryFailureText } from "./features/library/library-state.mjs"
@@ -1282,8 +1283,9 @@ export function SettingsPage({
           {/*
             R52：这一页只放**必须在主窗操作**的行为项——显示 / 窗口位置 / 锁定 / 鼠标穿透。
             外观（样式 / 方向 / 字号 / 效果 / 颜色）只在桌面歌词窗自己的齿轮菜单里改：同一项设置
-            有两个入口，用户会以为两边都该改得对，而其中一处迟早会落后。主窗设置不代管那扇窗的外观，
-            任务栏歌词的设置后续在设置页单独给（不与桌面歌词共用）。
+            有两个入口，用户会以为两边都该改得对，而其中一处迟早会落后。主窗设置不代管那扇窗的外观。
+            R59：任务栏歌词是**另一套**配置（颜色 / 字号 / 逐字），它没有可点的窗口，所以它的外观
+            就在下面那张卡里改（独立组件，与桌面歌词互不共用）。
             沉浸式歌词（播放器歌词）的颜色**不可改**：`AmllLyricsPanel` 恒用 AMLL 默认 + 主题令牌。
           */}
           <Card>
@@ -1368,6 +1370,9 @@ export function SettingsPage({
               ) : null}
             </CardContent>
           </Card>
+
+          {/* R59：任务栏歌词的外观（颜色 / 逐字 / 字号）——与桌面歌词各存一份，只在 Windows 渲染 */}
+          <TaskbarLyricsCard lyrics={lyrics} />
 
           {/* 歌词缓存 / 一键清除 / 导入本地歌词（R41）：与上面那张卡同一件事的两半（显示 vs 存放） */}
           <LyricsCacheCard lyrics={lyrics} />

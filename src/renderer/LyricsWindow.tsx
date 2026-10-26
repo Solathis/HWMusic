@@ -17,9 +17,9 @@ import { LYRICS_SEEK_WINDOW_MS } from "./features/lyrics/lyric-sync.mjs"
 import {
   LYRICS_STATUS,
   dragRegionEnabled,
-  effectiveSizeId,
   estimateTimeMs,
   karaokeFrame,
+  lyricsAppearance,
   lyricsConfigFromSearch,
   normalizeLyricsConfig,
   reanchorProgress,
@@ -82,6 +82,8 @@ export const RESIZE_SAVE_DELAY_MS = 250
 export function LyricsWindow() {
   // 初值来自建窗时拼的查询串（Rust 侧按当前配置拼）：渲染层还没订阅事件时也不会丢配置
   const [config, setConfig] = useState(() => lyricsConfigFromSearch(window.location.search))
+  // R59：这一份配置实际画成什么样由纯逻辑模块决定（任务栏只读任务栏那四个字段，桌面只读原字段）
+  const appearance = useMemo(() => lyricsAppearance(config), [config])
   const [lyricDocument, setLyricDocument] = useState<LyricsDocument>(INITIAL_DOCUMENT)
   const [frame, setFrame] = useState({ time: 0, isSeeking: false, playing: false })
 
@@ -202,9 +204,10 @@ export function LyricsWindow() {
 
   // R45B：自定义颜色只写在**这一个容器**上（一次 scoped 变量覆盖，变量名与写法都在适配层），
   // 空值就撤掉覆盖回设计令牌；变量的接线点仍然只在 css 与适配层（这里不出现 AMLL 变量名）。
+  // R59：颜色取哪一份（桌面 / 任务栏）也由纯逻辑模块决定。
   useEffect(() => {
-    applyCustomColor(stageRef.current, config.customColor)
-  }, [config.customColor])
+    applyCustomColor(stageRef.current, appearance.customColor)
+  }, [appearance.customColor])
 
   /**
    * R45B：尺寸稳定 250ms 后保存 DIP 宽高（保存与落盘仍由 Rust 拥有，这里只发一条窄命令）。
@@ -240,12 +243,17 @@ export function LyricsWindow() {
     }
   }, [mode, locked, savedWidth, savedHeight, configure])
 
-  const size = effectiveSizeId(config)
+  // R59：这一份配置实际画成什么样由纯逻辑模块决定（任务栏只读任务栏那四个字段，桌面只读原字段）
+  const size = appearance.size
   const hasLyric = lyricDocument.lines.length > 0
   const notice = lyricsNoticeText(lyricDocument)
   const canDrag = dragRegionEnabled(config)
-  // R45B：行级 LRC 在这里推导出逐字词（纯函数；词级源原样保留），官方组件负责着色
-  const playerLines = useMemo(() => withKaraokeWords(lyricDocument.lines), [lyricDocument.lines])
+  // R45B：行级 LRC 在这里推导出逐字词（纯函数；词级源原样保留），官方组件负责着色。
+  // R59：任务栏关掉逐字高亮时**不推导**——行级数组交给官方组件，按行渐变（仍是同一个组件）。
+  const playerLines = useMemo(
+    () => (appearance.karaoke ? withKaraokeWords(lyricDocument.lines) : lyricDocument.lines),
+    [lyricDocument.lines, appearance.karaoke],
+  )
   const canResize = resizableEnabled(config)
   const startDrag = (event: MouseEvent, grip = false) => {
     if (!canDrag || event.button !== 0) return
@@ -356,7 +364,8 @@ export function LyricsWindow() {
       data-lyrics-mode={config.mode}
       data-lyrics-layout={config.mode === "taskbar" ? "horizontal" : config.layout}
       data-lyrics-style={config.style} data-lyrics-size={size}
-      data-lyrics-color={config.style === "panel" && config.color === "contrast" ? "foreground" : config.color}
+      data-lyrics-color={config.style === "panel" && appearance.color === "contrast" ? "foreground" : appearance.color}
+      data-lyrics-karaoke={appearance.karaoke ? "on" : "off"}
       data-lyrics-locked={config.locked ? "on" : "off"}>
       {config.style === "panel" ? <Card size="sm" className="h-full min-h-0 gap-0 py-0">
         {config.mode === "desktop" ? <CardHeader className={config.locked ? "shrink-0 px-1.5 py-0" : "shrink-0 px-1.5 py-0.5"}>

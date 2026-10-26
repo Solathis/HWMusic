@@ -8,8 +8,8 @@
  * 1. **字号是档位，不是连续值**。渲染层的视觉一律走工具类/令牌，内联样式只允许
  *    几何契约与 AMLL 的 100% 尺寸那两处，所以"连续字号"这条 CSS 路本来就不存在。
  *    档位的 px 值在这里（钳制、文案用），实际字号在 `amll-theme.css` 的 `[data-lyrics-size]`
- *    规则里（rem，由测试钉住与 px 对得上）。契约里存的是**用户选的档位**；
- *    任务栏模式下再经 `effectiveSizeId` 压到 ≤ 20px——切回桌面模式时用户的选择还在。
+ *    规则里（rem，由测试钉住与 px 对得上）。契约里存的是**用户选的档位**；两种模式各读自己
+ *    那一列（桌面的 `size` / 任务栏的 `taskbarSize`，见 `lyricsAppearance`）。
  * 2. **颜色只认设计令牌**（`LYRICS_COLOR_TOKENS`）：不接受任意色值。
  *    渲染层把令牌 id 写进 `data-lyrics-color`，真正的 AMLL 歌词颜色变量映射在
  *    `amll-theme.css`（那些变量的唯一接线点，R9 的规矩，由扫描钉住）。
@@ -45,6 +45,23 @@ export const LYRICS_FONT_STEPS = [
 
 /** 任务栏模式的字号上限（简报钉死：≤ 20）：贴边的一条，字不能比系统的还大。 */
 export const TASKBAR_MAX_FONT_PX = 20;
+
+/**
+ * 任务栏专用字号档位（R59）：44px 高的槽位只放得下一行当前歌词，所以压在 ≤ 20px、档距 2px
+ * （桌面那张表最密的一档跨度 8px，套进 12–20px 只剩两档可挑）。
+ *
+ * id 与桌面档位不重叠：两张表互不通用，`taskbarSize` 收桌面档位一律判非法（两侧同一口径）。
+ */
+export const TASKBAR_FONT_STEPS = [
+  { id: "tsm", px: 12, label: "小" },
+  { id: "tmd", px: 14, label: "较小" },
+  { id: "tlg", px: 16, label: "标准" },
+  { id: "txl", px: 18, label: "大" },
+  { id: "txxl", px: 20, label: "特大" },
+];
+
+/** 任务栏的默认字号：取上限那一档（R44 起任务栏把桌面 lg 压到的就是 20px，观感不变）。 */
+export const DEFAULT_TASKBAR_SIZE = "txxl";
 
 /**
  * 颜色令牌表（唯一真源）：只在这几个设计令牌里选，不接受任意色值。
@@ -134,6 +151,10 @@ export function saveErrorText(code) {
  * @property {boolean} enableScale
  * @property {boolean} enableSpring
  * @property {boolean} showControls
+ * @property {string} taskbarSize 任务栏字号档位 id（见 TASKBAR_FONT_STEPS；与桌面档位不通用）
+ * @property {string} taskbarColor 任务栏颜色令牌 id
+ * @property {string} taskbarCustomColor 任务栏自定义颜色 `#RRGGBB` 或空串
+ * @property {boolean} taskbarKaraoke 任务栏逐字高亮（关掉 = 官方组件按行渐变）
  */
 
 /** @type {LyricsConfig} */
@@ -154,6 +175,11 @@ export const DEFAULT_LYRICS_CONFIG = {
   enableScale: true,
   enableSpring: true,
   showControls: true,
+  /** 任务栏那扇窗的外观（R59）：与桌面各存一份，改一边不许动另一边。 */
+  taskbarSize: DEFAULT_TASKBAR_SIZE,
+  taskbarColor: "foreground",
+  taskbarCustomColor: "",
+  taskbarKaraoke: true,
 };
 
 /** 进度节流窗口：rAF 每帧都可能调，但只有该推的才出 IPC（≥100ms 或播放/跳转变化）。 */
@@ -203,6 +229,15 @@ export function colorTokenLabel(id) {
   return (tokenOf(id) ?? tokenOf(DEFAULT_LYRICS_CONFIG.color)).label;
 }
 
+function taskbarStepOf(id) {
+  return TASKBAR_FONT_STEPS.find((step) => step.id === id) ?? null;
+}
+
+/** 任务栏档位标签（认不出的按默认档位说——界面不显示空串）。 */
+export function taskbarFontStepLabel(id) {
+  return (taskbarStepOf(id) ?? taskbarStepOf(DEFAULT_LYRICS_CONFIG.taskbarSize)).label;
+}
+
 /** 模式标签。 */
 export function modeLabel(id) {
   return MODE_LABELS[id] ?? MODE_LABELS[DEFAULT_LYRICS_CONFIG.mode];
@@ -219,9 +254,13 @@ export function normalizeLyricsConfig(patch, base = DEFAULT_LYRICS_CONFIG) {
   const source = patch !== null && typeof patch === "object" ? patch : {};
   const next = { ...DEFAULT_LYRICS_CONFIG };
   const enums = { mode: LYRICS_MODES, layout: LYRICS_LAYOUTS, style: LYRICS_STYLES,
-    size: LYRICS_FONT_STEPS.map((step) => step.id), color: LYRICS_COLOR_TOKENS.map((token) => token.id) };
+    size: LYRICS_FONT_STEPS.map((step) => step.id), color: LYRICS_COLOR_TOKENS.map((token) => token.id),
+    taskbarSize: TASKBAR_FONT_STEPS.map((step) => step.id),
+    taskbarColor: LYRICS_COLOR_TOKENS.map((token) => token.id) };
   const valid = (key, value) => {
-    if (key === "customColor") return typeof value === "string" && (value === "" || isCustomColor(value));
+    if (key === "customColor" || key === "taskbarCustomColor") {
+      return typeof value === "string" && (value === "" || isCustomColor(value));
+    }
     if (key === "windowWidth" || key === "windowHeight") return value === null || normalizeDipSize(value) !== null;
     if (enums[key]) return enums[key].includes(value);
     return typeof value === "boolean";
@@ -234,18 +273,40 @@ export function normalizeLyricsConfig(patch, base = DEFAULT_LYRICS_CONFIG) {
 }
 
 /**
- * 有效字号档位：任务栏模式下压到 ≤ [`TASKBAR_MAX_FONT_PX`] 的最大档位。
+ * 有效字号档位：两种模式各读自己那一列（R59 之后桌面选的档位不参与任务栏的渲染）。
  *
- * 刻意**不改配置本身**（`normalizeLyricsConfig` 存的是用户选的那个档位）：
- * 用户从桌面模式切到任务栏再切回来，看到的不该是自己没选过的小字号。
+ * 刻意**不改配置本身**：用户从桌面模式切到任务栏再切回来，看到的不该是自己没选过的小字号。
  */
 export function effectiveSizeId(config) {
   const normalized = normalizeLyricsConfig({}, config);
   if (normalized.mode !== "taskbar") return normalized.size;
-  const allowed = LYRICS_FONT_STEPS.filter((step) => step.px <= TASKBAR_MAX_FONT_PX);
-  const chosen = stepOf(normalized.size);
-  if (chosen !== null && chosen.px <= TASKBAR_MAX_FONT_PX) return chosen.id;
-  return allowed[allowed.length - 1].id;
+  const known = TASKBAR_FONT_STEPS.some((step) => step.id === normalized.taskbarSize);
+  return known ? normalized.taskbarSize : DEFAULT_LYRICS_CONFIG.taskbarSize;
+}
+
+/**
+ * 这一份配置**实际要画成什么样**（纯函数）：任务栏模式只读任务栏那四个字段，桌面模式只读原字段。
+ *
+ * 为什么把它单独拎出来：歌词窗只该消费一个结果，别再在组件里写 `mode === "taskbar" ? … : …`——
+ * 那样每加一个字段就要在组件里多一条分支，而分支是没法单测的。
+ * 桌面模式的逐字高亮恒为开（任务栏那个开关不许影响桌面观感）。
+ */
+export function lyricsAppearance(config) {
+  const normalized = normalizeLyricsConfig({}, config);
+  if (normalized.mode === "taskbar") {
+    return {
+      size: effectiveSizeId(normalized),
+      color: normalized.taskbarColor,
+      customColor: normalized.taskbarCustomColor,
+      karaoke: normalized.taskbarKaraoke,
+    };
+  }
+  return {
+    size: normalized.size,
+    color: normalized.color,
+    customColor: normalized.customColor,
+    karaoke: true,
+  };
 }
 
 /** 官方拖动调用的资格：仅 desktop 未锁且未点透。 */

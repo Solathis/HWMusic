@@ -38,6 +38,23 @@
   --amll-lp-font-size: 3.5rem;
 }
 
+/* 任务栏档位（R59：px 见 features/lyrics/lyrics-window.mjs 的 TASKBAR_FONT_STEPS） */
+.amll-lyrics-stage[data-lyrics-size="tsm"] {
+  --amll-lp-font-size: 0.75rem;
+}
+.amll-lyrics-stage[data-lyrics-size="tmd"] {
+  --amll-lp-font-size: 0.875rem;
+}
+.amll-lyrics-stage[data-lyrics-size="tlg"] {
+  --amll-lp-font-size: 1rem;
+}
+.amll-lyrics-stage[data-lyrics-size="txl"] {
+  --amll-lp-font-size: 1.125rem;
+}
+.amll-lyrics-stage[data-lyrics-size="txxl"] {
+  --amll-lp-font-size: 1.25rem;
+}
+
 /* 颜色令牌档位（id 见 features/lyrics/lyrics-window.mjs 的 LYRICS_COLOR_TOKENS） */
 .amll-lyrics-stage[data-lyrics-color="foreground"] {
   --amll-lp-color: var(--foreground);
