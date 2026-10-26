@@ -1,9 +1,8 @@
 /**
  * 侧栏「我的歌单」（R62）：组标题 + 歌单列表（封面 / 名字 / 歌曲数量）。
- * 数据只在这里取一次并留在内存（侧栏随外壳常驻，切页不重取），歌单变了走 `notifyPlaylistsChanged()` 重取。
+ * 数据只在这里取一次并留在内存（侧栏随外壳常驻，切页不重取）。
  * 窄轨（48px）里只剩封面，名字与数量交给 tooltip。
  */
-import { useEffect } from "react"
 import { ListMusicIcon, RefreshCwIcon } from "lucide-react"
 
 import { LIBRARY_PLAYLISTS } from "../shared/request-channels.ts"
@@ -22,7 +21,6 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./components/ui/tooltip
 import { CoverArt } from "./components"
 import { libraryFailureText } from "./features/library/library-state.mjs"
 import { PAGINATION_PAGE_SIZE } from "./features/library/pagination.mjs"
-import { onPlaylistsChanged } from "./features/library/playlist-refresh.mjs"
 import {
   SIDEBAR_PLAYLIST_ITEM_TESTID,
   SIDEBAR_PLAYLIST_META_TESTID,
@@ -55,8 +53,6 @@ export interface SidebarPlaylistsProps {
 export function SidebarPlaylists({ activePlaylistId, onOpen }: SidebarPlaylistsProps) {
   const resource = useLibraryResource<unknown[]>(LIBRARY_PLAYLISTS, PLAYLISTS_REQUEST, playlistsOf)
   const { reload } = resource
-  // 加歌这类写操作在内容区完成，够不到这里的闭包：它们发通知，这里重取一次
-  useEffect(() => onPlaylistsChanged(reload), [reload])
 
   const items = sidebarPlaylistItems(resource.data)
 

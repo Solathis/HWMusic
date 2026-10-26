@@ -627,6 +627,83 @@ test("R40 enqueue：同一首歌可以出现两次（不去重、不排序——
   assert.deepEqual(player.snapshot().entries.map((entry) => entry.id), ["1000", "1000"]);
 });
 
+// —— R63：下一首播放（行菜单的「下一首播放」= 插到当前曲目之后） ---------------------
+
+test("R63 playNext：插到当前曲目之后，索引与正在播的那一首都不动", async () => {
+  const { player, fake, resolved, persisted } = makePlayer();
+  await player.playQueue(songs(4), 1);
+  assert.equal(player.snapshot().track.id, "1001");
+  const sourcesBefore = fake.calls.sources.length;
+  const playBefore = fake.calls.play;
+
+  const inserted = player.playNext([{ id: "9001", name: "插队曲目" }]);
+  assert.equal(inserted.ok, true);
+  assert.deepEqual(inserted.data, { added: 1, queueLength: 5, index: 1 });
+
+  const state = player.snapshot();
+  assert.deepEqual(state.entries.map((entry) => entry.id), ["1000", "1001", "9001", "1002", "1003"]);
+  assert.equal(state.index, 1, "当前索引不动（插在后面，不换歌）");
+  assert.equal(state.status, "playing", "正在播的那一首继续响");
+  assert.equal(state.loaded, true);
+  assert.equal(fake.calls.sources.length, sourcesBefore, "不重新装载音频源");
+  assert.equal(fake.calls.play, playBefore, "不重新播放");
+  assert.deepEqual(resolved, ["1001"], "只取过被点那首的地址");
+  assert.equal(persisted.length, 2, "插队也要写盘");
+});
+
+test("R63 playNext：顺序模式下 next() 走的正是插进去的那一首", async () => {
+  const { player } = makePlayer();
+  await player.playQueue(songs(3), 0);
+  player.playNext([{ id: "9001", name: "插队曲目" }]);
+  await player.next();
+  assert.equal(player.snapshot().track.id, "9001", "下一首 = 刚插进去的那一首");
+  await player.next();
+  assert.equal(player.snapshot().track.id, "1001", "之后回到原来的顺序");
+});
+
+test("R63 playNext：随机模式下也真的排在当前曲目后面（排列表跟着移动，不是碰运气）", async () => {
+  const { player } = makePlayer();
+  await player.playQueue(songs(4), 0);
+  player.setMode("shuffle");
+  await player.next();
+  const beforeInsert = player.snapshot().track.id;
+
+  player.playNext([{ id: "9001", name: "插队曲目" }]);
+  await player.next();
+  const afterInsert = player.snapshot().track.id;
+  assert.notEqual(afterInsert, beforeInsert, "换了一首");
+  assert.equal(afterInsert, "9001", "随机播放的「下一首」同样认这次插队");
+});
+
+test("R63 playNext：空队列时插队 = 建立队列并停在第一首，但**不自动出声**", () => {
+  const { player, fake } = makePlayer();
+  const inserted = player.playNext(songs(2));
+  assert.deepEqual(inserted.data, { added: 2, queueLength: 2, index: 0 });
+  const state = player.snapshot();
+  assert.equal(state.index, 0);
+  assert.equal(state.status, "idle");
+  assert.equal(fake.calls.play, 0, "没有用户手势的自动出声是打扰");
+});
+
+test("R63 playNext：没有标识的条目 / 空列表一律不产生变化（不写盘）", () => {
+  const { player, persisted } = makePlayer();
+  player.playNext([{ name: "没有 id" }]);
+  assert.deepEqual(player.snapshot().entries, []);
+  assert.equal(persisted.length, 0);
+
+  player.setQueue(songs(1), 0);
+  const before = persisted.length;
+  assert.deepEqual(player.playNext([]).data, { added: 0, queueLength: 1, index: 0 });
+  assert.equal(persisted.length, before, "空插入不写盘");
+});
+
+test("R63 playNext：与 enqueue 同一条去重规则——同一首歌可以出现两次（插队不去重）", () => {
+  const { player } = makePlayer();
+  player.setQueue(songs(2), 0);
+  player.playNext([{ id: "1000", name: "歌0" }]);
+  assert.deepEqual(player.snapshot().entries.map((entry) => entry.id), ["1000", "1000", "1001"]);
+});
+
 test("player:command（R11 托盘预登记）：命令表是唯一真源，认不出的命令结构化拒绝", async () => {
   assert.deepEqual(PLAYER_COMMANDS, ["play", "pause", "toggle", "next", "previous"]);
   assert.equal(isPlayerCommand("toggle"), true);

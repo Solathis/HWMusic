@@ -23,7 +23,6 @@ import {
   sidebarPlaylistMetaText,
   sidebarPlaylistTooltipText,
 } from "../src/renderer/features/library/sidebar-playlists.mjs";
-import { notifyPlaylistsChanged, onPlaylistsChanged } from "../src/renderer/features/library/playlist-refresh.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const read = (relative) => readFileSync(`${repoRoot}${relative}`, "utf8");
@@ -80,24 +79,19 @@ test("窄轨 tooltip：名字在前，数量跟着（收起时那是唯一一份
 });
 
 // ---------------------------------------------------------------------------
-// 2. 刷新入口（加歌之后侧栏要重取）
+// 2. 加歌留下的刷新通道已删除（R63：没有加歌端点证据，那条订阅没有主）
 // ---------------------------------------------------------------------------
 
-test("歌单变化通知：订阅者都收到，退订之后不再收到", () => {
-  const calls = [];
-  const stopFirst = onPlaylistsChanged(() => calls.push("first"));
-  const stopSecond = onPlaylistsChanged(() => calls.push("second"));
-  notifyPlaylistsChanged();
-  assert.deepEqual(calls, ["first", "second"]);
-
-  stopFirst();
-  notifyPlaylistsChanged();
-  assert.deepEqual(calls, ["first", "second", "second"]);
-
-  stopSecond();
-  notifyPlaylistsChanged();
-  assert.deepEqual(calls, ["first", "second", "second"], "都退订之后没有人再被叫醒");
-  assert.equal(typeof onPlaylistsChanged("not-a-function"), "function", "坏订阅回一个空退订，不抛");
+test("歌单变化通知随加歌一起删除：模块与订阅都不在（没有写操作就没有刷新入口）", () => {
+  assert.equal(
+    existsSync(`${repoRoot}src/renderer/features/library/playlist-refresh.mjs`),
+    false,
+    "加歌端点没有证据 → 预留的刷新通道一并删除",
+  );
+  const source = stripComments(read("src/renderer/sidebar-playlists.tsx"));
+  assert.doesNotMatch(source, /onPlaylistsChanged|notifyPlaylistsChanged/, "侧栏里不再有那条订阅");
+  assert.doesNotMatch(source, /playlist-refresh/, "也不许改回 import 一个已经删掉的模块");
+  assert.match(source, /reload/, "「重试」那条路还在（reload 是它唯一入口）");
 });
 
 // ---------------------------------------------------------------------------
@@ -124,7 +118,6 @@ test("侧栏那一组：组标题 + 菜单项 + 骨架 + tooltip，状态文案�
   assert.match(source, /SIDEBAR_PLAYLISTS_RETRY_LABEL/, "失败态给「重试」");
   assert.match(source, /SIDEBAR_PLAYLISTS_EMPTY_TEXT/, "没有歌单给一句空态");
   assert.match(source, /SIDEBAR_PLAYLISTS_SKELETON_TESTID/, "加载中是骨架，不是空态");
-  assert.match(source, /onPlaylistsChanged\(reload\)/, "歌单变了要有人叫醒它重取");
   assert.match(source, /LIBRARY_PLAYLISTS/, "走共享常量里的那条 library:playlists（不新增端点）");
   assert.doesNotMatch(source, /["'`]library:[a-z-]+["'`]/, "频道名一律 import 共享常量");
   // 列表自己滚（手写 overflow 是 no-self-visual 禁的，面板一律 ScrollArea）

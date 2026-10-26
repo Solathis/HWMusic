@@ -15,6 +15,7 @@ import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 
 import { chromeKindOf } from "../shared/login-chrome.mjs"
+import { installContextMenuGuard } from "./features/shell/context-menu-guard.mjs"
 import { LoginChrome } from "./login-chrome.tsx"
 import { installThemeSync } from "./theme-sync"
 
@@ -25,6 +26,9 @@ if (!container) {
 }
 
 void installThemeSync()
+
+// 右键：吃掉网页默认菜单（浮动控件上没有输入框，等于一律拦掉）
+installContextMenuGuard()
 
 createRoot(container).render(
   <StrictMode>

@@ -10,6 +10,7 @@ import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 
 import { themeFromSearch } from "./features/lyrics/lyrics-window.mjs"
+import { installContextMenuGuard } from "./features/shell/context-menu-guard.mjs"
 import { applyThemeChoice } from "./features/theme/theme.mjs"
 import { LyricsWindow } from "./LyricsWindow.tsx"
 
@@ -24,6 +25,9 @@ import { LyricsWindow } from "./LyricsWindow.tsx"
  * 不 await 任何东西：主题类要在第一帧之前落地，否则会先按浅色画一帧再翻黑。
  */
 applyThemeChoice(document.documentElement, themeFromSearch(window.location.search))
+
+// 右键：吃掉网页默认菜单（这扇窗没有输入框，等于一律拦掉）
+installContextMenuGuard()
 
 const container = document.getElementById("root")
 

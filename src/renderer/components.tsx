@@ -9,6 +9,7 @@
  *   所以 UI 层既拿不到播放地址，也不可能出现第二个 `Audio`；
  * - `QueuePanel`：真实队列（当前项高亮、点击跳播、清空）；旧记录只有标识时，
  *   标题如实显示"曲目 &lt;id&gt;"（见 playback-state.mjs）；
+ * - 曲目表与队列的每一行都带专属右键菜单（`TrackRowMenu`）：播放 / 下一首播放 / 加入播放队列；
  * - `EmptyState` / `LoadFailed` / `ListSkeleton`：空态、失败态与骨架屏，
  *   文案一律由调用方从 features/library 的纯逻辑模块取（这里不造第二套文案）。
  *
@@ -67,6 +68,7 @@ import {
   formatDuration,
 } from "./features/library/track-fields.mjs"
 import { PLAYBACK_MODES } from "./features/playback/player.mjs"
+import { TRACK_MENU_TARGET } from "./features/shell/track-menu.mjs"
 import {
   playbackModeLabel,
   playerStatusText,
@@ -76,6 +78,7 @@ import {
 import type { PlayerRuntime } from "./features/playback/player-runtime.ts"
 import type { PlayerState } from "./features/playback/use-player.ts"
 import type { LyricsWindowBinding } from "./use-lyrics-window.ts"
+import { TrackRowMenu, type TrackRowActions } from "./track-menu.tsx"
 
 /** 空态：一句话（文案来自纯逻辑模块，克制且不冒充）。 */
 export function EmptyState({ text }: { text: string }) {
@@ -165,7 +168,7 @@ export function ListSkeleton({ count = 8 }: { count?: number }) {
   )
 }
 
-export interface TrackTableProps {
+export interface TrackTableProps extends TrackRowActions {
   songs: unknown[]
   emptyText: string
   /** 双击（或回车/空格）播放：带上行下标——播放器要用**整张列表**当队列 */
@@ -214,6 +217,8 @@ export function TrackTable({
   onOpenAlbum,
   onOpenArtist,
   onToggleFavorite,
+  onPlayNext,
+  onEnqueue,
   favoritedIds = [],
 }: TrackTableProps) {
   if (songs.length === 0) return <EmptyState text={emptyText} />
@@ -255,76 +260,85 @@ export function TrackTable({
             const artistId = trackArtistIdOf(song)
             const isFavorited = id !== null && favorited.has(id)
             return (
-              <TableRow
+              <TrackRowMenu
                 key={`${id ?? "row"}-${index}`}
-                tabIndex={0}
-                aria-label={`${trackNameOf(song)}，双击播放`}
-                onDoubleClick={() => onActivate?.(song, index)}
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter" && event.key !== " ") return
-                  event.preventDefault()
-                  onActivate?.(song, index)
-                }}
-                className="focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                target={TRACK_MENU_TARGET.track}
+                songs={[song]}
+                canPlay={onActivate !== undefined}
+                onPlay={() => onActivate?.(song, index)}
+                onPlayNext={onPlayNext}
+                onEnqueue={onEnqueue}
               >
-                <TableCell className="text-center tabular-nums text-muted-foreground">{index + 1}</TableCell>
-                <TableCell className="font-medium">
-                  {/* R38：小封面（`<img>` + 占位兜底见 CoverArt）——地址来自协议层的白名单投影 */}
-                  <div className="flex min-w-0 items-center gap-2">
-                    <CoverArt coverUrl={trackCoverUrlOf(song)} className="size-9 rounded-md" iconClassName="size-4" />
-                    <span className="truncate">{trackNameOf(song)}</span>
-                  </div>
-                </TableCell>
-                <TableCell>
-                  <Button
-                    variant="link"
-                    size="sm"
-                    className="max-w-full truncate"
-                    disabled={onOpenArtist === undefined || artistId === null}
-                    onClick={() => {
-                      if (artistId === null) return
-                      onOpenArtist?.(artistId, song)
-                    }}
-                  >
-                    {trackArtistsOf(song)}
-                  </Button>
-                </TableCell>
-                <TableCell>
-                  <Button
-                    variant="link"
-                    size="sm"
-                    className="max-w-full truncate"
-                    disabled={onOpenAlbum === undefined || albumId === null}
-                    onClick={() => {
-                      if (albumId === null) return
-                      onOpenAlbum?.(albumId, song)
-                    }}
-                  >
-                    {trackAlbumOf(song)}
-                  </Button>
-                </TableCell>
-                <TableCell className="text-right tabular-nums text-muted-foreground">
-                  {formatDuration(trackDurationOf(song))}
-                </TableCell>
-                <TableCell>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-pressed={isFavorited}
-                    disabled={onToggleFavorite === undefined}
-                    aria-label={
-                      onToggleFavorite === undefined
-                        ? "收藏（写入接口待联调确认）"
-                        : isFavorited
-                          ? "取消收藏"
-                          : "收藏"
-                    }
-                    onClick={() => onToggleFavorite?.(song)}
-                  >
-                    <HeartIcon className={isFavorited ? "fill-current" : undefined} />
-                  </Button>
-                </TableCell>
-              </TableRow>
+                <TableRow
+                  tabIndex={0}
+                  aria-label={`${trackNameOf(song)}，双击播放`}
+                  onDoubleClick={() => onActivate?.(song, index)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return
+                    event.preventDefault()
+                    onActivate?.(song, index)
+                  }}
+                  className="focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                >
+                  <TableCell className="text-center tabular-nums text-muted-foreground">{index + 1}</TableCell>
+                  <TableCell className="font-medium">
+                    {/* R38：小封面（`<img>` + 占位兜底见 CoverArt）——地址来自协议层的白名单投影 */}
+                    <div className="flex min-w-0 items-center gap-2">
+                      <CoverArt coverUrl={trackCoverUrlOf(song)} className="size-9 rounded-md" iconClassName="size-4" />
+                      <span className="truncate">{trackNameOf(song)}</span>
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <Button
+                      variant="link"
+                      size="sm"
+                      className="max-w-full truncate"
+                      disabled={onOpenArtist === undefined || artistId === null}
+                      onClick={() => {
+                        if (artistId === null) return
+                        onOpenArtist?.(artistId, song)
+                      }}
+                    >
+                      {trackArtistsOf(song)}
+                    </Button>
+                  </TableCell>
+                  <TableCell>
+                    <Button
+                      variant="link"
+                      size="sm"
+                      className="max-w-full truncate"
+                      disabled={onOpenAlbum === undefined || albumId === null}
+                      onClick={() => {
+                        if (albumId === null) return
+                        onOpenAlbum?.(albumId, song)
+                      }}
+                    >
+                      {trackAlbumOf(song)}
+                    </Button>
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums text-muted-foreground">
+                    {formatDuration(trackDurationOf(song))}
+                  </TableCell>
+                  <TableCell>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-pressed={isFavorited}
+                      disabled={onToggleFavorite === undefined}
+                      aria-label={
+                        onToggleFavorite === undefined
+                          ? "收藏（写入接口待联调确认）"
+                          : isFavorited
+                            ? "取消收藏"
+                            : "收藏"
+                      }
+                      onClick={() => onToggleFavorite?.(song)}
+                    >
+                      <HeartIcon className={isFavorited ? "fill-current" : undefined} />
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              </TrackRowMenu>
             )
           })}
         </TableBody>
@@ -608,15 +622,15 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
   )
 }
 
-/** 播放队列面板（R9 接通）：真实队列 + 点击跳播 + 清空。 */
-export interface QueuePanelProps {
+/** 播放队列面板（R9 接通）：真实队列 + 点击跳播 + 清空 + 行的专属右键菜单（R63）。 */
+export interface QueuePanelProps extends TrackRowActions {
   entries: PlayerState["entries"]
   index: number
   onSelect?: (index: number) => void
   onClear?: () => void
 }
 
-export function QueuePanel({ entries, index, onSelect, onClear }: QueuePanelProps) {
+export function QueuePanel({ entries, index, onSelect, onClear, onPlayNext, onEnqueue }: QueuePanelProps) {
   if (entries.length === 0) {
     return (
       <div className="flex min-h-0 flex-1 flex-col gap-3 px-4 pb-4" data-testid="queue-panel">
@@ -638,17 +652,25 @@ export function QueuePanel({ entries, index, onSelect, onClear }: QueuePanelProp
         <ul className="flex min-w-0 flex-col gap-1 [&>li]:min-w-0">
           {entries.map((entry, position) => (
             <li key={`${entry.id}-${position}`}>
-              <Button
-                variant={position === index ? "secondary" : "ghost"}
-                size="sm"
-                className="w-full min-w-0 max-w-full justify-start"
-                aria-current={position === index ? "true" : undefined}
-                onClick={() => onSelect?.(position)}
+              <TrackRowMenu
+                target={TRACK_MENU_TARGET.queue}
+                songs={[entry]}
+                canPlay={onSelect !== undefined}
+                onPlay={() => onSelect?.(position)}
+                onPlayNext={onPlayNext}
               >
-                <CoverArt coverUrl={trackCoverUrlOf(entry)} className="size-6 rounded-sm" iconClassName="size-3.5" />
-                <span className="min-w-0 flex-1 truncate text-left">{trackTitleOf(entry)}</span>
-                <span className="ml-auto min-w-0 max-w-1/3 truncate text-xs text-muted-foreground">{trackArtistOf(entry)}</span>
-              </Button>
+                <Button
+                  variant={position === index ? "secondary" : "ghost"}
+                  size="sm"
+                  className="w-full min-w-0 max-w-full justify-start"
+                  aria-current={position === index ? "true" : undefined}
+                  onClick={() => onSelect?.(position)}
+                >
+                  <CoverArt coverUrl={trackCoverUrlOf(entry)} className="size-6 rounded-sm" iconClassName="size-3.5" />
+                  <span className="min-w-0 flex-1 truncate text-left">{trackTitleOf(entry)}</span>
+                  <span className="ml-auto min-w-0 max-w-1/3 truncate text-xs text-muted-foreground">{trackArtistOf(entry)}</span>
+                </Button>
+              </TrackRowMenu>
             </li>
           ))}
         </ul>

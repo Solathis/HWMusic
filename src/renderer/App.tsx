@@ -385,8 +385,6 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
     [navigate],
   )
 
-  const navigation = { onActivateTrack, onOpenAlbum, onOpenArtist }
-
   /**
    * 歌单详情页的两个动作（R40）：都是**整队替换 / 追加**，动作全部转给播放运行时
    * （页面拿不到音频，也拿不到地址——与双击播放同一条纪律）。
@@ -407,6 +405,24 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
     },
     [runtime],
   )
+
+  /**
+   * 「下一首播放」（R63 行菜单）：插到当前曲目之后，不动正在播的那一首。
+   * 与 `enqueue` 是运行时里的两个动作，区别只在落点（见 player.mjs）。
+   */
+  const onPlayNext = useCallback(
+    (songs: unknown[]) => {
+      runtime.player.playNext(songs)
+    },
+    [runtime],
+  )
+
+  /**
+   * 行菜单的动作包（R63）：页面与列表都够不到播放运行时，所以外壳把这两个动作随
+   * `navigation` 一起交下去，页面只把它们转给曲目表（见 pages.tsx 的 PageNavigationProps）。
+   */
+  const rowActions = { onPlayNext, onEnqueue }
+  const navigation = { onActivateTrack, onOpenAlbum, onOpenArtist, rowActions }
 
   /** 账号资料的四项投影（缺什么兜什么，绝不编：见 features/auth/account.mjs）。 */
   const accountName = accountNameText(profile)
@@ -626,6 +642,7 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
                   onClear={() => {
                     runtime.player.clear()
                   }}
+                  {...rowActions}
                 />
               </SheetContent>
             </Sheet>
@@ -640,6 +657,7 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
             onActivateTrack={onActivateTrack}
             onOpenAlbum={onOpenAlbum}
             onOpenArtist={onOpenArtist}
+            {...rowActions}
           />
         </div>
 

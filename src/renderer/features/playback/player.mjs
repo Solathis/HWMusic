@@ -563,6 +563,37 @@ export function createPlayer(options = {}) {
     return done({ added: appended.length, queueLength: entries.length, index });
   }
 
+  /**
+   * 插到**当前曲目之后**（R63 行菜单的「下一首播放」）：与 `enqueue` 只差落点，其余四条纪律一致
+   * （空队列停在第一首不出声、不去重、不动已装载的音频、空列表不写盘）。
+   * 随机模式的 `order` 跟着后移，否则"下一首播放"等于没插；过期的 `order` 不动（下次 `shuffleNext` 重建）。
+   */
+  function playNext(items) {
+    const appended = queueEntriesOf(items);
+    if (appended.length === 0) {
+      return done({ added: 0, queueLength: state.entries.length, index: state.index });
+    }
+    const at = state.index < 0 ? 0 : state.index + 1;
+    const shiftOrder = state.index >= 0 && order.length === state.entries.length;
+    const entries = [...state.entries.slice(0, at), ...appended, ...state.entries.slice(at)];
+    const index = state.index < 0 ? 0 : state.index;
+    if (shiftOrder) {
+      const moved = order.map((value) => (value >= at ? value + appended.length : value));
+      const inserted = appended.map((_, position) => at + position);
+      order = moved.slice(0, cursor + 1).concat(inserted, moved.slice(cursor + 1));
+    }
+    if (state.index < 0) reportedDurationMs = 0;
+    publish({
+      entries,
+      index,
+      track: entries[index] ?? null,
+      durationMs: totalDurationMsOf(entries[index] ?? null, reportedDurationMs),
+      error: null,
+    });
+    persist();
+    return done({ added: appended.length, queueLength: entries.length, index });
+  }
+
   function clear() {
     token += 1;
     loadedId = null;
@@ -747,6 +778,7 @@ export function createPlayer(options = {}) {
     setQueue,
     playQueue,
     enqueue,
+    playNext,
     playAt: (index) => start(index, { manual: true }),
     play,
     pause,

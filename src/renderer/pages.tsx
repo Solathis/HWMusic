@@ -52,6 +52,7 @@ import { Switch } from "./components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs"
 import { CoverArt, EmptyState, ListSkeleton, LoadFailed, TrackTable } from "./components"
 import { AmllBackground } from "./AmllBackground.tsx"
+import type { TrackRowActions } from "./track-menu.tsx"
 import { LogTerminal } from "./log-terminal.tsx"
 import type { LogEntry } from "./log-terminal.tsx"
 import { RUN_LOG_READ_LIMIT } from "./features/settings/run-log.mjs"
@@ -439,6 +440,8 @@ function BrowsableTrackList({
           }}
           onOpenAlbum={navigation.onOpenAlbum}
           onOpenArtist={navigation.onOpenArtist}
+          onPlayNext={navigation.rowActions?.onPlayNext}
+          onEnqueue={navigation.rowActions?.onEnqueue}
         />
       )}
 
@@ -464,6 +467,8 @@ export interface PageNavigationProps {
   onActivateTrack: (song: unknown, index: number, songs: unknown[]) => void
   onOpenAlbum: (albumId: string, song: unknown) => void
   onOpenArtist: (artistId: string, song: unknown) => void
+  /** 行菜单的两个播放动作（外壳提供，页面只转给曲目表，不自己实现） */
+  rowActions?: TrackRowActions
 }
 
 // ---------------------------------------------------------------------------

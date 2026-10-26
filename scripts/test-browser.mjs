@@ -116,6 +116,7 @@ import { PlayerBar } from "../../src/renderer/components.tsx";
 import { PlaybackStage } from "../../src/renderer/playback-stage.tsx";
 import { TooltipProvider } from "../../src/renderer/components/ui/tooltip.tsx";
 import { getPlayerRuntime } from "../../src/renderer/features/playback/player-runtime.ts";
+import { installContextMenuGuard } from "../../src/renderer/features/shell/context-menu-guard.mjs";
 import { DEFAULT_LYRICS_CONFIG } from "../../src/renderer/features/lyrics/lyrics-window.mjs";
 import { guardMusicApi, playlistProbe } from "./protocol-fixture.mjs";
 
@@ -551,6 +552,8 @@ function Guard() {
   );
 }
 
+// R63：与四扇自有窗的入口同一条接线（右键默认菜单被吃掉，可编辑元素例外）
+installContextMenuGuard();
 createRoot(document.getElementById("root")).render(<StrictMode><Guard /></StrictMode>);
 `;
 }
@@ -4195,6 +4198,240 @@ export async function checkSidebarPlaylists(page, port, guardDir, add) {
   await items().first().waitFor();
 }
 
+/**
+ * R63：行的**专属右键菜单**（曲目表 + 播放队列）与默认网页菜单的屏蔽。
+ * 动作真改了队列、非行区域不弹菜单、文本输入保留原生编辑菜单、取色器与非文本控件被吃掉。
+ * 右键一律用 Playwright 派发；截图等淡入收尾（opacity=1）再拍，落在 `.tmp/browser-guard/r63-*`。
+ */
+export async function checkRowContextMenus(page, port, guardDir, add) {
+  const table = page.getByTestId("track-table");
+  const menu = page.getByTestId("row-context-menu");
+
+  const open = async (theme = "light") => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
+    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+    await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
+    await page.getByTestId("main-content").waitFor();
+    await table.locator("tbody tr").first().waitFor();
+    /**
+     * 记下每一次 contextmenu 的默认行为有没有被吃掉。监听挂在**冒泡**阶段：
+     * 守卫那一条是捕获阶段（先跑），radix 的触发器在行上（更先跑），所以这里读到的是
+     * "最后到底拦没拦"。
+     */
+    await page.evaluate(() => {
+      window.__ctxProbe = [];
+      document.addEventListener("contextmenu", (event) => {
+        window.__ctxProbe.push({
+          prevented: event.defaultPrevented,
+          tag: String(event.target?.tagName ?? "").toUpperCase(),
+        });
+      }, false);
+    });
+  };
+
+  const probe = () => page.evaluate(() => window.__ctxProbe.slice());
+  const menuItems = () => page.evaluate(() => {
+    const node = document.querySelector('[data-testid="row-context-menu"]');
+    if (node === null) return null;
+    return [...node.querySelectorAll('[role="menuitem"]')].map((item) => (item.textContent ?? "").trim());
+  });
+  const queueState = () => page.evaluate(() => {
+    const state = window.__guard.snapshot();
+    return { ids: state.entries.map((entry) => entry.id), index: state.index, status: state.status };
+  });
+  const rowAt = (index) => table.locator("tbody tr").nth(index);
+
+  /** 右键 → 等菜单出现（或确认它没出现）；返回菜单项文案。 */
+  const rightClickRow = async (index) => {
+    await rowAt(index).click({ button: "right" });
+    await menu.waitFor({ timeout: 5_000 });
+    return menuItems();
+  };
+  const dismiss = async () => {
+    await page.keyboard.press("Escape");
+    await menu.waitFor({ state: "detached", timeout: 5_000 }).catch(() => {});
+    await page.waitForTimeout(150);
+  };
+  /** 等菜单淡入/缩放动画收尾：截图不许拍在半透明那一帧（回放实测的 opacity 与在跑动画数）。 */
+  const waitMenuSettled = async () => {
+    const settled = await page.waitForFunction(() => {
+      const node = document.querySelector('[data-testid="row-context-menu"]');
+      if (node === null) return false;
+      const opacity = getComputedStyle(node).opacity;
+      const running = node.getAnimations().filter((animation) => animation.playState === "running").length;
+      return opacity === "1" && running === 0 ? { opacity, running } : false;
+    }, null, { timeout: 5_000 });
+    await page.waitForTimeout(80);
+    return settled.jsonValue();
+  };
+
+  // ——— ① 曲目行：三项恰好是"播放/下一首播放/加入播放队列"，且默认菜单被吃掉 ———
+  await open("light");
+  // 起手放一个确定的队列（前面的用例会留下任意队列，而这下面几条断言用的是绝对值）
+  await page.evaluate(() => window.__guard.queueWithTrackDuration(12));
+  const seeded = await queueState();
+  if (JSON.stringify(seeded.ids) !== JSON.stringify(["meta-12"])) {
+    throw new Error(`起手队列没摆好：${JSON.stringify(seeded)}`);
+  }
+  const trackItems = await rightClickRow(1);
+  const trackProbe = await probe();
+  const trackSettled = await waitMenuSettled();
+  const lightBox = await menu.boundingBox();
+  add("r63-track-menu-items",
+    JSON.stringify(trackItems) === JSON.stringify(["播放", "下一首播放", "加入播放队列"])
+      && lightBox !== null && lightBox.width > 40 && lightBox.height > 40,
+    JSON.stringify({ trackItems, lightBox, trackSettled }));
+  add("r63-track-menu-blocks-native-menu",
+    trackProbe.length >= 1 && trackProbe.every((entry) => entry.prevented === true),
+    JSON.stringify(trackProbe));
+  await page.screenshot({ path: path.join(guardDir, "r63-track-menu-light.png") });
+
+  // ——— ② 加入播放队列：排到队尾，当前索引不动 ———
+  await page.getByTestId("row-menu-enqueue").click();
+  await menu.waitFor({ state: "detached", timeout: 5_000 }).catch(() => {});
+  const afterEnqueue = await queueState();
+  add("r63-menu-enqueue-appends",
+    JSON.stringify(afterEnqueue.ids) === JSON.stringify(["meta-12", "2"]) && afterEnqueue.index === 0
+      && afterEnqueue.status !== "playing",
+    JSON.stringify(afterEnqueue));
+
+  // ——— ③ 下一首播放：插到当前曲目之后（不是队尾），当前索引不动 ———
+  await dismiss();
+  await rightClickRow(4);
+  await page.getByTestId("row-menu-play-next").click();
+  await menu.waitFor({ state: "detached", timeout: 5_000 }).catch(() => {});
+  const afterPlayNext = await queueState();
+  add("r63-menu-play-next-inserts-after-current",
+    JSON.stringify(afterPlayNext.ids) === JSON.stringify(["meta-12", "5", "2"]) && afterPlayNext.index === 0,
+    JSON.stringify(afterPlayNext));
+
+  // ——— ④ 播放：整张列表进队列、从这一首开始（与双击同一个语义） ———
+  await dismiss();
+  await rightClickRow(2);
+  await page.getByTestId("row-menu-play").click();
+  await page.waitForFunction(() => window.__guard.snapshot().entries.length === 36, null, { timeout: 5_000 }).catch(() => {});
+  const afterPlay = await queueState();
+  await page.evaluate(() => window.__guard.pause());
+  add("r63-menu-play-uses-whole-list",
+    afterPlay.ids.length === 36 && afterPlay.index === 2 && afterPlay.ids[2] === "3",
+    JSON.stringify({ length: afterPlay.ids.length, index: afterPlay.index, name: afterPlay.ids[2] }));
+
+  // ——— ⑤ 非行区域：标题栏与侧栏歌单组下方的空白处右键都不弹菜单（默认菜单照样被吃掉） ———
+  // 用坐标点击（CDP 派发真实右键）：locator.click 的可点击性检查会被播放栏的动画拖住
+  await page.evaluate(() => { window.__ctxProbe = []; });
+  const rightClickAt = async (box, dx, dy) => {
+    if (box === null) throw new Error("量不到要点的那块区域");
+    await page.mouse.click(box.x + dx, box.y + dy, { button: "right" });
+    await page.waitForTimeout(150);
+  };
+  await rightClickAt(await page.locator("header h1").boundingBox(), 10, 10);
+  const playlistsGroup = await page.getByTestId("sidebar-playlists").boundingBox();
+  if (playlistsGroup === null) throw new Error("量不到侧栏歌单组");
+  await rightClickAt(playlistsGroup, Math.round(playlistsGroup.width / 2), Math.max(0, playlistsGroup.height - 20));
+  await page.waitForTimeout(250);
+  const blankProbe = await probe();
+  add("r63-blank-area-no-menu",
+    (await menu.count()) === 0 && blankProbe.length === 2 && blankProbe.every((entry) => entry.prevented === true),
+    JSON.stringify({ menus: await menu.count(), blankProbe }));
+
+  // ——— ⑥ 侧栏搜索框：默认行为**没有**被吃掉（原生剪切/复制/粘贴/全选留着） ———
+  await page.evaluate(() => { window.__ctxProbe = []; });
+  await rightClickAt(await page.getByLabel("搜索关键字").boundingBox(), 30, 12);
+  await page.waitForTimeout(250);
+  const inputProbe = await probe();
+  add("r63-input-keeps-native-menu",
+    inputProbe.length === 1 && inputProbe[0].prevented === false && inputProbe[0].tag === "INPUT"
+      && (await menu.count()) === 0,
+    JSON.stringify({ inputProbe, menus: await menu.count() }));
+
+  // ——— ⑥b 行内嵌套最深的可点元素：守卫回溯祖先的深度够不够（ANCESTOR_DEPTH） ———
+  await page.evaluate(() => { window.__ctxProbe = []; });
+  const deepTarget = await rowAt(0).evaluate((row) => {
+    let deepest = null;
+    for (const node of row.querySelectorAll("*")) {
+      if (node.children.length > 0) continue;
+      const rect = node.getBoundingClientRect();
+      if (rect.width < 4 || rect.height < 4) continue;
+      const x = rect.x + rect.width / 2;
+      const y = rect.y + rect.height / 2;
+      if (document.elementFromPoint(x, y) !== node) continue; // 中心点命中的不是它（被盖住或不吃指针）
+      let depth = 0;
+      for (let walk = node; walk !== null && walk !== row; walk = walk.parentElement) depth += 1;
+      if (deepest === null || depth > deepest.depth) deepest = { tag: node.tagName, depth, x, y };
+    }
+    return deepest;
+  });
+  if (deepTarget === null) throw new Error("行里找不到可点的叶子元素");
+  await page.mouse.click(deepTarget.x, deepTarget.y, { button: "right" });
+  await menu.waitFor({ timeout: 5_000 });
+  const deepProbe = await probe();
+  const deepItems = await menuItems();
+  add("r63-deep-target-menu",
+    deepTarget.depth >= 3 && JSON.stringify(deepItems) === JSON.stringify(["播放", "下一首播放", "加入播放队列"])
+      && deepProbe.length === 1 && deepProbe[0].prevented === true && deepProbe[0].tag === deepTarget.tag,
+    JSON.stringify({ deepTarget, deepProbe, deepItems }));
+  await dismiss();
+
+  // ——— ⑥c 取色器（type=color）：网页菜单不能漏（应用里两个取色器都是这一型） ———
+  await page.evaluate(() => { window.__ctxProbe = []; });
+  const colorPoint = await page.evaluate(() => {
+    const input = document.createElement("input");
+    input.type = "color";
+    input.id = "r63-color-probe";
+    input.value = "#336699";
+    input.style.cssText = "position:fixed;left:6px;bottom:6px;width:36px;height:24px;z-index:2147483647";
+    document.body.appendChild(input);
+    const rect = input.getBoundingClientRect();
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  });
+  await page.mouse.click(colorPoint.x, colorPoint.y, { button: "right" });
+  await page.waitForTimeout(250);
+  const colorProbe = await probe();
+  const colorMenus = await menu.count();
+  add("r63-color-input-menu-blocked",
+    colorProbe.length === 1 && colorProbe[0].prevented === true && colorProbe[0].tag === "INPUT" && colorMenus === 0,
+    JSON.stringify({ colorProbe, menus: colorMenus }));
+  await page.evaluate(() => document.getElementById("r63-color-probe")?.remove());
+
+  // ——— ⑦ 队列行：菜单少一件「加入播放队列」（它已经在队列里） ———
+  await page.getByRole("button", { name: "播放队列", exact: true }).click();
+  const queueRow = page.locator('[data-testid="queue-panel"] li').first();
+  await queueRow.waitFor({ timeout: 5_000 });
+  await queueRow.getByRole("button").first().click({ button: "right" });
+  await menu.waitFor({ timeout: 5_000 });
+  const queueItems = await menuItems();
+  const queueSettled = await waitMenuSettled();
+  add("r63-queue-menu-items",
+    JSON.stringify(queueItems) === JSON.stringify(["播放", "下一首播放"]),
+    JSON.stringify({ queueItems, queueSettled }));
+  await page.screenshot({ path: path.join(guardDir, "r63-queue-menu.png") });
+
+  // 队列行上的「下一首播放」同样插到当前之后
+  await page.getByTestId("row-menu-play-next").click();
+  await menu.waitFor({ state: "detached", timeout: 5_000 }).catch(() => {});
+  const afterQueuePlayNext = await queueState();
+  add("r63-queue-play-next-inserts-after-current",
+    afterQueuePlayNext.ids.length === 37 && afterQueuePlayNext.ids[afterQueuePlayNext.index + 1] === "1",
+    JSON.stringify({ length: afterQueuePlayNext.ids.length, index: afterQueuePlayNext.index }));
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+
+  // ——— ⑧ 深色主题下的同一张菜单（样式令牌跟着主题走） ———
+  await open("dark");
+  await rightClickRow(0);
+  const darkSettled = await waitMenuSettled();
+  const darkBox = await menu.boundingBox();
+  await page.screenshot({ path: path.join(guardDir, "r63-track-menu-dark.png") });
+  const darkMenuVisible = (await menu.count()) === 1 && darkBox !== null && darkBox.height > 40;
+  await dismiss();
+  add("r63-track-menu-dark", darkMenuVisible,
+    `深色下菜单可见=${darkMenuVisible} 截图时=${JSON.stringify(darkSettled)} box=${JSON.stringify(darkBox)}`);
+
+  // 收尾：回浅色与干净的队列（后面还有别项要一个确定的页面）
+  await open("light");
+}
+
 
 /**
  * R66b：主内容区铺满。逐页量内容右边缘到可用区域右边缘的空白，要求不超过页面左内边距 + 8px，且无横向滚动。
@@ -5142,6 +5379,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     });
     /** R62：侧栏「我的歌单」（自己开页、自己收尾；排在 r66b 之前，结束后留下干净的默认页）。 */
     await checked("r62-sidebar-playlists", () => checkSidebarPlaylists(page, port, guardDir, add));
+    /** R63：行的专属右键菜单（自己开页、自己收尾；排在 r66b 之前）。 */
+    await checked("r63-row-context-menu", () => checkRowContextMenus(page, port, guardDir, add));
     /** R66b：主内容区宽度。会遍历各主页面并切换窗口尺寸，所以排在倒数第二（下一项自己 goto）。 */
     await checked("r66b-page-fill", () => checkPageFill(page, guardDir, add));
     /** R57：账号区四态（另一页，挂真 App；头像的两种结局都用 page.route 造出来）。 */

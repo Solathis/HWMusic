@@ -17,6 +17,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { Alert, AlertDescription } from "./components/ui/alert"
 import { Button } from "./components/ui/button"
 import { EmptyState, ListSkeleton, TrackTable } from "./components"
+import type { TrackRowActions } from "./track-menu.tsx"
 import { coreCall } from "./host-api"
 import { LIBRARY_FAVORITES } from "../shared/request-channels.ts"
 import { libraryEmptyText, libraryFailureText } from "./features/library/library-state.mjs"
@@ -46,7 +47,7 @@ const scrollMemory = createScrollMemory()
 
 type FavoritesState = ReturnType<typeof createFavoritesState>
 
-export interface FavoritesPageProps {
+export interface FavoritesPageProps extends TrackRowActions {
   /** 当前是否显示中（常驻挂载靠它控制显隐，而不是卸载） */
   active: boolean
   /** 双击曲目：`songs` 是已加载的完整列表（播放器用它当队列） */
@@ -55,7 +56,14 @@ export interface FavoritesPageProps {
   onOpenArtist: (artistId: string, song: unknown) => void
 }
 
-export function FavoritesPage({ active, onActivateTrack, onOpenAlbum, onOpenArtist }: FavoritesPageProps) {
+export function FavoritesPage({
+  active,
+  onActivateTrack,
+  onOpenAlbum,
+  onOpenArtist,
+  onPlayNext,
+  onEnqueue,
+}: FavoritesPageProps) {
   const [state, setState] = useState<FavoritesState>(createFavoritesState)
   const stateRef = useRef(state)
   const loadingRef = useRef(false)
@@ -186,6 +194,8 @@ export function FavoritesPage({ active, onActivateTrack, onOpenAlbum, onOpenArti
               onActivate={(song, index) => onActivateTrack(song, index, state.songs)}
               onOpenAlbum={onOpenAlbum}
               onOpenArtist={onOpenArtist}
+              onPlayNext={onPlayNext}
+              onEnqueue={onEnqueue}
             />
           )}
           {summary.loading && state.songs.length > 0 ? <ListSkeleton /> : null}

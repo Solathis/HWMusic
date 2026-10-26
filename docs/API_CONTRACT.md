@@ -1724,6 +1724,46 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 **必须有**时长佐证（`|Δ| ≤ 8 秒`，两边都要 > 30 秒才参与）；分数门槛 `MIN_SCORE = 1.5`。
 理由一句话：**显示错歌的词比没有词更糟**。
 
+### 2.13 向**已有**歌单加歌：**没有可用证据（R63 结论：不实现）**
+
+用户要的是"右键曲目 → 加入歌单 → 选一张本人的歌单"。这需要一个**追加**语义的写端点。
+R63 按下面四条标准逐条查过，**一条都没满足**，所以 `src/renderer/features/shell/track-menu.mjs`
+的 `ADD_TO_PLAYLIST_SUPPORTED` 保持 `false`，菜单里没有这一项（也没有放死按钮）。
+
+**证据标准（四条全中才算有）**：① 端点路径与方法明确；② 参数明确；③ 成功判据明确；
+④ 语义明确是"追加歌曲"，不是"用新列表覆盖整张歌单"。**语义分不出来一律按无证据处理**——
+对真实用户歌单发错语义的写请求可能毁掉整张歌单。
+
+**查过的来源**（都是只读）：
+
+| 来源 | 位置 | 结论 |
+|---|---|---|
+| 本仓协议层 | `src/protocols/music.mjs` 的 `MUSIC_ENDPOINT_PATHS`（52–75 行） | 只有 `playlistDetail` / `playlistDetailPublic` / `playlistDelete`，**没有**任何加歌端点 |
+| 本仓端点差分表 | `test/reference-parity.test.mjs` 的 `notImplementedPaths`（91–98 行） | 参考里与歌单写相关的路径只有 `playlist/create`、`playlist/update`，本仓**故意没接** |
+| 参考项目源码 | `talongao/huawei-music-desktop`，main @ `3fd67319fa4b4a10de00d6da7d88e4e52ebd8327`（2026-10-18，共 23 个提交，已整仓下载只读检索） | 歌单写操作只有三件：`MusicClient.createPlaylist`、`updatePlaylistDescription`、`deletePlaylist`（`src/music.mjs` 83–103 行）；`src/main/writes.mjs` 的写控制器只有 `createPlaylist` / `updateDescription` / `deletePlaylist`，**没有任何"往已有歌单加歌"的函数** |
+| 参考项目文档 | `docs/API_CONTRACT.md` §3.5–§3.7（170–211 行）、`docs/authorized-feature-validation.md` 26 行、`README.md` 220 行 | 作者本人账号实测过的是"建歌单（带一首歌）→ 改简介 → 删歌单"；原文写明"本轮验证的是简介修改，**不宣称已验证**改名、排序、封面或**增删歌单内歌曲**"，并写"不提供改名/封面/**曲目增删**的假按钮" |
+| 官方公开 H5 | — | R57 已查（15 个候选路径全部 404，公开 H5 前端不存在），本轮不重复 |
+
+**为什么 `playlist/create` 与 `playlist/update` 顶不上**：
+
+- `POST /music-userbehavior-service/v1/service/playlist/create`，体
+  `{createTime, playListName, songCodes[], shareFlag:"0"}`——**没有 `playListID` 参数**，
+  它建一张新歌单并塞进首批歌；拿它去"加到某张已有歌单"连目标都表达不了（语义也不同：
+  实测的判据是响应回一个新 `playListID`）。
+- `POST /music-userbehavior-service/v1/service/playlist/update`，已测的只有
+  `{actionType:"1", listDesc, playListID}` = **改简介**。参考文档明确写"不把 actionType=1
+  推断为通用更改名称/删除/改封面操作；**其他动作未测**"。`actionType` 的其它取值是否等于
+  "换掉整张歌单的曲目列表"、"是否追加"、"`songCodes` 是不是它的参数"——**全是未知**，
+  正是上面第 ④ 条要拒的那一档。
+
+**真实写入未验证（未获授权）**：本轮**没有**对真实接口发过任何请求（包括"试一下"），
+没有读 `.local\`，没有启动真实应用实例。所以即便将来找到了端点，也必须先有用户授权的
+"临时歌单 + 写后读回 + 清理"验证，才能进界面。
+
+**什么时候可以翻这个闸门**：拿到满足四条标准的端点证据（路径/方法/参数/成功判据/**追加语义**）
+→ 写进本节的逐端点表 → 协议层加一条写通道（不自动重试）→ 再把
+`ADD_TO_PLAYLIST_SUPPORTED` 改成 `true`（菜单项、子菜单、提示都在那一处之后才出现）。
+
 ## 3. 本地常量（唯一真源位置）
 
 | 常量 | 值 | 唯一真源文件 | 消费方 |

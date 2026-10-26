@@ -9,6 +9,7 @@ import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 
 import { themeFromSearch } from "./features/lyrics/lyrics-window.mjs"
+import { installContextMenuGuard } from "./features/shell/context-menu-guard.mjs"
 import { applyThemeChoice } from "./features/theme/theme.mjs"
 import { LyricsSettingsPopup } from "./LyricsSettingsPopup.tsx"
 
@@ -20,6 +21,9 @@ import { LyricsSettingsPopup } from "./LyricsSettingsPopup.tsx"
  * 与广播就是它仅有的两个输入。不 await 任何东西：主题类要在第一帧之前落地。
  */
 applyThemeChoice(document.documentElement, themeFromSearch(window.location.search))
+
+// 右键：吃掉网页默认菜单（弹出窗里没有输入框，等于一律拦掉）
+installContextMenuGuard()
 
 const container = document.getElementById("root")
 

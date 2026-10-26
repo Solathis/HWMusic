@@ -9,10 +9,14 @@ import { createRoot } from "react-dom/client"
 
 import { APP_BRAND_LABEL } from "../shared/app-name.mjs"
 import { App } from "./App.tsx"
+import { installContextMenuGuard } from "./features/shell/context-menu-guard.mjs"
 import { installDesktopBridge } from "./host-api"
 import { installThemeSync } from "./theme-sync"
 
 document.title = APP_BRAND_LABEL
+
+// 右键：吃掉网页默认菜单（可编辑元素保留原生编辑菜单），行上的专属菜单由 ContextMenu 弹
+installContextMenuGuard()
 
 // 宿主桥必须在渲染第一帧之前就位：门禁的订阅与 core_call 都走它。
 // （`rendererReady()` 由 useAuthGate 在**订阅之后**调用：Rust 侧的启动期广播是排队等冲刷的。）
