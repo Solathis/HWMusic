@@ -121,6 +121,31 @@
 | R41-5 | **桌面歌词窗**：显示前重新加载页面（从"加载失败 ⇒ 永久空白"里恢复）+ 主题跟随 + 窗口标题 | **根因取证 verified（真机 Win32/像素）；修法待重启复测** | 品红背板实验：那块 960×120 里**非品红像素 0**（页面一个像素都没画，`.tmp/r41-live/r41-lyrics-over-magenta.png`）；`1420` 无监听 + vite 日志止于 16:27:50（页面恰在建窗那一刻加载失败）；窗口 960×120 @ (480,792) = `desktop_position` 的正解、`WS_EX_TOPMOST` 在、exStyle `0x40118`（无 `WS_EX_TOOLWINDOW` ⇒ Alt+Tab 里显示 "Tauri App"），`.tmp/r41-windows.json` |
 | R41-6 | **设置页歌词挂点**（缓存占用 / 一键清除 / 导入入口） | **verified（真机 CDP）** | `.tmp/r41-verify.mjs` **15/15 PASS**：卡片挂载、`accept=.lrc,.txt`、两个按钮在、占用文案三档分得开（正在读取 / 数字 / 读不到）、开关能关能开、窗打开时主窗重推 `lyrics:document`（广播回声）、0 console error / 0 pageerror |
 
+**本轮逐项分档（2026-10-26；R50–R67）**
+
+**口径**：本轮**全部只有代码级验证** —— Node 单测（`npm test`）+ 无头浏览器守卫（真协议层、真渲染）。按静默规程**本轮没有启动真实实例**，因此下表**没有任何一项是真机 verified**；「状态」列里不出现“真机”二字。真窗观感一律记在 [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) B 组。
+
+| # | 项 | 状态 | 决定性证据（可复现） |
+|---|---|---|---|
+| R50 | 沉浸页歌词开关位置、透明歌词可读性、设置保存（`ac4a9d5`） | **代码级 verified（Node + 无头浏览器守卫）** | `test/player-lyrics.test.mjs` +182、`test/playback-lyrics-toggle.test.mjs` +50、`test/lyrics-window.test.mjs` +87/−31、`test/lyrics-panel.test.mjs` +10/−1 |
+| R51 | 桌面歌词设置弹出窗、紧凑默认尺寸（`d23f43a`） | **代码级 verified（Node + 无头浏览器守卫）** | `test/lyrics-settings-popup.test.mjs` +209、`test/lyrics-window.test.mjs` +73/−59、`test/no-self-visual.test.mjs` +2 |
+| R52 | 重构设置歌词页，沉浸式禁止改色（`7b8a6c5`） | **代码级 verified（Node + 无头浏览器守卫）** | `test/lyrics-settings-page.test.mjs` +201、`test/lyrics-panel.test.mjs` +24/−17、`test/lyrics-window.test.mjs` +61/−24、`test/settings-page.test.mjs` +5/−3；旧的沉浸页改色用例整条删除（`test/player-lyrics.test.mjs` −182） |
+| R53 | 设置页铺满主内容区（根因：`max-w-3xl`）（`8628db4`） | **代码级 verified（无头浏览器守卫）** | `scripts/test-browser.mjs` +258（宽窗下设置页右侧无空白、内容区撑满的守卫用例）；`src/renderer/App.tsx` / `pages.tsx` 去掉 `max-w-3xl`。**无单测改动** |
+| R54 | 已登录冷启动不闪登录页，登录后停二维码轮询（`83118d2`） | **代码级 verified（Node + 无头浏览器守卫）** | `test/auth-manager.test.mjs` +123、`test/login-gate.test.mjs` +58/−1、`test/auth-qr.test.mjs` +66、`test/qr-login.test.mjs` +34、`test/sidecar-e2e.test.mjs` +23、`test/channel-parity.test.mjs` +19 |
+| R55 | 底栏总时长，沉浸页顶部整行可收起（`6bb0276`） | **代码级 verified（Node + 无头浏览器守卫）** | `test/playback-player.test.mjs` +77/−1、`test/playback-runtime.test.mjs` +14、`test/playback-lyrics-toggle.test.mjs` +6/−4、`test/lyrics-panel.test.mjs` +1/−1 |
+| R56 | 去掉歌单/历史加载说明，整表播放/入队；分页只读核查结论：服务端不分页（`5db5345`） | **代码级 verified（Node + 无头浏览器守卫）** | `test/library-pagination.test.mjs` +127/−44、`test/music.test.mjs` +39、`test/library-views.test.mjs` +1/−7、`test/no-self-visual.test.mjs` +3/−2；只读结论与 `start`/`limit`/`pageNum`/`pageSize`/`offset` 的证据见 KNOWN_LIMITATIONS **A7** |
+| R57 | 运行日志汇集 sidecar 输出，设置页按级别/关键字筛选（`7ac0c6e`） | **代码级 verified（Node + 无头浏览器守卫）** | `test/run-log.test.mjs` +204、`test/log-terminal.test.mjs` +104/−155、`test/sidecar-e2e.test.mjs` +48/−1、`test/autostart.test.mjs` +47/−9 |
+| R58 | 后台验证启动开关 `HWMUSIC_BACKGROUND_TEST`（`f06ebcb`） | **代码级 verified（源码锚点）** | 无单测改动：`src-tauri/src/lib.rs` +213/−8、`src-tauri/src/login.rs` +39/−1 的启动链分支，口径记在 `docs/PLATFORM_DIFFERENCES.md`。**运行期行为未在真机核**（本轮未起真实实例） |
+| R59 | 账号区头像/名称/会员按证据显示（资料端点不可行）（`74fd7d7`） | **代码级 verified（Node + 无头浏览器守卫）** | `test/account-area.test.mjs` +76/−3、`test/music-session.test.mjs` +11、`test/no-self-visual.test.mjs` +4/−3；“端点不可行”的结论见 KNOWN_LIMITATIONS **A9** |
+| R60 | 桌面与任务栏歌词恢复逐字扫亮（`a3389ab`） | **代码级 verified（Node + 无头浏览器守卫）** | `test/lyrics-window.test.mjs` +10（逐字高亮的按字切换断言） |
+| R61 | 任务栏歌词独立设置颜色/字号/逐字（`450174f`） | **代码级 verified（Node + 无头浏览器守卫）** | `test/lyrics-window.test.mjs` +174/−10、`test/lyrics-settings-page.test.mjs` +7/−4 |
+| R62 | 桌面歌词设置改为指向齿轮的气泡面板（`afef324`） | **代码级 verified（Node + 无头浏览器守卫）** | `test/lyrics-color.test.mjs` +147、`test/lyrics-settings-popup.test.mjs` +121/−58、`test/theme-tokens.test.mjs` +18/−1 |
+| R63 | 竖版歌词单列竖排，字号随窗口宽度（`1e16fe2`） | **代码级 verified（Node + 无头浏览器守卫）** | `test/vertical-lyrics.test.mjs` +223、`test/lyrics-window.test.mjs` +22/−76 |
+| R64 | 我的歌单移到左侧栏（封面/名字/数量）（`180389f`） | **代码级 verified（Node + 无头浏览器守卫）** | `test/sidebar-playlists.test.mjs` +167、`test/library-views.test.mjs` +9/−3、`test/no-self-visual.test.mjs` +14/−6、`test/theme-tokens.test.mjs` −1 |
+| R65 | 应用内右键菜单，屏蔽网页默认菜单；**加入歌单未实现（无追加端点证据）**（`4525ce3`） | **代码级 verified（Node + 无头浏览器守卫）**；「加入歌单」**untested（刻意不做）** | `test/context-menu-guard.test.mjs` +215、`test/track-menu.test.mjs` +109、`test/playback-player.test.mjs` +77、`test/sidebar-playlists.test.mjs` +11/−18；缺项原因见 KNOWN_LIMITATIONS **A8** |
+| R66 | 保存并恢复上次播放进度（恢复后暂停）（`28189c9`） | **代码级 verified（Node + 无头浏览器守卫）** | `test/playback-player.test.mjs` +278/−5、`test/playback-queue.test.mjs` +52、`test/playback-runtime.test.mjs` +72/−1 |
+| R67 | 左侧栏本地歌曲，本地导入自动识别歌词（`7f502ff`） | **代码级 verified（Node + 无头浏览器守卫）** | `test/local-library.test.mjs` +172、`test/local-lyrics.test.mjs` +157、`test/local-queue.test.mjs` +106、`test/local-views.test.mjs` +69、`test/safe-media-url.test.mjs` +52、`test/dispatcher.test.mjs` +8/−4、`test/channel-parity.test.mjs` +2、`test/library-views.test.mjs` +2/−1 |
+
 ---
 
 ## 2. 能力矩阵（**代码级 verified 与真机 verified 分开写**）
@@ -134,21 +159,21 @@
 | 2 | 授权码 → 账号 AT 兑换 | **verified（注入式）** | untested（无账号） | `test/auth-manager.test.mjs`「端点真源」直接读 `docs/API_CONTRACT.md` 并断言两条端点字面量仍在 |
 | 3 | 音乐会话兑换（`loginex`） | **verified（端点 + 形状）** | **端点存在性 verified / 兑换往返 untested** | R17 补全：端点与请求形状有公开证据、端点存在性本机实测（`test/music-session.test.mjs` 钉形状与纪律；证据分级见 `docs/API_CONTRACT.md` §1.5.1）。「有效 AT → 真会话」要用户授权扫码，仍未实测（A2） |
 | 4 | DPAPI 会话加密/解密 | **verified** | **verified**（本机 `cargo test` 真跑 DPAPI；+1 ignored 是半程端到端） | `src-tauri/src/secure_store.rs` 内联测试；`test/session-store.test.mjs` |
-| 5 | 设置持久化（`settings.json` 形状/清洗/0600/原子写） | **verified** | **verified**（本机真写盘、真读回） | `test/settings-test-proxy.test.mjs`、`test/settings-page.test.mjs`、`scripts/acceptance.mjs` 的 `settings-persistence` 路径（4 条源码锚点） |
+| 5 | 设置持久化（`settings.json` 形状/清洗/0600/原子写） | **verified**（+R50–R67 代码级：沉浸页歌词设置保存、设置页铺满主内容区） | **verified**（本机真写盘、真读回） | `test/settings-test-proxy.test.mjs`、`test/settings-page.test.mjs`、`scripts/acceptance.mjs` 的 `settings-persistence` 路径（4 条源码锚点） |
 | 6 | HTTP 代理（sidecar 侧 undici `ProxyAgent`） | **verified** | **verified**（本地假代理端到端到 HTTP 头级） | `test/proxy.test.mjs`；`test/fixtures/proxy-host-cases.json` 31 例跨语言互钉（5 变异全灭） |
 | 7 | HTTP 代理（三窗 webview `proxy_url`） | **verified**（源码扫描 + 跨进程 e2e 双钉） | untested（真抓包） | `test/proxy.test.mjs` 的接线扫描；`scripts/acceptance.mjs` 的 `proxy` 路径 |
-| 8 | 登录门禁（未登录不渲染主界面） | **verified** | untested | `test/login-gate.test.mjs`；`scripts/acceptance.mjs` 的 `login-gate` 路径（4 锚点：`shouldShowLoginGate` 判定 + `App.tsx` 真的挡在 `app-shell` 之前） |
+| 8 | 登录门禁（未登录不渲染主界面） | **verified**（+R50–R67：已登录冷启动不闪登录页、登录后停二维码轮询） | untested | `test/login-gate.test.mjs`；`scripts/acceptance.mjs` 的 `login-gate` 路径（4 锚点：`shouldShowLoginGate` 判定 + `App.tsx` 真的挡在 `app-shell` 之前） |
 | 9 | 登录子窗（白名单导航 / `hms://` 拦截 / 双期限 / 四收场） | **verified** | untested | `test/login-parity.test.mjs`（双端互钉）；Rust `src/login.rs` 内联测试 + `tests/login_policy.rs` 17 passed（含建窗失败路径删一次性数据目录） |
 | 10 | 收藏分页（无可信总数 → 完整分页去重） | **verified** | untested（端点未配） | `test/favorites-pagination.test.mjs`；协议层 `readFavoritesPage` |
-| 11 | 歌单 / 搜索 / 专辑 / 歌手 / 历史 | **verified（协议层 + UI 三态）** | untested（端点未配） | `test/music.test.mjs`、`test/library-views.test.mjs`、`test/dispatcher.test.mjs`、`test/sidecar-e2e.test.mjs`（真进程） |
-| 12 | 播放器状态机 + 队列持久化 | **verified** | untested（无真实音源） | `test/playback-state.test.mjs`、`test/playback-queue.test.mjs`、`test/playback-runtime.test.mjs`、`test/playback-player.test.mjs` |
+| 11 | 歌单 / 搜索 / 专辑 / 歌手 / 历史 | **verified（协议层 + UI 三态；+R50–R67：整表播放/入队、加载说明文案删除、只读核查确认服务端不分页）** | untested（端点未配） | `test/music.test.mjs`、`test/library-views.test.mjs`、`test/dispatcher.test.mjs`、`test/sidecar-e2e.test.mjs`（真进程） |
+| 12 | 播放器状态机 + 队列持久化 | **verified**（+R50–R67：整表播放/入队、底栏总时长、上次播放进度保存与恢复后暂停） | untested（无真实音源） | `test/playback-state.test.mjs`、`test/playback-queue.test.mjs`、`test/playback-runtime.test.mjs`、`test/playback-player.test.mjs` |
 | 13 | 播放地址纪律（不日志/不落盘/不缓存/不进状态） | **verified** | untested | `test/playback-channel.test.mjs`；断言状态快照序列化后不含 `http`/CDN 域 |
 | 14 | `<audio>` 真实播放 | untested | untested | 端点未配置 → 无法验（B10） |
-| 15 | 歌词解析适配（`[offset:]` + 翻译行）+ 逐行滚动 | **verified** | untested | `test/lyrics.test.mjs`、`test/amll-adapter.test.mjs`、`test/lyric-sync.test.mjs`；AMLL 官方组件真实挂载冒烟 23/23 |
+| 15 | 歌词解析适配（`[offset:]` + 翻译行）+ 逐行滚动 | **verified**（+R50–R67：竖版单列竖排、逐字按字切换、字号随窗口宽度） | untested | `test/lyrics.test.mjs`、`test/amll-adapter.test.mjs`、`test/lyric-sync.test.mjs`；AMLL 官方组件真实挂载冒烟 23/23 |
 | 16 | 歌词文本通道（`playback:lyrics`） | **verified（频道）** | untested（端点未配） | `test/lyrics-window.test.mjs`、`test/channel-parity.test.mjs` |
 | 17 | Media Session 系统媒体控件 | **verified（映射逻辑）** | untested | `test/media-session.test.mjs` |
-| 18 | 桌面歌词窗（五条 async 专命令、锁/媒体、横竖/样式、配置持久化） | **verified** | **R44c Windows 已验拖锁、一次媒体、几何与重启配置；R44e 持久化改由 Rust 保存任务拥有（登出/退出不丢），真机退出重启复验未做；其余平台/多屏待验** | `test/lyrics-window.test.mjs`、`playback-runtime`、`proxy-settings`；Rust 原子 revision/来源/几何注入测试；browser 面板像素；`.tmp/r44c-native-evidence.json`、`.tmp/r44c-restart-evidence.json` |
-| 19 | Windows 任务栏歌词（Beta，精确自窗原生内嵌） | **verified** | **verified（Windows 单屏 1920×1080 / dpi 96；多屏 `Shell_SecondaryTrayWnd`、高 DPI、自动隐藏、`TaskbarCreated` 重建、长时间 z-order 未验）** | R47 `a62a0ad` 的真实 Explorer 验证：`attached:true`、`GetParent(歌词 HWND) == Shell_TrayWnd (0x20072)`、子窗 `8,1034 680×44`（visible / enabled=false）、槽位像素差分 5235–5394 px 而空段与任务栏按钮区 0、`WindowFromPoint` 17 点全归 Explorer、切回 desktop 后 `underTaskbar=0`、退出无残留（`task-47-report.md`）；`taskbar_lyrics.rs` 的 parent-client/UIA/单在途/代次/退出纯测试 35 条；acceptance 仅新模块限定例外，DLL/全局 Hook 仍禁 |
+| 18 | 桌面歌词窗（五条 async 专命令、锁/媒体、横竖/样式、配置持久化） | **verified**（+R50–R67：设置弹出窗与齿轮气泡面板、紧凑默认尺寸、独立颜色/字号/逐字、逐字扫亮恢复） | **R44c Windows 已验拖锁、一次媒体、几何与重启配置；R44e 持久化改由 Rust 保存任务拥有（登出/退出不丢），真机退出重启复验未做；其余平台/多屏待验** | `test/lyrics-window.test.mjs`、`playback-runtime`、`proxy-settings`；Rust 原子 revision/来源/几何注入测试；browser 面板像素；`.tmp/r44c-native-evidence.json`、`.tmp/r44c-restart-evidence.json` |
+| 19 | Windows 任务栏歌词（Beta，精确自窗原生内嵌） | **verified**（+R50–R67：逐字扫亮恢复、独立颜色/字号/逐字设置） | **verified（Windows 单屏 1920×1080 / dpi 96；多屏 `Shell_SecondaryTrayWnd`、高 DPI、自动隐藏、`TaskbarCreated` 重建、长时间 z-order 未验）** | R47 `a62a0ad` 的真实 Explorer 验证：`attached:true`、`GetParent(歌词 HWND) == Shell_TrayWnd (0x20072)`、子窗 `8,1034 680×44`（visible / enabled=false）、槽位像素差分 5235–5394 px 而空段与任务栏按钮区 0、`WindowFromPoint` 17 点全归 Explorer、切回 desktop 后 `underTaskbar=0`、退出无残留（`task-47-report.md`）；`taskbar_lyrics.rs` 的 parent-client/UIA/单在途/代次/退出纯测试 35 条；acceptance 仅新模块限定例外，DLL/全局 Hook 仍禁 |
 | 20 | 托盘（9 槽位菜单 / 勾选镜像 / 失败提示） | **verified** | untested | `test/tray.test.mjs`；Rust `tray.rs` 内联测试 |
 | 21 | 关窗 fail-safe（托盘真装上才藏窗口） | **verified** | untested | `src-tauri/src/tray.rs` 的 `decide_close` 矩阵；`scripts/acceptance.mjs` 的 `tray` 路径（锚点要求现场查 `tray_by_id`） |
 | 22 | 全局快捷键（5 动作 / 备选链 / 失败提示） | **verified** | untested | `src-tauri/src/shortcuts.rs` 21 内联测试；接线变异校验（2 变异各自被专用用例抓到） |
