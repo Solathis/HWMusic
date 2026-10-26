@@ -55,6 +55,9 @@ export const FIXTURE_LRC = ["[00:00.00]第一行歌词守卫", "[00:03.00]第二
 export const R46_MIXED_LRC = ["[00:00.00]第一行歌词 2024 hey", "[00:03.00]第二行歌词 guard test line"].join("\n");
 export const R46_LONG_LRC = ["[00:00.00]这一行被刻意写得很长 hello world 2024 混排 ABCdef 0123456789 再补几个字", "[00:03.00]第二行"].join("\n");
 
+/** R61 竖版译文夹具：同一时间戳的第二行会被适配层并成 `translatedLyric`（相邻第二列、字号略小）。 */
+export const R61_TRANSLATION_LRC = ["[00:00.00]第一行歌词守卫", "[00:00.00]译文与原文同时刻", "[00:03.00]第二行歌词守卫"].join("\n");
+
 /**
  * R45A3 的库列表分页夹具（脚本与守卫页共用同一份常量，避免两边各写一套数字）。
  *
@@ -1852,7 +1855,7 @@ export async function checkLyricsKaraoke(page, guardDir, add) {
   await runMode("desktop-clean", { ...baseline }, { width: 800, height: 128 }, "light");
   await runMode("desktop-panel", { ...baseline, style: "panel", color: "contrast" }, { width: 800, height: 128 }, "dark");
   await runMode("taskbar-clean", { ...baseline, mode: "taskbar", size: "md" }, { width: 1200, height: 44 }, "light");
-  // 竖版（R61 整体重做）：只记录现状，不断言
+  // 竖版（R61 整体重做）：只记录现状，不断言（逐字/滚动由 checkDesktopInteraction 的 r61-* 判）
   await page.setViewportSize({ width: 260, height: 520 });
   await page.evaluate(() => { document.documentElement.className = "light"; });
   await configure({ ...baseline, layout: "vertical" });
@@ -1860,11 +1863,20 @@ export async function checkLyricsKaraoke(page, guardDir, add) {
   await page.evaluate(() => window.__guard.desktopDocument());
   await page.waitForTimeout(300);
   await startProgress(600);
-  const vertical = await readAt("vertical-status", 700, "light");
+  await page.waitForTimeout(700);
+  const verticalStatus = await page.evaluate(() => {
+    const root = document.querySelector('[data-testid="lyrics-vertical"]');
+    const tokens = [...(root?.querySelectorAll("[data-vertical-token]") ?? [])];
+    return {
+      text: root?.querySelector('[data-testid="lyrics-vertical-line"]')?.textContent ?? null,
+      sung: tokens.filter((token) => token.className.includes("is-sung")).length,
+      states: tokens.map((token) => (token.className.match(/is-(\w+)/) ?? [])[1] ?? null),
+      font: root ? Number.parseFloat(getComputedStyle(root.querySelector(".vertical-lyric__track")).fontSize) : null,
+    };
+  });
   await stopProgress();
   add("r58-vertical-status", true,
-    JSON.stringify({ note: "竖版只记录现状（R61 重做）", active: vertical.active, player: vertical.player,
-      sung: vertical.sung, mask: vertical.words.map((word) => word.mask) }));
+    JSON.stringify({ note: "竖版只记录现状（R61 重做为自渲染单列）", ...verticalStatus }));
 
   await page.setViewportSize({ width: 800, height: 128 });
   await page.evaluate(() => { document.documentElement.className = "light"; });
@@ -1901,11 +1913,8 @@ export async function checkDesktopInteraction(page, guardDir, add) {
   const activeLine = '[data-testid="lyrics-window"] [class*="lyricMainLine"][class*="active"]';
   const configure = (patch) => page.evaluate((next) => window.__guard.configureDesktop(next), patch);
   /**
-   * 量当前行每个字的几何。
-   *
-   * `slack`：字形框是**字符的 em 盒**（不是墨迹），首字的 em 盒会比行盒顶多探出约 1.5px
-   * （字体度量那点 leading），墨迹仍在窗口里——所以「最小窗口整行可读」那条给 2px 容差，
-   * 其余用例仍按 1px 严判。RED 时那 7 个字全在窗口上方 80px 之外，2px 容差一点都不放水。
+   * 横版对照用：量 AMLL 当前行每个字的**字形框**（`Range` 选中文字本身，不是带 -1em/1em 的
+   * span 盒子）。竖版不用这个辅助——竖版是自渲染的一列，量法见 `verticalGeometry`。
    */
   const charGeometry = (slack = 1) => page.evaluate((pad) => {
     const stage = document.querySelector('[data-testid="lyrics-window"]');
@@ -2131,224 +2140,246 @@ export async function checkDesktopInteraction(page, guardDir, add) {
   add("desktop-locked-no-resize-save", lockedSizeCalls.length === 0, JSON.stringify({ lockedSizeCalls }));
   await configure({ locked: false });
 
-  // ⑦ 竖排：字符坐标纵向递增（同一列 x 相同），不是"窄窗内横向换行"
-  await configure({ layout: "vertical", style: "clean" });
-  await page.setViewportSize({ width: 260, height: 520 });
-  await page.waitForTimeout(1200);
-  const vertical = await charGeometry();
-  const verticalColumns = columnReport(vertical.chars);
-  add("desktop-vertical-char-geometry", vertical.writingMode === "vertical-rl" && vertical.textOrientation === "mixed"
-    && vertical.chars.length >= 5 && verticalColumns.longest >= 4 && verticalColumns.increasing
-    && verticalColumns.distinctX === 1 && vertical.chars.every((char) => char.inside),
-  JSON.stringify({ ...verticalColumns, writingMode: vertical.writingMode, textOrientation: vertical.textOrientation, playerWritingMode: vertical.playerWritingMode, chars: vertical.chars, activeText: vertical.activeText }));
-  await page.screenshot({ path: path.join(guardDir, "desktop-vertical-geometry.png") });
-
-  // ⑦b 小窗（240×400，接近最小尺寸但还能读）：仍是真竖排，整行都落在播放器范围内
-  await page.setViewportSize({ width: 240, height: 400 });
-  await page.waitForTimeout(1200);
-  const small = await charGeometry();
-  const smallColumns = columnReport(small.chars);
-  add("desktop-vertical-small-window", small.chars.length >= 5 && smallColumns.increasing
-    && smallColumns.longest >= 2 && small.chars.every((char) => char.inside),
-  JSON.stringify({ ...smallColumns, playerScroll: small.playerScroll, chars: small.chars }));
-
   /**
-   * ⑦c 最小窗口 **240×120**（Rust 里的 `MIN_WINDOW_WIDTH_DIP/MIN_WINDOW_HEIGHT_DIP`，brief 的下限）：
-   * 当前行必须**整行可读**——不许像 fix1 那样被官方排版推到窗口上方之外（裁成空白）。
+   * R61 竖版重做（`VerticalLyricColumn` + `vertical-lyrics.mjs`）：一句一列、字号随窗口宽度、
+   * 长句按演唱进度平移、逐字扫亮、译文第二列。
    *
-   * 这一条为什么能抓到现在这个 bug：官方按 `ResizeObserver.borderBoxSize.blockSize` 给每行量"行高"
-   * （`getEntrySize` → `LayoutCalculator.setLineHeight`），而 `blockSize` 是**在元素自己的书写模式里**
-   * 量的。播放器一旦是 `vertical-rl`，块轴就变成水平的：官方量到的"行高"其实是"一行有多少列那么宽"
-   * （240×120 实测 291px，而窗口只有 120px 高），当前行被按这个值居中 ⇒ 7 个字全在窗口上方。
-   * 修法是把竖排下沉到**行内容**上（行盒仍水平书写），官方量到的行高就恢复成"这条横带有多高"。
+   * 有意整块替换 R45B/R46/fix4 的竖版用例：那些量的是"给 AMLL 播放器打补丁"的行为（行盒折列、
+   * 横向滚动条、RTL 滚动容器）。竖版现在自渲染，选择器与几何判据都换成新组件的 DOM。
    */
-  await page.setViewportSize({ width: 240, height: 120 });
-  await page.waitForTimeout(1200);
-  const minWindow = await charGeometry(2);
-  const minWindowColumns = columnReport(minWindow.chars);
-  /** 竖排的列自右向左推进（vertical-rl）：按字符顺序看，x 只许往左走，不许回跳。 */
-  const columnOrderOk = minWindow.chars.every((char, index) => index === 0 || char.x <= minWindow.chars[index - 1].x + 2);
-  const minWindowInk = await inkColor(page, activeLine, path.join(guardDir, "desktop-min-window-line.png"));
-  add("desktop-min-window-current-line", minWindow.chars.length >= 5
-    && minWindow.writingMode === "vertical-rl" && minWindowColumns.increasing && columnOrderOk
-    && minWindow.chars.every((char) => char.inside) && minWindowInk.count > 40,
-  JSON.stringify({ ...minWindowColumns, columnOrderOk, chars: minWindow.chars, ink: minWindowInk.count, playerScroll: minWindow.playerScroll }));
-  await page.screenshot({ path: path.join(guardDir, "desktop-min-window.png") });
-
-  /**
-   * ⑦d 最小窗口里的**竖向滚动**（用户等效：真滚轮，不用 `scrollTop`）。
-   *
-   * 三件事：① 240×120 装不下两行 ⇒ 另一行确实被裁在窗口外；② 往书写方向（竖排里的 y）真滚一下，
-   * 被裁的那行滚进来、行盒真的动了；③ 一次超大的滚轮不许把内容甩到无限远 —— 同样的第二次滚轮
-   * 位置不再变化（官方 `ScrollInteractionEngine` 会钳在 `beginFrame` 算出的上下界里）。
-   */
-  const playerBox = await desktop.locator(".amll-lyric-player").boundingBox();
-  const wheelOverLyrics = async (deltaY) => {
-    await page.mouse.move(playerBox.x + playerBox.width / 2, playerBox.y + playerBox.height / 2);
-    await page.mouse.wheel(0, deltaY);
-    await page.waitForTimeout(900);
-    return charGeometry(2);
-  };
-  const topsEqual = (left, right) => left.lineTops.length === right.lineTops.length
-    && left.lineTops.every((top, index) => Math.abs(top - right.lineTops[index]) <= 2);
-  const stillRest = await charGeometry(2);
-  const nudged = await wheelOverLyrics(60);
-  const hugeDownFirst = await wheelOverLyrics(4000);
-  const hugeDownAgain = await wheelOverLyrics(4000);
-  const hugeUpFirst = await wheelOverLyrics(-4000);
-  const hugeUpAgain = await wheelOverLyrics(-4000);
-  add("desktop-min-window-write-scroll", stillRest.nextLineVisible === false && nudged.nextLineVisible === true
-    && !topsEqual(stillRest, nudged) && topsEqual(hugeDownFirst, hugeDownAgain)
-    && topsEqual(hugeUpFirst, hugeUpAgain),
-  JSON.stringify({ stillRest: { tops: stillRest.lineTops, next: stillRest.nextLineVisible }, nudged: { tops: nudged.lineTops, next: nudged.nextLineVisible },
-    hugeDownFirst: hugeDownFirst.lineTops, hugeDownAgain: hugeDownAgain.lineTops, hugeUpFirst: hugeUpFirst.lineTops, hugeUpAgain: hugeUpAgain.lineTops }));
-  await page.evaluate(() => window.__guard.setTime(700));
-  await page.evaluate(() => window.__guard.desktopDocument());
-  await page.waitForTimeout(900);
-  const restored = await charGeometry(2);
-  add("desktop-min-window-scroll-restores", restored.activeText.includes("第一行")
-    && restored.chars.length >= 5 && restored.chars.every((char) => char.inside),
-  JSON.stringify({ activeText: restored.activeText, tops: restored.lineTops, chars: restored.chars }));
-  await page.setViewportSize({ width: 260, height: 520 });
-  await page.waitForTimeout(600);
-
-  /**
-   * ⑦e 最小窗口 + **特大字号（xxl 56px）**（R45B fix4）：7 个字在 240 宽里需要 ~470px，
-   * 一行最多只放得下 3 列 —— 这一档必须能**滚**才谈得上 B5（review contract B5）。
-   *
-   * 这一条问的是"用户的手能不能把它们带进视口"，不是"几何上算不算得出来"：
-   * ① 静止时窗口里**只能**有前三个字（第/一/行）；
-   * ② 在**真画出来的**原生滚动条上按下往左拖，逐格采样，7 个字都要进过视口；
-   * ③ 按下滚动条**不许**触发 Tauri `startDragging`（真窗里那一按会变成拖窗口，条就永远拖不动），
-   *    而同一容器里**滚动条之上 3px 的正文**必须照旧触发（"正文按住拖窗口"的既有行为不许被削掉）；
-   * ④ 两个方向各再拖一次越过边界，位置不再变化、也绝不越过内容边界（有界，不越界滚到屏外）；
-   * ⑤ 当前行上下文不变（仍是"第一行歌词守卫"）。
-   *
-   * 环境要求：Chromium 必须**真的画**滚动条。Playwright 默认带 `--hide-scrollbars`：条不画、
-   * `offsetHeight - clientHeight == 0`，既看不见也点不到，这条用例会直接以 `bar:0` 失败——
-   * 所以启动参数里那条 `ignoreDefaultArgs: ["--hide-scrollbars"]`（见 launchChromium）是判定的一部分。
-   *
-   * 量法与 `charGeometry` 的差别只有一处：**纵向**给到约 0.12em 的容差。56px 的字在缩窄了的横带里，
-   * em 盒顶会探出带顶 3~5px（字体行距那点 leading，墨迹仍在带内），横向仍按 2px 严判。
-   */
-  const xxlGeometry = () => page.evaluate(() => {
-    const stage = document.querySelector('[data-testid="lyrics-window"]');
-    const player = stage.querySelector(".amll-lyric-player");
-    const pr = player.getBoundingClientRect();
-    const line = stage.querySelector('[class*="lyricMainLine"][class*="active"]');
-    const lead = Math.ceil((Number.parseFloat(getComputedStyle(player).fontSize) || 16) * 0.12);
-    const chars = [...(line?.querySelectorAll("span") ?? [])]
-      .filter((span) => span.children.length === 0 && (span.textContent ?? "").length === 1)
-      .map((span) => {
-        const range = document.createRange();
-        range.selectNodeContents(span);
-        const rect = range.getBoundingClientRect();
-        const insideX = rect.left >= pr.left - 2 && rect.right <= pr.right + 2;
-        const insideY = rect.top >= pr.top - lead && rect.bottom <= pr.bottom + lead;
-        return {
-          text: span.textContent, x: Math.round(rect.x), y: Math.round(rect.y),
-          w: Math.round(rect.width), h: Math.round(rect.height), insideX, insideY, inside: insideX && insideY,
-        };
-      });
+  const verticalRootSelector = '[data-testid="lyrics-vertical"]';
+  const expectedFontPx = (width) => Math.round(Math.min(96, Math.max(16, width * 0.26)));
+  /** 竖版几何：当前句每个字素框（Range 选中文字，不含 span 的盒子）、列、平移量、字号、译文/下一句。 */
+  const verticalGeometry = (pad = 1) => page.evaluate(({ selector, tolerance }) => {
+    const root = document.querySelector(selector);
+    const track = root?.querySelector(".vertical-lyric__track");
+    const column = root?.querySelector('[data-testid="lyrics-vertical-line"]');
+    const rootRect = root?.getBoundingClientRect();
+    const chars = [...(column?.querySelectorAll("[data-vertical-token]") ?? [])].map((span) => {
+      const range = document.createRange();
+      range.selectNodeContents(span);
+      const rect = range.getBoundingClientRect();
+      const name = typeof span.className === "string" ? span.className : "";
+      return {
+        text: span.textContent ?? "",
+        state: name.includes("is-sung") ? "sung" : name.includes("is-active") ? "active" : "pending",
+        x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height),
+        opacity: Number.parseFloat(getComputedStyle(span).opacity),
+        inside: rootRect
+          ? rect.left >= rootRect.left - tolerance && rect.right <= rootRect.right + tolerance
+            && rect.top >= rootRect.top - tolerance && rect.bottom <= rootRect.bottom + tolerance
+          : false,
+      };
+    });
+    const columnStyle = column ? getComputedStyle(column) : null;
+    const trackStyle = track ? getComputedStyle(track) : null;
+    const translation = root?.querySelector('[data-testid="lyrics-vertical-translation"]');
+    const next = root?.querySelector('[data-testid="lyrics-vertical-next"]');
     return {
-      chars, activeText: line?.textContent ?? "",
-      scroll: {
-        scrollW: player.scrollWidth, clientW: player.clientWidth, scrollLeft: player.scrollLeft,
-        scrollH: player.scrollHeight, clientH: player.clientHeight,
-        /** 滚动条真的占掉的那条厚度（0 = 浏览器没画条，或这东西压根不可滚）。 */
-        bar: player.offsetHeight - player.clientHeight, barX: player.offsetWidth - player.clientWidth,
-      },
-      /** 滚动条那条**实际命中带**：横向条贴播放器底边，纵向条贴右边（都按条真占了多厚算）。 */
-      strip: {
-        top: pr.top + player.clientHeight, height: player.offsetHeight - player.clientHeight,
-        left: pr.left + player.clientWidth, width: player.offsetWidth - player.clientWidth,
-      },
-      playerBox: { x: pr.x, y: pr.y, w: pr.width, h: pr.height },
+      chars,
+      activeText: column?.textContent ?? "",
+      current: root?.getAttribute("data-vertical-current") ?? null,
+      writingMode: columnStyle?.writingMode ?? null,
+      textOrientation: columnStyle?.textOrientation ?? null,
+      columnTransform: columnStyle?.transform ?? null,
+      fontSize: trackStyle ? Number.parseFloat(trackStyle.fontSize) : null,
+      /** 运行时写进 CSS 变量的平移量（纵向为负值 = 内容往上走）。 */
+      shift: root ? Number.parseFloat(getComputedStyle(root).getPropertyValue("--vertical-lyric-shift")) || 0 : 0,
+      translation: translation ? {
+        text: (translation.textContent ?? "").trim(),
+        fontSize: Number.parseFloat(getComputedStyle(translation).fontSize),
+      } : null,
+      next: next ? (next.textContent ?? "").trim() : null,
+      amllPlayer: Boolean(root?.querySelector(".amll-lyric-player")),
+      overflow: root ? {
+        x: root.offsetWidth - root.clientWidth,
+        y: root.offsetHeight - root.clientHeight,
+        style: getComputedStyle(root).overflow,
+      } : null,
+      columnCount: new Set(chars.map((char) => char.x)).size,
+    };
+  }, { selector: verticalRootSelector, tolerance: pad });
+  /** 定住当前句：换夹具 → 发文档 → 把时刻钉在 timeMs 上且不播放（时刻不会自己往前跑）。 */
+  const showVertical = async (lrc, timeMs) => {
+    await page.evaluate((text) => window.__guard.setLrc(text), lrc);
+    await page.evaluate(() => window.__guard.pause());
+    await page.evaluate(() => window.__guard.desktopDocument());
+    await page.evaluate((ms) => window.__guard.desktopProgress({ timeMs: ms, playing: false, seekGeneration: 100 }), timeMs);
+    await page.waitForTimeout(360);
+  };
+  const setVerticalTime = async (timeMs) => {
+    await page.evaluate((ms) => window.__guard.desktopProgress({ timeMs: ms, playing: false, seekGeneration: 100 }), timeMs);
+    await page.waitForTimeout(320);
+  };
+  const activeChar = (state) => state.chars.find((char) => char.state === "active") ?? null;
+
+  // ⑦ 一句一列：竖版不再是 AMLL 播放器，当前句是**单独一列**（同一 x、y 严格递增），既不下沉到
+  //    多列，也不出原生滚动条。
+  await configure({ ...DESKTOP_BASELINE, layout: "vertical", style: "clean" });
+  await page.setViewportSize({ width: 260, height: 520 });
+  await showVertical(FIXTURE_LRC, 700);
+  const narrow = await verticalGeometry();
+  add("r61-vertical-single-column",
+    narrow.amllPlayer === false && narrow.current === "0"
+      && narrow.writingMode === "vertical-rl" && narrow.textOrientation === "mixed"
+      && narrow.chars.length >= 5 && narrow.columnCount === 1
+      && narrow.chars.every((char, index) => index === 0 || char.y > narrow.chars[index - 1].y)
+      && narrow.chars.every((char) => char.inside)
+      && narrow.overflow !== null && narrow.overflow.x === 0 && narrow.overflow.y === 0
+      && narrow.overflow.style === "hidden",
+    JSON.stringify({ ...narrow, chars: narrow.chars.map((char) => `${char.text}@${char.x},${char.y}`) }));
+  await page.screenshot({ path: path.join(guardDir, "r61-vertical-narrow.png") });
+
+  // ⑦b 字号随窗口宽度：宽 260 → 68px，宽 380 → 96px（上限），与纯函数同一套常数
+  await page.setViewportSize({ width: 380, height: 520 });
+  await page.waitForTimeout(520);
+  const wide = await verticalGeometry();
+  add("r61-vertical-font-follows-width",
+    Math.abs(narrow.fontSize - expectedFontPx(260)) <= 1.5 && Math.abs(wide.fontSize - expectedFontPx(380)) <= 1.5
+      && wide.fontSize > narrow.fontSize + 10 && wide.chars.length >= 5
+      && wide.overflow !== null && wide.overflow.x === 0,
+    JSON.stringify({ narrow: { width: 260, font: narrow.fontSize, expected: expectedFontPx(260) },
+      wide: { width: 380, font: wide.fontSize, expected: expectedFontPx(380) } }));
+  await page.screenshot({ path: path.join(guardDir, "r61-vertical-wide.png") });
+
+  // ⑦c 方向：CJK 直立（字形框高 ≈ 字号）、拉丁/数字旋转（矮而宽）；整列没有被 transform 旋转
+  await page.setViewportSize({ width: 260, height: 520 });
+  await page.waitForTimeout(360);
+  await showVertical(R46_MIXED_LRC, 700);
+  const mixed = await verticalGeometry(2);
+  const cjkChars = mixed.chars.filter((char) => /[\u3400-\u9fff]/.test(char.text));
+  const latinChars = mixed.chars.filter((char) => /[A-Za-z0-9]/.test(char.text));
+  add("r61-vertical-cjk-upright-latin-rotated",
+    mixed.writingMode === "vertical-rl" && mixed.textOrientation === "mixed"
+      && mixed.columnTransform === "none"
+      && cjkChars.length >= 5 && latinChars.length >= 5
+      && cjkChars.every((char) => char.h >= mixed.fontSize * 0.8)
+      && latinChars.every((char) => char.h <= mixed.fontSize * 0.7 && char.w >= mixed.fontSize * 0.8),
+    JSON.stringify({ writingMode: mixed.writingMode, textOrientation: mixed.textOrientation,
+      columnTransform: mixed.columnTransform, fontSize: mixed.fontSize,
+      cjk: cjkChars.slice(0, 4), latin: latinChars.slice(0, 4) }));
+
+  // ⑦d 长句：一列装不下时按演唱进度沿书写方向平移，**两个时刻正在唱的字都在视口里**
+  await showVertical(R46_LONG_LRC, 600);
+  const longEarly = await verticalGeometry();
+  await page.screenshot({ path: path.join(guardDir, "r61-vertical-long-t1.png") });
+  await setVerticalTime(2400);
+  const longLate = await verticalGeometry();
+  await page.screenshot({ path: path.join(guardDir, "r61-vertical-long-t2.png") });
+  const earlyActive = activeChar(longEarly);
+  const lateActive = activeChar(longLate);
+  add("r61-vertical-long-line-keeps-singing-char",
+    longEarly.chars.length >= 20 && earlyActive !== null && lateActive !== null
+      && earlyActive.inside && lateActive.inside
+      && longLate.shift < longEarly.shift
+      && longLate.activeText === longEarly.activeText,
+    JSON.stringify({ early: { active: earlyActive, shift: longEarly.shift },
+      late: { active: lateActive, shift: longLate.shift } }));
+
+  // ⑦e 逐字扫亮：同一行两个时刻，已唱的字变多、像素有差异、未唱的字更淡
+  await showVertical(FIXTURE_LRC, 400);
+  const karaokeEarly = await verticalGeometry();
+  const earlyPng = await page.screenshot({ path: path.join(guardDir, "r61-vertical-karaoke-early.png") });
+  await setVerticalTime(2600);
+  const karaokeLate = await verticalGeometry();
+  const latePng = await page.screenshot({ path: path.join(guardDir, "r61-vertical-karaoke-late.png") });
+  const karaokeDiff = pixelDiffRatio(await sharp(earlyPng).raw().toBuffer(), await sharp(latePng).raw().toBuffer());
+  const sungOf = (state) => state.chars.filter((char) => char.state === "sung").length;
+  const pendingOpacity = Math.min(...karaokeEarly.chars.filter((char) => char.state === "pending").map((char) => char.opacity));
+  const sungOpacity = Math.max(...karaokeEarly.chars.filter((char) => char.state === "sung").map((char) => char.opacity), 1);
+  add("r61-vertical-karaoke-sweep",
+    karaokeLate.activeText === karaokeEarly.activeText && activeChar(karaokeEarly) !== null
+      && sungOf(karaokeLate) > sungOf(karaokeEarly) && sungOf(karaokeLate) >= 5
+      && karaokeDiff > 0.01 && pendingOpacity < sungOpacity,
+    `逐字扫亮：已唱 ${sungOf(karaokeEarly)} → ${sungOf(karaokeLate)}，像素差异 ${(karaokeDiff * 100).toFixed(2)}%，未唱不透明度 ${pendingOpacity}`);
+
+  // ⑦f 译文：同一时间戳的第二行并成译文，落在相邻的第二列、字号略小
+  await showVertical(R61_TRANSLATION_LRC, 700);
+  const translated = await verticalGeometry();
+  add("r61-vertical-translation-column",
+    translated.translation !== null && translated.translation.text === "译文与原文同时刻"
+      && translated.translation.fontSize < translated.fontSize * 0.9
+      && translated.chars.length >= 5,
+    JSON.stringify({ translation: translated.translation, font: translated.fontSize }));
+  await page.screenshot({ path: path.join(guardDir, "r61-vertical-translation.png") });
+
+  // ⑦g 减少动效：取消平滑滚动（直接定位）；不减少动效时那一条过渡确实在
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.waitForTimeout(120);
+  const transitionOf = () => page.evaluate(() => {
+    const track = document.querySelector(".vertical-lyric__track");
+    const style = track ? getComputedStyle(track) : null;
+    return { property: style?.transitionProperty ?? null, duration: style?.transitionDuration ?? null };
+  });
+  const animated = await transitionOf();
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.waitForTimeout(200);
+  const reducedMotion = await transitionOf();
+  add("r61-vertical-reduced-motion",
+    animated.property !== null && animated.property !== "none" && animated.duration !== "0s"
+      && (reducedMotion.property === "none" || reducedMotion.duration === "0s"),
+    JSON.stringify({ animated, reduced: reducedMotion }));
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+
+  // ⑦h 面板样式 + 深色主题：竖版在面板里同样是一列（控件/衬底/面板样式不受影响）
+  await page.evaluate(() => { document.documentElement.className = "dark"; });
+  await configure({ ...DESKTOP_BASELINE, layout: "vertical", style: "panel" });
+  await page.waitForTimeout(420);
+  const panel = await verticalGeometry(2);
+  const panelCard = await desktop.locator('[data-slot="card"]').count();
+  add("r61-vertical-panel-dark",
+    panelCard === 1 && panel.writingMode === "vertical-rl" && panel.chars.length >= 5
+      && panel.columnCount === 1 && panel.overflow !== null && panel.overflow.y === 0,
+    JSON.stringify({ panelCard, columnCount: panel.columnCount, overflow: panel.overflow, font: panel.fontSize }));
+  await page.screenshot({ path: path.join(guardDir, "r61-vertical-panel-dark.png") });
+  await configure({ ...DESKTOP_BASELINE, layout: "vertical", style: "clean" });
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await showVertical(FIXTURE_LRC, 700);
+  await page.waitForTimeout(240);
+
+  // ⑦i 竖版下控件、拖动、缩放柄、透明衬底照旧可用；锁定后仍然只剩解锁按钮
+  const verticalControlState = () => page.evaluate(() => {
+    const stage = document.querySelector('[data-testid="lyrics-window"]');
+    const count = (selector) => stage?.querySelectorAll(selector).length ?? -1;
+    return {
+      locked: stage?.getAttribute("data-lyrics-locked") ?? null,
+      buttons: stage ? stage.querySelectorAll("button").length : -1,
+      grip: count('button[aria-label="拖动桌面歌词"]'),
+      media: count('[data-testid="lyrics-controls"] button[aria-label="播放"], [data-testid="lyrics-controls"] button[aria-label="暂停"]'),
+      appearance: count('button[aria-label="桌面歌词外观"]'),
+      lock: count('button[aria-label="锁定桌面歌词"]'),
+      resize: count('[data-testid="lyrics-resize-grip"]'),
+      scrim: stage?.getAttribute("data-lyrics-scrim") ?? null,
+      column: count('[data-testid="lyrics-vertical-line"]'),
     };
   });
-  await configure({ size: "xxl", layout: "vertical" });
-  await page.setViewportSize({ width: 240, height: 120 });
-  await page.waitForTimeout(1200);
-  const xxlRest = await xxlGeometry();
-  const xxlRestVisible = xxlRest.chars.filter((char) => char.inside).map((char) => char.text);
-  const seenByPointer = new Set(xxlRestVisible);
-  const xxlScrolls = [xxlRest.scroll.scrollLeft];
-  const sampleInto = async () => {
-    const state = await xxlGeometry();
-    state.chars.forEach((char) => { if (char.inside) seenByPointer.add(char.text); });
-    xxlScrolls.push(state.scroll.scrollLeft);
-    return state;
-  };
-  /**
-   * 在滚动条那条带上按下 → 逐格拖到另一个 x → 松开；**每一步都采样**（12px 一格，56px 的字不会跳过去）。
-   * 落点记在返回值里，供"再拖一次越过边界不许动"判。
-   */
-  const barMidY = xxlRest.strip.top + Math.max(1, xxlRest.strip.height) / 2;
-  const dragBar = async (fromRatio, toRatio, steps) => {
-    const box = xxlRest.playerBox;
-    const fromX = box.x + box.w * fromRatio;
-    const toX = box.x + box.w * toRatio;
-    await page.mouse.move(fromX, barMidY);
-    await page.waitForTimeout(120);
-    await page.mouse.down();
-    for (let step = 1; step <= steps; step += 1) {
-      await page.mouse.move(fromX + ((toX - fromX) * step) / steps, barMidY);
-      await page.waitForTimeout(80);
-      await sampleInto();
-    }
-    await page.mouse.up();
-    await page.waitForTimeout(250);
-    return xxlGeometry();
-  };
-  const barDragsBefore = await page.evaluate(() => window.__guard.dragCount());
-  // 往左：RTL 滚动容器的"往后看"，把左边那几列拖进视口（fix3 控制实验证明这条路在 headless 里也能动）
-  const afterLeftDrag = await dragBar(0.6, 0.1, 12);
-  // 再往左：拇指这时贴到左端，继续往左顶到底
-  const afterMoreLeft = await dragBar(0.2, 0.02, 8);
-  // 越过左边界再拖一次：位置不许再变（有界，不越界滚到屏外）
-  const afterPastLeft = await dragBar(0.1, 0, 5);
-  await page.screenshot({ path: path.join(guardDir, "desktop-min-window-xxl-scrolled.png") });
-  // 往右：拖回行首（第/一/行）
-  const afterRightDrag = await dragBar(0.2, 0.95, 14);
-  // 越过右边界再拖一次：位置不许再变
-  const afterMoreRight = await dragBar(0.85, 0.99, 8);
-  const xxlDragEventsOnBar = (await page.evaluate(() => window.__guard.dragCount())) - barDragsBefore;
-  const xxlAfterDrags = await xxlGeometry();
-  const leftmost = Math.min(...xxlScrolls);
-  const rightmost = Math.max(...xxlScrolls);
-  /** 内容边界（RTL 下 scrollLeft 是负数）：越界 = 滚到内容之外，B5 明令不许。 */
-  const contentMin = xxlRest.scroll.clientW - xxlRest.scroll.scrollW;
-  const neverBeyond = xxlScrolls.every((value) => value >= contentMin - 2 && value <= 2);
-  /** 越过左/右边界的那一次拖动都不许再改变位置。 */
-  const bounded = Math.abs(afterPastLeft.scroll.scrollLeft - afterMoreLeft.scroll.scrollLeft) <= 2
-    && Math.abs(afterMoreRight.scroll.scrollLeft - afterRightDrag.scroll.scrollLeft) <= 2 && neverBeyond;
-  // 对照：正文（滚动条之上 3px）按下仍要开始拖窗口 —— 免得"整块歌词区不许拖"这种过度豁免混过去
-  const contentDragBefore = await page.evaluate(() => window.__guard.dragCount());
-  await page.mouse.move(xxlRest.playerBox.x + xxlRest.playerBox.w / 2, Math.max(xxlRest.playerBox.y + 2, xxlRest.strip.top - 3));
-  await page.mouse.down();
-  await page.waitForTimeout(120);
-  await page.mouse.up();
-  await page.waitForTimeout(250);
-  const contentDragEvents = (await page.evaluate(() => window.__guard.dragCount())) - contentDragBefore;
-  add("desktop-min-window-xxl-reach", xxlRest.chars.length === 7
-    && xxlRestVisible.join("") === "第一行"
-    && seenByPointer.size === 7
-    && xxlRest.scroll.bar > 0 && xxlRest.scroll.scrollW > xxlRest.scroll.clientW
-    && leftmost <= contentMin + 2 && rightmost >= -2
-    && bounded && xxlDragEventsOnBar === 0 && contentDragEvents === 1
-    && afterLeftDrag.activeText.includes("第一行") && xxlAfterDrags.activeText.includes("第一行"),
-  JSON.stringify({
-    rest: xxlRestVisible, seenByPointer: [...seenByPointer], seenByScrolls: { leftmost, rightmost, contentMin },
-    atRest: xxlRest.chars, scroll: xxlRest.scroll, strip: xxlRest.strip,
-    landed: { left: afterLeftDrag.scroll.scrollLeft, moreLeft: afterMoreLeft.scroll.scrollLeft,
-      pastLeft: afterPastLeft.scroll.scrollLeft, right: afterRightDrag.scroll.scrollLeft,
-      moreRight: afterMoreRight.scroll.scrollLeft },
-    xxlDragEventsOnBar, contentDragEvents, activeText: xxlAfterDrags.activeText,
-  }));
-  await page.screenshot({ path: path.join(guardDir, "desktop-min-window-xxl.png") });
-  await configure({ size: "lg" });
-  await page.setViewportSize({ width: 260, height: 520 });
-  await page.waitForTimeout(900);
+  const verticalUnlocked = await verticalControlState();
+  const verticalBox = await desktop.locator('[data-testid="lyrics-vertical"]').boundingBox();
+  const verticalDragBefore = await page.evaluate(() => window.__guard.dragCount());
+  await page.mouse.click(verticalBox.x + 40, verticalBox.y + 70);
+  await page.waitForTimeout(150);
+  const verticalDragAfter = await page.evaluate(() => window.__guard.dragCount());
+  const verticalResizeBefore = await page.evaluate(() => window.__guard.resizeCalls());
+  await page.getByTestId("lyrics-resize-grip").click();
+  await page.waitForTimeout(200);
+  const verticalResizeAfter = await page.evaluate(() => window.__guard.resizeCalls());
+  await page.getByRole("button", { name: "锁定桌面歌词", exact: true }).click();
+  await page.waitForFunction(() => window.__guard.desktopConfig().locked === true);
+  await page.waitForTimeout(220);
+  const verticalLocked = await verticalControlState();
+  add("r61-vertical-controls-still-usable",
+    verticalUnlocked.column === 1 && verticalUnlocked.scrim === "on"
+      && verticalUnlocked.grip === 1 && verticalUnlocked.media === 1 && verticalUnlocked.appearance === 1
+      && verticalUnlocked.lock === 1 && verticalUnlocked.resize === 1
+      && verticalDragAfter === verticalDragBefore + 1
+      && verticalResizeAfter.length === verticalResizeBefore.length + 1 && verticalResizeAfter.at(-1) === "SouthEast"
+      && verticalLocked.locked === "on" && verticalLocked.buttons === 1 && verticalLocked.column === 1,
+    JSON.stringify({ unlocked: verticalUnlocked, drag: [verticalDragBefore, verticalDragAfter],
+      resize: verticalResizeAfter.at(-1), locked: verticalLocked }));
+  await page.getByRole("button", { name: /已锁定桌面歌词/ }).click();
+  await page.waitForFunction(() => window.__guard.desktopConfig().locked === false);
+  await configure({ ...DESKTOP_BASELINE, layout: "vertical", style: "clean" });
+  await page.waitForTimeout(240);
 
   // ⑧ 横排对照：同一行 x 递增、y 相同（证明竖排不是"哪边都这样"）
   await configure({ layout: "horizontal" });
@@ -2362,62 +2393,61 @@ export async function checkDesktopInteraction(page, guardDir, add) {
     && horizontalColumns.distinctX === horizontal.chars.length && horizontalColumns.longest === 1,
   JSON.stringify({ writingMode: horizontal.writingMode, columns: horizontalColumns, chars: horizontal.chars }));
 
-  // ⑨ 官方组件仍在排版当前行（竖版切到第二行，整行都在播放器范围内）
-  await configure({ layout: "vertical" });
+  // ⑨ 当前句跟着时间切换：竖版只显示正在唱的那一句（第二句到来时第一句整列消失）
+  await configure({ layout: "vertical", style: "clean" });
   await page.setViewportSize({ width: 260, height: 520 });
-  await page.waitForTimeout(900);
-  await page.evaluate(() => window.__guard.setTime(3300));
-  await page.evaluate(() => window.__guard.desktopDocument());
-  await page.waitForTimeout(900);
-  const secondLine = await charGeometry();
-  add("desktop-vertical-current-line-visible", secondLine.activeText.includes("第二行") && secondLine.lineCount >= 2
-    && secondLine.chars.length >= 5 && secondLine.chars.every((char) => char.inside),
-  JSON.stringify({ activeText: secondLine.activeText, lineCount: secondLine.lineCount, playerScroll: secondLine.playerScroll, chars: secondLine.chars }));
-  await page.evaluate(() => window.__guard.setTime(700));
-  await page.evaluate(() => window.__guard.desktopDocument());
-  await page.waitForTimeout(600);
+  await showVertical(FIXTURE_LRC, 3300);
+  const secondLineState = await verticalGeometry();
+  add("r61-vertical-follows-current-line",
+    secondLineState.current === "1" && secondLineState.activeText.includes("第二行")
+      && secondLineState.chars.length >= 5 && secondLineState.chars.every((char) => char.inside)
+      && secondLineState.columnCount === 1,
+    JSON.stringify({ current: secondLineState.current, activeText: secondLineState.activeText,
+      chars: secondLineState.chars.map((char) => `${char.text}@${char.y}`) }));
+  await setVerticalTime(700);
 
-  // ⑩ 逐字：行级 LRC 推导出"一个字一个词"（行级 LRC 在 AMLL 里只会是 1 个词）
-  const wordSpans = await desktop.locator('[class*="lyricMainLine"][class*="active"] span').evaluateAll((nodes) =>
-    nodes.filter((node) => node.children.length === 0 && (node.textContent ?? "").length === 1).map((node) => node.textContent));
-  add("desktop-karaoke-per-char-words", wordSpans.length >= 5 && wordSpans.join("") === "第一行歌词守卫",
-    JSON.stringify({ wordSpans }));
-  const karaokeBox = await stableTextBox(page, activeLine);
-  const karaokeShot = async (timeMs, file) => {
-    await page.evaluate((ms) => window.__guard.setTime(ms), timeMs);
-    await page.evaluate(() => window.__guard.desktopDocument());
-    await page.waitForTimeout(700);
-    return page.screenshot(karaokeBox ? { clip: karaokeBox, path: path.join(guardDir, file) } : { path: path.join(guardDir, file) });
-  };
-  const early = await karaokeShot(300, "desktop-karaoke-early.png");
-  const late = await karaokeShot(2600, "desktop-karaoke-late.png");
-  const highlightDiff = pixelDiffRatio(await sharp(early).raw().toBuffer(), await sharp(late).raw().toBuffer());
-  add("desktop-karaoke-highlight-progress", Boolean(karaokeBox) && highlightDiff > 0.02,
-    `逐字高亮推进：行内像素差异 ${(highlightDiff * 100).toFixed(2)}%`);
-  await page.evaluate(() => window.__guard.setTime(700));
-  await page.evaluate(() => window.__guard.desktopDocument());
-  await page.waitForTimeout(500);
-
-  // ⑪ 自定义颜色：真的改到官方组件消费的像素上；清空回设计令牌
-  await configure({ layout: "horizontal", style: "clean", color: "foreground" });
-  await page.setViewportSize({ width: 800, height: 128 });
-  await page.waitForTimeout(700);
-  const tokenInk = await inkColor(page, activeLine, path.join(guardDir, "desktop-color-token.png"));
+  // ⑪ 自定义颜色：真的改到竖版列的像素上；清空回设计令牌
+  await configure({ layout: "vertical", style: "clean", color: "foreground" });
+  await page.setViewportSize({ width: 260, height: 520 });
+  await showVertical(FIXTURE_LRC, 2600);
+  const verticalLineSelector = '[data-testid="lyrics-vertical-line"]';
+  const tokenInk = await inkColor(page, verticalLineSelector, path.join(guardDir, "r61-vertical-color-token.png"));
   await page.evaluate(() => { document.documentElement.className = "light"; });
   await configure({ customColor: "#00dd00" });
-  await page.waitForTimeout(800);
-  const customInk = await inkColor(page, activeLine, path.join(guardDir, "desktop-color-custom.png"));
+  await page.waitForTimeout(700);
+  const customInk = await inkColor(page, verticalLineSelector, path.join(guardDir, "r61-vertical-color-custom.png"));
   const customStored = await page.evaluate(() => window.__guard.desktopConfig().customColor);
-  add("desktop-custom-color-pixels", customStored === "#00dd00" && customInk.count > 40
+  add("r61-vertical-custom-color-pixels", customStored === "#00dd00" && customInk.count > 40
     && customInk.mean[1] > customInk.mean[0] + 60 && customInk.mean[1] > customInk.mean[2] + 60,
   JSON.stringify({ tokenInk: tokenInk.mean, customInk: customInk.mean, customStored }));
   await configure({ customColor: "" });
   await page.waitForTimeout(700);
-  const restoredInk = await inkColor(page, activeLine, path.join(guardDir, "desktop-color-restored.png"));
+  const restoredInk = await inkColor(page, verticalLineSelector, path.join(guardDir, "r61-vertical-color-restored.png"));
   const restoredStored = await page.evaluate(() => window.__guard.desktopConfig().customColor);
-  add("desktop-custom-color-restored", restoredStored === "" && restoredInk.count > 40
+  add("r61-vertical-custom-color-restored", restoredStored === "" && restoredInk.count > 40
     && !(restoredInk.mean[1] > restoredInk.mean[0] + 60 && restoredInk.mean[1] > restoredInk.mean[2] + 60),
   JSON.stringify({ restoredInk: restoredInk.mean, restoredStored }));
+
+  // ⑪ 自定义颜色（横版官方组件）：真的改到官方组件消费的像素上；清空回设计令牌
+  await configure({ layout: "horizontal", style: "clean", color: "foreground" });
+  await page.setViewportSize({ width: 800, height: 128 });
+  await page.waitForTimeout(700);
+  const horizontalTokenInk = await inkColor(page, activeLine, path.join(guardDir, "desktop-color-token.png"));
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await configure({ customColor: "#00dd00" });
+  await page.waitForTimeout(800);
+  const horizontalCustomInk = await inkColor(page, activeLine, path.join(guardDir, "desktop-color-custom.png"));
+  const horizontalCustomStored = await page.evaluate(() => window.__guard.desktopConfig().customColor);
+  add("desktop-custom-color-pixels", horizontalCustomStored === "#00dd00" && horizontalCustomInk.count > 40
+    && horizontalCustomInk.mean[1] > horizontalCustomInk.mean[0] + 60 && horizontalCustomInk.mean[1] > horizontalCustomInk.mean[2] + 60,
+  JSON.stringify({ tokenInk: horizontalTokenInk.mean, customInk: horizontalCustomInk.mean, customStored: horizontalCustomStored }));
+  await configure({ customColor: "" });
+  await page.waitForTimeout(700);
+  const horizontalRestoredInk = await inkColor(page, activeLine, path.join(guardDir, "desktop-color-restored.png"));
+  const horizontalRestoredStored = await page.evaluate(() => window.__guard.desktopConfig().customColor);
+  add("desktop-custom-color-restored", horizontalRestoredStored === "" && horizontalRestoredInk.count > 40
+    && !(horizontalRestoredInk.mean[1] > horizontalRestoredInk.mean[0] + 60 && horizontalRestoredInk.mean[1] > horizontalRestoredInk.mean[2] + 60),
+  JSON.stringify({ restoredInk: horizontalRestoredInk.mean, restoredStored: horizontalRestoredStored }));
 
   // ⑫ 重挂载：旧 query 仍按权威配置显示（配置回读优先于查询串初值）
   await configure({ layout: "vertical", style: "panel" });
@@ -2437,155 +2467,6 @@ export async function checkDesktopInteraction(page, guardDir, add) {
   await desktop.getByRole("status").click();
   add("desktop-empty-drag", await page.evaluate((count) => window.__guard.dragCount() === count + 1, emptyDragBefore), "空态宿主同样可拖");
   await page.evaluate(() => window.__guard.desktopDocument());
-
-  /**
-   * ⑭ R46 竖排重设计 · 方向：**Unicode 默认竖排方向**（CJK 直立、拉丁/数字/标点旋转）。
-   *
-   * 量法是逐字的**字形框**（`Range` 选中的那截文字，不是带 -1em/1em 的 span 盒子）：
-   * - CJK 直立 ⇒ 字形框高度 ≈ 字号（em 盒高）；
-   * - 拉丁旋转（`text-orientation: mixed`）⇒ 字形框**矮而宽**：高度只有字号的一半上下，
-   *   宽度是整条行高。`upright` 会把拉丁也拉成直立方块（高度 = 字号），一眼可辨。
-   * 同时钉住"整行没有被 transform 旋转"——那是最容易混过去的假竖排。
-   */
-  const isCjkChar = (text) => /[\u3400-\u9fff]/.test(text);
-  const isLatinChar = (text) => /[A-Za-z0-9]/.test(text);
-  /**
-   * 换夹具 + 把进度钉在**第一行**上再看。
-   *
-   * 为什么要先 `pause()`：⑤ 之后播放器是一直在播的，seek 到 700 之后进度会继续往前跑，
-   * 等几何量完（1.2s）早就越过 3000 → 量到的"当前行"会是第二行（RED 实测：`seen:"第二行"`）。
-   * 暂停 + seek + 重发文档，才是"就停在这一行上"的确定状态。
-   */
-  const showDesktopLine = async (lrc, timeMs = 700) => {
-    await page.evaluate((text) => window.__guard.setLrc(text), lrc);
-    await page.evaluate((ms) => { window.__guard.pause(); window.__guard.setTime(ms); }, timeMs);
-    await page.evaluate(() => window.__guard.desktopDocument());
-  };
-  await showDesktopLine(R46_MIXED_LRC);
-  await configure({ layout: "vertical", style: "clean", size: "lg", customColor: "" });
-  await page.setViewportSize({ width: 260, height: 520 });
-  await page.waitForTimeout(1200);
-  const mixed = await charGeometry(2);
-  const mixedCjk = mixed.chars.filter((char) => isCjkChar(char.text));
-  const mixedLatin = mixed.chars.filter((char) => isLatinChar(char.text));
-  const mixedColumns = columnReport(mixed.chars);
-  const fontSize = mixed.fontSize ?? 0;
-  add("desktop-vertical-mixed-orientation",
-    mixed.writingMode === "vertical-rl" && mixed.textOrientation === "mixed"
-      && mixed.lineTransform === "none"
-      && mixedCjk.length >= 5 && mixedLatin.length >= 5
-      && mixedCjk.every((char) => char.h >= fontSize * 0.8)
-      && mixedLatin.every((char) => char.h <= fontSize * 0.7)
-      && mixedLatin.every((char) => char.w >= fontSize * 0.8)
-      && mixedColumns.increasing && mixed.chars.every((char) => char.inside),
-    JSON.stringify({ ...mixedColumns, textOrientation: mixed.textOrientation, fontSize, writingMode: mixed.writingMode,
-      lineTransform: mixed.lineTransform, cjk: mixedCjk.slice(0, 4), latin: mixedLatin.slice(0, 4), chars: mixed.chars }));
-  await page.screenshot({ path: path.join(guardDir, "r46-vertical-mixed-260x520.png") });
-
-  /**
-   * ⑮ R46 竖排重设计 · 长行：折成多列、当前行整块落在播放器里（不剪上不剪下）、
-   * 沿**书写方向**（竖排的块轴 = 横向）溢出时有原生滚动条，且所有字都够得着、滚动有界。
-   *
-   * 关键判据（brief 第 2 项）：`wrapperBox` 是**官方用来量行高的那个行盒**。它必须
-   * ① 不高于播放器（高出来的部分会被 `overflow: hidden` 裁掉，就是"底部剪掉"）；
-   * ② 被官方居中（中心 ≈ 播放器中心，当前行可辨识）；③ 每个字的纵向范围都在播放器里。
-   */
-  await page.evaluate((lrc) => window.__guard.setLrc(lrc), R46_LONG_LRC);
-  await configure({ size: "xxl", layout: "vertical" });
-  await page.evaluate(() => { window.__guard.pause(); window.__guard.setTime(700); });
-  await page.evaluate(() => window.__guard.desktopDocument());
-  await page.waitForTimeout(1300);
-  const longLine = await charGeometry(2);
-  const longColumns = columnReport(longLine.chars);
-  /** 竖排列自右向左：按字符顺序看，x 只许往左走，不许回跳。 */
-  const longColumnOrder = longLine.chars.every((char, index) => index === 0 || char.x <= longLine.chars[index - 1].x + 2);
-  /**
-   * 官方把当前行居中用的是**内容盒**（`clientHeight`，横向滚动条占掉的那 6px 不算），
-   * 所以"居中"的参照是 `播放器顶 + clientHeight/2`（实测两者相等，误差 0px）；
-   * 行盒允许盖住滚动条那一条（`bar`），但**不许**比播放器再高——高出去的部分就是被裁掉的字。
-   */
-  const longContentHeight = longLine.playerScroll?.clientH ?? longLine.playerBox?.height ?? 0;
-  const longBar = longLine.playerScroll?.bar ?? 0;
-  const playerMid = (longLine.playerBox?.top ?? 0) + longContentHeight / 2;
-  const wrapperFits = Boolean(longLine.wrapperBox)
-    && longLine.wrapperBox.height <= longContentHeight + longBar + 2;
-  const wrapperCentered = Boolean(longLine.wrapperBox) && Math.abs(longLine.wrapperBox.center - playerMid) <= 2;
-  /** 拖动原生横条时**逐格采样**：每个字都要在某一格整块进过视口。 */
-  const barStrip = await page.evaluate(() => {
-    const player = document.querySelector('[data-testid="lyrics-window"] .amll-lyric-player');
-    const rect = player.getBoundingClientRect();
-    return { x: rect.x, y: rect.y, w: rect.width, h: rect.height,
-      stripTop: rect.top + player.clientHeight, stripH: player.offsetHeight - player.clientHeight,
-      scrollLeft: player.scrollLeft, contentMin: player.clientWidth - player.scrollWidth };
-  });
-  const seenInViewport = new Set(longLine.chars.filter((char) => char.insideX).map((char) => char.text));
-  const scrollSamples = [barStrip.scrollLeft];
-  const sampleViewport = async () => {
-    const state = await charGeometry(2);
-    state.chars.forEach((char) => { if (char.insideX) seenInViewport.add(char.text); });
-    scrollSamples.push(state.playerScroll?.scrollLeft ?? 0);
-    return state;
-  };
-  const barY = barStrip.stripTop + Math.max(1, barStrip.stripH) / 2;
-  const dragBarAcross = async (fromRatio, toRatio, steps) => {
-    const fromX = barStrip.x + barStrip.w * fromRatio;
-    const toX = barStrip.x + barStrip.w * toRatio;
-    await page.mouse.move(fromX, barY);
-    await page.waitForTimeout(120);
-    await page.mouse.down();
-    for (let step = 1; step <= steps; step += 1) {
-      await page.mouse.move(fromX + ((toX - fromX) * step) / steps, barY);
-      await page.waitForTimeout(80);
-      await sampleViewport();
-    }
-    await page.mouse.up();
-    await page.waitForTimeout(250);
-    return charGeometry(2);
-  };
-  const afterLongDrag = await dragBarAcross(0.85, 0.05, 12);
-  const afterLongPastEdge = await dragBarAcross(0.05, 0, 5);
-  const longScrollLeft = scrollSamples.at(-1) ?? 0;
-  const longBounded = Math.abs((afterLongPastEdge.playerScroll?.scrollLeft ?? 0) - longScrollLeft) <= 2
-    && scrollSamples.every((value) => value >= (barStrip.contentMin ?? 0) - 2 && value <= 2);
-  const longChars = new Set(longLine.chars.map((char) => char.text));
-  add("desktop-vertical-long-line-columns",
-    longLine.writingMode === "vertical-rl" && longLine.chars.length >= 20
-      && longColumns.distinctX >= 3 && longColumnOrder && longColumns.increasing,
-    JSON.stringify({ columns: longColumns, order: longColumnOrder, playerScroll: longLine.playerScroll }));
-  add("desktop-vertical-long-line-not-clipped",
-    Boolean(longLine.playerBox && longLine.wrapperBox) && wrapperFits && wrapperCentered
-      && longLine.chars.every((char) => char.insideY),
-    JSON.stringify({ playerBox: longLine.playerBox, wrapperBox: longLine.wrapperBox, centered: wrapperCentered,
-      outsideY: longLine.chars.filter((char) => !char.insideY).map((char) => `${char.text}@${char.y}`), scroll: longLine.playerScroll }));
-  add("desktop-vertical-long-line-reachable-bounded",
-    (longLine.playerScroll?.bar ?? 0) > 0 && (longLine.playerScroll?.scrollW ?? 0) > (longLine.playerScroll?.clientW ?? 0)
-      && [...longChars].every((text) => seenInViewport.has(text)) && longBounded
-      && afterLongDrag.activeText.includes("这一行"),
-    JSON.stringify({ seen: [...seenInViewport].join(""), expected: [...longChars].join(""),
-      samples: { first: scrollSamples[0], last: longScrollLeft, contentMin: barStrip.contentMin }, bounded: longBounded }));
-  await page.screenshot({ path: path.join(guardDir, "r46-vertical-long-260x520.png") });
-
-  // ⑯ R46 最小窗口 240×120：混排同样不剪字（上下都不许探出播放器），仍是真竖排
-  await page.evaluate((lrc) => window.__guard.setLrc(lrc), R46_MIXED_LRC);
-  await configure({ size: "lg", layout: "vertical" });
-  await page.setViewportSize({ width: 240, height: 120 });
-  await page.evaluate(() => { window.__guard.pause(); window.__guard.setTime(700); });
-  await page.evaluate(() => window.__guard.desktopDocument());
-  await page.waitForTimeout(1200);
-  const minMixed = await charGeometry(2);
-  const minMixedColumns = columnReport(minMixed.chars);
-  const minContentHeight = minMixed.playerScroll?.clientH ?? minMixed.playerBox?.height ?? 0;
-  const minWrapperFits = Boolean(minMixed.wrapperBox)
-    && minMixed.wrapperBox.height <= minContentHeight + (minMixed.playerScroll?.bar ?? 0) + 2;
-  add("desktop-vertical-min-window-mixed-no-clip",
-    minMixed.writingMode === "vertical-rl" && minMixed.textOrientation === "mixed"
-      && minMixedColumns.increasing && minMixedColumns.distinctX >= 2
-      && minMixed.chars.length >= 10 && minMixed.chars.every((char) => char.insideY)
-      && minMixed.chars.filter((char) => char.insideX).length >= 4
-      && minWrapperFits,
-    JSON.stringify({ ...minMixedColumns, playerBox: minMixed.playerBox, wrapperBox: minMixed.wrapperBox, wrapperFits: minWrapperFits,
-      outsideY: minMixed.chars.filter((char) => !char.insideY).map((char) => `${char.text}@${char.y}`), chars: minMixed.chars }));
-  await page.screenshot({ path: path.join(guardDir, "r46-vertical-mixed-240x120.png") });
 
   await page.evaluate(() => window.__guard.restoreLyrics());
   await configure({ ...DESKTOP_BASELINE });
@@ -2922,6 +2803,31 @@ export async function checkLyricsSettingsPopup(page, port, guardDir, add) {
   add("r60-popup-style-layout-apply",
     styleLayout.at(-2)?.style === "panel" && styleLayout.at(-1)?.layout === "vertical",
     JSON.stringify(styleLayout));
+  /**
+   * R61：竖版下"字号"档位禁用，并给一句用户能懂的说明（竖版的字号随窗口宽度变化）。
+   * 其余控件不受影响——样式/方向/开关/颜色在竖版下照旧可用（后面的用例继续点它们）。
+   */
+  const verticalSizeState = await page.evaluate(() => {
+    const group = document.querySelector('[data-testid="lyrics-size"]');
+    const items = [...(group?.querySelectorAll('[data-testid^="lyrics-size-"]') ?? [])];
+    const note = document.querySelector('[data-testid="lyrics-size-vertical-note"]');
+    return {
+      items: items.length,
+      allDisabled: items.length > 0 && items.every((item) => item.hasAttribute("disabled") || item.getAttribute("data-disabled") !== null),
+      note: (note?.textContent ?? "").trim(),
+    };
+  });
+  const callsBeforeSizeClick = await page.evaluate(() => window.__popupGuard.configureCalls().length);
+  await page.locator('[data-testid="lyrics-size-xxl"]').click({ force: true }).catch(() => undefined);
+  await page.waitForTimeout(200);
+  const sizeClickWrote = await page.evaluate((count) => window.__popupGuard.configureCalls().length, callsBeforeSizeClick);
+  add("r61-popup-size-disabled-in-vertical",
+    verticalSizeState.items === 5 && verticalSizeState.allDisabled
+      && verticalSizeState.note.includes("窗口宽度") && sizeClickWrote === callsBeforeSizeClick,
+    JSON.stringify({ ...verticalSizeState, sizeClickWrote, callsBeforeSizeClick }));
+  await page.screenshot({ path: path.join(guardDir, "r61-vertical-settings-size-disabled.png") });
+  await page.getByTestId("lyrics-layout-horizontal").click();
+  await page.waitForFunction(() => window.__popupGuard.config().layout === "horizontal");
   await page.getByTestId("lyrics-window-enableBlur").click();
   await page.waitForFunction(() => window.__popupGuard.config().enableBlur === false);
   add("r60-popup-switch-applies", await page.evaluate(() => window.__popupGuard.configureCalls().at(-1)?.enableBlur === false),

@@ -76,9 +76,6 @@
  * 官方在 `.amll-lyric-player` 上给 `1em`、窗口窄于 500px 时给 `20px`）——不改官方 CSS，不写死像素，
  * 也不另造一层容器内边距。窗口变紧凑之后，这 28~56px 的左右留白就是"字还没唱到就被挤掉"的那一块。
  *
- * **刻意不动 `.4em` 那对上下内边距**：竖排的折列轴是 `calc(100cqh - 0.8em)`，正是给这 0.4em×2 让路的
- * （见下面的竖排规则与 test/lyrics-window.test.mjs 的契约）——改了它，竖排的当前行会重新被裁掉上下两端。
- *
  * 选择器只命中桌面歌词窗：`data-lyrics-layout` 只有那一个舞台根节点会写（主窗歌词面板只写
  * `data-lyrics-color`，任务栏那一条 Rust 强制 horizontal 也一样收小）。
  */
@@ -87,115 +84,10 @@
 }
 
 /*
- * R45B/R46：竖版 = 官方 AMLL 组件上的**真竖排**。
- *
- * 一句话：竖排落在**一行之内**（一行 = 一条横带，带里是从上到下的列，列自右向左），
- * 播放器自己仍保持水平书写。这不是"把一整行横排折进窄窗"——那是 R45 之前的假竖版。
- *
- * 为什么 `writing-mode` 只能加在行内容上、不能加在 `.amll-lyric-player` 上（R45B fix2 的关键）：
- * 官方组件给自己的每一行量高用的是 `ResizeObserver.borderBoxSize.blockSize`（`getEntrySize` →
- * `LayoutCalculator.setLineHeight`），并把这一个"行高"拿去在 **y 轴**上排所有行、算滚动边界。
- * `blockSize` 是**在元素自己的书写模式里**量的：播放器一旦是 `vertical-rl`，所谓块轴就变成水平的
- * ——官方量到的"行高"其实是一行有多少列那么宽（240×120 实测：行高 = 291px，而窗口只有 120px 高），
- * 于是当前行被按 291 高居中排版、整体推到窗口上方之外，屏幕上一条歌词都看不见（fix2 的 RED 证据：
- * 240×120 竖排、7 个字全部 y=-31、`inside=false`）。把竖排下沉到行内容上，行盒仍是水平书写，
- * 官方量到的"行高"就恢复成"这一条横带有多高"= 竖排列的真实高度，排版/居中/滚动边界全部自洽。
- *
- * 逐条说明：
- * - `writing-mode: vertical-rl` + `text-orientation: mixed`（R46 改）：文字沿垂直方向排列、
- *   列自右向左推进（不是把整行旋转 90°）。`mixed` 是 `text-orientation` 的**初始值**，也就是
- *   Unicode 默认竖排方向：**CJK 直立、拉丁/数字标点旋转 90°**（参考实现的同一条原则）。
- *   R45B 用的 `upright` 会把拉丁字母也拉成直立方块——中英混排的歌词看起来像一列方块，
- *   实测（320×620 / lg）拉丁字形盒高 = 字号 28px，旋转后应该只有 16px 左右。
- * - `max-height: calc(100cqh - 0.8em)`（R46 改）：竖排的折列轴，也是 R46 之前**剪字的直接原因**。
- *   官方量的那个"行高"是行盒 wrapper 的高度，而 wrapper 自带上下各 `.4em` 内边距
- *   （`.FmKaba_lyricLineWrapper { padding: .4em var(--lyric-line-padding-x) }`）。
- *   行内容占满 `100cqh` 时 wrapper = `100cqh + 0.8em` > 播放器高度，官方又把 wrapper 居中，
- *   于是上下各被 `overflow: hidden` 裁掉一段：240×120 实测 wrapper 106px / 播放器 84px，
- *   首字 em 盒探出播放器 4px（`insideY=false`）。给内边距让路之后 wrapper 正好等于播放器高度
- *   （320×620 / xxl 实测 584px），每个字都落在播放器里。
- * - `margin: 0; padding: 0`（只覆盖官方给主行的 `-1em/1em` 那对儿）：那 1em 竖排时是**列的内边距**，
- *   84px 高的窗里它吃掉 56px，每列只剩 1 个字——7 个字的行会被撑成 7 列 235px 宽，反而放不下。
- *   词内 span 自己的 `-1em/1em` 保留（那是逐字遮罩的背景连续性），只撤主行这一层。
- * - `direction: rtl` 在行盒上、`direction: ltr` 在行内容上：竖排的**块起边在右**，列从行盒右端开始
- *   往左排；`rtl` 只用来把行盒摆到右边（块级盒按父级的内联方向靠起边），文字本身仍是
- *   `direction: ltr` 的"从上到下"，不会被倒过来。放不下时至少**行首**在窗口里，不会整行跑到左边去。
- * - `br { display: none }`（R46 保留，理由更明确）：官方的平衡换行（`LineBalancer`）用 canvas 量的是
- *   **水平**步进宽度（`prefixWidth` 与 `containerWidth` 比较），在竖排里那个"宽度"是列的厚度——
- *   两边量的不是同一个轴，插出来的 `<br>` 就是几处**任意的**强制断列，列会长短不一。
- *   让那两个 `<br>` 不显示，改由浏览器按窗口**高度**折列，列才会整齐填满。只动显示，不动官方 DOM，
- *   也不改它的测量代码。
- * - `overflow-x: auto` / `overflow-y: hidden`：y 轴留给官方自己的滚动（官方用 `translateY` 排版、
- *   自己接管滚轮并钳在 `beginFrame` 算的上下界里），再给它一条 y 滚动条只会互相打架。
- *   x 是竖排的块轴（见下面 fix4 的两条规则）：窗口宽度装不下所有列时，播放器自己就是滚动容器，
- *   底边出现浏览器原生的横向滚动条，用户用鼠标拖它就能看到剩下的列（R46 的浏览器守卫按"真拖条"
- *   验证所有字都够得着、且越界拖不动）。
- * - `direction: rtl`（fix4，只加在**播放器**这一层）：竖排的块起边在右，行首天然落在窗口右边、
- *   溢出朝左。只有 rtl 滚动容器才能把"朝左的溢出"变成可滚的：`scrollLeft` 从 0 走到负值，
- *   按行首在右、行尾在左的顺序露出后面的字。行盒上的那条 `direction: rtl` 照旧保留（两者不冲突）。
- * - 行盒 `width: max-content`（fix4）：官方行盒带 `contain: content` + `content-visibility: auto`，
- *   行盒自己按窗口宽度折行 ⇒ 溢出被它自己裁掉，播放器量到 `scrollWidth == clientWidth`（fix2 的残留）。
- *   把行盒按内容宽度撑开后，行盒自己不再"溢出"，官方那两层 containment 就没东西可裁，溢出落到
- *   播放器（240×120 + xxl 实测 `scrollWidth 502 / clientWidth 240`），滚动条才有意义。
- *   宽度是 `max-content`，所以横版、任务栏、主窗面板（这条选择器都命中不到）一个字节不受影响。
- * - `::-webkit-scrollbar` 只给竖排播放器画**细条**（6px）：84px 高的横带里 Windows 经典条会吃掉
- *   17px（五分之一窗口），细条是"能看见、能拖、又不把歌词挤没"的那一档。颜色写 `currentColor`
- *   （= `--amll-lp-color`），所以本文件仍然不出现任何色值。
- * - 选择器只挂在 `[data-lyrics-layout="vertical"]` 上：横版（默认）与任务栏（Rust 强制 horizontal）
- *   一个字节都受影响不到；主窗歌词面板共用 `.amll-lyrics-stage`，同样不受影响
- *   （那条 data 属性只有桌面歌词窗的 vertical 模式才有）。
- *
- * 官方组件的排版/测量/滚动仍是它自己的事：这里只加标准 CSS 布局属性，没有自绘歌词。
+ * R61：竖版歌词不再借 AMLL 播放器排版（自渲染单列，见 VerticalLyricColumn.tsx 与 vertical-lyrics.css），
+ * 旧的一整套竖排补丁规则（折列轴 `calc(100cqh - 0.8em)`、RTL 滚动容器、`br{display:none}`、细滚动条）
+ * 全部删除。这里只保留颜色接线：自定义色仍由适配层写在同一个变量上，竖版组件直接继承。
  */
-.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player {
-  /* fix4：块起边在右 ⇒ 溢出朝左，只有 rtl 滚动容器能把它变成"可滚到的"（见上面的说明） */
-  direction: rtl;
-  container-type: size;
-  overflow-x: auto;
-  overflow-y: hidden;
-}
-/* fix4：行盒按内容宽度撑开，把溢出交还给播放器（不碰官方 containment，不自绘） */
-.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player
-  [class*="lyricLineWrapper"] > [class*="lyricLine"] {
-  width: max-content;
-  min-width: 0;
-  max-width: none;
-}
-/* fix4：细滚动条（颜色走 currentColor，仍然不写色值） */
-.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player::-webkit-scrollbar {
-  height: 6px;
-  width: 6px;
-}
-.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player::-webkit-scrollbar-thumb {
-  /* 半透明走 color-mix（`opacity` 在滚动条伪元素上不生效，实测条会画成实心 currentColor）；
-     上一行是给不支持 color-mix 的运行时留的实心 currentColor 兜底，宁可实心也不许"条看不见" */
-  background: currentColor;
-  background: color-mix(in srgb, currentColor 45%, transparent);
-  border-radius: 99px;
-}
-.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player::-webkit-scrollbar-track {
-  background: transparent;
-}
-.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player [class*="lyricMainLine"] {
-  writing-mode: vertical-rl;
-  /* R46：Unicode 默认竖排方向 —— CJK 直立、拉丁/数字/标点旋转（不是全 upright 的方块字） */
-  text-orientation: mixed;
-  direction: ltr;
-  margin: 0;
-  padding: 0;
-  /*
-   * R46：折列轴。给行盒 wrapper 的上下 `.4em` 内边距让路（`calc(100cqh - 0.8em)`），
-   * 否则 wrapper 比播放器高 0.8em，官方把它居中后上下各被裁掉一段（剪字的直接原因）。
-   */
-  max-height: calc(100cqh - 0.8em);
-}
-.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player [class*="lyricMainLine"] br {
-  display: none;
-}
-/* 行盒（wrapper / line）的块起边摆到右边；翻译/音译这些行内文本仍按从左到右（竖排下 = 从上到下） */
-.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player [class*="lyricLine"] {
-  direction: rtl;
-}
-.amll-lyrics-stage[data-lyrics-layout="vertical"] .amll-lyric-player [class*="lyricSubLine"] {
-  direction: ltr;
+.amll-lyrics-stage .vertical-lyric {
+  color: var(--amll-lp-color);
 }

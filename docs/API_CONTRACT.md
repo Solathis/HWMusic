@@ -1474,7 +1474,7 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 `core_call` 与 `core_login_chrome` 的既有来源守卫不放宽。歌词窗没有任意业务 HTTP、登录、文档写入或进度写入权限。
 歌词页先订阅 document/config/progress/theme，再 `configure({})` 回读权威配置，最后 signalReady；主窗补读最新配置、补文档/进度/主题。
 
-**几何**：desktop 横版默认 **800×128 DIP**、竖版默认 **260×520 DIP**（R51 收紧，原 960×160 / 320×620；用户拖过的尺寸优先，切换方向/模式会丢弃上一方向的尺寸）；竖版是官方 AMLL 组件上的真竖排（`writing-mode` 落在行内容上）；taskbar 最多 **1200×44 DIP**，实际尺寸由安全空白决定，不能走 desktop 几何/样式分支。
+**几何**：desktop 横版默认 **800×128 DIP**、竖版默认 **260×520 DIP**（R51 收紧，原 960×160 / 320×620；用户拖过的尺寸优先，切换方向/模式会丢弃上一方向的尺寸）；竖版**不再使用官方 AMLL 组件**，由渲染层自渲染单列（`VerticalLyricColumn` + `features/lyrics/vertical-lyrics.mjs`，R61：一句一列、`writing-mode: vertical-rl` + `text-orientation: mixed`、字号随窗口宽度、按演唱进度沿书写方向平移）；横版、任务栏与沉浸页仍走官方 `LyricPlayer`。taskbar 最多 **1200×44 DIP**，实际尺寸由安全空白决定，不能走 desktop 几何/样式分支。
 只 mode/layout 变化重新计算 size/position，颜色、字号、锁、点透、演出选项不重定位。已有用户位置保留并夹入当前歌词窗显示器工作区；首次优先主窗显示器，退主屏。
 window-state 不自动恢复 lyrics 的旧尺寸/坐标，避免异步覆盖配置几何或 Taskbar。拖柄与非交互歌词宿主通过官方 `startDragging()` 拖动，排除按钮/输入/滑块等交互节点。
 
@@ -1487,6 +1487,7 @@ window-state 不自动恢复 lyrics 的旧尺寸/坐标，避免异步覆盖配�
 **配置**：`{mode:'desktop'|'taskbar', layout:'horizontal'|'vertical', style:'clean'|'panel', size, color, locked, clickThrough, enableBlur, enableScale, enableSpring, showControls, taskbarSize, taskbarColor, taskbarCustomColor, taskbarKaraoke}`。
 默认 desktop/horizontal/clean/lg/foreground，locked/clickThrough=false，四个演出/控件布尔=true。AMLL 官方 props 控制模糊/缩放/弹簧，panel 使用 shadcn Card 语义 surface；宿主隔离 AMLL 合成以保证浅暗文字可见。panel+contrast 的有效字色使用既有 foreground 令牌，配置仍保留 contrast，切回 clean 还原。
 字号档位为 **桌面 16/20/28/40/56px**（`sm|md|lg|xl|xxl`）与 **任务栏 12/14/16/18/20px**（`tsm|tmd|tlg|txl|txxl`）两张表，id 不重叠、互不通用（`taskbarSize` 收桌面档位一律 `invalid_payload`）。颜色只认 foreground/muted/primary/contrast 令牌。
+**竖版字号（R61）**：竖版字号由**窗口宽度**决定（`clamp(1rem, 26cqw, 6rem)`，纯函数 `verticalFontPx` 同常数），`size` 档位在竖版下不生效，设置气泡面板的「字号」项因此禁用并附一句说明；配置字段与档位值本身不变（切回横版立即恢复）。
 **任务栏外观独立（R59）**：`taskbarSize`（默认 `txxl` = 20px）、`taskbarColor`（默认 `foreground`）、`taskbarCustomColor`（`#RRGGBB` 或空串，默认空）、`taskbarKaraoke`（逐字高亮，默认 `true`）。`mode=taskbar` 时歌词窗**只读**这四个字段（字号/颜色/自定义色/逐字），`mode=desktop` 只读 `size`/`color`/`customColor` 且逐字恒开；两套值各存一份，改一边不动另一边。逐字关闭 = 不经逐字词推导（行级数组直接交给官方 `LyricPlayer`，按行渐变），仍是同一个官方组件。任务栏模式强制横条点透；clean/panel 均不渲染任何控件带，showControls 不改变 44px 歌词可用高度。
 任务栏这张卡只在**宿主回报 `taskbar.supported === true`**（Windows）时渲染，配置入口在主窗设置页「任务栏歌词（Beta）」卡（窄命令 `core_lyrics_configure`），不出现在桌面歌词的齿轮弹出窗里。
 锁定仅禁拖，解锁/媒体仍可点击；点透整窗不接鼠标，须在主窗设置恢复。

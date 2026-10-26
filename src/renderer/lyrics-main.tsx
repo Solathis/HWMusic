@@ -1,8 +1,10 @@
 // CSS 引入顺序契约（两个入口逐字一致）：AMLL core → full → amll-theme.css → styles.css
+// R61：竖版自渲染组件只在这扇窗里出现，它的样式追加在最后（其余入口不需要）
 import "@applemusic-like-lyrics/core/style.css"
 import "@applemusic-like-lyrics/react-full/style.css"
 import "./amll-theme.css"
 import "./styles.css"
+import "./vertical-lyrics.css"
 
 import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"

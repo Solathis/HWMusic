@@ -3,6 +3,7 @@ import "@applemusic-like-lyrics/core/style.css"
 import "@applemusic-like-lyrics/react-full/style.css"
 import "./amll-theme.css"
 import "./styles.css"
+import "./vertical-lyrics.css"
 
 import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"

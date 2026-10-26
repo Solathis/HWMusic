@@ -1099,9 +1099,15 @@ test("歌词窗入口：lyrics-main.tsx 挂载 LyricsWindow（双入口那一份
     "./styles.css",
   ];
   // R51：弹出窗入口也用同一份样式表（菜单的视觉必须与歌词窗里那份逐像素一致）
-  for (const file of ["src/renderer/main.tsx", "src/renderer/lyrics-main.tsx", "src/renderer/lyrics-settings-main.tsx"]) {
+  // R61：歌词窗与它的设置面板多一份竖版组件样式（主窗不渲染竖版歌词，不引）
+  const expectedCssByFile = {
+    "src/renderer/main.tsx": expectedCss,
+    "src/renderer/lyrics-settings-main.tsx": [...expectedCss, "./vertical-lyrics.css"],
+    "src/renderer/lyrics-main.tsx": [...expectedCss, "./vertical-lyrics.css"],
+  };
+  for (const [file, expected] of Object.entries(expectedCssByFile)) {
     const imports = [...read(file).matchAll(/^import "([^"]+\.css)"/gm)].map((match) => match[1]);
-    assert.deepEqual(imports, expectedCss, `${file}：core → full → 变量接线 → 应用样式`);
+    assert.deepEqual(imports, expected, `${file}：core → full → 变量接线 → 应用样式（+ 歌词窗的竖版样式）`);
   }
 });
 
@@ -1590,83 +1596,23 @@ test("R45B 歌词窗：Lock 图标表示已锁、悬停只留解锁、缩放拖�
   assert.match(source, /250/, "稳定 250ms 才保存（拖动过程中不许刷配置）");
 });
 
-test("R45B/R46 竖版 CSS：真竖排只作用于 vertical 布局（横版/任务栏/主窗面板都不受影响）", () => {
-  const css = read("src/renderer/amll-theme.css");
-  // 只扫规则，不扫注释（注释里解释 writing-mode 是什么，那不是"给全局加了竖排"）
-  const rules = css.replace(/\/\*[\s\S]*?\*\//g, "");
-  const at = rules.indexOf('[data-lyrics-layout="vertical"]');
-  assert.ok(at > 0, "竖排规则必须在 amll-theme.css 里（AMLL 变量的两个接线点之一）");
-  const vertical = rules.slice(at);
-  assert.match(vertical, /writing-mode:\s*vertical-rl/, "竖版必须是真竖排（writing-mode），不是窄窗换行");
+test("R61 竖版改自渲染：只有桌面竖版走 VerticalLyricColumn，横版与任务栏仍是官方 LyricPlayer", () => {
   /**
-   * R46（有意更改 R45B 的这条断言）：`upright` 会把拉丁字母也逐字直立（变成一列方块字），
-   * 与参考实现的 Unicode 默认竖排方向相反。R46 要求 **CJK 直立、拉丁/数字/标点旋转**
-   * （`mixed` 是 `text-orientation` 的初始值 = Unicode 默认竖排方向），所以这里钉 mixed。
-   * 整行仍是竖排（writing-mode），不是"把一整行旋转 90°"。
+   * 有意替换 R45B/R46/R45B-fix4 三条竖版用例（它们钉的是"给 AMLL 播放器打补丁"的写法）：
+   * 补丁规则连同 `lyricScrollbarHit` 一起删掉了，换成"竖版由哪个组件渲染"的接线契约。
+   * 竖版自己的行为（单列、字号随宽度、进度滚动、逐字）在 test/vertical-lyrics.test.mjs 与浏览器守卫里。
    */
-  assert.match(vertical, /text-orientation:\s*mixed/, "Unicode 默认竖排方向：CJK 直立、拉丁旋转（不是全 upright）");
-  assert.doesNotMatch(vertical, /text-orientation:\s*upright/, "全 upright 会把拉丁字母也拉成直立方块（R46 之前的老行为）");
-  assert.match(vertical, /overflow-x:\s*auto/, "沿书写方向（竖排下是 x 轴）允许滚动");
-  /**
-   * R46：`max-height: 100cqh` 是剪字的直接原因。官方给每行量的是**行盒 wrapper** 的高度
-   * （`.FmKaba_lyricLineWrapper` 有 `padding: .4em var(--lyric-line-padding-x)`），播放器又按这个
-   * 高度把当前行居中 ⇒ 行内容占满 100cqh 时 wrapper = 100cqh + 0.8em > 播放器高度，上下各被裁掉
-   * 半截（240×120 + xxl 实测：wrapper 129px / 播放器 84px，首字 em 盒探出播放器 4px）。
-   * 现在行内容给 wrapper 的上下内边距让路：`calc(100cqh - 0.8em)`。
-   */
-  assert.match(vertical, /max-height:\s*calc\(100cqh\s*-\s*0\.8em\)/,
-    "行内容的最大高度要给行盒 wrapper 的上下内边距（.4em×2）让路，否则当前行会被裁掉上下两端");
-  assert.doesNotMatch(vertical, /max-height:\s*100cqh/, "旧的 max-height:100cqh 已删（它就是剪字的原因）");
-  assert.match(vertical, /container-type:\s*size/, "100cqh 需要播放器自己是尺寸容器");
-  assert.match(vertical, /br\s*\{[^}]*display:\s*none/, "官方按宽度插的 <br> 在竖排下不显示（改由浏览器按高度折列）");
-  assert.doesNotMatch(rules.slice(0, at), /writing-mode/, "竖排规则不许出现在全局作用域");
-  assert.doesNotMatch(
-    rules,
-    /(^|\})\s*\.amll-lyric-player\s*\{[^}]*writing-mode/m,
-    "不能直接给 .amll-lyric-player 加竖排：主窗歌词面板共用这个类",
-  );
-  assert.doesNotMatch(vertical, /<|getContext\(/, "仍然只是 CSS：没有自绘歌词");
-  /**
-   * R45B fix2：竖排必须落在**行内容**上，不能落在播放器上。
-   *
-   * 官方给每行量高用的是 `ResizeObserver.borderBoxSize.blockSize`（在元素自己的书写模式里量），
-   * 再拿这一个"行高"在 y 轴上排所有行、算滚动边界。播放器一旦是 `vertical-rl`，块轴变成水平的，
-   * 量到的"行高"就成了"一行有多少列那么宽"（240×120 实测 291px > 窗口 120px），当前行被整体推到
-   * 窗口上方之外——这正是 fix2 要修的裁切。所以这条守卫钉住"竖排写在 `[class*="lyricMainLine"]` 上"，
-   * 也钉住"行内容自己的文本方向仍是 ltr"（块起边靠右由行盒的 rtl 负责，别把字序倒过来）。
-   */
-  const mainLineRule = vertical.slice(vertical.indexOf('[class*="lyricMainLine"]'));
-  assert.match(mainLineRule, /writing-mode:\s*vertical-rl/, "竖排要写在行内容（lyricMainLine）上：行盒保持水平书写，官方量到的行高才是真的");
-  assert.match(mainLineRule, /direction:\s*ltr/, "行内文本方向不许被 rtl 带倒（竖排仍是「从上到下」）");
-  assert.match(vertical, /\[class\*="lyricLine"\]\s*\{[^}]*direction:\s*rtl/, "行盒的块起边靠右（竖排列自右向左），放不下时行首留在窗口里");
-});
-
-
-test("R45B fix4 竖版小窗：溢出交给播放器的原生滚动条，而滚动条那一条不拖窗口（其余歌词区照旧可拖）", () => {
-  /**
-   * 这一条钉的是 fix4 的**最小面**：
-   * - CSS 只给竖排播放器（`[data-lyrics-layout="vertical"]`）加"溢出几何 + 细条"，全局作用域一个字节不动；
-   * - 组件只放过"按在播放器原生滚动条那一条上"的 mousedown，**且不 preventDefault**（否则原生拖条被取消），
-   *   不放宽整块歌词区（正文按住拖窗口的行为必须原样保留，浏览器侧由 ⑦e 的正文对照点证）。
-   */
-  const css = read("src/renderer/amll-theme.css");
-  const rules = css.replace(/\/\*[\s\S]*?\*\//g, "");
-  const at = rules.indexOf('[data-lyrics-layout="vertical"]');
-  assert.ok(at > 0, "fix4 的几何也必须在 amll-theme.css 的竖排作用域里");
-  const vertical = rules.slice(at);
-  assert.match(vertical, /\.amll-lyric-player\s*\{[^}]*direction:\s*rtl/, "竖排播放器要是 rtl 滚动容器：块起边在右，溢出朝左才滚得到");
-  assert.match(vertical, /\[class\*="lyricLineWrapper"\]\s*>\s*\[class\*="lyricLine"\]\s*\{[^}]*width:\s*max-content/,
-    "行盒按内容宽度撑开，溢出才会落在播放器里（官方 containment 才没东西可裁）");
-  assert.match(vertical, /::-webkit-scrollbar\s*\{[^}]*height:\s*6px/, "滚动条画成细条：84px 高的横带里经典条会吃掉 17px");
-  assert.doesNotMatch(rules.slice(0, at), /max-content|webkit-scrollbar/, "fix4 的几何不许出现在全局作用域（横版/任务栏/主窗面板都不受影响）");
-
   const code = stripComments(read("src/renderer/LyricsWindow.tsx"));
-  assert.match(code, /lyricScrollbarHit/, "滚动条命中判定要是一个有名字的判据，不是散在 startDrag 里的裸坐标比较");
-  assert.match(code, /closest<HTMLElement>\("\.amll-lyric-player"\)/, "只认播放器自己的滚动条，不放大到整块歌词区");
-  assert.match(code, /offsetHeight - player\.clientHeight/, "条厚取它真占掉的那一条（offsetHeight - clientHeight）");
-  assert.match(code, /if \(!grip && lyricScrollbarHit\([^)]*\)\) return\s*\n\s*event\.preventDefault\(\)/,
-    "命中滚动条时先 return：不许 preventDefault，否则原生拖条被取消");
-  assert.match(code, /onMouseDownCapture=\{startDrag\}/, "宿主仍在 capture 阶段接管拖动（既有行为不变）");
+  assert.match(code, /import \{ VerticalLyricColumn \} from "\.\/VerticalLyricColumn\.tsx"/, "竖版组件从独立文件导入");
+  assert.match(code, /const vertical = config\.mode === "desktop" && config\.layout === "vertical"/,
+    "竖版只对桌面模式生效（任务栏由 Rust 强制 horizontal）");
+  assert.match(code, /hasLyric && vertical \? <VerticalLyricColumn/, "竖版挂自渲染的单列");
+  assert.match(code, /hasLyric && !vertical \? <LyricPlayer/, "横版继续用官方组件（渲染路径没动）");
+  assert.doesNotMatch(code, /lyricScrollbarHit/, "竖版不再有原生滚动条，那条拖动豁免跟着删");
+
+  const css = stripComments(read("src/renderer/amll-theme.css"));
+  assert.doesNotMatch(css, /data-lyrics-layout="vertical"/, "AMLL 主题里不再有竖版补丁规则");
+  assert.match(read("src/renderer/lyrics-main.tsx"), /import "\.\/vertical-lyrics\.css"/, "歌词窗入口引入竖版样式表");
 });
 
 

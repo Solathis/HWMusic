@@ -31,6 +31,7 @@ import { lyricsNoticeText } from "./features/playback/playback-state.mjs"
 import { createThemeAcceptor } from "./features/theme/theme-accept.mjs"
 import { applyThemeChoice } from "./features/theme/theme.mjs"
 import { cn } from "./lib/utils"
+import { VerticalLyricColumn } from "./VerticalLyricColumn.tsx"
 
 /** 广播进来的歌词文档（主窗转发的那一份）。 */
 interface LyricsDocument {
@@ -47,30 +48,6 @@ interface LyricsProgress {
 }
 
 const INITIAL_DOCUMENT: LyricsDocument = { lines: [], status: LYRICS_STATUS.unavailable }
-
-/**
- * R45B fix4：这一下是不是按在**歌词播放器自己的原生滚动条**上。
- *
- * 桌面歌词窗的歌词区整块都在 `onMouseDownCapture={startDrag}` 里（按住正文就拖窗口）。
- * 竖排小窗（240×120 + 特大字号）装不下整行时，播放器底边会画出浏览器自己的横向滚动条——
- * 那条滚动条在真窗里必须归浏览器：按下它若还去调 `startDragging()`，OS 的窗口移动循环会接管指针，
- * 滚动条就永远拖不动（fix3 实测：按下滚动条的 mousedown 确实落在 `.amll-lyric-player` 上）。
- *
- * 判据只用**滚动条真正占掉的那一条**，不放宽整块歌词区：
- * - 目标在 `.amll-lyric-player` 里（它自己或子树——命中测试会把条算在它头上）；
- * - 位置落在它的滚动条带上：横向条贴底边（`offsetHeight - clientHeight` 那么厚），
- *   纵向条贴右边（`offsetWidth - clientWidth`）。没有条（厚度 0）时这里恒为 false。
- * 缩放拖柄自己 `stopPropagation`，与本函数无关。
- */
-function lyricScrollbarHit(target: Element, event: { clientX: number; clientY: number }): boolean {
-  const player = target.closest<HTMLElement>(".amll-lyric-player")
-  if (player === null) return false
-  const rect = player.getBoundingClientRect()
-  const barY = player.offsetHeight - player.clientHeight
-  const barX = player.offsetWidth - player.clientWidth
-  return (barY > 0 && event.clientY >= rect.top + player.clientHeight)
-    || (barX > 0 && event.clientX >= rect.left + player.clientWidth)
-}
 
 /**
  * 拖拽缩放后多久算"尺寸稳定"（R45B）：拖动过程中每一帧都保存会把配置刷成几百条，
@@ -258,8 +235,6 @@ export function LyricsWindow() {
   const startDrag = (event: MouseEvent, grip = false) => {
     if (!canDrag || event.button !== 0) return
     if (!grip && (event.target as Element).closest('button, input, select, textarea, a, [role="button"], [role="slider"], [role="menu"], [role="switch"]')) return
-    // fix4：按在播放器的原生滚动条上 = 用户在滚歌词，不许变成拖窗口（也不 preventDefault，条自己拖）
-    if (!grip && lyricScrollbarHit(event.target as Element, event)) return
     event.preventDefault()
     void getCurrentWindow().startDragging().catch(() => setActionError("拖动未能开始，请解锁后重试。"))
   }
@@ -330,9 +305,15 @@ export function LyricsWindow() {
       {appearanceButton}
     </div>
   )
+  /**
+   * R61：竖版（桌面模式）改由自渲染的单列承担——一句一列、按演唱进度平移。横版与任务栏
+   * 仍是官方 `LyricPlayer`（渲染路径一个字节没动）。
+   */
+  const vertical = config.mode === "desktop" && config.layout === "vertical"
   const content = (
     <div className="relative isolate min-h-0 flex-1" onMouseDownCapture={startDrag}>
-      {hasLyric ? <LyricPlayer className="h-full w-full" lyricLines={playerLines}
+      {hasLyric && vertical ? <VerticalLyricColumn lines={playerLines} timeMs={frame.time} karaoke={appearance.karaoke} /> : null}
+      {hasLyric && !vertical ? <LyricPlayer className="h-full w-full" lyricLines={playerLines}
         currentTime={frame.time} isSeeking={frame.isSeeking} playing={frame.playing}
         enableBlur={config.enableBlur} enableScale={config.enableScale} enableSpring={config.enableSpring}
         alignAnchor="center" alignPosition={0.5} /> : null}
