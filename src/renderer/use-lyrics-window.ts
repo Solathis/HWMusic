@@ -7,8 +7,8 @@ import {
   DEFAULT_LYRICS_CONFIG,
   LYRICS_STATUS,
   importPlanOf,
-  progressOf,
 } from "./features/lyrics/lyrics-window.mjs"
+import { createProgressPump } from "./features/lyrics/progress-pump.mjs"
 import { trackArtistsOrNull, trackDurationOf, trackNameOrNull } from "./features/library/track-fields.mjs"
 import type { PlayerRuntime } from "./features/playback/player-runtime.ts"
 import type { PlayerState } from "./features/playback/use-player.ts"
@@ -86,7 +86,7 @@ export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): Lyr
     [trackId, title, artist, durationSeconds],
   )
 
-  /** 播放状态的最新值：rAF 进度泵读它（不把状态放进 effect 依赖，否则每帧重订阅）。 */
+  /** 播放状态的最新值：歌词窗就绪重放时读它（不进 effect 依赖）。 */
   const stateRef = useRef(state)
   stateRef.current = state
 
@@ -159,21 +159,17 @@ export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): Lyr
     }
   }, [bridge, runtime, trackQuery])
 
-  // 4. 进度泵：rAF 每帧读状态机；该不该出 IPC 由桥里的纯函数决定
-  //    （推失败在桥里吞掉并留一行 warn：进度是"下一帧还会再来"的东西，不该打断用户）
-  //
-  // **只在窗真的开着时跑**：窗藏起来之后没人看进度，而 10 次/秒的 IPC 是白烧的
-  // （`visible` 来自宿主的回执，不是"我们请求它开着"）。
-  useEffect(() => {
-    if (!visible) return undefined
-    let handle = 0
-    const tick = () => {
-      void bridge.pushProgress(progressOf(stateRef.current))
-      handle = requestAnimationFrame(tick)
-    }
-    handle = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(handle)
-  }, [bridge, visible])
+  // 4. 进度泵：跟播放器通知推送，不用 rAF（主窗最小化/被遮挡时帧循环会停），也不按 visible 掐断。
+  useEffect(
+    () =>
+      createProgressPump({
+        subscribe: runtime.player.subscribe,
+        readState: runtime.player.snapshot,
+        push: (progress: { timeMs: number; playing: boolean; seekGeneration: number }) =>
+          void bridge.pushProgress(progress),
+      }),
+    [bridge, runtime],
+  )
 
   /**
    * 开关：`setVisible` / `toggleVisible` 都只经过意图机（唯一主人），不各自发 IPC。

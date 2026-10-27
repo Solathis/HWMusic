@@ -182,7 +182,7 @@ export const DEFAULT_LYRICS_CONFIG = {
   taskbarKaraoke: true,
 };
 
-/** 进度节流窗口：rAF 每帧都可能调，但只有该推的才出 IPC（≥100ms 或播放/跳转变化）。 */
+/** 进度节流窗口：每次播放通知都可能调，但只有该推的才出 IPC（≥100ms 或播放/跳转变化）。 */
 export const MIN_PROGRESS_INTERVAL_MS = 100;
 
 /** 歌词状态词表（与 `playback-state.mjs` 的文案表、播放器状态机共用的那一套）。 */
@@ -470,14 +470,7 @@ export function estimateTimeMs(lastPush, nowMs) {
   return anchor + Math.round(elapsed);
 }
 
-/**
- * 把插值锚点挪到"现在"（纯函数，窗从隐藏变可见时用）。
- *
- * 为什么需要它：窗被托盘藏起来的那段时间里，主窗**不推进度**（它知道窗不在，见
- * `use-lyrics-window.ts` 的进度泵），所以手里那条推送已经过期。窗再显示时若不重锚，
- * 插值会按"隐藏了多久"一次性往前跳（歌词瞬间窜到后面再被新推送拉回来）；
- * 重锚之后就是"停在上次的位置，等 100ms 内的新推送"。
- */
+/** 窗从隐藏变可见时把插值锚点挪到"现在"，免得按隐藏时长一次性往前跳。 */
 export function reanchorProgress(lastPush, nowMs) {
   const push = lastPush !== null && typeof lastPush === "object" ? lastPush : null;
   if (push === null) return null;

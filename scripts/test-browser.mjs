@@ -193,6 +193,8 @@ const settingsPopupOpens = [];
 const settingsPopupResizes = [];
 const settingsPopupCloses = [];
 const mediaActions = [];
+/** core_lyrics_progress 的调用次数（判断去掉 rAF 后进度是否还在推）。 */
+let lyricsProgressCalls = 0;
 /** R45C：core_lyrics_toggle 的请求次数与每次的意图（"一次点击只发一次"按它判）。 */
 const lyricsToggles = [];
 /**
@@ -377,7 +379,10 @@ mockIPC(async (command, args) => {
   if (command === "core_get_tray_available") return true;
   if (command === "core_login_chrome") return { theme: currentTheme };
   if (command === "core_lyrics_document") return emit("core:event", { channel: "lyrics:document", payload: args.document });
-  if (command === "core_lyrics_progress") return emit("core:event", { channel: "lyrics:progress", payload: args.progress });
+  if (command === "core_lyrics_progress") {
+    lyricsProgressCalls += 1;
+    return emit("core:event", { channel: "lyrics:progress", payload: args.progress });
+  }
   if (command === "core_lyrics_control") {
     mediaActions.push(args.payload.action);
     return emit("core:event", { channel: "player:command", payload: { command: args.payload.action } });
@@ -479,6 +484,26 @@ function Guard() {
       },
       setDesktop,
       dragCount: () => dragCalls,
+      /** 进度 IPC 的累计次数（配合 resetProgressCount 计一段时间内的推送数）。 */
+      progressCount: () => lyricsProgressCalls,
+      resetProgressCount: () => { lyricsProgressCalls = 0; },
+      /** 挂上与 use-lyrics-window 同一份接线的进度泵（桌面歌词模式下 LibraryShell 不挂载）。 */
+      async startProgressPump() {
+        const [{ createProgressPump }, { getLyricsBridge }] = await Promise.all([
+          import("../../src/renderer/features/lyrics/progress-pump.mjs"),
+          import("../../src/renderer/features/lyrics/lyrics-bridge.mjs"),
+        ]);
+        if (typeof window.__r68StopPump === "function") window.__r68StopPump();
+        window.__r68StopPump = createProgressPump({
+          subscribe: runtime.player.subscribe,
+          readState: runtime.player.snapshot,
+          push: (progress) => void getLyricsBridge().pushProgress(progress),
+        });
+      },
+      stopProgressPump() {
+        if (typeof window.__r68StopPump === "function") window.__r68StopPump();
+        window.__r68StopPump = undefined;
+      },
       resizeCalls: () => resizeCalls.slice(),
       configureCalls: () => configureCalls.map((patch) => ({ ...patch })),
       resetConfigureCalls: () => { configureCalls.length = 0; },
@@ -1974,6 +1999,87 @@ const DESKTOP_BASELINE = {
   // R59：任务栏那一套字段与桌面各存一份（一起归位，免得上一项改过的值漏到下一项）
   taskbarSize: "txxl", taskbarColor: "foreground", taskbarCustomColor: "", taskbarKaraoke: true,
 };
+
+/** 去掉 rAF 后进度仍要推送、播放图标仍要跟着翻（摘帧时 Playwright 默认轮询也停，故等待用 polling: 100、点击用强制模式）。 */
+export async function checkDesktopProgressChain(browser, port, guardDir, add) {
+  /** 这一项真播真停，会把播放器状态带进后面按夹具量的检查，所以自己开一页。 */
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
+  let reported = false;
+  try {
+    page.setDefaultTimeout(15_000);
+    await routeGuardAudio(page, fixtureAudio());
+    await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
+    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+    await page.evaluate(() => window.__guard.ready());
+    await page.evaluate(() => window.__guard.desktopBeforeMount());
+    await page.getByTestId("lyrics-window").waitFor();
+    await page.waitForTimeout(900);
+
+    const desktop = page.getByTestId("lyrics-window");
+    const mediaButton = '[data-testid="lyrics-controls"] button[aria-label="播放"], [data-testid="lyrics-controls"] button[aria-label="暂停"]';
+    const mediaLabel = () => page.evaluate((selector) => document.querySelector(selector)?.getAttribute("aria-label") ?? null, mediaButton);
+    const progressCount = () => page.evaluate(() => window.__guard.progressCount());
+    const status = () => page.evaluate(() => window.__guard.snapshot().status);
+    /** 真点击优先（可信手势，音频才放得起来）；摘帧时强制模式跳过可点性轮询，再不行就直接派发。 */
+    const clickMedia = async (label) => {
+      try {
+        await desktop.getByRole("button", { name: label, exact: true }).click({ force: true, timeout: 5000 });
+      } catch {
+        await page.evaluate((name) => {
+          const target = document.querySelector('[data-testid="lyrics-controls"] button[aria-label="' + name + '"]');
+          if (target === null) throw new Error("歌词窗没有这个按钮：" + name);
+          target.click();
+        }, label);
+      }
+    };
+
+    await page.evaluate(() => window.__guard.configureDesktop({ mode: "desktop", showControls: true, locked: false }));
+    await page.waitForTimeout(400);
+    await page.evaluate(() => window.__guard.pause());
+    await page.evaluate(() => window.__guard.desktopDocument());
+    await page.waitForTimeout(300);
+    const labelBefore = await mediaLabel();
+
+    // ① 摘帧：此后不再执行任何帧回调
+    await page.evaluate(() => { window.__r68Raf = window.requestAnimationFrame; window.requestAnimationFrame = () => 0; });
+    // ② 挂上进度泵
+    await page.evaluate(() => window.__guard.startProgressPump());
+    await page.evaluate(() => window.__guard.resetProgressCount());
+    await page.waitForTimeout(200);
+    const idle = await progressCount();
+
+    // ③ 播放：进度必须由状态机自己的通知流出来
+    await clickMedia("播放");
+    await page.waitForFunction(() => window.__guard.snapshot().status === "playing", null, { polling: 100, timeout: 8000 });
+    await page.waitForFunction((base) => window.__guard.progressCount() > base, idle, { polling: 100, timeout: 8000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    const playingCount = await progressCount();
+    const labelPlaying = await mediaLabel();
+    await page.screenshot({ path: path.join(guardDir, "r68-progress-without-raf.png") });
+
+    // ④ 暂停：播放态翻转同样要出一帧，图标翻回「播放」
+    await clickMedia("暂停");
+    await page.waitForFunction(() => window.__guard.snapshot().status === "paused", null, { polling: 100, timeout: 8000 });
+    await page.waitForTimeout(500);
+    const pausedCount = await progressCount();
+    const labelPaused = await mediaLabel();
+    await page.screenshot({ path: path.join(guardDir, "r68-desktop-toggle-icon-follows-state.png") });
+
+    add("r68-progress-without-raf", playingCount > idle && pausedCount > playingCount,
+      JSON.stringify({ idle, playing: playingCount, paused: pausedCount }));
+    add("r68-desktop-toggle-icon-follows-state", labelBefore === "播放" && labelPlaying === "暂停" && labelPaused === "播放",
+      JSON.stringify({ labelBefore, labelPlaying, labelPaused, status: await status() }));
+    reported = true;
+  } catch (cause) {
+    if (!reported) {
+      const detail = `检查过程抛错：${String(cause?.message ?? cause).split("\n")[0]}`;
+      add("r68-progress-without-raf", false, detail);
+      add("r68-desktop-toggle-icon-follows-state", false, detail);
+    }
+  } finally {
+    await page.close();
+  }
+}
 
 /**
  * R45B：桌面歌词的**交互**验收（锁定 / 缩放 / 竖排 / 逐字 / 颜色）。
@@ -5628,6 +5734,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     add("desktop-early-document", earlyDocument?.includes("第一行歌词守卫"), "早于 React 挂载的文档丢失后，就绪握手须补回当前快照");
     const desktop = page.getByTestId("lyrics-window");
     await checkDesktopInteraction(page, guardDir, add);
+    await checkDesktopProgressChain(browser, port, guardDir, add);
     /** R51：歌词窗里只剩齿轮——点它把锚点交给宿主，菜单搬到了另一扇窗（下面那一项量那一页）。 */
     await checked("r51-desktop-settings-gear", () => checkDesktopLyricsSettings(page, guardDir, add));
     /** R50：透明桌面歌词的令牌衬底（白桌面/深色主题、深桌面/浅色主题都要读得清）。 */

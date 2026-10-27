@@ -312,7 +312,7 @@ export function createLyricsBridge(deps = {}) {
     await callCommand(CORE_LYRICS_DOCUMENT, { document: lyricsDocumentOf(source.lines, source.status) });
   }
 
-  /** 推进度（rAF 每帧都可能调；不该推的直接丢掉，不出 IPC）。 */
+  /** 推进度（播放器每次通知都可能调；不该推的直接丢掉，不出 IPC）。 */
   async function pushProgress(progress) {
     const next = normalizeProgress(progress);
     if (!shouldPushProgress(lastProgress, next)) return { pushed: false };

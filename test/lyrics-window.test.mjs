@@ -1380,7 +1380,9 @@ test("主窗接线：App 用 use-lyrics-window 的 hook，且设置页有桌面�
   assert.match(hook, /useEffect\(/, "订阅与数据链都在 effect 里（挂载一次）");
   assert.match(hook, /setLyrics\(/, "解析出来的行要喂给播放器状态（主窗面板与歌词窗共用同一份）");
   assert.match(hook, /pushDocument\(/, "同一份行也转发给歌词窗");
-  assert.match(hook, /requestAnimationFrame/, "进度用 rAF 推（不另起定时器）");
+  // 进度由播放器订阅推送（见 progress-pump.mjs），不再用 rAF。
+  assert.match(hook, /createProgressPump\(/, "进度泵走播放器的订阅");
+  assert.doesNotMatch(hook, /requestAnimationFrame/, "主窗不再排帧推进度");
   assert.match(hook, /lyrics-window\.mjs/, "判定来自纯逻辑模块");
 
   const page = read("src/renderer/pages.tsx");

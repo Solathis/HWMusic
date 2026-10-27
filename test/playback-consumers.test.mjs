@@ -75,7 +75,10 @@ test("同 id 的歌词匹配元信息变化重新请求，进度/音量/封面�
     builder.onResolve({ filter: /lyrics-bridge\.mjs$/ }, () => ({ path: "bridge", namespace: "r44a" }));
     builder.onLoad({ filter: /.*/, namespace: "r44a" }, ({ path }) => ({ contents: path === "react" ? "export const { useRef, useState, useMemo, useCallback, useEffect } = globalThis.__r44aHooks;" : "export const getLyricsBridge = () => globalThis.__r44aHooks.bridge;" }));
   } }]);
-  const runtime = { player: { setLyrics() {} } };
+  /** 进度泵要用 subscribe/snapshot，与真运行时一致。 */
+  const runtime = {
+    player: { setLyrics() {}, subscribe: () => () => {}, snapshot: () => ({ currentTimeMs: 0, status: "paused", seekGeneration: 0 }) },
+  };
   const render = async (track, progress = 0, volume = 1) => { cursor = 0; effects = []; useLyricsWindow(runtime, { track, currentTimeMs: progress, volume }); for (const effect of effects) effect(); await new Promise((done) => setTimeout(done, 0)); };
   try {
     await render({ id: "1", name: "旧名", artists: "旧艺人", duration: 10 });
