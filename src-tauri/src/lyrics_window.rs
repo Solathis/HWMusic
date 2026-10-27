@@ -215,7 +215,7 @@ pub const DEFAULT_TASKBAR_SIZE: &str = "txxl";
 pub const DEFAULT_TASKBAR_COLOR: &str = "foreground";
 
 pub const LYRICS_LAYOUTS: &[&str] = &["horizontal", "vertical"];
-pub const LYRICS_STYLES: &[&str] = &["clean", "panel"];
+pub const LYRICS_STYLES: &[&str] = &["clean", "panel", "bare"];
 pub const LYRICS_CONTROL_ACTIONS: &[&str] = &["toggle", "previous", "next"];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -231,7 +231,6 @@ pub struct LyricsConfig {
     pub window_width: Option<f64>,
     pub window_height: Option<f64>,
     pub locked: bool,
-    pub click_through: bool,
     pub enable_blur: bool,
     pub enable_scale: bool,
     pub enable_spring: bool,
@@ -256,7 +255,6 @@ impl Default for LyricsConfig {
             window_width: None,
             window_height: None,
             locked: false,
-            click_through: false,
             enable_blur: true,
             enable_scale: true,
             enable_spring: true,
@@ -304,7 +302,7 @@ impl LyricsConfig {
         if let Some(size) = size_patch(patch, "windowWidth", MIN_WINDOW_WIDTH_DIP) { next.window_width = size; }
         if let Some(size) = size_patch(patch, "windowHeight", MIN_WINDOW_HEIGHT_DIP) { next.window_height = size; }
         for (key, target) in [
-            ("locked", &mut next.locked), ("clickThrough", &mut next.click_through),
+            ("locked", &mut next.locked),
             ("enableBlur", &mut next.enable_blur), ("enableScale", &mut next.enable_scale),
             ("enableSpring", &mut next.enable_spring), ("showControls", &mut next.show_controls),
             ("taskbarKaraoke", &mut next.taskbar_karaoke),
@@ -333,7 +331,7 @@ impl LyricsConfig {
             "size": self.size, "color": self.color, "locked": self.locked,
             "customColor": self.custom_color, "windowWidth": self.window_width,
             "windowHeight": self.window_height,
-            "clickThrough": self.click_through, "enableBlur": self.enable_blur,
+            "enableBlur": self.enable_blur,
             "enableScale": self.enable_scale, "enableSpring": self.enable_spring,
             "showControls": self.show_controls, "effectiveSize": self.effective_size(),
             // R59：任务栏那扇窗的外观（与桌面各存一份）
@@ -342,7 +340,7 @@ impl LyricsConfig {
         })
     }
 
-    /// **落盘合同**：只有 `DEFAULT_LYRICS_CONFIG` 那 18 个字面键。
+    /// **落盘合同**：只有 `DEFAULT_LYRICS_CONFIG` 那 17 个字面键。
     ///
     /// 刻意与 [`LyricsConfig::payload`] 分开：`effectiveSize` 是派生值（由 mode+size 算出来的），
     /// taskbar 的附着/可见/revision/dirty/saveError 是运行时状态——把它们写进 `settings.json`
@@ -353,7 +351,7 @@ impl LyricsConfig {
             "size": self.size, "color": self.color, "locked": self.locked,
             "customColor": self.custom_color, "windowWidth": self.window_width,
             "windowHeight": self.window_height,
-            "clickThrough": self.click_through, "enableBlur": self.enable_blur,
+            "enableBlur": self.enable_blur,
             "enableScale": self.enable_scale, "enableSpring": self.enable_spring,
             "showControls": self.show_controls,
             "taskbarSize": self.taskbar_size, "taskbarColor": self.taskbar_color,
@@ -368,10 +366,10 @@ impl LyricsConfig {
 
     pub fn query(&self) -> String {
         format!(
-            "mode={}&size={}&color={}&customColor={}&windowWidth={}&windowHeight={}&locked={}&clickThrough={}&layout={}&style={}&enableBlur={}&enableScale={}&enableSpring={}&showControls={}&taskbarSize={}&taskbarColor={}&taskbarCustomColor={}&taskbarKaraoke={}",
+            "mode={}&size={}&color={}&customColor={}&windowWidth={}&windowHeight={}&locked={}&layout={}&style={}&enableBlur={}&enableScale={}&enableSpring={}&showControls={}&taskbarSize={}&taskbarColor={}&taskbarCustomColor={}&taskbarKaraoke={}",
             self.mode.as_str(), self.size, self.color, encode_custom_color(&self.custom_color),
             dip_param(self.window_width), dip_param(self.window_height),
-            u8::from(self.locked), u8::from(self.click_through),
+            u8::from(self.locked),
             self.layout, self.style, u8::from(self.enable_blur), u8::from(self.enable_scale),
             u8::from(self.enable_spring), u8::from(self.show_controls),
             self.taskbar_size, self.taskbar_color,
@@ -412,8 +410,37 @@ pub fn normalized_patch(current: &LyricsConfig, patch: &Value) -> LyricsConfig {
     }
 }
 
+/// 任务栏模式一律不接收鼠标；锁定的桌面歌词也不接收（解锁按钮所在区域由指针轮询临时放开）。
 pub fn click_through_enabled(config: &LyricsConfig) -> bool {
-    config.click_through || config.mode == LyricsMode::Taskbar
+    config.mode == LyricsMode::Taskbar || config.locked
+}
+
+/// 解锁按钮在歌词窗里的矩形（CSS 像素，相对窗口左上角）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UnlockZone { pub x: f64, pub y: f64, pub width: f64, pub height: f64 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerZone { Outside, Inside, Unlock }
+
+/// 光标落在歌词窗的哪一块：参数是物理像素（光标与窗口左上角）、窗口的 CSS 尺寸与缩放比。
+pub fn pointer_zone(cursor: (f64, f64), window_origin: (f64, f64), window_size: (f64, f64), scale: f64, unlock: Option<UnlockZone>) -> PointerZone {
+    let factor = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    let x = (cursor.0 - window_origin.0) / factor;
+    let y = (cursor.1 - window_origin.1) / factor;
+    if !(x >= 0.0 && y >= 0.0 && x < window_size.0 && y < window_size.1) { return PointerZone::Outside; }
+    match unlock {
+        Some(zone) if x >= zone.x && x < zone.x + zone.width && y >= zone.y && y < zone.y + zone.height => PointerZone::Unlock,
+        _ => PointerZone::Inside,
+    }
+}
+
+/// 解锁区报告的参数：`null` 表示没有解锁按钮；否则必须恰好是 x/y/width/height 四个有限非负数。
+pub fn parse_unlock_zone(value: &Value) -> Result<Option<UnlockZone>, CoreError> {
+    if value.is_null() { return Ok(None); }
+    let bad = || CoreError::new("invalid_payload", "解锁区只接受 null 或 {x, y, width, height}");
+    let object = value.as_object().filter(|map| map.len() == 4).ok_or_else(bad)?;
+    let read = |key: &str| object.get(key).and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0).ok_or_else(bad);
+    Ok(Some(UnlockZone { x: read("x")?, y: read("y")?, width: read("width")?, height: read("height")? }))
 }
 
 pub fn status_payload(config: &LyricsConfig, visible: bool, revision: u64) -> Value {
@@ -553,6 +580,8 @@ pub struct LyricsWindowState {
     persist: Mutex<LyricsPersistence>,
     persist_idle: Condvar,
     writer: Mutex<Option<std::thread::JoinHandle<()>>>,
+    unlock_zone: Mutex<Option<UnlockZone>>,
+    pointer_generation: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Default)]
@@ -982,7 +1011,7 @@ pub fn validate_configure(label: &str, patch: &Value, retry_save: Option<bool>, 
             "taskbarCustomColor" => value.as_str().is_some_and(custom_color_ok),
             "windowWidth" | "windowHeight" => value.is_null()
                 || value.as_f64().is_some_and(|size| size.is_finite() && size > 0.0),
-            "locked" | "clickThrough" | "enableBlur" | "enableScale" | "enableSpring" | "showControls" => value.is_boolean(),
+            "locked" | "enableBlur" | "enableScale" | "enableSpring" | "showControls" => value.is_boolean(),
             _ => false,
         };
         if !valid { return Err(CoreError::new("invalid_payload", "歌词配置含未知字段或非法值")); }
@@ -1321,7 +1350,55 @@ pub fn apply_window_effects(previous: Option<&LyricsConfig>, config: &LyricsConf
     }
 }
 
+const POINTER_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// 配置一变就作废旧的轮询线程；锁定的桌面歌词再起一个新的。
+fn sync_pointer_watch<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<R>, config: &LyricsConfig) {
+    let state = app.state::<LyricsWindowState>();
+    let generation = state.pointer_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    if config.mode != LyricsMode::Desktop || !config.locked { return; }
+    let app = app.clone();
+    let window = window.clone();
+    std::thread::spawn(move || watch_pointer(app, window, generation));
+}
+
+fn watch_pointer<R: Runtime>(app: AppHandle<R>, window: WebviewWindow<R>, generation: u64) {
+    let mut last: Option<PointerZone> = None;
+    loop {
+        std::thread::sleep(POINTER_POLL);
+        let Some(state) = app.try_state::<LyricsWindowState>() else { return; };
+        if state.pointer_generation.load(std::sync::atomic::Ordering::SeqCst) != generation { return; }
+        let config = state.config();
+        if config.mode != LyricsMode::Desktop || !config.locked { return; }
+        match window.is_visible() { Ok(true) => {}, Ok(false) => { last = None; continue; }, Err(_) => return }
+        let zone = match (window.cursor_position(), window.inner_position(), window.inner_size(), window.scale_factor()) {
+            (Ok(cursor), Ok(origin), Ok(size), Ok(scale)) => pointer_zone(
+                (cursor.x, cursor.y),
+                (f64::from(origin.x), f64::from(origin.y)),
+                (f64::from(size.width) / scale, f64::from(size.height) / scale),
+                scale,
+                *lock(&state.unlock_zone),
+            ),
+            (Err(error), ..) => {
+                log::warn!("读不到光标位置（{error}）：锁定的桌面歌词改为照常接收鼠标");
+                let _ = window.set_ignore_cursor_events(false);
+                return;
+            }
+            _ => continue,
+        };
+        if last == Some(zone) { continue; }
+        if let Err(error) = window.set_ignore_cursor_events(zone != PointerZone::Unlock) {
+            log::warn!("歌词窗的鼠标接收状态没能更新：{error}");
+        }
+        if last.map(|old| old != PointerZone::Outside) != Some(zone != PointerZone::Outside) {
+            emit_core_event(&app, crate::bridge::LYRICS_POINTER, json!({ "inside": zone != PointerZone::Outside }));
+        }
+        last = Some(zone);
+    }
+}
+
 fn apply_config<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<R>, previous: Option<&LyricsConfig>, config: &LyricsConfig) -> Result<(), CoreError> {
+    sync_pointer_watch(app, window, config);
     if config.mode == LyricsMode::Taskbar { return Ok(()); }
     let geometry = previous.is_none_or(|old| old.mode != config.mode || old.layout != config.layout);
     let resized = !geometry && previous.and_then(LyricsConfig::custom_size) != config.custom_size() && config.custom_size().is_some();
@@ -1660,6 +1737,17 @@ pub async fn core_lyrics_configure(
 pub async fn core_lyrics_control(app: AppHandle, webview: tauri::Webview, payload: Value) -> Result<Value, CoreError> {
     let command = control_payload(webview.label(), &payload)?;
     emit_core_event(&app, crate::bridge::PLAYER_COMMAND, command);
+    Ok(Value::Null)
+}
+
+/// 歌词页报告解锁按钮所在区域（只接受歌词窗自己调用）。
+#[tauri::command]
+pub async fn core_lyrics_unlock_zone(app: AppHandle, webview: tauri::Webview, zone: Value) -> Result<Value, CoreError> {
+    if webview.label() != LYRICS_WINDOW_LABEL {
+        return Err(CoreError::new("forbidden_source", "解锁区只接受歌词窗调用"));
+    }
+    let parsed = parse_unlock_zone(&zone)?;
+    *lock(&app.state::<LyricsWindowState>().unlock_zone) = parsed;
     Ok(Value::Null)
 }
 
@@ -2031,7 +2119,7 @@ mod tests {
         let current = LyricsConfig::default();
         let area = Rect { x: -1920.0, y: -200.0, width: 1920.0, height: 1040.0 };
         let mut effects = Vec::new();
-        let visual = current.apply_patch(&json!({"locked":true,"color":"primary","clickThrough":true,"style":"panel","enableBlur":false,"enableScale":false,"enableSpring":false}));
+        let visual = current.apply_patch(&json!({"locked":true,"color":"primary","style":"panel","enableBlur":false,"enableScale":false,"enableSpring":false}));
         apply_window_effects(Some(&current), &visual, area, 1.25, Some(Point {x:-800.0,y:150.0}), |effect| effects.push(effect));
         assert_eq!(effects, vec![WindowEffect::ClickThrough(true)]);
         effects.clear();
@@ -2244,7 +2332,6 @@ mod tests {
         assert_eq!(config.size, "lg");
         assert_eq!(config.color, "foreground");
         assert!(!config.locked);
-        assert!(!config.click_through);
         assert_eq!(config.effective_size(), "lg");
     }
 
@@ -2255,7 +2342,6 @@ mod tests {
             size: "xl".to_string(),
             color: "primary".to_string(),
             locked: true,
-            click_through: true,
             ..LyricsConfig::default()
         };
 
@@ -2280,13 +2366,11 @@ mod tests {
             "size": "md",
             "color": "contrast",
             "locked": false,
-            "clickThrough": false,
         }));
         assert_eq!(patched.mode, LyricsMode::Taskbar);
         assert_eq!(patched.size, "md");
         assert_eq!(patched.color, "contrast");
         assert!(!patched.locked);
-        assert!(!patched.click_through);
     }
 
     /// 简报钉死的上限：任务栏档位表每一档都 ≤ 20px（R59 之后上限由表本身保证）。
@@ -2455,19 +2539,51 @@ mod tests {
     }
 
     #[test]
-    fn taskbar_mode_is_always_click_through_and_desktop_mode_is_not() {
+    fn taskbar_and_locked_desktop_ignore_the_cursor() {
         let desktop = LyricsConfig::default();
-        assert!(!click_through_enabled(&desktop), "桌面模式默认可点（要能接手拖动）");
-        let explicit = LyricsConfig {
-            click_through: true,
-            ..LyricsConfig::default()
-        };
-        assert!(click_through_enabled(&explicit), "用户显式开了就点透");
-        let taskbar = LyricsConfig {
-            mode: LyricsMode::Taskbar,
-            ..LyricsConfig::default()
-        };
-        assert!(click_through_enabled(&taskbar), "任务栏模式一律点透");
+        assert!(!click_through_enabled(&desktop), "未锁定的桌面歌词要能接收鼠标");
+        let locked = LyricsConfig { locked: true, ..LyricsConfig::default() };
+        assert!(click_through_enabled(&locked), "锁定的桌面歌词不接收鼠标");
+        let taskbar = LyricsConfig { mode: LyricsMode::Taskbar, ..LyricsConfig::default() };
+        assert!(click_through_enabled(&taskbar), "任务栏模式一律不接收鼠标");
+    }
+
+    /// 盘上还留着已删除的 `clickThrough` 时要照常恢复（它现在是未知字段）。
+    #[test]
+    fn a_saved_config_with_the_removed_click_through_key_still_restores() {
+        let old = json!({ "mode": "desktop", "locked": true, "clickThrough": true, "style": "panel" });
+        let restored = LyricsConfig::restored(Some(&old));
+        assert!(restored.locked);
+        assert_eq!(restored.style, "panel");
+        assert!(restored.persisted().get("clickThrough").is_none(), "已删除的键不再写回");
+        assert_eq!(LyricsConfig::default().apply_patch(&json!({"style": "bare"})).style, "bare");
+    }
+
+    #[test]
+    fn pointer_zone_maps_physical_cursor_to_css_pixels() {
+        let unlock = Some(UnlockZone { x: 380.0, y: 0.0, width: 40.0, height: 28.0 });
+        let origin = (1000.0, 500.0);
+        let size = (800.0, 128.0);
+        assert_eq!(pointer_zone((990.0, 510.0), origin, size, 1.5, unlock), PointerZone::Outside);
+        assert_eq!(pointer_zone((1000.0 + 100.0 * 1.5, 500.0 + 60.0 * 1.5), origin, size, 1.5, unlock), PointerZone::Inside);
+        assert_eq!(pointer_zone((1000.0 + 400.0 * 1.5, 500.0 + 10.0 * 1.5), origin, size, 1.5, unlock), PointerZone::Unlock);
+        assert_eq!(pointer_zone((1000.0 + 400.0 * 1.5, 500.0 + 10.0 * 1.5), origin, size, 1.5, None), PointerZone::Inside);
+        assert_eq!(pointer_zone((1000.0 + 800.0 * 1.5, 510.0), origin, size, 1.5, unlock), PointerZone::Outside, "右边界不算在窗内");
+        assert_eq!(pointer_zone((-300.0, 50.0), (-500.0, 0.0), size, 1.0, None), PointerZone::Inside, "副屏的负坐标照常换算");
+    }
+
+    #[test]
+    fn unlock_zone_payload_is_null_or_exactly_four_numbers() {
+        assert_eq!(parse_unlock_zone(&Value::Null).ok(), Some(None));
+        assert_eq!(
+            parse_unlock_zone(&json!({"x": 1, "y": 2, "width": 30, "height": 28})).ok(),
+            Some(Some(UnlockZone { x: 1.0, y: 2.0, width: 30.0, height: 28.0 }))
+        );
+        assert!(parse_unlock_zone(&json!({"x": 1, "y": 2, "width": 30})).is_err(), "少一个键");
+        assert!(parse_unlock_zone(&json!({"x": 1, "y": 2, "width": 30, "height": 28, "z": 0})).is_err(), "多一个键");
+        assert!(parse_unlock_zone(&json!({"x": -1, "y": 2, "width": 30, "height": 28})).is_err(), "负数");
+        assert!(parse_unlock_zone(&json!({"x": "1", "y": 2, "width": 30, "height": 28})).is_err(), "字符串");
+        assert!(parse_unlock_zone(&json!([1, 2, 30, 28])).is_err(), "数组");
     }
 
     #[test]
@@ -2477,7 +2593,6 @@ mod tests {
             size: "xxl".to_string(),
             color: "contrast".to_string(),
             locked: true,
-            click_through: false,
             ..LyricsConfig::default()
         };
         let url = lyrics_window_url(&config, crate::theme::ThemeChoice::Dark);
@@ -2486,7 +2601,7 @@ mod tests {
         assert!(url.contains("size=xxl"), "查询串保留用户档位，渲染时再限有效字号：{url}");
         assert!(url.contains("color=contrast"), "{url}");
         assert!(url.contains("locked=1"), "布尔写成 0/1（渲染层只认这两个值）：{url}");
-        assert!(url.contains("clickThrough=0"), "{url}");
+        assert!(!url.contains("clickThrough"), "{url}");
         // R41：主题也走查询串（歌词窗调不动读主题的那条命令，只能由建窗那一刻同步给它）
         assert!(url.contains("&theme=dark"), "深色档位要真的带上：{url}");
         assert!(
@@ -2752,11 +2867,12 @@ mod tests {
             ("core_lyrics_progress", "require_main_webview("),
             ("core_lyrics_configure", "validate_configure("),
             ("core_lyrics_control", "control_payload("),
+            ("core_lyrics_unlock_zone", "LYRICS_WINDOW_LABEL"),
         ] {
             let body = &production[production.find(&format!("pub async fn {name}(")).unwrap()..];
             assert!(body.find(guard).unwrap() < 900);
         }
-        assert_eq!(production.matches("#[tauri::command]").count(), 5);
+        assert_eq!(production.matches("#[tauri::command]").count(), 6);
     }
 
     // ---- R44e：歌词配置持久化（Rust 拥有的保存任务）--------------------------------
@@ -2765,17 +2881,14 @@ mod tests {
         LyricsConfig::default().apply_patch(&patch)
     }
 
-    /// 落盘合同恰好是 18 个字面键：不含 `effectiveSize`（派生值）与 taskbar/revision/visible/dirty。
-    ///
-    /// R59 **有意扩到 18 个**：任务栏歌词的外观（字号/颜色/自定义色/逐字开关）是用户配置，
-    /// 必须落盘并在重启后恢复。
+    /// 落盘合同恰好是 17 个字面键：不含 `effectiveSize`（派生值）与 taskbar/revision/visible/dirty。
     #[test]
     fn r44e_the_persisted_contract_is_exactly_the_config_keys() {
         let persisted = LyricsConfig::default().persisted();
         let mut keys: Vec<&str> = persisted.as_object().expect("必须是对象").keys().map(String::as_str).collect();
         keys.sort_unstable();
         let mut expected = vec![
-            "mode", "layout", "style", "size", "color", "locked", "clickThrough",
+            "mode", "layout", "style", "size", "color", "locked",
             "enableBlur", "enableScale", "enableSpring", "showControls",
             // R45B：歌词颜色与窗口尺寸也是用户配置（要落盘、要重启恢复）
             "customColor", "windowWidth", "windowHeight",
@@ -2784,7 +2897,7 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(keys, expected, "只写合同 config 字段");
-        assert_eq!(keys.len(), 18, "落盘键数就是 18");
+        assert_eq!(keys.len(), 17, "落盘键数就是 17");
         assert!(persisted.get("effectiveSize").is_none(), "派生值不入盘");
         for forbidden in ["revision", "visible", "dirty", "saveError", "requestedVisible", "taskbar"] {
             assert!(persisted.get(forbidden).is_none(), "{forbidden} 是运行时状态，不入盘");
@@ -3252,9 +3365,9 @@ mod tests {
             vec![WindowEffect::Size(Size { width: 500.0, height: 480.0 })],
             "用户拖出来的尺寸只改尺寸——不许给 Geometry（那会连位置一起重算 = 跳位）"
         );
+        // 锁定会切换鼠标接收状态，所以不在这一组里（见 taskbar_and_locked_desktop_ignore_the_cursor）。
         for patch in [
             json!({"color": "primary"}),
-            json!({"locked": true}),
             json!({"style": "panel"}),
             json!({"enableSpring": false}),
             json!({"customColor": "#ff8800"}),
@@ -3263,7 +3376,7 @@ mod tests {
             let next = sized.apply_patch(&patch);
             let mut quiet = Vec::new();
             apply_window_effects(Some(&sized), &next, area, 1.0, current, |effect| quiet.push(effect));
-            assert!(quiet.is_empty(), "颜色/锁/样式/演出/字号/自定义色都不许产生窗口效果：{patch} → {quiet:?}");
+            assert!(quiet.is_empty(), "颜色/样式/演出/字号/自定义色都不许产生窗口效果：{patch} → {quiet:?}");
         }
     }
 
@@ -3274,7 +3387,6 @@ mod tests {
         assert!(resizable_enabled(&base));
         assert!(!resizable_enabled(&base.apply_patch(&json!({"locked": true}))), "锁定不可缩放");
         assert!(!resizable_enabled(&base.apply_patch(&json!({"mode": "taskbar"}))), "任务栏那条不可缩放");
-        assert!(resizable_enabled(&base.apply_patch(&json!({"clickThrough": true}))), "点透只禁拖动，不禁缩放");
         // 建窗与配置应用两处都按同一个判定走（窗口属性不能有第二份口径）
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs"))
             .expect("要能读到自己的源码");

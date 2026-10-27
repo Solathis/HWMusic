@@ -195,6 +195,8 @@ const settingsPopupCloses = [];
 const mediaActions = [];
 /** core_lyrics_progress 的调用次数（判断去掉 rAF 后进度是否还在推）。 */
 let lyricsProgressCalls = 0;
+/** 歌词页上报的解锁区（null = 没有解锁按钮）。 */
+let unlockZones = [];
 /** R45C：core_lyrics_toggle 的请求次数与每次的意图（"一次点击只发一次"按它判）。 */
 const lyricsToggles = [];
 /**
@@ -379,6 +381,7 @@ mockIPC(async (command, args) => {
   if (command === "core_get_tray_available") return true;
   if (command === "core_login_chrome") return { theme: currentTheme };
   if (command === "core_lyrics_document") return emit("core:event", { channel: "lyrics:document", payload: args.document });
+  if (command === "core_lyrics_unlock_zone") { unlockZones.push(args.zone ?? null); return null; }
   if (command === "core_lyrics_progress") {
     lyricsProgressCalls += 1;
     return emit("core:event", { channel: "lyrics:progress", payload: args.progress });
@@ -486,6 +489,7 @@ function Guard() {
       dragCount: () => dragCalls,
       /** 进度 IPC 的累计次数（配合 resetProgressCount 计一段时间内的推送数）。 */
       progressCount: () => lyricsProgressCalls,
+      unlockZones: () => unlockZones.slice(),
       resetProgressCount: () => { lyricsProgressCalls = 0; },
       /** 挂上与 use-lyrics-window 同一份接线的进度泵（桌面歌词模式下 LibraryShell 不挂载）。 */
       async startProgressPump() {
@@ -567,6 +571,9 @@ function Guard() {
       /** R56：经**真实广播通道**播一条 app:notice（提示条目的来源是这条广播）。 */
       async emitNotice(text) {
         await emit("core:event", { channel: "app:notice", payload: { text } });
+      },
+      async emitPointer(inside) {
+        await emit("core:event", { channel: "lyrics:pointer", payload: { inside } });
       },
       async configureDesktop(patch) {
         const { coreLyricsConfigure } = await import("../../src/renderer/host-api.ts");
@@ -2081,6 +2088,97 @@ export async function checkDesktopProgressChain(browser, port, guardDir, add) {
   }
 }
 
+/** 锁定后的桌面歌词：衬底更淡、光标进窗才显示解锁键、解锁区上报与清空、纯透明无衬底（自己开一页，不影响后续检查）。 */
+export async function checkLockedLyricsPointer(browser, port, guardDir, add) {
+  const names = ["r69-locked-backdrop-lighter", "r69-pointer-reveals-unlock", "r69-unlock-zone-reported", "r69-unlock-zone-cleared", "r69-style-bare-has-no-backdrop"];
+  const done = new Set();
+  const record = (name, ok, detail) => { done.add(name); add(name, ok, detail); };
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
+  try {
+    page.setDefaultTimeout(15_000);
+    await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
+    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+    await page.evaluate(() => window.__guard.ready());
+    await page.evaluate(() => window.__guard.desktopBeforeMount());
+    await page.getByTestId("lyrics-window").waitFor();
+    await page.waitForTimeout(900);
+
+    const configure = async (patch) => {
+      await page.evaluate((next) => window.__guard.configureDesktop(next), patch);
+      await page.waitForTimeout(400);
+    };
+    const stage = () => page.evaluate(() => {
+      const root = document.querySelector('[data-testid="lyrics-window"]');
+      const style = root ? getComputedStyle(root) : null;
+      const color = style?.backgroundColor ?? "";
+      const slash = color.match(/\/\s*([\d.]+)\s*\)/);
+      const comma = color.match(/^rgba\([^)]*,\s*([\d.]+)\s*\)$/);
+      const alpha = slash ? Number(slash[1]) : comma ? Number(comma[1]) : /^(rgb|oklab|oklch)\(/.test(color) ? 1 : 0;
+      const slot = root?.querySelector('[data-testid="lyrics-unlock-slot"]');
+      const rect = slot?.getBoundingClientRect();
+      return {
+        backdrop: root?.getAttribute("data-lyrics-backdrop") ?? null,
+        scrim: root?.getAttribute("data-lyrics-scrim") ?? null,
+        pointer: root?.getAttribute("data-pointer") ?? null,
+        color, alpha,
+        filter: style?.filter ?? "none",
+        slotOpacity: slot ? getComputedStyle(slot).opacity : null,
+        slotRect: rect ? { x: rect.left, y: rect.top, width: rect.width, height: rect.height } : null,
+      };
+    });
+    const lastZone = () => page.evaluate(() => {
+      const zones = window.__guard.unlockZones();
+      return zones.length === 0 ? "missing" : zones[zones.length - 1];
+    });
+
+    await configure({ mode: "desktop", style: "clean", locked: false, showControls: true });
+    const unlocked = await stage();
+    await configure({ locked: true });
+    const locked = await stage();
+    record("r69-locked-backdrop-lighter",
+      unlocked.backdrop === "normal" && locked.backdrop === "light" && locked.alpha > 0 && locked.alpha < unlocked.alpha,
+      JSON.stringify({ unlocked: [unlocked.backdrop, unlocked.alpha], locked: [locked.backdrop, locked.alpha] }));
+
+    // 新开的页面没有鼠标位置，不存在悬停，解锁键只由广播控制
+    const hidden = locked.slotOpacity;
+    await page.evaluate(() => window.__guard.emitPointer(true));
+    await page.waitForTimeout(350);
+    const inside = await stage();
+    await page.screenshot({ path: path.join(guardDir, "r69-locked-pointer-inside.png") });
+    await page.evaluate(() => window.__guard.emitPointer(false));
+    await page.waitForTimeout(350);
+    const outside = await stage();
+    await page.screenshot({ path: path.join(guardDir, "r69-locked-pointer-outside.png") });
+    record("r69-pointer-reveals-unlock",
+      hidden === "0" && inside.pointer === "inside" && inside.slotOpacity === "1" && outside.pointer === "outside" && outside.slotOpacity === "0",
+      JSON.stringify({ hidden, inside: [inside.pointer, inside.slotOpacity], outside: [outside.pointer, outside.slotOpacity] }));
+
+    const zone = await lastZone();
+    const slot = inside.slotRect;
+    const near = (a, b) => typeof a === "number" && typeof b === "number" && Math.abs(a - b) <= 1;
+    record("r69-unlock-zone-reported",
+      zone !== null && zone !== "missing" && slot !== null && slot.width > 0
+        && near(zone.x, Math.max(0, slot.x)) && near(zone.y, Math.max(0, slot.y)) && near(zone.width, slot.width) && near(zone.height, slot.height),
+      JSON.stringify({ zone, slot }));
+
+    await configure({ locked: false });
+    const cleared = await lastZone();
+    record("r69-unlock-zone-cleared", cleared === null, JSON.stringify({ cleared }));
+
+    await configure({ style: "bare" });
+    const bare = await stage();
+    await page.screenshot({ path: path.join(guardDir, "r69-bare-style.png") });
+    record("r69-style-bare-has-no-backdrop",
+      bare.backdrop === "none" && bare.scrim === "off" && bare.alpha === 0 && bare.filter !== "none",
+      JSON.stringify({ backdrop: bare.backdrop, scrim: bare.scrim, color: bare.color, filter: bare.filter }));
+  } catch (cause) {
+    const detail = `检查过程抛错：${String(cause?.message ?? cause).split("\n")[0]}`;
+    for (const name of names) if (!done.has(name)) add(name, false, detail);
+  } finally {
+    await page.close();
+  }
+}
+
 /**
  * R45B：桌面歌词的**交互**验收（锁定 / 缩放 / 竖排 / 逐字 / 颜色）。
  *
@@ -2830,6 +2928,7 @@ export async function checkLyricsSettingsPopup(page, port, guardDir, add) {
   const CONTROLS = [
     '[data-testid="lyrics-style-clean"]',
     '[data-testid="lyrics-style-panel"]',
+    '[data-testid="lyrics-style-bare"]',
     '[data-testid="lyrics-layout-horizontal"]',
     '[data-testid="lyrics-layout-vertical"]',
     '[data-testid="lyrics-size-sm"]',
@@ -3180,12 +3279,13 @@ export async function checkImmersiveKaraoke(page, guardDir, add) {
  * 3. 任务栏模式下状态只有 Badge + 一句 `taskbarStatusText`，页面里也不会冒出新入口。
  */
 export async function checkSettingsPageLyricsCard(page, guardDir, add) {
-  const CONTROLS = ["#lyrics-visible", "#lyrics-mode", "#lyrics-locked", "#lyrics-click-through"];
+  const CONTROLS = ["#lyrics-visible", "#lyrics-mode"];
   /** R52 删掉的那些控件（它们只在 R51 的弹出窗里）。 */
   const GONE = [
     "#lyrics-size", "#lyrics-layout", "#lyrics-style",
     "#lyrics-enableBlur", "#lyrics-enableScale", "#lyrics-enableSpring", "#lyrics-showControls",
     "#player-lyrics-color", "#player-lyrics-custom-color",
+    "#lyrics-locked", "#lyrics-click-through",
   ];
   await page.setViewportSize({ width: 960, height: 600 });
   await page.evaluate(() => window.__guard.pause());
@@ -3233,10 +3333,26 @@ export async function checkSettingsPageLyricsCard(page, guardDir, add) {
   add("r52-settings-has-no-appearance-entry",
     leftovers.appearanceHook === 0 && leftovers.appearanceButtons === 0 && leftovers.appearanceAria === 0,
     JSON.stringify(leftovers));
+  const removedSwitches = await page.evaluate(() => {
+    const settings = document.querySelector('[data-testid="settings-page"]');
+    const text = settings?.textContent ?? "";
+    return {
+      visible: document.querySelectorAll("#lyrics-visible").length,
+      locked: document.querySelectorAll("#lyrics-locked").length,
+      passthrough: document.querySelectorAll("#lyrics-click-through").length,
+      lockLabel: text.includes("锁定位置"),
+      passthroughLabel: text.includes("鼠标穿透"),
+    };
+  });
+  await page.screenshot({ path: path.join(guardDir, "r69-settings-lyrics.png") });
+  add("r69-settings-no-lock-or-passthrough-switch",
+    removedSwitches.visible === 1 && removedSwitches.locked === 0 && removedSwitches.passthrough === 0
+      && !removedSwitches.lockLabel && !removedSwitches.passthroughLabel,
+    JSON.stringify(removedSwitches));
 
   // 这一页点什么都不许发出 open（外观只有一个入口，在歌词窗的齿轮上）
   await page.getByTestId("settings-page").getByRole("tab", { name: "歌词", exact: true }).click();
-  await page.locator("#lyrics-locked").scrollIntoViewIfNeeded();
+  await page.locator("#lyrics-mode").scrollIntoViewIfNeeded();
   await page.waitForTimeout(250);
   const opensFromSettings = await page.evaluate(() => window.__guard.settingsPopupCalls());
   add("r52-settings-never-opens-the-popup", opensFromSettings.length === 0,
@@ -5739,6 +5855,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     await checked("r51-desktop-settings-gear", () => checkDesktopLyricsSettings(page, guardDir, add));
     /** R50：透明桌面歌词的令牌衬底（白桌面/深色主题、深桌面/浅色主题都要读得清）。 */
     await checked("r50-desktop-lyrics-scrim", () => checkDesktopLyricsScrim(page, guardDir, add));
+    await checkLockedLyricsPointer(browser, port, guardDir, add);
     /**
      * 官方演出开关（R44 起的既有覆盖，R45B 保留）：还能真的关掉弹簧/模糊、还能真的做缩放。
      * 放在交互验收之后：它要一段"播放中"的稳定画面。

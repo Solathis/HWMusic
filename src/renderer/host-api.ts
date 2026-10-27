@@ -24,6 +24,7 @@ import {
   CORE_LYRICS_SETTINGS_OPEN,
   CORE_LYRICS_SETTINGS_RESIZE,
   CORE_LYRICS_TOGGLE,
+  CORE_LYRICS_UNLOCK_ZONE,
   CORE_READ_RUN_LOG,
   CORE_RENDERER_READY,
   CORE_SET_AUTOSTART,
@@ -185,6 +186,11 @@ export async function coreLyricsConfigure(config: unknown, retrySave?: boolean):
 
 export async function coreLyricsControl(action: "toggle" | "previous" | "next"): Promise<unknown> {
   return invokeLyrics(CORE_LYRICS_CONTROL, { payload: { action } });
+}
+
+/** 歌词页上报解锁按钮所在区域（CSS 像素；null = 没有解锁按钮）。 */
+export async function coreLyricsUnlockZone(zone: { x: number; y: number; width: number; height: number } | null): Promise<unknown> {
+  return invokeLyrics(CORE_LYRICS_UNLOCK_ZONE, { zone });
 }
 
 /** 把歌词文档转发给歌词窗（行数组来自官方 `parseLrc` 的适配层）。 */

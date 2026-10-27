@@ -4,7 +4,7 @@
  * 这里钉的是"跨层的那几件事"——真交互在浏览器守卫（`scripts/test-browser.mjs` 的
  * `checkSettingsPageLyricsCard` / `checkImmersiveLyricsColorIsFixed`），本文件管：
  *
- * 1. 设置页「歌词」标签：桌面歌词卡（显示 / 窗口位置 / 锁定 / 鼠标穿透）与 R59 的任务栏歌词卡
+ * 1. 设置页「歌词」标签：桌面歌词卡（显示 / 窗口位置）与 R59 的任务栏歌词卡
  *    （独立组件 `taskbar-lyrics-card.tsx`）。
  *    桌面歌词样式/方向/字号/效果/颜色的控件 id 一个都不许留在页面里（它们只在 R51 弹出窗里），
  *    也**没有**「外观设置」按钮——桌面歌词外观只在歌词窗自己的齿轮菜单里改（R52 收尾还原）；
@@ -41,12 +41,16 @@ function lyricsPane() {
 
 test("R52 设置页「歌词」：只留一张桌面歌词卡（没有外观入口）", () => {
   const pane = lyricsPane();
-  // 必须在主窗做的四件事（id 是浏览器守卫与真机取证的锚点）
-  for (const id of ["lyrics-visible", "lyrics-mode", "lyrics-locked", "lyrics-click-through"]) {
+  // 必须在主窗做的两件事（id 是浏览器守卫的锚点）
+  for (const id of ["lyrics-visible", "lyrics-mode"]) {
     assert.ok(pane.includes(`id="${id}"`), `歌词页要有 #${id}（必须在主窗操作的行为项）`);
   }
-  for (const label of ["显示桌面歌词", "窗口位置", "锁定位置", "鼠标穿透"]) {
+  for (const label of ["显示桌面歌词", "窗口位置"]) {
     assert.ok(pane.includes(label), `控件文案：${label}`);
+  }
+  // 锁定与点透都搬进歌词窗自己那一侧了：主窗设置页不再有这两个开关
+  for (const gone of ["lyrics-locked", "lyrics-click-through", "锁定位置", "鼠标穿透"]) {
+    assert.equal(pane.includes(gone), false, `歌词页不再有 ${gone}（锁定与点透归歌词窗）`);
   }
   // 只剩一张桌面歌词卡 + R59 的任务栏卡（**独立组件**，标题不在这一页的源码里）+ 缓存卡
   const titles = [...pane.matchAll(/<CardTitle>([^<]+)<\/CardTitle>/g)].map((found) => found[1]);
@@ -111,7 +115,7 @@ test("R52 文案克制：提示都在控件旁、每句不超过一行，且不�
   const hints = [...pane.matchAll(/<span className="text-xs text-muted-foreground">([^<{]*)<\/span>/g)]
     .map((found) => found[1])
     .filter((hint) => hint.trim() !== "");
-  assert.ok(hints.length >= 1, `控件旁要有必要提示（拿到 ${hints.length} 句）`);
+  assert.deepEqual(hints, [], "这一页不再有写死的旁注（锁定与点透都归歌词窗自己）");
   for (const hint of hints) {
     assert.ok(hint.trim().length > 0 && hint.trim().length <= 20, `提示要短（≤20 字）：${hint}`);
   }

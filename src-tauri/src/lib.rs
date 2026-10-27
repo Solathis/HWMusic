@@ -854,6 +854,7 @@ pub fn run() {
             lyrics_window::core_lyrics_control,
             lyrics_window::core_lyrics_document,
             lyrics_window::core_lyrics_progress,
+            lyrics_window::core_lyrics_unlock_zone,
             // R51：歌词设置的**独立弹出窗**（打开 / 报尺寸 / 关闭）。位置与尺寸由 Rust 定，
             // 所以这扇窗不授予任何 window 权限（见 capabilities/lyrics-settings.json）。
             lyrics_settings::core_lyrics_settings_open,
@@ -1568,7 +1569,7 @@ mod tests {
         );
     }
 
-    /// 五条具名命令都必须注册，防止仅定义却运行时 command not found。
+    /// 六条具名命令都必须注册，防止仅定义却运行时 command not found。
     #[test]
     fn lyrics_window_commands_are_registered_in_the_invoke_handler() {
         let source = lib_source();
@@ -1579,6 +1580,7 @@ mod tests {
             "lyrics_window::core_lyrics_control",
             "lyrics_window::core_lyrics_document",
             "lyrics_window::core_lyrics_progress",
+            "lyrics_window::core_lyrics_unlock_zone",
         ] {
             assert!(
                 registered.contains(name),

@@ -204,6 +204,7 @@ export function LyricsSettingsPopup() {
             onValueChange={pick("style")} data-testid="lyrics-style">
             <ToggleGroupItem value="clean" data-testid="lyrics-style-clean">透明</ToggleGroupItem>
             <ToggleGroupItem value="panel" data-testid="lyrics-style-panel">面板</ToggleGroupItem>
+            <ToggleGroupItem value="bare" data-testid="lyrics-style-bare">纯透明</ToggleGroupItem>
           </ToggleGroup>
         </Field>
 

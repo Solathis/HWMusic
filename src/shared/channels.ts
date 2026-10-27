@@ -107,6 +107,9 @@ export const LYRICS_PROGRESS = "lyrics:progress" as const;
  */
 export const LYRICS_STATE = "lyrics:state" as const;
 
+/** 锁定的桌面歌词：光标进出歌词窗 `{inside: boolean}`（Rust 轮询光标后广播）。 */
+export const LYRICS_POINTER = "lyrics:pointer" as const;
+
 /**
  * 二维码登录状态广播（R16 增补）：`{status, content?, expiresInMs?, message?, errorKind?}`。
  *
@@ -148,6 +151,7 @@ export const BROADCAST_CHANNELS = [
   LYRICS_DOCUMENT,
   LYRICS_PROGRESS,
   LYRICS_STATE,
+  LYRICS_POINTER,
   THEME_CHANGED,
 ] as const;
 

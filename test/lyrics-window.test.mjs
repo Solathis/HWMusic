@@ -45,6 +45,7 @@ import {
   isCustomColor,
   karaokeFrame,
   lyricsAppearance,
+  lyricsBackdrop,
   lyricsConfigFromSearch,
   lyricsStatusFromFailure,
   modeLabel,
@@ -162,8 +163,8 @@ test("R44c 配置 JSON/query 保留布局样式与 AMLL 开关，点透不等于
   assert.equal(config.showControls, false);
   assert.deepEqual(lyricsConfigFromSearch("?layout=vertical&style=panel&enableBlur=0&enableScale=0&enableSpring=0&showControls=0"), config);
   assert.deepEqual(normalizeLyricsConfig(JSON.parse(JSON.stringify(config))), config);
-  assert.equal(dragRegionEnabled({ ...DEFAULT_LYRICS_CONFIG, clickThrough: true }), false);
-  assert.equal(clickThroughEnabled({ ...DEFAULT_LYRICS_CONFIG, locked: true }), false);
+  assert.equal(dragRegionEnabled({ ...DEFAULT_LYRICS_CONFIG, locked: true }), false);
+  assert.equal(clickThroughEnabled({ ...DEFAULT_LYRICS_CONFIG, locked: true }), true);
 });
 
 test("R44e 启动只读：桥不读也不写 settings，恢复由 Rust 只读完成，只读一次权威状态", async () => {
@@ -551,7 +552,7 @@ test("命令名：歌词专命令共享真源、注册与最小 capability 一�
   assert.deepEqual(popupPermission.permissions, ["core:event:default"]);
   assert.doesNotMatch(JSON.stringify(popupPermission), /allow-start|allow-set-(size|position)|allow-close/, "弹出窗不许有窗口权限");
   const rust = rustProduction(rustSource("lyrics_window.rs"));
-  for (const [name, values] of [["LYRICS_LAYOUTS", ["horizontal","vertical"]], ["LYRICS_STYLES", ["clean","panel"]], ["LYRICS_CONTROL_ACTIONS", ["toggle","previous","next"]]]) {
+  for (const [name, values] of [["LYRICS_LAYOUTS", ["horizontal","vertical"]], ["LYRICS_STYLES", ["clean","panel","bare"]], ["LYRICS_CONTROL_ACTIONS", ["toggle","previous","next"]]]) {
     const body = rust.match(new RegExp(`${name}[^=]*=\\s*&\\[([^\\]]+)\\]`))[1];
     assert.deepEqual([...body.matchAll(/"([^"]+)"/g)].map((match) => match[1]), values);
   }
@@ -566,6 +567,7 @@ test("Rust：歌词专命令都 async、正确来源守卫且注册", () => {
     ["core_lyrics_progress", "require_main_webview(webview.label())"],
     ["core_lyrics_configure", "validate_configure(webview.label()"],
     ["core_lyrics_control", "control_payload(webview.label()"],
+    ["core_lyrics_unlock_zone", "webview.label() != LYRICS_WINDOW_LABEL"],
   ]) {
     assert.match(rust, new RegExp(`pub async fn ${name}\\(`));
     const body = rust.slice(rust.indexOf(`pub async fn ${name}(`));
@@ -823,14 +825,14 @@ test("无注入：全源码扫描——系统钩子 / explorer 注入类 API 零
 // ---------------------------------------------------------------------------
 
 test("配置纯逻辑：认不出的值一律不猜（落回上一个合法值）", () => {
-  const base = { ...DEFAULT_LYRICS_CONFIG, mode: "desktop", size: "xl", color: "primary", locked: true, clickThrough: true };
+  const base = { ...DEFAULT_LYRICS_CONFIG, mode: "desktop", size: "xl", color: "primary", locked: true };
 
   assert.deepEqual(normalizeLyricsConfig({}, base), base, "空 patch = 原样（设置页挂载时读回当前配置）");
   assert.deepEqual(normalizeLyricsConfig(null, base), base, "坏 patch 同样不猜");
   assert.deepEqual(normalizeLyricsConfig("nope", base), base);
 
-  const patch = normalizeLyricsConfig({ mode: "taskbar", size: "md", color: "muted", locked: false, clickThrough: false }, base);
-  assert.deepEqual(patch, { ...DEFAULT_LYRICS_CONFIG, mode: "taskbar", size: "md", color: "muted", locked: false, clickThrough: false });
+  const patch = normalizeLyricsConfig({ mode: "taskbar", size: "md", color: "muted", locked: false }, base);
+  assert.deepEqual(patch, { ...DEFAULT_LYRICS_CONFIG, mode: "taskbar", size: "md", color: "muted", locked: false });
 
   const bogus = normalizeLyricsConfig({ mode: "floating", size: "999", color: "#fff", locked: "yes", clickThrough: 1 }, base);
   assert.deepEqual(bogus, base, "认不出的模式/档位/颜色/布尔都不许猜（尤其不许把字符串当真）");
@@ -921,8 +923,8 @@ test("配置纯逻辑：拖动区与点透（锁定时不挂拖动区；任务�
   assert.equal(dragRegionEnabled({ ...base, locked: true }), false, "锁定就不挂 data-tauri-drag-region");
   assert.equal(dragRegionEnabled({ ...base, mode: "taskbar" }), false, "任务栏模式贴在边上，不给拖");
 
-  assert.equal(clickThroughEnabled(base), false, "桌面模式默认可点（要能接手拖动）");
-  assert.equal(clickThroughEnabled({ ...base, clickThrough: true }), true, "用户显式开点透就点透");
+  assert.equal(clickThroughEnabled(base), false, "未锁定的桌面歌词要能接收鼠标");
+  assert.equal(clickThroughEnabled({ ...base, locked: true }), true, "锁定的桌面歌词不接收鼠标");
   assert.equal(
     clickThroughEnabled({ ...base, mode: "taskbar" }),
     true,
@@ -930,15 +932,35 @@ test("配置纯逻辑：拖动区与点透（锁定时不挂拖动区；任务�
   );
 });
 
+test("配置纯逻辑：衬底深浅（锁定的桌面歌词更淡，纯透明与任务栏没有衬底）", () => {
+  assert.equal(lyricsBackdrop({ ...DEFAULT_LYRICS_CONFIG, mode: "desktop", style: "clean" }), "normal");
+  assert.equal(lyricsBackdrop({ ...DEFAULT_LYRICS_CONFIG, mode: "desktop", style: "clean", locked: true }), "light");
+  assert.equal(lyricsBackdrop({ ...DEFAULT_LYRICS_CONFIG, mode: "desktop", style: "panel", locked: true }), "light");
+  assert.equal(lyricsBackdrop({ ...DEFAULT_LYRICS_CONFIG, mode: "desktop", style: "bare" }), "none");
+  assert.equal(lyricsBackdrop({ ...DEFAULT_LYRICS_CONFIG, mode: "taskbar" }), "none");
+});
+
+test("歌词窗：锁定时按光标位置显形解锁按钮，并把解锁区上报给 Rust", () => {
+  const source = read("src/renderer/LyricsWindow.tsx");
+  for (const token of [
+    "LYRICS_POINTER",
+    "coreLyricsUnlockZone",
+    "group-data-[pointer=inside]/locked:opacity-100",
+    "data-lyrics-backdrop",
+  ]) {
+    assert.ok(source.includes(token), `歌词窗源码必须包含 ${token}`);
+  }
+});
+
 test("配置纯逻辑：查询串解析（歌词窗的初值；认不出的值落默认）", () => {
   assert.deepEqual(lyricsConfigFromSearch(""), DEFAULT_LYRICS_CONFIG);
   assert.deepEqual(lyricsConfigFromSearch(null), DEFAULT_LYRICS_CONFIG);
   assert.deepEqual(
-    lyricsConfigFromSearch("?mode=taskbar&size=md&color=primary&locked=1&clickThrough=1"),
-    { ...DEFAULT_LYRICS_CONFIG, mode: "taskbar", size: "md", color: "primary", locked: true, clickThrough: true },
+    lyricsConfigFromSearch("?mode=taskbar&size=md&color=primary&locked=1"),
+    { ...DEFAULT_LYRICS_CONFIG, mode: "taskbar", size: "md", color: "primary", locked: true },
   );
   assert.deepEqual(
-    lyricsConfigFromSearch("?mode=taskbar&locked=0&clickThrough=0"),
+    lyricsConfigFromSearch("?mode=taskbar&locked=0"),
     { ...DEFAULT_LYRICS_CONFIG, mode: "taskbar" },
     "0/1 才是布尔；别的写法不算（不许把任意字符串当真）",
   );
@@ -950,9 +972,10 @@ test("配置纯逻辑：查询串解析（歌词窗的初值；认不出的值�
 
   // Rust 侧拼的就是这几个键（两侧同一份契约）
   const rust = rustProduction(rustSource("lyrics_window.rs"));
-  for (const key of ["mode", "size", "color", "locked", "clickThrough"]) {
+  for (const key of ["mode", "size", "color", "locked"]) {
     assert.match(rust, new RegExp(`${key}=`), `Rust 拼的歌词窗 URL 必须带 ${key} 参数`);
   }
+  assert.doesNotMatch(rust, /clickThrough=/, "已删除的 clickThrough 不再出现在歌词窗 URL 里");
   assert.match(rust, /lyrics\.html\?/, "初值经 URL 查询串交给渲染层：渲染层还没订阅事件时也不会丢配置");
 });
 
@@ -1519,8 +1542,6 @@ test("R45B 纯逻辑：锁定隐藏全部控制、只有悬停/聚焦才给解�
   assert.equal(resizableEnabled(base), true, "未锁的桌面窗可以拖拽缩放");
   assert.equal(resizableEnabled({ ...base, locked: true }), false, "锁定不可缩放");
   assert.equal(resizableEnabled({ ...base, mode: "taskbar" }), false, "任务栏那一条不可缩放");
-  // 拖动与缩放是两条不同的资格：点透禁拖动，但不该把缩放开着
-  assert.equal(resizableEnabled({ ...base, clickThrough: true }), true, "点透只影响拖动，缩放能力仍在配置上");
 });
 
 test("R52 设置页文案克制：不再有解释性长段落，只有控件旁的一行状态", () => {
@@ -1530,10 +1551,7 @@ test("R52 设置页文案克制：不再有解释性长段落，只有控件旁�
   // 卡片描述一句话；控件旁提示各一行、且没有长段落（>80 字的说明文字一律不许）
   const paragraphs = [...lyricsPane.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/g)].map((found) => found[1].trim());
   assert.deepEqual(paragraphs, [], "歌词页里不许再有 <p> 说明段落");
-  // R52 收尾：设置页不再有「外观设置」入口，所以这里只剩点透那一句提示
-  for (const hint of ["开启后需在这里关闭"]) {
-    assert.ok(lyricsPane.includes(hint), `必要提示要在控件旁：${hint}`);
-  }
+  // R52 收尾：设置页不再有「外观设置」入口；锁定与点透都不再是主窗的设置项，这里已无旁注提示
   for (const chatter of ["互不影响", "并非中文竖排", "重启后恢复", "推导", "敬请期待", "外观设置"]) {
     assert.equal(lyricsPane.includes(chatter), false, `解释性/画饼/外观入口文案不许回来：${chatter}`);
   }
@@ -1709,14 +1727,17 @@ test("R50 clean+desktop 的令牌衬底：bg-background/60 + data-lyrics-scrim�
   const code = stripComments(read("src/renderer/LyricsWindow.tsx"));
   assert.match(code, /data-lyrics-scrim=/, "根节点要有衬底锚点（守卫按它判有没有衬底）");
   assert.match(code, /bg-background\/60/, "衬底用设计令牌（不写裸色值）");
-  assert.match(code, /config\.mode === "desktop" && config\.style === "clean"/,
-    "只有 桌面模式 + clean 才加衬底（面板已有 Card 背景；任务栏要透出系统栏）");
+  assert.match(code, /const backdrop = lyricsBackdrop\(config\)/, "衬底深浅交给纯逻辑的 lyricsBackdrop");
+  assert.match(code, /config\.style === "clean" && backdrop !== "none"/,
+    "只有 clean 且不是纯透明才加衬底（面板已有 Card 背景；任务栏要透出系统栏）");
+  assert.match(code, /bg-background\/35/, "锁定后衬底更淡（同一条令牌的另一档透明度）");
   assert.match(code, /cn\(/, "条件类名走 cn（不拼字符串）");
   assert.doesNotMatch(code, /bg-black|bg-white|#[0-9a-fA-F]{3,8}\b/, "不写裸色值");
   // 衬底挂在既有根节点上：不另起一层 div（否则控件条与歌词区一定会漏掉一处）
   const rootAt = code.indexOf("<div\n      ref={stageRef}");
   const rootTag = rootAt === -1 ? "" : code.slice(rootAt, code.indexOf(">", rootAt) + 1);
   assert.match(rootTag, /data-lyrics-scrim=/, "衬底锚点就在根节点上（不另起一层 div）");
+  assert.match(rootTag, /data-lyrics-backdrop=\{backdrop\}/, "衬底深浅也挂在根节点上，守卫按它判档");
   assert.match(rootTag, /data-testid="lyrics-window"/, "就是那个既有的根节点");
 });
 

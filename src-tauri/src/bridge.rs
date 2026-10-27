@@ -57,6 +57,8 @@ pub const LYRICS_DOCUMENT: &str = "lyrics:document";
 pub const LYRICS_PROGRESS: &str = "lyrics:progress";
 /// 歌词配置权威广播：`{config, visible, revision}`；`{ready:true}` 是单独的就绪握手。
 pub const LYRICS_STATE: &str = "lyrics:state";
+/// 锁定的桌面歌词：光标进出歌词窗 `{inside: bool}`（Rust 轮询光标后广播）。
+pub const LYRICS_POINTER: &str = "lyrics:pointer";
 /// 主题变化广播频道（R25）：`{theme: "light"|"dark"|"system"}` —— **目标态**。
 ///
 /// 发送方是 Rust 侧（`theme::set_theme`，由 `core_login_chrome` 的 `theme` 动作触发）：
@@ -74,6 +76,7 @@ pub const BROADCAST_CHANNELS: &[&str] = &[
     "lyrics:document",
     "lyrics:progress",
     "lyrics:state",
+    "lyrics:pointer",
     "theme:changed",
 ];
 
@@ -604,6 +607,7 @@ mod tests {
                 LYRICS_DOCUMENT,
                 LYRICS_PROGRESS,
                 LYRICS_STATE,
+                LYRICS_POINTER,
                 THEME_CHANGED
             ]
         );
@@ -616,6 +620,7 @@ mod tests {
         assert_eq!(LYRICS_DOCUMENT, "lyrics:document");
         assert_eq!(LYRICS_PROGRESS, "lyrics:progress");
         assert_eq!(LYRICS_STATE, "lyrics:state");
+        assert_eq!(LYRICS_POINTER, "lyrics:pointer");
         assert_eq!(THEME_CHANGED, "theme:changed");
     }
 
@@ -782,6 +787,7 @@ mod tests {
             "lyrics:document",
             "lyrics:progress",
             "lyrics:state",
+            "lyrics:pointer",
             "theme:changed",
         ];
         assert_eq!(BROADCAST_CHANNELS, expected, "控制器裁决的广播集合（R16 起加上二维码那条）");

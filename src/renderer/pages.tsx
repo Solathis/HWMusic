@@ -1337,7 +1337,7 @@ export function SettingsPage({
         {/* 歌词：桌面歌词窗口（在哪显示）+ 歌词缓存/导入（从哪来）——两半本来就可以并排看 */}
         <TabsContent value="lyrics" className="grid grid-cols-1 items-start gap-4 xl:grid-cols-2">
           {/*
-            R52：这一页只放**必须在主窗操作**的行为项——显示 / 窗口位置 / 锁定 / 鼠标穿透。
+            R52：这一页只放**必须在主窗操作**的行为项——显示 / 窗口位置。
             外观（样式 / 方向 / 字号 / 效果 / 颜色）只在桌面歌词窗自己的齿轮菜单里改：同一项设置
             有两个入口，用户会以为两边都该改得对，而其中一处迟早会落后。主窗设置不代管那扇窗的外观。
             R59：任务栏歌词是**另一套**配置（颜色 / 字号 / 逐字），它没有可点的窗口，所以它的外观
@@ -1347,7 +1347,7 @@ export function SettingsPage({
           <Card>
             <CardHeader>
               <CardTitle>桌面歌词</CardTitle>
-              <CardDescription>桌面上的独立歌词窗：在哪显示、怎么拖。</CardDescription>
+              <CardDescription>桌面上的独立歌词窗：开关与显示位置。</CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-4">
               <div className="flex items-center gap-2">
@@ -1388,29 +1388,6 @@ export function SettingsPage({
                     <span className="text-xs text-muted-foreground">{taskbarStatusText(lyrics.taskbar)}</span>
                   </div>
                 ) : null}
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center gap-2">
-                  <Switch
-                    id="lyrics-locked"
-                    checked={lyrics?.config.locked === true}
-                    disabled={lyrics === null}
-                    onCheckedChange={(checked) => lyrics?.updateConfig({ locked: checked })}
-                  />
-                  <Label htmlFor="lyrics-locked">锁定位置</Label>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Switch
-                    id="lyrics-click-through"
-                    checked={lyrics?.config.clickThrough === true}
-                    disabled={lyrics === null}
-                    onCheckedChange={(checked) => lyrics?.updateConfig({ clickThrough: checked })}
-                  />
-                  <Label htmlFor="lyrics-click-through">鼠标穿透</Label>
-                  {/* 点透之后鼠标事件不再落到那扇窗上：这里是唯一的关闭处（一句话，不讲原理） */}
-                  <span className="text-xs text-muted-foreground">开启后需在这里关闭</span>
-                </div>
               </div>
 
               {lyrics?.saveError ? (

@@ -8,8 +8,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window"
 // 对角双箭头正是缩放手柄的形状，语义与几何都对（报告里如实登记了这处替换）。
 import { MoveDiagonal2, GripHorizontal, Lock, Unlock, Pause, Play, SkipBack, SkipForward, Settings2 } from "lucide-react"
 
-import { LYRICS_DOCUMENT, LYRICS_PROGRESS, LYRICS_STATE, THEME_CHANGED } from "../shared/channels.ts"
-import { coreLyricsConfigure, coreLyricsControl, coreLyricsSettingsOpen, onCoreEvent, signalLyricsReady } from "./host-api"
+import { LYRICS_DOCUMENT, LYRICS_POINTER, LYRICS_PROGRESS, LYRICS_STATE, THEME_CHANGED } from "../shared/channels.ts"
+import { coreLyricsConfigure, coreLyricsControl, coreLyricsSettingsOpen, coreLyricsUnlockZone, onCoreEvent, signalLyricsReady } from "./host-api"
 import { Button } from "./components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
@@ -20,6 +20,7 @@ import {
   estimateTimeMs,
   karaokeFrame,
   lyricsAppearance,
+  lyricsBackdrop,
   lyricsConfigFromSearch,
   normalizeLyricsConfig,
   reanchorProgress,
@@ -59,6 +60,9 @@ export const RESIZE_SAVE_DELAY_MS = 250
 export function LyricsWindow() {
   // 初值来自建窗时拼的查询串（Rust 侧按当前配置拼）：渲染层还没订阅事件时也不会丢配置
   const [config, setConfig] = useState(() => lyricsConfigFromSearch(window.location.search))
+  // 光标是否落在歌词窗里（锁定后窗不接收鼠标，这个事实只能由 Rust 轮询广播过来）
+  const [pointerInside, setPointerInside] = useState(false)
+  const unlockSlotRef = useRef<HTMLDivElement | null>(null)
   // R59：这一份配置实际画成什么样由纯逻辑模块决定（任务栏只读任务栏那四个字段，桌面只读原字段）
   const appearance = useMemo(() => lyricsAppearance(config), [config])
   const [lyricDocument, setLyricDocument] = useState<LyricsDocument>(INITIAL_DOCUMENT)
@@ -131,6 +135,7 @@ export function LyricsWindow() {
           setFrame(karaokeFrame(progressRef.current, Date.now(), Date.now() < seekDeadlineRef.current))
         },
       ).then(keep),
+      onCoreEvent<{ inside?: unknown }>(LYRICS_POINTER, (payload) => { setPointerInside(payload?.inside === true) }).then(keep),
     ]).then(async () => {
       if (!alive) return
       const authoritative = await coreLyricsConfigure({})
@@ -220,6 +225,28 @@ export function LyricsWindow() {
     }
   }, [mode, locked, savedWidth, savedHeight, configure])
 
+  // 锁定的桌面歌词把解锁按钮所在区域交给 Rust：光标落到那里时由它临时放开鼠标。
+  useEffect(() => {
+    const report = () => {
+      const node = unlockSlotRef.current
+      const rect = node?.getBoundingClientRect()
+      const zone = rect === undefined ? null : { x: Math.max(0, rect.left), y: Math.max(0, rect.top), width: rect.width, height: rect.height }
+      void coreLyricsUnlockZone(zone).catch((cause: unknown) => console.warn("[hwmusic-lyrics] 解锁区没能上报：", cause))
+    }
+    if (config.mode !== "desktop" || !config.locked) {
+      report()
+      return undefined
+    }
+    report()
+    const observer = new ResizeObserver(report)
+    if (unlockSlotRef.current !== null) observer.observe(unlockSlotRef.current)
+    window.addEventListener("resize", report)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener("resize", report)
+    }
+  }, [config.mode, config.locked])
+
   // R59：这一份配置实际画成什么样由纯逻辑模块决定（任务栏只读任务栏那四个字段，桌面只读原字段）
   const size = appearance.size
   const hasLyric = lyricDocument.lines.length > 0
@@ -274,11 +301,11 @@ export function LyricsWindow() {
       aria-label={config.locked ? "已锁定桌面歌词（点击解锁）" : "锁定桌面歌词"}
       onClick={() => configure({ locked: !config.locked })}>{config.locked ? <Lock /> : <Unlock />}</Button>
   )
-  /** 锁定后的全部控制：只有一个解锁按钮，且要**悬停或键盘聚焦**才显形（`group-hover`/`focus-within`）。 */
+  /** 锁定后只有一个解锁按钮：光标进入歌词窗（Rust 广播）、悬停或键盘聚焦时才显示。 */
   const lockedControls = (
     <div className="flex shrink-0 items-center justify-center" data-testid="lyrics-locked-actions">
-      <div data-testid="lyrics-unlock-slot"
-        className="opacity-0 transition-opacity duration-150 group-hover/locked:opacity-100 group-focus-within/locked:opacity-100">
+      <div ref={unlockSlotRef} data-testid="lyrics-unlock-slot"
+        className="opacity-0 transition-opacity duration-150 group-hover/locked:opacity-100 group-focus-within/locked:opacity-100 group-data-[pointer=inside]/locked:opacity-100">
         {lockButton}
       </div>
     </div>
@@ -323,32 +350,27 @@ export function LyricsWindow() {
     </div>
   )
 
-  /**
-   * R50：透明桌面歌词的**可读性衬底**。
-   *
-   * 这个窗是透明的（浮在桌面/其它窗口之上）：`style=clean` 时窗里本来什么都没有，
-   * 深色主题的近白字与近白图标浮在**白色桌面**上、浅色主题的近黑字浮在**深色桌面**上都读不清。
-   * 所以桌面模式 + clean 给根节点加一层**令牌**衬底（`bg-background/60`，窗口仍然透明），
-   * 它同时盖住控件条与歌词区——两层各自加就一定会漏掉一处。
-   *
-   * 另外两档**不加**：`panel` 已经有 Card 背景；`mode=taskbar` 要透出系统任务栏
-   * （在那上面贴一块半透明背景就是把任务栏涂花了）。
-   */
-  const scrim = config.mode === "desktop" && config.style === "clean"
+  /** 透明窗的可读性衬底：clean 用令牌底色、锁定时更淡；panel 锁定时卡片更淡；bare 不加衬底，只给歌词加阴影。 */
+  const backdrop = lyricsBackdrop(config)
+  const scrim = config.style === "clean" && backdrop !== "none"
 
   return <TooltipProvider>
     <div
       ref={stageRef}
-      className={cn("amll-lyrics-stage group/locked absolute inset-0 isolate flex flex-col overflow-hidden", scrim && "bg-background/60")}
+      className={cn("amll-lyrics-stage group/locked absolute inset-0 isolate flex flex-col overflow-hidden",
+        scrim && (backdrop === "light" ? "bg-background/35" : "bg-background/60"),
+        config.mode === "desktop" && config.style === "bare" && "drop-shadow-md")}
       data-testid="lyrics-window"
       data-lyrics-scrim={scrim ? "on" : "off"}
+      data-lyrics-backdrop={backdrop}
+      data-pointer={pointerInside ? "inside" : "outside"}
       data-lyrics-mode={config.mode}
       data-lyrics-layout={config.mode === "taskbar" ? "horizontal" : config.layout}
       data-lyrics-style={config.style} data-lyrics-size={size}
       data-lyrics-color={config.style === "panel" && appearance.color === "contrast" ? "foreground" : appearance.color}
       data-lyrics-karaoke={appearance.karaoke ? "on" : "off"}
       data-lyrics-locked={config.locked ? "on" : "off"}>
-      {config.style === "panel" ? <Card size="sm" className="h-full min-h-0 gap-0 py-0">
+      {config.style === "panel" ? <Card size="sm" className={cn("h-full min-h-0 gap-0 py-0", backdrop === "light" && "bg-card/65")}>
         {config.mode === "desktop" ? <CardHeader className={config.locked ? "shrink-0 px-1.5 py-0" : "shrink-0 px-1.5 py-0.5"}>
           <CardTitle className="sr-only">桌面歌词</CardTitle>
           <CardDescription className="sr-only">媒体控制与歌词滚动区（竖版为逐字竖排）</CardDescription>

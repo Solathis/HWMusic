@@ -77,7 +77,7 @@ export const LYRICS_COLOR_TOKENS = [
 ];
 
 export const LYRICS_LAYOUTS = ["horizontal", "vertical"];
-export const LYRICS_STYLES = ["clean", "panel"];
+export const LYRICS_STYLES = ["clean", "panel", "bare"];
 export const LYRICS_SETTING_KEY = "lyricsWindow";
 
 /**
@@ -139,14 +139,13 @@ export function saveErrorText(code) {
  * @typedef {object} LyricsConfig
  * @property {string} mode desktop | taskbar
  * @property {string} layout horizontal | vertical
- * @property {string} style clean | panel
+ * @property {string} style clean | panel | bare（纯透明：无衬底）
  * @property {string} size 字号档位 id（见 LYRICS_FONT_STEPS）
  * @property {string} color 设计令牌 id（见 LYRICS_COLOR_TOKENS）
  * @property {string} customColor `#RRGGBB` 或空串（空 = 用 `color` 的令牌）
  * @property {number | null} windowWidth 桌面窗 DIP 宽（null = 该方向的默认尺寸）
  * @property {number | null} windowHeight 桌面窗 DIP 高
  * @property {boolean} locked
- * @property {boolean} clickThrough
  * @property {boolean} enableBlur
  * @property {boolean} enableScale
  * @property {boolean} enableSpring
@@ -170,7 +169,6 @@ export const DEFAULT_LYRICS_CONFIG = {
   windowWidth: null,
   windowHeight: null,
   locked: false,
-  clickThrough: false,
   enableBlur: true,
   enableScale: true,
   enableSpring: true,
@@ -309,27 +307,29 @@ export function lyricsAppearance(config) {
   };
 }
 
-/** 官方拖动调用的资格：仅 desktop 未锁且未点透。 */
+/** 官方拖动调用的资格：仅未锁的桌面窗。 */
 export function dragRegionEnabled(config) {
   const normalized = normalizeLyricsConfig({}, config);
-  return normalized.mode === "desktop" && !normalized.locked && !normalized.clickThrough;
+  return normalized.mode === "desktop" && !normalized.locked;
 }
 
-/**
- * 拖拽缩放的资格（R45B）：**仅未锁的桌面窗**。
- *
- * 与拖动资格分开写：点透会禁拖动（窗口收不到鼠标），但不该把"能不能缩放"这件事也顺手关掉
- * ——锁定与任务栏才是缩放的两条禁线（Rust 侧 `resizable_enabled` 是同一口径）。
- */
+/** 拖拽缩放的资格：仅未锁的桌面窗（与 Rust 的 resizable_enabled 同一口径）。 */
 export function resizableEnabled(config) {
   const normalized = normalizeLyricsConfig({}, config);
   return normalized.mode === "desktop" && !normalized.locked;
 }
 
-/** 点透开关：桌面尊重用户选项，内嵌 Beta 始终点透。 */
+/** 窗口是否不接收鼠标：任务栏一律如此，锁定的桌面歌词也是（解锁按钮所在区域由 Rust 轮询临时放开）。 */
 export function clickThroughEnabled(config) {
   const normalized = normalizeLyricsConfig({}, config);
-  return normalized.clickThrough || normalized.mode === "taskbar";
+  return normalized.mode === "taskbar" || normalized.locked;
+}
+
+/** 衬底深浅：桌面 clean/panel 未锁为 normal、锁定为 light；纯透明与任务栏为 none。 */
+export function lyricsBackdrop(config) {
+  const normalized = normalizeLyricsConfig({}, config);
+  if (normalized.mode !== "desktop" || normalized.style === "bare") return "none";
+  return normalized.locked ? "light" : "normal";
 }
 
 /**

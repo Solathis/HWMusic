@@ -65,6 +65,7 @@ export const CORE_LYRICS_CONFIGURE = "core_lyrics_configure";
 export const CORE_LYRICS_CONTROL = "core_lyrics_control";
 export const CORE_LYRICS_DOCUMENT = "core_lyrics_document";
 export const CORE_LYRICS_PROGRESS = "core_lyrics_progress";
+export const CORE_LYRICS_UNLOCK_ZONE = "core_lyrics_unlock_zone";
 
 /**
  * 歌词设置**弹出窗**的三条命令（R51）：打开 / 报尺寸 / 关闭自己。

@@ -83,6 +83,7 @@ import {
   LYRICS_DOCUMENT,
   LYRICS_PROGRESS,
   LYRICS_STATE,
+  LYRICS_POINTER,
   LYRICS_TOGGLE,
   PLAYER_COMMAND,
   THEME_CHANGED,
@@ -171,6 +172,7 @@ const BROADCAST_CHANNEL_NAMES = [
   "auth:qr",
   "auth:status",
   "lyrics:document",
+  "lyrics:pointer",
   "lyrics:progress",
   "lyrics:state",
   "lyrics:toggle",
@@ -320,12 +322,14 @@ test("一致性：R12 桌面歌词窗的三条广播（常量 + 字面量两侧�
   assert.equal(LYRICS_DOCUMENT, "lyrics:document");
   assert.equal(LYRICS_PROGRESS, "lyrics:progress");
   assert.equal(LYRICS_STATE, "lyrics:state");
+  assert.equal(LYRICS_POINTER, "lyrics:pointer");
   assert.equal(rustStringConst(rustSource("bridge.rs"), "LYRICS_DOCUMENT"), LYRICS_DOCUMENT);
   assert.equal(rustStringConst(rustSource("bridge.rs"), "LYRICS_PROGRESS"), LYRICS_PROGRESS);
   assert.equal(rustStringConst(rustSource("bridge.rs"), "LYRICS_STATE"), LYRICS_STATE);
+  assert.equal(rustStringConst(rustSource("bridge.rs"), "LYRICS_POINTER"), LYRICS_POINTER);
 
   const rustBroadcasts = rustStringArray(rustSource("bridge.rs"), "BROADCAST_CHANNELS");
-  for (const channel of [LYRICS_DOCUMENT, LYRICS_PROGRESS, LYRICS_STATE]) {
+  for (const channel of [LYRICS_DOCUMENT, LYRICS_PROGRESS, LYRICS_STATE, LYRICS_POINTER]) {
     assert.ok(BROADCAST_CHANNELS.includes(channel), `${channel} 必须在广播白名单里`);
     assert.ok(rustBroadcasts.includes(channel), `Rust 侧白名单同样必须含 ${channel}`);
   }
