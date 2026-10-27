@@ -31,6 +31,13 @@ function harness(initialState) {
 
 const PAUSED = { currentTimeMs: 700, status: "paused", seekGeneration: 0 };
 
+test("订阅后立刻推一帧当前状态（恢复到的暂停位置不用等下一次通知）", () => {
+  const pump = harness(PAUSED);
+  assert.equal(pump.pushed.length, 1, "订阅即出帧，不依赖播放器再发通知");
+  assert.deepEqual(pump.pushed[0], progressOf(PAUSED));
+  pump.stop();
+});
+
 test("进度泵全程不碰 requestAnimationFrame", () => {
   const frames = [];
   const original = globalThis.requestAnimationFrame;
@@ -61,9 +68,10 @@ test("播放、时间更新、暂停、跳转各推一帧，且值就是 progres
   for (const state of states) pump.notify(state);
   pump.stop();
 
-  assert.equal(pump.pushed.length, states.length, "每次通知推一帧，不多不少");
-  assert.deepEqual(pump.pushed, states.map((state) => progressOf(state)));
+  assert.equal(pump.pushed.length, states.length + 1, "订阅时一帧，之后每次通知各一帧");
+  assert.deepEqual(pump.pushed, [progressOf(PAUSED), ...states.map((state) => progressOf(state))]);
   assert.deepEqual(pump.pushed, [
+    { timeMs: 700, playing: false, seekGeneration: 0 },
     { timeMs: 700, playing: true, seekGeneration: 0 },
     { timeMs: 1700, playing: true, seekGeneration: 0 },
     { timeMs: 1700, playing: false, seekGeneration: 0 },
@@ -77,6 +85,6 @@ test("退订之后不再推送", () => {
   pump.stop();
   const afterStop = pump.pushed.length;
   pump.notify({ currentTimeMs: 2000, status: "playing", seekGeneration: 0 });
-  assert.equal(afterStop, 1);
-  assert.equal(pump.pushed.length, 1, "退订后的通知不该再推");
+  assert.equal(afterStop, 2, "订阅时一帧 + 退订前一帧");
+  assert.equal(pump.pushed.length, 2, "退订后的通知不该再推");
 });

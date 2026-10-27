@@ -7,6 +7,8 @@ export function createProgressPump({ subscribe, readState, push }) {
   if (typeof readState !== "function") throw new TypeError("createProgressPump 需要 readState");
   if (typeof push !== "function") throw new TypeError("createProgressPump 需要 push");
   const unsubscribe = subscribe(() => push(progressOf(readState())));
+  // 订阅即出一帧：启动时恢复到暂停位置，之后可能一直没有新的播放器通知。
+  push(progressOf(readState()));
   return () => {
     if (typeof unsubscribe === "function") unsubscribe();
   };

@@ -1149,7 +1149,7 @@ test("桌窗文档重发：保留 Rust 加载重发，不在 visible 翻转时�
   assert.match(rust, /\.on_page_load\(/, "重发挂在页面加载回调上（唯一知道新页就绪的时刻）");
   assert.match(rust, /PageLoadEvent::Finished/, "只认加载完成：Started 时页面里的 JS 还没跑");
   assert.match(rust, /webview\.label\(\) != LYRICS_WINDOW_LABEL/, "按 label 过滤（这条广播只发给歌词窗）");
-  assert.match(rust, /fn replay_document/, "重发是一个单独的函数（页面加载回调与命令各用各的一半）");
+  assert.match(rust, /fn replay_after_page_load/, "重发是一个单独的函数（页面加载回调与命令各用各的一半）");
   // 缓存发生在发出去那一刻：core_lyrics_document 里"留一份"要在"发出去"之前
   const command = rust.slice(rust.indexOf("pub async fn core_lyrics_document("));
   const kept = command.indexOf("remember_document(");
@@ -1157,7 +1157,7 @@ test("桌窗文档重发：保留 Rust 加载重发，不在 visible 翻转时�
   assert.ok(kept > 0 && emitted > kept, "先留一份再发出去（缓存住的必须是用户本来能看到的那一份）");
   assert.match(command.slice(0, kept), /return Err\(/, "归一失败如实报错，不缓存半个文档");
   // 日志里不许出现文档内容（歌词文本进日志 = 把用户的歌单抄进日志文件）
-  const replay = rust.slice(rust.indexOf("pub fn replay_document"));
+  const replay = rust.slice(rust.indexOf("pub fn replay_after_page_load"));
   const logStart = replay.indexOf('log::info!("');
   const logEnd = replay.indexOf('")', logStart);
   assert.ok(logStart > 0 && logEnd > logStart, "重发要留一行日志（不然真机上无从取证）");

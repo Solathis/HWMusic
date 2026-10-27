@@ -545,6 +545,8 @@ impl LyricsPersistence {
 pub struct LyricsWindowState {
     config: Mutex<LyricsSnapshot>,
     document: Mutex<Option<Value>>,
+    progress: Mutex<Option<(Value, std::time::Instant)>>,
+    awaiting_first_progress: Mutex<Option<std::time::Instant>>,
     lifecycle: Mutex<LyricsLifecycle>,
     operations: tauri::async_runtime::Mutex<()>,
     runtime_status: Mutex<(u64, Option<Value>)>,
@@ -669,6 +671,8 @@ impl LyricsWindowState {
 
     pub fn document(&self) -> Option<Value> { lock(&self.document).clone() }
     fn store_document(&self, document: Value) { *lock(&self.document) = Some(document); }
+    pub fn progress(&self) -> Option<(Value, std::time::Instant)> { lock(&self.progress).clone() }
+    fn store_progress(&self, progress: Value) { *lock(&self.progress) = Some((progress, std::time::Instant::now())); }
 }
 
 pub fn current_status<R: Runtime>(app: &AppHandle<R>) -> Value {
@@ -1029,26 +1033,62 @@ fn remember_document<R: Runtime>(app: &AppHandle<R>, document: Value) {
     }
 }
 
-/// 页面加载完成时把最后一份文档重发一次（**没有就什么都不发**）。
-///
-/// 这条是 R41a 对"重开歌词窗显示占位直到换歌"的对症修：`reload()` 之后主窗那次重推落在
-/// 新页订阅**之前**（Rust 即转即弃），所以重发必须由**知道页面何时就绪**的那一侧做
-/// ——`on_page_load(Finished)`（见 [`build_lyrics_window`]）。
-///
-/// 走的是同一条广播（[`LYRICS_DOCUMENT`]）与同一种信封（[`emit_core_event`]）：歌词窗那边
-/// 只有一条消费路径，不因为"这次是重发"而多认一种形状。
-pub fn replay_document<R: Runtime>(app: &AppHandle<R>) {
-    let Some(state) = app.try_state::<LyricsWindowState>() else {
-        return;
-    };
-    let Some(document) = state.document() else {
-        // 这一次会话还没有任何歌词文档（比如刚启动、还没播过歌）：没什么可重发的
-        return;
-    };
-    // 只记"发了一件事"，**不记文档内容**：歌词文本进了日志就等于把用户的歌单抄进日志文件
-    //（与取词那条路同一条纪律）。
-    log::info!("歌词窗页面加载完成：重发最后一份歌词文档");
-    emit_core_event(app, LYRICS_DOCUMENT, document);
+/// 进度只在歌词窗存在时广播（可见或隐藏都发）；不存在时只缓存最新一份。
+pub fn should_emit_progress(window_exists: bool) -> bool {
+    window_exists
+}
+
+pub fn first_progress_line(elapsed_ms: u64, playing: bool) -> String {
+    format!("歌词窗页面加载后首条进度已转发（距加载 {elapsed_ms}ms，{}）", if playing { "播放中" } else { "已暂停" })
+}
+
+/// 页面加载完成后要补发的内容：先文档后进度；播放中的进度按缓存后经过的时间前推。
+pub fn page_load_replay(document: Option<Value>, progress: Option<(Value, u64)>) -> Vec<(&'static str, Value)> {
+    let mut plan = Vec::new();
+    if let Some(document) = document {
+        plan.push((LYRICS_DOCUMENT, document));
+    }
+    if let Some((mut progress, elapsed_ms)) = progress {
+        if progress.get("playing").and_then(Value::as_bool) == Some(true) {
+            let base = progress.get("timeMs").and_then(Value::as_f64).unwrap_or(0.0);
+            progress["timeMs"] = json!(base + elapsed_ms as f64);
+        }
+        plan.push((LYRICS_PROGRESS, progress));
+    }
+    plan
+}
+
+/// 页面加载完成时补发最后一份文档与进度，并在 10 秒后核对主窗是否推来过进度。
+pub fn replay_after_page_load<R: Runtime>(app: &AppHandle<R>) {
+    let Some(state) = app.try_state::<LyricsWindowState>() else { return; };
+    let loaded = std::time::Instant::now();
+    *lock(&state.awaiting_first_progress) = Some(loaded);
+    let progress = state.progress().map(|(value, at)| (value, at.elapsed().as_millis() as u64));
+    let plan = page_load_replay(state.document(), progress);
+    let has_document = plan.iter().any(|(event, _)| *event == LYRICS_DOCUMENT);
+    let has_progress = plan.iter().any(|(event, _)| *event == LYRICS_PROGRESS);
+    if has_document && has_progress {
+        log::info!("歌词窗页面加载完成：补发歌词文档与进度");
+    } else if has_document {
+        log::info!("歌词窗页面加载完成：补发歌词文档");
+    } else if has_progress {
+        log::info!("歌词窗页面加载完成：补发进度");
+    }
+    for (event, payload) in plan {
+        emit_core_event(app, event, payload);
+    }
+    let owner = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        let Some(state) = owner.try_state::<LyricsWindowState>() else { return; };
+        let mut awaiting = lock(&state.awaiting_first_progress);
+        if *awaiting != Some(loaded) { return; }
+        *awaiting = None;
+        drop(awaiting);
+        if owner.get_webview_window(LYRICS_WINDOW_LABEL).is_some() {
+            log::warn!("歌词窗页面加载 10 秒后仍未收到主窗进度");
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1196,7 +1236,7 @@ fn build_lyrics_window<R: Runtime>(
             if let Some(state) = webview.app_handle().try_state::<LyricsWindowState>() {
                 if lock(&state.lifecycle).live_generation != Some(generation) { return; }
             }
-            replay_document(webview.app_handle());
+            replay_after_page_load(webview.app_handle());
         })
         .build()
         .map_err(|source| {
@@ -1382,7 +1422,7 @@ pub fn open_desktop(
 /// 此后没有任何补发路径，用户看到的是占位文案，**直到换歌**（换歌会重新走一遍数据链）。
 ///
 /// 现在改成：`core_lyrics_document` 留一份最后发出去的文档（[`remember_document`]），
-/// **页面加载完成时由 webview 自己那条回调重发**（[`replay_document`]，见 [`build_lyrics_window`]）。
+/// **页面加载完成时由 webview 自己那条回调重发**（[`replay_after_page_load`]，见 [`build_lyrics_window`]）。
 /// 帧的顺序由"知道页面何时就绪"的那一侧定，而不是靠"希望主窗推得够晚"。
 /// 主窗那次重推因此删掉了（它在任何时序下都不落在可用的那一刻，留着只会让人以为它在起作用）。
 ///
@@ -1626,7 +1666,7 @@ pub async fn core_lyrics_control(app: AppHandle, webview: tauri::Webview, payloa
 /// 把歌词文档转发给歌词窗（歌词窗没有业务频道权限，数据只能由主窗转发）。
 ///
 /// 顺手**留一份**（[`remember_document`]）：歌词窗每显示一次都会重新加载页面，那一份要由
-/// [`replay_document`] 在加载完成时重发。留的是归一之后的形状——缓存里躺着的与发出去的
+/// [`replay_after_page_load`] 在加载完成时重发。留的是归一之后的形状——缓存里躺着的与发出去的
 /// 必须是同一份，否则"重发"会是一种谁都没见过的形状。
 #[tauri::command]
 pub async fn core_lyrics_document(
@@ -1648,7 +1688,7 @@ pub async fn core_lyrics_document(
     Ok(Value::Null)
 }
 
-/// 推进度（主窗的 rAF 已经按 ≥100ms / 播放或跳转变化节流过）。
+/// 推进度：先缓存最新一份，歌词窗存在时才广播（主窗已按 ≥100ms 或播放/跳转变化节流）。
 #[tauri::command]
 pub async fn core_lyrics_progress(
     app: AppHandle,
@@ -1679,17 +1719,72 @@ pub async fn core_lyrics_progress(
         .and_then(Value::as_i64)
         .unwrap_or(0);
 
-    emit_core_event(
-        &app,
-        LYRICS_PROGRESS,
-        json!({ "timeMs": time_ms, "playing": playing, "seekGeneration": seek_generation }),
-    );
+    let payload = json!({ "timeMs": time_ms, "playing": playing, "seekGeneration": seek_generation });
+    let state = app.state::<LyricsWindowState>();
+    state.store_progress(payload.clone());
+    if !should_emit_progress(app.get_webview_window(LYRICS_WINDOW_LABEL).is_some()) {
+        return Ok(Value::Null);
+    }
+    if let Some(loaded) = lock(&state.awaiting_first_progress).take() {
+        log::info!("{}", first_progress_line(loaded.elapsed().as_millis() as u64, playing));
+    }
+    emit_core_event(&app, LYRICS_PROGRESS, payload);
     Ok(Value::Null)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- 进度缓存、只在歌词窗存在时广播、加载完成补发 -------------------------
+
+    #[test]
+    fn r68b_progress_is_broadcast_only_while_the_lyrics_window_exists() {
+        assert!(!should_emit_progress(false), "歌词窗不在了：只缓存最新一份，不广播");
+        assert!(should_emit_progress(true), "窗口存在（可见或隐藏）都要广播");
+    }
+
+    #[test]
+    fn r68b_first_progress_line_carries_the_gap_and_the_state() {
+        assert_eq!(
+            first_progress_line(1234, true),
+            "歌词窗页面加载后首条进度已转发（距加载 1234ms，播放中）"
+        );
+        assert_eq!(
+            first_progress_line(0, false),
+            "歌词窗页面加载后首条进度已转发（距加载 0ms，已暂停）"
+        );
+    }
+
+    #[test]
+    fn r68b_page_load_replays_document_first_then_progress() {
+        let document = json!({ "lines": [{ "text": "a" }], "status": "ready" });
+
+        let both = page_load_replay(
+            Some(document.clone()),
+            Some((json!({ "timeMs": 1000.0, "playing": true, "seekGeneration": 3 }), 250)),
+        );
+        assert_eq!(both.len(), 2, "两样都缓存着就补发两样");
+        assert_eq!(both[0], (LYRICS_DOCUMENT, document), "先文档");
+        assert_eq!(both[1].0, LYRICS_PROGRESS, "后进度");
+        assert_eq!(both[1].1["timeMs"], json!(1250.0), "播放中：时间加上经过的毫秒数");
+        assert_eq!(both[1].1["playing"], json!(true));
+        assert_eq!(both[1].1["seekGeneration"], json!(3), "跳转代次原样带上");
+
+        let document_only = page_load_replay(Some(json!({ "status": "ready" })), None);
+        assert_eq!(document_only.len(), 1, "只有文档就只发文档");
+        assert_eq!(document_only[0].0, LYRICS_DOCUMENT);
+
+        let progress_only = page_load_replay(
+            None,
+            Some((json!({ "timeMs": 700.0, "playing": false, "seekGeneration": 0 }), 5000)),
+        );
+        assert_eq!(progress_only.len(), 1, "只有进度就只发进度");
+        assert_eq!(progress_only[0].0, LYRICS_PROGRESS);
+        assert_eq!(progress_only[0].1["timeMs"], json!(700.0), "暂停中：时间不动");
+
+        assert_eq!(page_load_replay(None, None), Vec::new(), "都没有就什么都不发");
+    }
 
     #[test]
     fn d5_runtime_status_sequence_changes_without_config_revision_or_persistence() {
@@ -2502,16 +2597,16 @@ mod tests {
             "按 label 过滤：这条广播只发给歌词窗那一个 webview"
         );
         assert!(
-            callback.contains("replay_document("),
+            callback.contains("replay_after_page_load("),
             "回调里要真的重发（不是只记一行日志）"
         );
 
         // 重发走的是同一条广播与同一个信封构造点（歌词窗只有一条消费路径）
-        let replay = production.find("pub fn replay_document").expect("重发函数必须在");
+        let replay = production.find("pub fn replay_after_page_load").expect("重发函数必须在");
         let replay_body = &production[replay..];
         assert!(
-            replay_body.contains("emit_core_event(app, LYRICS_DOCUMENT, document)"),
-            "重发用的是同一条歌词广播"
+            replay_body.contains("emit_core_event(app, event, payload)"),
+            "补发的文档与进度都走同一条歌词广播"
         );
         assert!(
             !replay_body.contains("app.emit("),

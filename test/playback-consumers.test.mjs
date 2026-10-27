@@ -62,7 +62,7 @@ test("同 id 的歌词匹配元信息变化重新请求，进度/音量/封面�
   globalThis.__r44aHooks = {
     bridge: {
       snapshot: () => ({ config: {}, visible: false, saveError: null }), observe: () => () => {},
-      pushDocument: async () => {}, loadLyrics: async (query) => { calls.push(query); return { lines: [], status: "empty" }; },
+      pushDocument: async () => {}, pushProgress: async () => {}, loadLyrics: async (query) => { calls.push(query); return { lines: [], status: "empty" }; },
     },
     useRef: (value) => { const i = cursor++; return slots[i] ??= { current: value }; },
     useState: (init) => { const i = cursor++; slots[i] ??= { value: typeof init === "function" ? init() : init }; return [slots[i].value, (next) => { slots[i].value = next; }]; },
