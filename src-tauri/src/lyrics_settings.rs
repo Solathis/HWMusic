@@ -1,31 +1,9 @@
-//! 桌面歌词设置气泡（R60）：一扇**独立透明小窗**，里面是一个 shadcn `Popover`。
+//! 桌面歌词设置气泡：一扇独立的透明小窗，里面是一个 shadcn `Popover`。
 //!
-//! ## 为什么仍然是一扇窗
-//!
-//! 面板必须能长到 800×128 的歌词窗外面去（用户要求"允许突破桌面歌词大小限制"），所以它画在
-//! 自己的一扇透明窗里：尺寸与位置全由 Rust 定，这扇窗**不授予任何 window 权限**。
-//!
-//! ## 几何（纯函数，单测在文件末尾）
-//!
-//! 调用方给的是**它自己客户区里的 CSS 像素锚点**（齿轮按钮的 `getBoundingClientRect()`）。
-//! Rust 用调用窗口的 `inner_position()`（客户区左上角的屏幕物理坐标）与缩放比换算到物理像素，然后：
-//!
-//! - 面板**水平以锚点中心为准**，夹进"工作区减去一圈留边"的范围（副屏在主屏左边时坐标是负的）；
-//! - 优先放在锚点**下方**（间距 [`SETTINGS_BUBBLE_GAP_DIP`]），下方放不下才翻到上方；
-//! - 箭头的中心对准锚点中心，被夹紧时沿面板边滑动、但两端各留 [`SETTINGS_ARROW_INSET_DIP`]。
-//!
-//! 窗口比面板**四周各多 [`SETTINGS_POPUP_PAD_DIP`]**：那圈透明白边是阴影与"探到面板外的箭头"的容身处，
-//! 面板因此永远贴在窗口留边内侧——页面据此把隐形触发点摆在箭头该指的位置。
-//!
-//! ## 关闭路径（少一条就是"面板粘住不走"）
-//!
-//! 失焦（= 点到窗口外面）、Esc（radix 的 dismiss 经命令回来）、点面板外面、锁定、歌词窗隐藏/销毁、
-//! 切任务栏模式、退出。关闭 = `hide()`（**不销毁**：下次打开要快，页面里量好的尺寸也还在）。
-//!
-//! 齿轮二次点击不能闪：点齿轮会让弹出窗失焦（先 hide），紧接着到达的 `core_lyrics_settings_open`
-//! 落在 [`SETTINGS_REOPEN_SUPPRESS_MS`] 之内，判为**同一次点击的尾巴**、不打开。
-//!
-//! 退出时直接 `destroy()`：不排队、不等待（弹出窗自己不持有任何要落盘的东西）。
+//! 面板要能长到 800×128 的歌词窗外面去，所以自成一窗：尺寸位置全由 Rust 定，该窗不授予任何 window 权限。
+//! 锚点是调用方自己客户区里的 CSS 像素，Rust 用 `inner_position()` 与缩放比换成物理像素再夹进工作区。
+//! 窗口四周多出 [`SETTINGS_POPUP_PAD_DIP`] 的透明边容纳阴影与箭头；失焦、Esc、点外面、锁定、隐藏、退出都要关。
+//! 关闭一律 `hide()` 以保留页面与量好的尺寸；退出时直接 `destroy()`，不排队不等待。
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -150,10 +128,8 @@ pub fn parse_anchor(value: &Value) -> Result<Rect, CoreError> {
     })
 }
 
-/// 客户区 DIP 锚点 → **屏幕物理像素**矩形。
-///
-/// `inner` 是调用窗口客户区左上角的屏幕物理坐标（`Window::inner_position()`），
-/// 所以这里只有一次乘加，没有第二套"屏幕坐标 + 缩放比"的换算。
+/// 客户区 DIP 锚点 → 屏幕物理像素矩形；`inner` 是调用窗口客户区左上角的屏幕物理坐标。
+/// 因此这里只有一次乘加换算，没有第二套坐标系。
 pub fn anchor_rect(inner: Point, anchor: Rect, scale: f64) -> Rect {
     let scale = trusted_scale(scale);
     Rect {
@@ -337,9 +313,7 @@ impl SettingsPopupState {
 pub const SETTINGS_POPUP_TITLE: &str = "桌面歌词设置";
 
 /// 弹出窗的 webview 数据目录：`<数据根>/webview2/lyrics-settings`。
-///
-/// 不与歌词窗共用：同一份 WebView2 用户数据目录上建两个环境时，环境参数必须完全一致，
-/// 共用还会让两扇窗的库锁互相牵制。每窗一份是本仓既有的做法。
+/// 不与歌词窗共用：同目录建两个环境会让库锁互相牵制，每窗一份是本仓既有做法。
 pub fn popup_data_dir(data_root: &Path) -> PathBuf {
     data_root.join("webview2").join("lyrics-settings")
 }
@@ -504,10 +478,8 @@ fn show<R: Runtime>(window: &WebviewWindow<R>) {
 // 命令面
 // ---------------------------------------------------------------------------
 
-/// 打开（或再次摆好）设置弹出窗。`anchor` 是**调用窗口客户区里的 CSS 像素**矩形。
-///
-/// 首次打开：建一扇**隐藏**的窗就返回——页面挂载后报上来的内容尺寸才会让它显示出来。
-/// 之后每次打开：用上一次量好的内容尺寸摆好、`show()` + 取焦点。
+/// 打开（或再次摆好）设置弹出窗；`anchor` 是调用窗口客户区里的 CSS 像素矩形。
+/// 首次只建隐藏窗，等页面报上内容尺寸再显示；之后用上次量好的尺寸摆好、`show()` 并取焦点。
 #[tauri::command]
 pub async fn core_lyrics_settings_open(
     app: AppHandle,
@@ -837,8 +809,7 @@ mod tests {
             !reopen_suppressed(Some(now), now + window, window),
             "过了窗口就是一次新的打开（用户过一会儿再点齿轮）"
         );
-        // 时刻倒退（真机上不回退，这条只证明注入的假时刻不会 panic）：`saturating_duration_since`
-        // 给 0 ⇒ 仍算"刚关过"，也就是 fail-closed（宁可不弹）。
+        // 时刻倒退时 `saturating_duration_since` 给 0，仍算"刚关过"，即 fail-closed 宁可不弹。
         assert!(reopen_suppressed(
             Some(now + Duration::from_secs(5)),
             now,

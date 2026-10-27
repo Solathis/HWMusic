@@ -1,16 +1,9 @@
-//! webview 侧代理：`settings.json` → `WebviewWindowBuilder::proxy_url` 的纯函数层。
-//!
-//! 为什么要在 Rust 里再判一遍：webview 的请求（封面图、`<audio>` 音频流）走 WebView2 自己的
-//! 网络栈，绕开 sidecar 的 undici dispatcher。**主窗不接 proxy_url，这些请求就直连**
-//! （旧仓审计出的缺陷 K6）。三个窗口（主窗 R6、登录窗 R7、歌词窗 R12）都要接。
-//!
-//! 两条不可让步的规则：
-//! 1. **凭据不进 URL**：Chromium 的 `--proxy-server` 不接受内联凭据，用户名/密码只能丢弃，
-//!    且丢弃必须被报告（[`WebviewProxy::credentials_dropped`]），绝不假装配好了。
-//! 2. **形状不认识一律当没配，绝不猜**：非 JSON、schemaVersion 不是 1、缺 data、proxy 不是对象、
-//!    host/port 可疑 —— 结果都是 `None`（= 直连），而不是"尽力猜一个"。
-//!
-//! 日志只允许出现 `host:port`（[`describe`] 是唯一出口，有用例钉住它不含凭据）。
+//! webview 侧代理：把 `settings.json` 变成 `WebviewWindowBuilder::proxy_url` 的纯函数层。
+//! webview 请求走 WebView2 自己的网络栈、绕开 sidecar 的 dispatcher，所以三个窗口都必须接 proxy_url，
+//! 否则封面图和 `<audio>` 音频流会直连。
+//! 两条硬规则：凭据不进 URL——Chromium 的 `--proxy-server` 不接受内联凭据，凭据只能丢弃且必须被
+//! [`WebviewProxy::credentials_dropped`] 报告；形状不认识一律当没配（`None` 即直连），绝不猜。
+//! 日志只允许出现 `host:port`：[`describe`] 是唯一出口，有用例钉住它不含凭据。
 
 use std::path::Path;
 
@@ -31,13 +24,8 @@ pub struct WebviewProxy {
     pub credentials_dropped: bool,
 }
 
-/// host 清洗：只接受主机名 / 裸 IPv4 / **带方括号的 IPv6**，其余一律 `None`。
-///
-/// 拒绝：协议前缀（`scheme://`）、路径 / 查询串 / 片段 / userinfo（`/?#@`）、任何空白、
-/// 多冒号（`host:port` 写法与裸 IPv6 都无法与端口区分：端口有独立字段）、非 ASCII（不做 IDN 猜测）。
-/// 方括号那段除字符集外还要**结构上是 IPv6**（标准库 `Ipv6Addr` 解析）：`[1.2.3.4]`、`[::::]` 能过
-/// 字符集却拼不出可解析的代理 URL，放行它们等于让主窗建不起来。
-/// 规则与 Node `src/main/settings.mjs::cleanHost` 逐条对齐，由 `test/fixtures/proxy-host-cases.json` 两侧钉住。
+/// host 清洗：只接受主机名 / 裸 IPv4 / 带方括号的 IPv6，其余一律 `None`；规则与 Node `cleanHost` 对齐。
+/// 拒绝协议前缀、路径/查询/片段/userinfo、空白、多冒号（端口另字段）与非 ASCII；方括号内还须能 `Ipv6Addr` 解析。
 pub fn clean_host(raw: Option<&str>) -> Option<String> {
     let trimmed = raw?.trim();
     if trimmed.is_empty() {
@@ -85,11 +73,8 @@ pub fn clean_port(raw: Option<f64>) -> Option<u16> {
     Some(value as u16)
 }
 
-/// 判定 webview 代理（brief 钉死的签名）。
-///
-/// 所有 `None` 情形都是**"当作没配"**而非错误：`enabled` 不是 `Some(true)`、host 可疑、port 没填全。
-/// 凭据**不进 URL**（Chromium `--proxy-server` 不接受内联凭据），带了凭据就把
-/// [`WebviewProxy::credentials_dropped`] 置上——丢弃必须被报告，不能假装认证代理能用。
+/// 判定 webview 代理：所有 `None` 都是「当作没配」而非错误（未启用、host 可疑、端口不全）。
+/// 凭据不进 URL，带了凭据只置 [`WebviewProxy::credentials_dropped`]——丢弃必须被报告，不能假装认证可用。
 pub fn webview_proxy_url(
     enabled: Option<bool>,
     host: Option<&str>,
@@ -112,10 +97,8 @@ pub fn webview_proxy_url(
     })
 }
 
-/// `settings.json` 文本 → webview 代理。
-///
-/// **形状不认识一律 `None`，绝不猜**：非 JSON、不是对象、`schemaVersion` 不是 1、缺 `data`、
-/// `data.proxy` 不是对象、端口/主机没填全 —— 结果都是 `None`（直连）。
+/// `settings.json` 文本 → webview 代理：非 JSON、非对象、`schemaVersion` 不是 1、缺 `data`、
+/// `data.proxy` 不是对象、端口或主机不全，一律 `None`（直连），绝不猜。
 pub fn parse_settings(raw: &str) -> Option<WebviewProxy> {
     let value: Value = serde_json::from_str(raw).ok()?;
     let document = value.as_object()?;
@@ -157,9 +140,8 @@ pub fn describe(window_tag: &str, proxy: Option<&WebviewProxy>) -> String {
     }
 }
 
-/// 建窗前的取值口子：读盘 → 打一行可见日志 → 交给 `builder.proxy_url`。
-///
-/// 三窗（主窗 R6 / 登录窗 R7 / 歌词窗 R12）都调它；`window_tag` 只进日志，不参与判定。
+/// 建窗前的取值口子：读盘 → 打一行可见日志 → 交给 `builder.proxy_url`，三个窗口都调它。
+/// `window_tag` 只进日志，不参与判定。
 pub fn resolve_for_webview(data_dir: &Path, window_tag: &str) -> Option<String> {
     let proxy = read_proxy(data_dir);
     log::info!("{}", describe(window_tag, proxy.as_ref()));

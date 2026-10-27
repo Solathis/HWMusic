@@ -71,11 +71,8 @@ pub fn surface_message(message: u32, taskbar_created: u32) -> bool {
     (taskbar_created != 0 && message == taskbar_created) || matches!(message, 0x007e | 0x02e0 | 0x02e2 | 0x02e3)
 }
 
-/// 窄自窗判据（纯逻辑，可脱窗单测）：句柄必须**存在**、属于**本进程**、且是**当前 owner 线程**的窗。
-///
-/// 只给子类化顶层主窗那一个入口用：主窗不属于歌词创建代次，`ensure_own` 的代次资格对它不成立，
-/// 但"只写自窗"这条不变量不变——外来 HWND（Explorer 的任务栏控件、任意他进程窗）PID 对不上，
-/// 别的线程拥有的窗也不在本线程上，两者都被拒；销毁后的句柄（`is_window == false`）同样被拒。
+/// 自窗判据（纯逻辑）：句柄必须存在、属于本进程且归当前 owner 线程，他进程或他线程的窗一律拒绝。
+/// 只给顶层主窗的子类化入口用：主窗不属于歌词创建代次，所以不走 `ensure_own` 的代次判据。
 pub fn self_window(is_window: bool, pid: u32, thread: u32, current_pid: u32, current_thread: u32) -> bool {
     is_window && pid != 0 && pid == current_pid && thread == current_thread
 }
@@ -88,25 +85,16 @@ pub fn uia_container(class: &str, control_type: i32, shell_owned: bool, root: bo
     root || (shell_owned && matches!(control_type, 50033 | 50025 | 50032) && matches!(class, "Windows.UI.Input.InputSite.WindowClass" | "Taskbar.TaskbarFrameAutomationPeer" | "ReBarWindow32" | "WorkerW"))
 }
 
-/// XAML 任务栏宿主判据（纯逻辑，可脱窗单测）：Windows 11 把整条任务栏内容画在一个铺满栏体的
-/// XAML 子窗里，而**类名随系统版本变**（本机是 `Windows.UI.Composition.DesktopWindowContentBridge`，
-/// 另有版本用 `Windows.UI.Input.InputSite.WindowClass`）。按类名点名会在没见过的版本上退回经典
-/// `ReBarWindow32`——而在 XAML 任务栏上 ReBar 只剩任务列表那一条（本机 264×48），拿它当"栏体"
-/// 会让安全空白计算永远找不到空段（R47 的 `no_space` 根因）。
-///
-/// 所以只认只读结构，四条缺一不可：shell 自有进程、**可见**、**直接**子窗、客户区覆盖整条栏体。
-/// 全宽但不可见的 `Windows.UI.Core.CoreWindow`（本机 65535×65535）不是宿主；窄条 ReBar、
-/// 开始按钮、托盘也都不是——判据只看几何，未知类名一样适用，不需要往白名单里加名字。
+/// XAML 任务栏宿主判据（纯逻辑）：宿主子窗的类名随系统版本变，所以只看结构，不按类名点名。
+/// 四条缺一不可：shell 自有进程、可见、直接子窗、客户区覆盖整条栏体。
 pub fn xaml_surface(shell_owned: bool, visible: bool, direct_child: bool, child_client: PixelRect, bar: PixelRect) -> bool {
     direct_child && shell_owned && visible && bar.valid() && child_client.valid()
         && child_client.x <= bar.x && child_client.y <= bar.y
         && child_client.right() >= bar.right() && child_client.bottom() >= bar.bottom()
 }
 
-/// 父窗选择（纯逻辑，可脱窗单测）：**XAML 任务栏一律以栏体根为父**。宿主管的只是"整条栏体
-/// 由谁铺满"这件事——ReBar 在 XAML 栏上只剩任务列表那一条，把它当父窗等于把歌词塞进任务列表
-/// 的条带里，安全空白也随之按那条带算（R47 的 `no_space`）。经典任务栏才退到
-/// `ReBarWindow32`/`WorkerW`（ANYNC/TaskbarLyrics 的做法），都没有就用根。
+/// 父窗选择（纯逻辑）：XAML 任务栏一律以栏体根为父，在那上面 ReBar 只剩任务列表那一条。
+/// 经典任务栏才退到 `ReBarWindow32`/`WorkerW`（ANYNC/TaskbarLyrics 的做法），都没有就用根。
 pub fn taskbar_parent(xaml_host: bool, legacy: Option<isize>, root: isize) -> isize {
     if xaml_host { root } else { legacy.unwrap_or(root) }
 }
@@ -124,9 +112,8 @@ pub fn attachment_attempt<T>(state: &mut T, apply: impl FnOnce(&mut T) -> Result
     result
 }
 
-/// 受控切出（detach）的纯状态收口：`restored` 是隐藏 + restore 的实际结果。
-/// 成功才 detached；失败必须失败关闭——旧宿主立刻禁探测、禁摆位、保持隐藏，
-/// 且已保存的恢复信息不收掉，好让同一有效代次重试 restore/detach。
+/// 受控切出的状态收口：restore 成功才算 detached，失败就停掉旧宿主的探测与摆位并保持隐藏。
+/// 失败时保留已保存的恢复信息，好让同一代次重试 restore/detach。
 pub fn finish_detach(state: &mut EmbedState, own: OwnWindow, restored: Result<(), Reason>) -> Result<(), Reason> {
     if state.live() != Some(own) { return Err(Reason::Stale); }
     match restored {
@@ -166,10 +153,8 @@ impl EmbedState {
         if (self.enabled, self.requested) != (enabled, requested) { self.invalidate(); }
         self.enabled = enabled; self.requested = requested;
     }
-    /// 切出 taskbar（或 restore 失败）后的失败关闭：旧宿主立刻 detached、禁探测、禁摆位，
-    /// 且不再接受 `request(true, true)` 复活；`live` 与已保存的恢复信息都保留，
-    /// 好让同一有效代次仍能走 detach/restore 重试。回到 desktop 必须由新 HWND 重新 `register`。
-    /// 第一次的原因胜出：后续的兜底 revoke 不会盖掉更精确的 restore 失败原因。
+    /// 切出任务栏或 restore 失败后停用旧宿主，回到桌面必须由新 HWND 重新 `register`。
+    /// 保留 `live` 与恢复信息供同一代次重试，后续兜底 revoke 不覆盖第一次的原因。
     pub fn revoke(&mut self, reason: Reason) {
         if let Some(own) = self.live { self.revoked.get_or_insert((own, reason)); }
         self.enabled = false; self.requested = false; self.attachment = None;
@@ -414,10 +399,7 @@ mod native {
                 if SHAppBarMessage(ABM_GETSTATE, &mut appbar) & ABS_AUTOHIDE as usize != 0 { return Err(Reason::AutoHide); }
                 for edge in 0..4 { appbar.uEdge = edge; if SHAppBarMessage(ABM_GETAUTOHIDEBAREX, &mut appbar) != 0 { return Err(Reason::AutoHide); } }
                 let root_client = client_screen(root)?;
-                // 宿主选择：XAML 任务栏（整条栏体由一个 XAML 子窗铺满）→ 直接挂在栏体根上；
-                // 经典任务栏才退到 ReBarWindow32/WorkerW。R47 之前只按 InputSite 类名判断，
-                // 本机没有这个类名的 HWND，于是 ReBarWindow32 被当成"栏体"（本机 264×48），
-                // 安全空白永远算不出来 → no_space。
+                // XAML 任务栏直接以栏体根为父，经典任务栏才退到 ReBarWindow32/WorkerW。
                 let host = xaml_host(root, root_id.pid, root_client);
                 let legacy = FindWindowExW(Some(root), None, w!("ReBarWindow32"), None).ok()
                     .or_else(|| FindWindowExW(Some(root), None, w!("WorkerW"), None).ok())
@@ -503,21 +485,16 @@ mod native {
         pub fn now(&self) -> u64 { self.origin.elapsed().as_millis().min(u128::from(u64::MAX)) as u64 }
         pub fn payload(&self) -> Value { let i = lock(&self.inner); i.reason.payload(i.attached) }
         pub fn live(&self) -> Option<OwnWindow> { lock(&self.inner).policy.live() }
-        /// 窄只读出口：**已 revoke 但仍活着**的旧代次（没有就 `None`）。
-        ///
-        /// 撤销态只影响探测/显示/摆位（`live`/`saved` 故意保留，好让同一代次重试
-        /// restore/detach）。所以"这扇窗还是不是那个被禁用的旧 HWND"只能问宿主：
-        /// 桌面重开必须据此改走受控销毁 + 新建代次，而不是 reload/show 旧窗。
-        /// 顺手消费迟到的 Destroyed 记账，免得拿一扇已经销毁的代次去重建。
+        /// 已 revoke 但仍存活的旧代次：桌面重开据此改走受控销毁加新建代次，而不是 reload/show 旧窗。
+        /// 同时消费迟到的 Destroyed 记账，免得拿已经销毁的代次去重建。
         pub fn revoked_live(&self) -> Option<OwnWindow> {
             let mut i = lock(&self.inner);
             self.consume_destroyed(&mut i);
             i.policy.revoked().and_then(|_| i.policy.live())
         }
         pub fn failed(&self, reason: Reason) { let mut i = lock(&self.inner); i.policy.fail(reason); i.reason = reason; i.attached = false; }
-        /// 失败关闭出口（窄接口）：切出 taskbar / restore 失败时，旧宿主立即进入 detached、
-        /// 禁探测、隐藏；`live` 与 saved 保留给同一有效代次重试 restore。
-        /// 第一个原因胜出：detach 已记下更精确的原因时，后续兜底不覆盖它。
+        /// 切出任务栏或 restore 失败时，旧宿主立即 detached 并隐藏，保留 `live` 供同一代次重试。
+        /// 已记下更精确的原因时，后续兜底不覆盖它。
         pub fn revoke(&self, reason: Reason) {
             let mut i = lock(&self.inner);
             let reason = i.policy.revoked().unwrap_or(reason);
@@ -550,9 +527,7 @@ mod native {
                 if taskbar_created == 0 { return Err(Reason::AttachFailed); }
                 let alive = std::sync::Arc::new(AtomicBool::new(true));
                 let data = Box::into_raw(Box::new(NativeLife { alive: alive.clone(), changed: self.changed.clone(), taskbar_created }));
-                // 先登记代次再装子类：这样子类化调用的目标参数本身就能由 ensure_own 当场复核
-                // （代次/线程/自进程/活性四项），而不是靠前面那次 PID 检查。装不上就地撤销这次登记，
-                // 绝不留"有写资格却没有 liveness 观察"的活代次。
+                // 先登记代次再装子类，目标参数才能由 ensure_own 当场复核，装不上就地撤销这次登记。
                 i.policy.register(own); i.policy.native_alive = Some(alive);
                 let installed = subclass_own(&i.policy, own, generation as usize, data as usize);
                 if !matches!(installed, Ok(true)) {

@@ -1,31 +1,9 @@
-//! 主题三态（浅色 / 深色 / 跟随系统）：`settings.json` 的 `theme` 键 + `theme:changed` 广播（R25）。
-//!
-//! 用户四项之 4：登录体验的右上角要有「黑白主题 + 系统默认」。三个档位的**状态**放在这里
-//! （Rust 侧持有），渲染层只有"把类落到 `<html>` 上"那一个副作用
-//! （`src/renderer/features/theme/theme.mjs`）。
-//!
-//! 为什么状态归 Rust 而不是渲染层：改主题的入口有三个（gate 里的控件、浮动 `login-theme` 控件、
-//! 将来的设置页），而它们活在**三个不同的 webview** 里——各存一份必然漂移
-//! （"主窗是暗的、浮动控件还是亮的"）。于是：一份状态 + 一条广播（[`crate::bridge::THEME_CHANGED`]）
-//! + 每个 webview 自己按广播应用类。
-//!
-//! 三条纪律（与 `close_behavior.rs` / `webview_proxy.rs` 的读盘同款）：
-//!
-//! 1. **读盘认不出就用默认，不猜**：非 JSON、`schemaVersion ≠ 1`、`data` 不是对象、
-//!    `theme` 不在枚举里 —— 一律回落 [`DEFAULT_THEME`]（跟随系统 = 什么都不强制）。
-//!    这与 R10 起的行为逐字一致，用户不会因为一次坏读盘突然被锁进某个强制档。
-//! 2. **写盘只有一个写者**（R44e 裁决）：`settings.json` 的**唯一写者**是 sidecar
-//!    （`src/main/settings.mjs` 的 `writeTail` 尾链）。Rust 不再自己 read/rename 那个文件——
-//!    两个写者各自"读旧文档 → 改自己那一键 → rename"会互相覆盖（原子替换不等于串行读改写；
-//!    集成审查 agent71 的 I3 就是合成复现出来的双成功覆盖）。主题改盘走内部 `settings:set`
-//!    （[`crate::commands::settings_write_owned`]），与代理/歌词配置排在同一条尾链上。
-//! 3. **认不出的文件绝不覆盖**：这条纪律现在由 sidecar 执行（它的 `save` 对认不出的文档报结构化
-//!    错误并保留原文件）；Rust 这一侧的责任是**收到错误就什么都不改**（内存、原生、广播都不动）。
-//!
-//! 整笔事务由 Rust 拥有（R44e 设计审查 agent73）：写盘 → 校验回执 → 处置 uncertain →
-//! 更新内存/原生 → 推进 revision → 广播，全部在**同一个拥有任务**里完成，invoke 的等待者消失
-//! （WebView 导航、组件卸载）不会取消后半提交。写可能已经发出去却没等到回执（超时）时，那一笔在
-//! **确认提交前保持 uncertain**——退出流程要等整笔主题，而不是只等底层那次调用。
+//! 主题三态（浅色 / 深色 / 跟随系统），状态归 Rust 持有，渲染层只按广播把类落到 `<html>` 上。
+//! 三个 webview 里的入口共用这一份状态加一条广播，各存一份必然漂移。
+//! 读盘认不出就用默认不猜；`settings.json` 的唯一写者是 sidecar，Rust 改盘走 `settings:set`。
+//! 收到写盘错误就什么都不改，内存、原生主题与广播都不动。
+//! 整笔事务在 Rust 拥有的任务里完成，invoke 等待者消失不会取消后半提交。
+//! 写可能发出却没等到回执时那一笔保持 uncertain，退出流程等的是整笔主题而非底层那次调用。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -102,7 +80,7 @@ impl std::fmt::Display for ThemeChoice {
     }
 }
 
-/// 没有这一项 / 认不出时的落点：**跟随系统**（= 什么都不强制，与 R10 起的行为一致）。
+/// 没有这一项或认不出时的落点，跟随系统，什么都不强制。
 pub const DEFAULT_THEME: ThemeChoice = ThemeChoice::System;
 
 /// `settings.json` 文本 → 主题档位；认不出/没写一律 `None`（由调用方决定回落）。
@@ -116,14 +94,8 @@ pub fn parse_theme(raw: Option<&str>) -> Option<ThemeChoice> {
     ThemeChoice::from_setting(setting.as_str())
 }
 
-/// 读数据目录下的 `settings.json`，分三档（与 `close_behavior::read_close_behavior` 同款）：
-///
-/// 1. **文件不存在** → [`DEFAULT_THEME`]（用户没选过，界面显示的也是它）；
-/// 2. 文件在、形状认识 → 照读（缺 `theme` 键同样落 [`DEFAULT_THEME`]）；
-/// 3. 文件在但读不了 / 形状不认识 → [`DEFAULT_THEME`]（**不猜档位**：跟随系统是唯一安全的落点）。
-///
-/// **只在启动时调用一次**（`ThemeState::restore`）。运行期不再读这个文件：内存里那份才是权威，
-/// 读盘一律经 sidecar 的排空屏障（内部 `settings:get`）。
+/// 读数据目录下的 `settings.json` 得到启动档位，读不了或认不出就算 [`DEFAULT_THEME`] 不猜。
+/// 只在启动时调用一次，运行期内存里那份才是权威，读盘一律经 sidecar 的排空屏障。
 pub fn read_theme(data_dir: &Path) -> ThemeChoice {
     match std::fs::read_to_string(data_dir.join(SETTINGS_FILE_NAME)) {
         Ok(raw) => parse_theme(Some(&raw)).unwrap_or(DEFAULT_THEME),
@@ -136,14 +108,8 @@ pub fn theme_patch(choice: ThemeChoice) -> Value {
     json!({ THEME_KEY: choice.setting() })
 }
 
-/// 主题的托管状态（**在 setup 里登记**，与关窗行为同款）。
-///
-/// 四个部件各管一件事，缺一个就会退回 R44e 之前那种"两份真相"：
-/// - `current`：内存里的权威档位（只在本事务确认提交后写）；
-/// - `revision`：单调序号，用来让读回/广播的**旧回执**无法盖掉新的（渲染层同一份合同）；
-/// - `uncertain`：**可能已经写进盘、但还没确认**的那一档。写之前置上，确认后清掉；
-///   超时/回执读不出时**留着**（退出前重存权威主题来消除，不能把"超时"当"没写"）；
-/// - `order`：整笔事务的顺序门（两笔快速主题指令不会交叉提交）。
+/// 主题的托管状态，在 setup 里登记，`current` 只在事务确认提交后写，`uncertain` 超时时必须留着。
+/// `order` 是整笔事务的顺序门，`revision` 单调递增让旧回执盖不掉新的，不能把超时当没写。
 pub struct ThemeState {
     data_dir: PathBuf,
     current: Mutex<ThemeChoice>,
@@ -179,11 +145,8 @@ impl ThemeState {
         self.revision.load(Ordering::Acquire)
     }
 
-    /// **原子快照**：档位与 revision 必须是**同一笔提交**的那一对。
-    ///
-    /// 分开读（`current()` 再 `revision()`）会给出"新档位 + 旧编号"（写者刚改完档位、还没加编号，
-    /// 或反过来）——渲染层的单调合同拿这种载荷做判断就会把旧档位当新答案。写者在本互斥量内
-    /// 同时改档位与编号，所以只要**持着 `current` 读编号**，读到的就是某一笔完整提交。
+    /// 档位与 revision 必须取自同一笔提交，分开读会给出新档位配旧编号的假快照。
+    /// 写者在 `current` 的互斥量内同时改两者，所以持着它读编号即可。
     pub fn snapshot(&self) -> ThemeCommit {
         let current = lock(&self.current);
         ThemeCommit {
@@ -206,35 +169,20 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// 一笔**已提交**主题事务的快照：`{theme, revision}` 由这笔事务自己产出。
-///
-/// 为什么不是"事务结束后另读一次当前档位"：两笔快速指令时，第一笔的调用方可能读到第二笔的
-/// revision，于是回执是"旧档位 + 新编号"——渲染层按单调合同照收，界面被拉回旧主题
-/// （review finding 3）。回执必须与广播同源，所以由事务本身返回。
+/// 一笔已提交主题事务的快照，由事务本身产出，保证回执与广播同源而不是事后另读当前档位。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThemeCommit {
     pub theme: ThemeChoice,
     pub revision: u64,
 }
 
-/// 这次失败算不算"可能已经写了"（= 必须留 uncertain）。
-///
-/// `timeout` 是 `CoreShared::call` 超时：接收槽已被 `forget`，但 sidecar 仍可能把那一帧处理完
-/// ——把它当"没写"就是 R44e 的第一个缺陷形状（退出时假确认、盘上其实还差一笔）。
+/// 这次失败算不算"可能已经写了"，= 必须留 uncertain；超时时 sidecar 仍可能把那帧处理完。
 pub fn is_uncertain_write(error: &CoreError) -> bool {
     matches!(error.kind.as_deref(), Some("timeout") | Some("uncertain"))
 }
 
-/// **整笔主题事务的编排**（不碰 tauri：三个外部效果由参数注入，因此可脱机测）。
-///
-/// 顺序是合同的一部分：
-/// 1. 拿顺序门 → 2. 置 uncertain → 3. 写盘并校验回执 →
-/// 4. 只有确认成功才更新内存/revision、应用原生主题、广播。
-///
-/// 失败语义：
-/// - 明确失败（core 不可用 / 被拒 / 坏文档）→ 清掉 uncertain，**什么都不提交**；
-/// - 超时或回执认不出 → **留 uncertain**，不提交（退出前重存权威主题）；
-/// - 原生失败 → 盘上与内存已是新主题、广播照发（A 语义：已存已播），只把原生报成错误。
+/// 整笔主题事务的编排，三个外部效果由参数注入所以可脱机测。
+/// 只有写盘回执确认成功才更新内存、应用原生主题并广播，超时或回执认不出时留 uncertain 不提交。
 pub fn apply_theme_transaction<W, N, B>(
     state: &ThemeState,
     choice: ThemeChoice,
@@ -305,10 +253,7 @@ where
     }
 }
 
-/// 生产接线：起一条 **Rust 拥有的**线程跑整笔事务。
-///
-/// 受理（`PersistKind::Renderer`）在**命令线程上同步**完成——退出准备之后不再受理新的主题写；
-/// 受理凭据随线程走完整笔事务，所以"invoke 的等待者消失"不会提前放行退出。
+/// 起一条 Rust 拥有的线程跑整笔事务，受理在命令线程上同步完成，凭据随线程走完才放行退出。
 pub fn spawn_theme_transaction<R: tauri::Runtime>(
     app: &AppHandle<R>,
     choice: ThemeChoice,
@@ -394,13 +339,8 @@ pub fn current_snapshot<R: tauri::Runtime>(app: &AppHandle<R>) -> ThemeCommit {
     }
 }
 
-/// 改主题并广播（`core_login_chrome` 的 `theme` 动作落在这里）。
-///
-/// 这是**渲染层发起的**入口：先过准入门（退出准备后拒），再把整笔事务交给 Rust 拥有的线程。
-/// 广播经 `commands::emit_core_event`（信封的唯一构造点 + 启动期排队）：改完这一下，
-/// 主窗、两个浮动控件的 `<html>` 类一起变。
-///
-/// 回执是**这一笔事务提交的那一对** `{theme, revision}`（不是事后另读的快照）。
+/// 改主题并广播，是渲染层发起的入口，先过准入门再把整笔事务交给 Rust 拥有的线程。
+/// 回执是这一笔事务提交的那一对 `{theme, revision}` 而不是事后另读的快照。
 pub async fn set_theme<R: tauri::Runtime>(
     app: &AppHandle<R>,
     choice: ThemeChoice,
@@ -422,22 +362,14 @@ pub async fn set_theme<R: tauri::Runtime>(
     Ok(applied)
 }
 
-/// `core_login_chrome` 的**回执**：`{theme, revision}` 的全部构造都走这里。
-///
-/// 抽出来的唯一理由是让"回执来自**哪一份**快照"成为可断言的行为：写盘回执必须传**这一笔提交**
-/// （[`ThemeCommit`]），读回传当前原子快照（[`ThemeState::snapshot`]）。两处共用同一个构造点，
-/// 形状不会漂移，也不会有人另写一份"事务结束后再读一次当前档位"。
+/// `core_login_chrome` 回执 `{theme, revision}` 的唯一构造点，保证形状与来源不漂移。
+/// 写盘回执传这一笔提交，读回传当前原子快照，别处不许另读一次当前档位。
 pub fn reply_payload(commit: ThemeCommit) -> Value {
     json!({ "theme": commit.theme.setting(), "revision": commit.revision })
 }
 
-/// 退出用的 uncertain 处置：把**当前权威主题**重存一次，成功才清 uncertain。
-///
-/// 返回 `Ok(true)` = 现在没有 uncertain（本来就没有，或这次重存确认了）；
-/// `Ok(false)` 不会出现（失败走 `Err`：退出必须保窗，而不是"当作已一致"）。
-///
-/// `deadline` 是**整个退出准备**的绝对期限（review finding 4）：重存只拿剩下的预算，
-/// 不另起一个 10 秒等待；预算用尽时立刻有界失败，uncertain 留着给下一次退出。
+/// 退出用的 uncertain 处置，把当前权威主题重存一次，成功才清 uncertain，失败必须保窗而非当作已一致。
+/// `deadline` 是整个退出准备的绝对期限，重存只用剩余预算，用尽即立刻有界失败并保留 uncertain。
 pub fn resolve_uncertain<R: tauri::Runtime>(
     app: &AppHandle<R>,
     deadline: std::time::Instant,
@@ -459,10 +391,8 @@ pub fn resolve_uncertain<R: tauri::Runtime>(
     result
 }
 
-/// [`resolve_uncertain`] 的**可脱机测试**版本：写调用由参数注入（拿到的是调用方给的时间上限）。
-///
-/// 顺序是合同：先看有没有 uncertain（没有就什么都不做，预算再紧也不报错）→ 再算预算
-/// （没预算立刻失败，一次都不写）→ 拿顺序门 → 重写并校验回执 → 才清 uncertain。
+/// [`resolve_uncertain`] 的可脱机测试版本，写调用由参数注入并拿到调用方给的时间上限。
+/// 顺序是合同，没有 uncertain 就什么都不做，预算用尽时立刻失败且一次都不写。
 pub fn resolve_uncertain_with<W>(
     state: &ThemeState,
     deadline: std::time::Instant,
@@ -580,11 +510,7 @@ mod tests {
         );
     }
 
-    /// R44e / I3：主题**不再自己写 `settings.json`**。
-    ///
-    /// 两个写者各自 read→patch→rename 会互相覆盖（集成审查的合成复现：C 读 light → Rust 落 dark
-    /// → C rename 回 light）。所以这一侧的纪律是：生产代码里不许再出现状态目录的写盘调用，
-    /// 也不许出现第二条临时文件名——唯一写者只能是 sidecar 的 `writeTail`。
+    /// 主题侧不许自己写 `settings.json`，唯一写者只能是 sidecar 的 `writeTail`，否则两个写者互相覆盖。
     #[test]
     fn the_theme_module_owns_no_second_settings_json_writer() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/theme.rs"))
@@ -774,11 +700,7 @@ mod tests {
         assert_eq!(state.revision(), 2);
     }
 
-    /// R44e fix1 / review finding 3：命令回执必须带**这一笔事务自己提交的** `(theme, revision)`。
-    ///
-    /// 修复前命令在事务结束后另读一次 `current_snapshot()`：两笔快速主题指令时，第一笔的
-    /// continuation 可能读到第二笔的编号，于是"旧档位 + 新编号"的回执把界面拉回去——渲染层的
-    /// 单调合同也拦不住它（编号是新的）。这里钉的是"回执与广播同源"。
+    /// 命令回执必须带这一笔事务自己提交的 `(theme, revision)`，与广播同源。
     #[test]
     fn fix3_a_commit_reply_carries_the_very_revision_that_transaction_committed() {
         let state = ThemeState::restore(&scratch("commit-reply"));
@@ -811,11 +733,7 @@ mod tests {
         assert_eq!(state.snapshot(), second, "快照里的档位与编号也必须是同一笔的");
     }
 
-    /// R44e fix1 / review finding 4：退出前的 uncertain 重存只拿**剩余预算**，没预算就立刻失败。
-    ///
-    /// 修复前它调的是 `settings_write_owned`（自带 10 秒超时）：4 秒退出预算之外的这一次等待
-    /// 会把"有界退出"再拖 10 秒。修复后：写调用拿到的是（剩余预算 min 单笔上限）；预算用尽时
-    /// 一次都不写、uncertain 留着——退出走既有的可逆 abort，下次再来。
+    /// 退出前重存 uncertain 只能用剩余预算，预算耗尽时一次都不写并保留 uncertain。
     #[test]
     fn fix4_the_uncertain_rewrite_only_gets_the_remaining_exit_budget() {
         let state = ThemeState::restore(&scratch("uncertain-budget"));
@@ -857,10 +775,7 @@ mod tests {
         assert!(resolve_uncertain_with(&state, now, |_, _| panic!("没有 uncertain 不许写盘")).expect("无事可做"));
     }
 
-    /// 回执的**构造点**也是合同：晚组装的旧回执必须还是旧的那一对（不是"最新快照"）。
-    ///
-    /// 两笔快速主题：第一笔的回执即使拖到第二笔之后才组装，也必须仍然是 `(dark, 1)`——
-    /// 否则渲染层拿到的就是"旧档位 + 新编号"，单调合同照收、界面被拉回去。
+    /// 回执在构造点绑定自己那一笔，晚组装也必须仍是 `(dark, 1)` 而不是最新快照。
     #[test]
     fn fix3_a_reply_is_built_from_its_own_commit_not_from_the_latest_snapshot() {
         let state = ThemeState::restore(&scratch("commit-reply-payload"));
@@ -916,7 +831,7 @@ mod tests {
         assert_eq!(state.revision(), 2);
     }
 
-    /// R28（用户指令 2026-10-20，**推翻 R26/R27 裁决**）：改主题不再动官方登录页。
+    /// 改主题只影响主窗与浮窗，不得再触碰官方登录页。
     #[test]
     fn changing_the_theme_leaves_the_official_login_page_alone() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/theme.rs"))

@@ -23,10 +23,8 @@ pub const NODE_BIN_ENV: &str = "HWMUSIC_NODE_BIN";
 /// sidecar 脚本覆盖旋钮：只接受绝对路径；空值/相对路径=未设置（排障用）。
 pub const SIDECAR_SCRIPT_ENV: &str = "HWMUSIC_SIDECAR_SCRIPT";
 
-/// sidecar 启动参数：应用数据目录（Node 侧 `src/main/data-dir.mjs` 读同一个字面量，测试互钉）。
-///
-/// 数据目录只由宿主解析（`HWMUSIC_DATA_DIR` → 应用数据目录 → 应用缓存目录），再经 argv 交给
-/// sidecar：让 sidecar 自己猜目录，打包后会落到不可写的位置（见 `lib.rs` 的 `DataRootError`）。
+/// sidecar 启动参数：应用数据目录，Node 侧 `src/main/data-dir.mjs` 读同一字面量。
+/// 目录只由宿主解析后经 argv 传入；sidecar 自己猜目录，打包后会落到不可写的位置。
 pub const DATA_DIR_ARG: &str = "--data-dir";
 
 /// 打包后 sidecar 二进制的文件名主干：Tauri 复制 externalBin 时会剥掉三元组后缀。
@@ -53,10 +51,8 @@ pub fn log_stderr_line(raw: &str) {
     log::log!(target: STDERR_LOG_TARGET, level, "{message}");
 }
 
-/// 逐行读一条 stderr 管道直到对端关闭。
-///
-/// **绝不 join**：管道在子进程退出/被 kill 时才关闭，而退出路径不能等一个可能还没写的管道。
-/// 读失败一律当读完（`break`），把"收尾"留给 `terminate` 的收尸。
+/// 逐行读 stderr 直到对端关闭；读失败一律当读完，收尾留给 `terminate`。
+/// **绝不 join**：退出路径不能等一条只在子进程退出时才关闭的管道。
 pub fn spawn_stderr_reader<R>(stderr: R, sink: impl Fn(&str) + Send + 'static) -> JoinHandle<()>
 where
     R: std::io::Read + Send + 'static,
@@ -102,10 +98,8 @@ impl SidecarKnobs {
     }
 }
 
-/// 开发期的脚本回退：仓库里的 `src/sidecar/main.mjs`。
-///
-/// release 构建返回 None：不能把构建机上的仓库路径烘进交付产物——那时必须靠
-/// 应用同目录的 sidecar 二进制（R14 打包负责放进去）。
+/// 开发期脚本回退：仓库里的 `src/sidecar/main.mjs`。
+/// release 构建返回 None：不能把构建机上的仓库路径烘进交付产物，那时得靠应用同目录的二进制。
 #[cfg(debug_assertions)]
 pub fn fallback_dev_script() -> Option<PathBuf> {
     Some(
@@ -178,10 +172,8 @@ impl std::fmt::Display for LaunchError {
 
 impl std::error::Error for LaunchError {}
 
-/// node 程序覆盖值：接受绝对路径与裸命令名，其余（含相对路径）一律视为未设置。
-///
-/// 相对路径会随启动目录漂移，和 `HWMUSIC_DATA_DIR` 一样只收绝对路径；
-/// 但裸命令名（如 `node`）是有意义的——交给 PATH 解析。
+/// node 程序覆盖值：只收绝对路径与裸命令名（交 PATH 解析），其余一律视为未设置。
+/// 相对路径会随启动目录漂移，和 `HWMUSIC_DATA_DIR` 一样不收。
 pub fn node_program_override(raw: Option<&str>) -> Option<String> {
     let trimmed = raw?.trim();
     if trimmed.is_empty() {
@@ -416,10 +408,8 @@ impl SidecarProcess {
         Ok(())
     }
 
-    /// 收尸（幂等）：关写入端 → 等它自己退出（stdin EOF → exit(0)）→ 超时才 kill。
-    ///
-    /// 这是 `RunEvent::ExitRequested`/`Exit` 的落点：tao 在 Windows 上 `run_return` 之后
-    /// 直接 `process::exit`，`Drop` 不会执行，所以必须显式收尸。
+    /// 收尸（幂等）：关写入端 → 等它自己退出 → 超时才 kill。
+    /// 必须显式调用：tao 在 Windows 上 `run_return` 之后直接 `process::exit`，`Drop` 不执行。
     pub fn terminate(&self, reason: &str) {
         if self.terminated.swap(true, Ordering::SeqCst) {
             return;
@@ -696,9 +686,8 @@ mod tests {
             .start_pump(move |effect| sink.lock().unwrap().push(effect))
             .expect("帧泵必须能起来");
 
-        // 真 sidecar 对白名单频道回**确定的答复**（不是超时、不是挂起）。
-        // `auth:login` 自 R7 起是长轮询：立刻回"已受理"，真正的结论经 `auth:status` 广播送达
-        // （渲染层那条 core_call 链路有 60 秒上限，等不了 10 分钟的扫码）。
+        // 真 sidecar 对白名单频道回确定的答复（不是超时、不是挂起）：`auth:login` 立刻回"已受理"，
+        // 真正的结论经 `auth:status` 广播——渲染层那条 core_call 有 60 秒上限，等不了 10 分钟扫码。
         let ack = process
             .shared()
             .call("auth:login", json!({}), Duration::from_secs(20))
@@ -754,7 +743,7 @@ mod tests {
         condition()
     }
 
-    /// R56：stderr 管道逐行进日志管线，级别来自 sidecar 自己的 `[warn]`/`[error]` 标记。
+    /// stderr 管道逐行进日志管线，级别来自 sidecar 自己的 `[warn]`/`[error]` 标记。
     #[test]
     fn stderr_pipe_feeds_levels_from_a_real_child() {
         let script = concat!(
@@ -793,7 +782,7 @@ mod tests {
         assert!(levels[2].1.contains("nextTick"), "{:?}", levels[2]);
     }
 
-    /// R56：收尸不许等 stderr 管道——子进程赖在 SHUTDOWN_GRACE 里不走时，terminate 仍要按时返回。
+    /// 收尸不许等 stderr 管道：子进程赖在 SHUTDOWN_GRACE 里不走时，terminate 仍要按时返回。
     #[test]
     fn terminate_does_not_wait_for_the_stderr_reader() {
         let plan = LaunchPlan {
@@ -822,7 +811,7 @@ mod tests {
         );
     }
 
-    /// R56：stderr 必须是管道（`inherit` 时 sidecar 的日志一条都进不了日志文件）。
+    /// stderr 必须是管道：`inherit` 时 sidecar 的日志一条都进不了日志文件。
     #[test]
     fn spawn_pipes_stderr_instead_of_inheriting_it() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sidecar.rs"))
@@ -838,10 +827,8 @@ mod tests {
         assert!(body.contains("spawn_stderr_reader("), "必须真的起一个读线程：{body}");
     }
 
-    /// R6 端到端：真 sidecar 读真 `settings.json` → 广播 `app:notice` → 宿主帧泵收到 `Effect::Emit`。
-    ///
-    /// 这条横跨进程边界：证的不是"某个函数返回了什么"，而是**启动提示真的能被宿主收到**
-    /// （旧仓缺陷正是"启动期 emit 发进空气"）。凭据只允许停在磁盘上，绝不进提示文本。
+    /// 端到端：真 sidecar 读真 `settings.json` → 广播 `app:notice` → 宿主帧泵收到 `Effect::Emit`。
+    /// 证的是启动提示真能被宿主收到；凭据只允许停在磁盘上，绝不进提示文本。
     #[test]
     fn proxy_startup_notice_reaches_the_host_pump_without_credentials() {
         let Some(dev_script) = fallback_dev_script() else {

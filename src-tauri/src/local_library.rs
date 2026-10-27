@@ -1,7 +1,7 @@
-//! 本地曲库（R65）：选文件、读元数据、存索引、按 id 提供音频/封面/歌词。
+//! 本地曲库：选文件、读元数据、存索引、按 id 提供音频/封面/歌词。
 //!
-//! **路径只存在这里**：渲染层与 sidecar 拿到的永远是 128 位随机十六进制 id（不可猜，协议只按 id 查索引）。
-//! 格式白名单在**导入时**就拦：WebView2 放不出来的格式（ape/wma/tak…）导进来只会变成"点了没反应"。
+//! 路径只存在这里：渲染层与 sidecar 只见到 128 位随机十六进制 id，协议只按 id 查索引。
+//! 格式白名单在导入时就拦：WebView2 放不出来的格式导进来只会变成"点了没反应"。
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -81,9 +81,7 @@ pub fn file_name_of(path: &Path) -> String {
 pub fn new_track_id() -> String {
     let mut bytes = [0u8; 16];
     if getrandom::fill(&mut bytes).is_err() {
-        // 随机源不可用是"这台机器出问题了"，不是可以悄悄降级的地方：
-        // 退化成一个可预测的 id 等于把"没导入就拿不到"这条保证作废。用时间戳兜底只为不 panic，
-        // 并把这件事记进日志（调用方会在索引里看到它）。
+        // 随机源不可用是"这台机器出问题了"，不能悄悄降级成可预测的 id；用时间戳兜底只为不 panic，并记进日志。
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|value| value.as_nanos())
@@ -108,10 +106,7 @@ pub enum ProtocolRequest {
     Cover(String),
 }
 
-/// 解析协议路径（**只认两种形状**，别的一律 `None` → 404）。
-///
-/// 查询串/片段不算路径的一部分（uri 层已经剥掉了）；这里只认真实路径段：
-/// `/{id}` 与 `/{id}/cover`。多一段、少一位、大小写不对都不认。
+/// 解析协议路径，只认 `/{id}` 与 `/{id}/cover` 两种形状，别的一律 `None`（对外是 404）。
 pub fn parse_protocol_path(path: &str) -> Option<ProtocolRequest> {
     let trimmed = path.strip_prefix('/')?;
     if trimmed.is_empty() || trimmed.ends_with('/') {
@@ -146,10 +141,7 @@ pub enum RangeOutcome {
     Unsatisfiable,
 }
 
-/// 解析 `Range` 头（单区间）。
-///
-/// 认不出的写法（多区间、非 `bytes` 单位、乱码）**回 `Full`**：按 HTTP 的规矩，"看不懂的范围"
-/// 该整份回，而不是猜一个区间——猜错的表现是播放器拖到某个位置就卡住。
+/// 解析单区间 `Range` 头；看不懂的写法回 `Full`，猜区间会让播放器拖到某个位置就卡住。
 pub fn parse_range(header: Option<&str>, length: u64) -> RangeOutcome {
     let Some(raw) = header else { return RangeOutcome::Full };
     let Some(spec) = raw.trim().strip_prefix("bytes=") else {
@@ -466,7 +458,7 @@ pub fn collect_candidates(paths: &[PathBuf]) -> (Vec<PathBuf>, Vec<RejectedImpor
     (files, rejected, truncated)
 }
 
-/// 深度与数量都有上限的遍历（R65 简报：深度 3、最多 2000 个文件）。
+/// 有上限的递归遍历：深度 3 层、最多 2000 个文件。
 fn walk_folder(dir: &Path, depth: u32, files: &mut Vec<PathBuf>, truncated: &mut usize) {
     if depth >= MAX_FOLDER_DEPTH {
         *truncated += 1;
@@ -494,10 +486,8 @@ fn walk_folder(dir: &Path, depth: u32, files: &mut Vec<PathBuf>, truncated: &mut
     }
 }
 
-/// 导入一批路径（**纯函数式入口**：不弹对话框，测试直接传路径）。
-///
-/// 已存在（同一路径键）的那一条**更新元数据并保留 id**——id 一变，队列里与歌词缓存里的引用
-/// 就全断了（用户会看到"刚导入过的歌在队列里消失了"）。
+/// 导入一批路径（不弹对话框，测试直接传路径）。
+/// 同一路径键的旧记录只更新元数据并保留 id——id 变了，队列与歌词缓存里的引用就全断了。
 pub fn import_paths(root: &Path, paths: &[PathBuf]) -> Result<(Vec<Track>, ImportOutcome), CoreError> {
     let mut tracks = load_index(root);
     let mut outcome = ImportOutcome::default();
@@ -640,9 +630,7 @@ fn read_lyrics_file(path: &Path) -> Option<Vec<u8>> {
 }
 
 /// 本地曲目的歌词字节：同名 `.lrc` → 同名 `.txt` → 内嵌歌词标签。
-///
-/// 为什么是这个顺序：外挂文件是**用户自己放在那儿**的（他能看见、能改），内嵌标签是打包进文件的
-/// 那一份（用户改起来要专门的工具）。两者都在的时候，前者更接近"我现在想看的词"。
+/// 外挂文件是用户自己放的、能改，所以优先于打包进文件的内嵌标签。
 pub fn lyrics_bytes(path: &Path) -> Option<(Vec<u8>, LyricsSourceKind)> {
     for (extension, kind) in [("lrc", LyricsSourceKind::Lrc), ("txt", LyricsSourceKind::Txt)] {
         let candidate = path.with_extension(extension);
@@ -864,10 +852,8 @@ fn snapshot(tracks: &[Track]) -> Value {
     json!({ "tracks": views, "available": true })
 }
 
-/// 选文件 / 选文件夹：**在阻塞线程池上等**，主线程全程不被占住。
-///
-/// 不走渲染层那条 `plugin:dialog|*`（那要在 capabilities 里给页面对话框权限）；
-/// 也不在主线程同步等——Windows 的模态对话框会把事件循环锁死。
+/// 选文件 / 选文件夹：在阻塞线程池上等，主线程全程不被占住（Windows 模态对话框会锁死事件循环）。
+/// 不走渲染层的 `plugin:dialog|*`，那需要在 capabilities 里给页面对话框权限。
 pub async fn pick_paths(app: AppHandle, folder: bool) -> Vec<PathBuf> {
     tauri::async_runtime::spawn_blocking(move || {
         use tauri_plugin_dialog::DialogExt;
@@ -904,10 +890,8 @@ pub fn core_local_list(webview: Webview) -> Result<Value, CoreError> {
     Ok(snapshot(&load_index(&root)))
 }
 
-/// 导入：`paths` 缺省 = 开系统对话框（`folder: true` 是选文件夹）。
-///
-/// async 的原因：对话框那一路要等用户在窗里选完。用它自己的**回调**形态 + await 一个答复槽，
-/// 主线程始终不被占住（Windows 上同步等对话框会把事件循环锁死）。
+/// 导入：`paths` 缺省时开系统对话框（`folder: true` 是选文件夹）。
+/// async 是为了等用户选完：用对话框的回调形态 await 一个答复槽，主线程始终不被占住。
 #[tauri::command]
 pub async fn core_local_import(
     webview: Webview,

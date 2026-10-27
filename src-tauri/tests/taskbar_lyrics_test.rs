@@ -296,11 +296,8 @@ fn fix_self_window_guard_rejects_foreign_process_foreign_thread_and_dead_handle(
     assert!(!self_window(true, 0, 8, 7, 8), "pid 0 不是本进程");
 }
 
-/// R47 真实几何夹具：本机 2026-10-25 单屏 1920×1080 任务栏的一手 UIA 观测
-/// （`.tmp/probe/uia-pids.json`，Explorer pid 10916 全部同进程）。21 个非容器节点里，
-/// 可交互控件只占 718–1203 与 1631–1920，中间 1203–1631 与左侧 0–718 是空白。
-/// 注意夹具里刻意保留两个**铺满一段**的占用块（MSTaskSwWClass 762–982、
-/// TrayNotifyWnd 1631–1920）——它们不是"空白"，只是把空白切断。
+/// 真实几何夹具：本机单屏 1920×1080 任务栏的一手 UIA 观测，可交互控件只占 718–1203 与 1631–1920，
+/// 中间和左侧是空白；夹具刻意保留两个铺满一段的占用块（MSTaskSwWClass、TrayNotifyWnd），它们不是空白。
 fn measured_taskbar() -> (TargetSnapshot, Vec<PixelRect>) {
     let mut bar = target();
     bar.client_screen = rect(0, 1032, 1920, 48);
@@ -332,9 +329,8 @@ fn measured_taskbar_with_real_blank_band_yields_a_slot_that_touches_no_button() 
     }
 }
 
-/// 误把经典 `ReBarWindow32`（本机 264×48、随任务列表移动）当成"整条栏体"的后果：
-/// 那一条被任务列表容器铺满，安全空白算成 0 → `no_space`。这就是 R47 修复前的真实现象，
-/// 用它把"父窗选错必须失败关闭、不许硬塞"钉住。
+/// 把经典 `ReBarWindow32`（随任务列表移动）当成整条栏体：安全空白会算成 0 并报 `no_space`。
+/// 用它钉住「父窗选错必须失败关闭、不许硬塞」。
 #[test]
 fn task_list_band_is_not_the_bar_so_a_missing_slot_fails_closed_with_no_space() {
     let (mut bar, occupied) = measured_taskbar();
@@ -358,8 +354,8 @@ fn xaml_host_is_decided_by_structure_not_by_class_name() {
     assert!(!xaml_surface(true, true, true, rect(0, 1032, 1920, 48), rect(0, 1032, 0, 0)), "栏体自身非法时失败关闭");
 }
 
-/// 父窗选择：宿主在就必须用栏体根；只有经典任务栏才退 ReBar/WorkerW。
-/// R47 的 `no_space` 正是这一条选错：本机是 XAML 任务栏但宿主类名换了，走了 ReBar 分支。
+/// 宿主覆盖栏体时父窗必须是栏体根，只有经典任务栏才退 ReBar/WorkerW。
+/// 选错就退化成 `no_space`：XAML 任务栏但宿主类名换了会误走 ReBar 分支。
 #[test]
 fn parent_selection_prefers_the_bar_root_whenever_a_xaml_host_covers_it() {
     use huawei_music_desktop_lib::taskbar_lyrics::taskbar_parent;
@@ -374,9 +370,8 @@ fn parent_selection_prefers_the_bar_root_whenever_a_xaml_host_covers_it() {
     assert_eq!(taskbar_parent(false, None, ROOT), ROOT, "两个经典子窗都没有就用根");
 }
 
-/// 容器判定仍以"已知白名单 + 允许的 ControlType"为准，宽度不是放行理由：
-/// 全宽 Pane 只有类名已知才递归，全宽 Button 永不递归，窄的未知 Pane 也不会被自动打开，
-/// 非 shell 进程的节点一律保守占用。
+/// 容器判定只认「已知白名单 + 允许的 ControlType」，宽度不是放行理由：全宽 Pane 需类名已知才递归，
+/// 全宽 Button 永不递归，窄的未知 Pane 也不会自动打开，非 shell 进程节点一律保守占用。
 #[test]
 fn uia_container_boundaries_keep_width_out_of_the_decision() {
     use huawei_music_desktop_lib::taskbar_lyrics::uia_container;

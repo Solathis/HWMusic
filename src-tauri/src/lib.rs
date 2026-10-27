@@ -1,14 +1,8 @@
-//! 华为音乐第三方桌面客户端 · Tauri v2 外壳。
-//!
-//! R2 范围：窗口策略（1280×800 / min 960×640 / 显式 webview 数据目录）、最小权限
-//! capabilities、插件链编排。R3 增加 sidecar 桥（NDJSON stdio、命令白名单、宿主要求路由）。
-//! R5 增加 DPAPI 安全存储（`secure_store.rs`）并把数据根经 argv 传给 sidecar。
-//! R7 增加登录子窗（`login.rs`：白名单导航/hms 拦截/双期限/四收场/一次性数据目录）。
-//! R11 增加托盘与关窗 fail-safe（`tray.rs` / `close_behavior.rs`）。
-//! R12 增加桌面歌词窗与任务栏歌词降级（`lyrics_window.rs`）。
-//!
-//! `bridge` / `login` / `lyrics_window` / `tray` 是 `pub`：前两者的策略由 `tests/` 与内联单测直接钉
-//! （纯函数，不要 GUI），歌词窗的几何与配置判定同理（见 `lyrics_window.rs` 的内联单测）。
+//! 华为音乐第三方桌面客户端的 Tauri v2 外壳：窗口、托盘、快捷键、本地曲库协议、安全存储与插件编排。
+//! 在线业务请求与登录换码在 Node sidecar 里，两边只经 NDJSON 帧协议（`bridge.rs`）通信。
+//! 窗口全部由代码创建（`tauri.conf.json` 的 `app.windows` 留空），每个窗口用独立的 webview 数据目录。
+//! capabilities 按窗口分文件、按最小权限配置，官方登录页没有任何命令权限。
+//! `bridge` / `login` / `lyrics_window` / `tray` 是 `pub`，好让 `tests/` 与内联单测直接测纯函数。
 
 pub mod bridge;
 pub mod close_behavior;
@@ -16,7 +10,7 @@ mod commands;
 pub mod login;
 pub mod lyrics_settings;
 pub mod lyrics_window;
-/// R65：本地曲库（选文件 / 元数据 / 索引 / 按 id 提供音频与封面）与自定义协议
+/// 本地曲库（选文件 / 元数据 / 索引 / 按 id 提供音频与封面）与自定义协议
 pub mod local_library;
 pub mod taskbar_lyrics;
 pub mod run_log;
@@ -37,20 +31,18 @@ use tauri_plugin_window_state::StateFlags;
 
 /// 主窗 label。窗口由代码创建（`tauri.conf.json` 的 `app.windows` 故意留空）。
 pub const MAIN_WINDOW_LABEL: &str = "main";
-/// 桌面歌词窗 label。窗口由 R12 的 `lyrics_window.rs` 起（无边框/透明/置顶/点透），
+/// 桌面歌词窗 label。窗口由 `lyrics_window.rs` 起（无边框/透明/置顶/点透），
 /// window-state、歌词专命令来源守卫与几何接管都按同一 label。
 pub const LYRICS_WINDOW_LABEL: &str = "lyrics";
-/// 桌面歌词**设置弹出窗** label（R51）。它是歌词窗外面的另一扇小透明窗：菜单要能超出歌词窗的
-/// 800×128，所以不能留在窗里。窗口与几何归 `lyrics_settings.rs`，它自己**没有任何** window 权限。
+/// 桌面歌词设置弹出窗 label。它必须能超出歌词窗的 800×128，所以是独立的一扇透明小窗，
+/// 窗口与几何归 `lyrics_settings.rs`，它自己没有任何 window 权限。
 pub const LYRICS_SETTINGS_WINDOW_LABEL: &str = "lyrics-settings";
 /// 托盘**图标** id（菜单项 id 的前缀是 `tray:`，见 `tray::MENU_ID_PREFIX`；两件事别混）。
 pub const TRAY_ID: &str = "tray";
 /// 数据目录覆盖旋钮：只接受绝对路径，空值等同未设置（%APPDATA% 不可写时排障用）。
 pub const DATA_DIR_ENV: &str = "HWMUSIC_DATA_DIR";
-/// 数据根下放日志的一级子目录名（R17/A）。
-///
-/// 名字钉成常量而不是就地拼字符串：它同时是排障入口（用户被要求去看这个目录）与
-/// 清理脚本的靶子（`.tmp/<数据根>/logs`），改名等于同时弄坏这两件事。
+/// 数据根下放日志的一级子目录名。
+/// 名字钉成常量而不是就地拼字符串：它同时是排障入口和清理脚本的靶子，改名等于同时弄坏这两件事。
 pub const LOG_DIR_NAME: &str = "logs";
 
 fn persist_window_state(label: &str) -> bool { label == MAIN_WINDOW_LABEL }
@@ -61,9 +53,7 @@ const MAIN_WINDOW_MIN_WIDTH: f64 = 960.0;
 const MAIN_WINDOW_MIN_HEIGHT: f64 = 640.0;
 
 /// 数据根解析失败：应用数据目录与缓存目录都取不到。
-///
-/// 刻意没有“回退到 cwd”这一档：进程当前目录在打包后不可预测（可能是 Program Files），
-/// 把配置/会话写进去会静默失败或落到只读位置，所以这里如实失败。
+/// 刻意不回退到 cwd：打包后当前目录不可预测，把配置或会话写进去会静默失败或落到只读位置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataRootError {
     /// data 与 cache 两级都不可用
@@ -83,7 +73,7 @@ impl std::fmt::Display for DataRootError {
 
 impl std::error::Error for DataRootError {}
 
-/// 托管状态：本进程实际使用的 webview 数据根，供 R5/R6 等后续任务读取落盘位置。
+/// 托管状态：本进程实际使用的 webview 数据根，供后续读写落盘位置的代码取用。
 pub struct WebviewDataRoot(pub PathBuf);
 
 /// 解析 `HWMUSIC_DATA_DIR` 覆盖值：空白 = 未设置；相对路径拒绝（会随启动目录漂移）；
@@ -116,25 +106,13 @@ pub fn webview_data_root(app: &tauri::AppHandle) -> Result<PathBuf, DataRootErro
     pick_data_root(paths.app_data_dir().ok(), paths.app_cache_dir().ok())
 }
 
-/// 数据根 → 日志目录（R17/A）。纯函数，便于用例钉住"落在哪"。
+/// 数据根 → 日志目录（纯函数，便于用例钉住落在哪里）。
 pub fn log_dir(data_root: &Path) -> PathBuf {
     data_root.join(LOG_DIR_NAME)
 }
 
-/// 启动诊断那一行：**数据根是哪个路径** + **它是哪来的**（R27 用户三项之 3）。
-///
-/// 为什么这一行值得单独存在：用户报"每次重启都要重登"，而最可能的原因根本不是代码——
-/// 调试用的根（`HWMUSIC_DATA_DIR=.tmp/live-data`）与用户自跑时读的根
-/// （`%APPDATA%\{bundle}`）**互不相通**，两个根里的 `session.enc` 各归各的。
-/// 没有这一行时，"会话为什么不在"只能靠人回忆当时那个进程读的是哪个根。
-///
-/// 报的是**实际用的那个根**（`root`，走完了三级回退之后的结果），不是旋钮里的原始写法：
-/// 那两者在"旋钮没设 / 设了空白 / 设了相对路径"这三种情况下是**不一样**的，而日志要回答的是
-/// "这一次到底写哪儿了"。来源只分两档（旋钮生效 / 没生效）——第三级回退（应用数据目录 →
-/// 缓存目录）的区分已经体现在路径本身里（`%APPDATA%` vs `%LOCALAPPDATA%`）。
-///
-/// sidecar 那一侧另有一行更完整的诊断（同一个根 + `session.enc` 存在性 + 恢复档位，
-/// 见 `src/main/session-diagnostic.mjs`）；两处说的是**同一个**根（宿主经 `--data-dir` 交给它）。
+/// 启动诊断那一行报的是实际使用的数据根和它的来源，不是旋钮里的原始写法。
+/// sidecar 那侧另有一行更完整的诊断，说的是同一个根（宿主经 `--data-dir` 交给它）。
 pub fn data_root_note(raw: Option<&str>, root: &Path) -> String {
     let source = if data_root_override(raw).is_some() {
         format!("{DATA_DIR_ENV} 覆盖")
@@ -145,34 +123,15 @@ pub fn data_root_note(raw: Option<&str>, root: &Path) -> String {
 }
 
 /// 日志落点决议：`HWMUSIC_DATA_DIR` 是可用的绝对路径时给出 `<该值>/logs`，否则 `None`。
-///
-/// `None` 的含义是"**沿用插件的默认落点**"（`LogDir` = `%LOCALAPPDATA%\{bundle}\logs`），
-/// 不是"不写文件"——见 [`log_plugin_targets`]。
+/// `None` 的含义是沿用插件的默认落点（`LogDir` = `%LOCALAPPDATA%\{bundle}\logs`），不是不写文件。
 pub fn log_folder(raw: Option<&str>) -> Option<PathBuf> {
     // 走同一个旋钮解析（`data_root_override`）：那三档非法输入（未设置/空白/相对路径）
     // 的判定在这里**不许有第二份**，否则日志目录与数据根会各自漂到不同地方。
     data_root_override(raw).map(|root| log_dir(&root))
 }
 
-/// 日志目标表（R17/A）：**stdout + 文件**，文件落点跟随数据根。
-///
-/// 为什么要有这次改动：插件的默认文件目标是 `LogDir`（Windows 上
-/// `%LOCALAPPDATA%\{bundle}\logs`）。那在正常桌面环境完全没问题，但在**受限/便携**环境里
-/// 它可能不可写——而建窗走的是数据根（`HWMUSIC_DATA_DIR` 指哪写哪），于是出现
-/// "窗口能起、日志打开失败"的错配（实测表现就是把启动整个带走的 `os error 5`）。
-/// 把日志目录也拴到同一个数据根上，两者要么一起可写、要么一起报同一个错。
-///
-/// 两档落点：
-/// - **覆盖值可用** → `Folder(<覆盖值>/logs)`；
-/// - **覆盖值不可用** → `LogDir`，即插件的默认落点——**改动前是什么就是什么**，
-///   生产环境的行为逐字节不变。
-///
-/// 为什么只在这一档跟随数据根：目标表在 `Builder` 构造时就固定，而
-/// `app_data_dir()` 要等 `AppHandle`（插件的 setup 之前拿不到）。所以能"无需 AppHandle
-/// 就确定"的那一档（环境旋钮）跟随数据根，另一档交给插件默认；两者都是可写位置。
-///
-/// 档位（Info / 单文件 4MB / KeepOne）不在本函数里：它们仍写在 `run()` 的 Builder 链上，
-/// 免得"日志级别"这种东西有两个真源。
+/// 日志目标表是 stdout + 文件两档：覆盖值可用时落 `<覆盖值>/logs`，否则沿用插件的 `LogDir`，生产行为不变。
+/// 只有旋钮这一档能跟随数据根，因为目标表在 Builder 构造时就固定，`app_data_dir()` 那时还拿不到。
 pub fn log_plugin_targets(data_root_override: Option<&str>) -> Vec<Target> {
     let file = match log_folder(data_root_override) {
         Some(path) => Target::new(TargetKind::Folder {
@@ -237,9 +196,7 @@ pub fn second_instance_action(background_test: bool) -> SecondInstanceAction {
     }
 }
 
-/// 窗口状态恢复的标志：后台验证去掉 `MAXIMIZED`。
-///
-/// Windows 上恢复最大化就是 `ShowWindow(SW_MAXIMIZE)`——那会让隐藏的主窗显示出来并抢走前台。
+/// 窗口状态恢复的标志：后台验证时去掉 `MAXIMIZED`，否则恢复最大化会把隐藏的主窗显示到前台。
 pub fn window_state_flags(background_test: bool) -> StateFlags {
     let base = StateFlags::SIZE | StateFlags::POSITION;
     if background_test {
@@ -249,13 +206,8 @@ pub fn window_state_flags(background_test: bool) -> StateFlags {
     }
 }
 
-/// 创建主窗（1280×800，最小 960×640，显式数据目录，接设置里的代理）。
-///
-/// 返回实际使用的 webview 数据根，由 `run()` 登记为托管状态。目录必须先建：
-/// WebView2 不会自建，缺目录时建窗直接 `os error 5`（拒绝访问）。
-///
-/// **代理必须接**：封面图与 `<audio>` 音频流走 WebView2 自己的网络栈，不接 `proxy_url` 就绕过设置直连
-/// （旧仓审计出的缺陷 K6）。代理只在建窗时读取 → **改代理要重启应用才生效**（登录窗 R7、歌词窗 R12 同理）。
+/// 创建主窗，返回实际使用的 webview 数据根（目录要先建好，WebView2 缺目录会报 `os error 5`）。
+/// 封面图与音频流走 WebView2 自己的网络栈，所以建窗时必须接 `proxy_url`，改代理要重启应用才生效。
 pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let webview_data = webview_data_root(app)?;
     std::fs::create_dir_all(&webview_data)?;
@@ -282,9 +234,8 @@ pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std
     .visible(activation.visible)
     .focused(activation.focused);
 
-    // 没配代理/配置不可用 → None → 直连（绝不猜一个代理出来）。
-    // 走 `proxy_url_argument` 而不是直接 `Url::parse(...)?`：坏到解析不了的写法（清洗漏网的方括号 IPv6）
-    // 只降级成"没配"，绝不把建主窗这一步带崩（旧缺陷：一个配置错误 = 应用起不来）。
+    // 没配代理或配置不可用 → None → 直连，绝不猜一个代理出来。
+    // 走 `proxy_url_argument` 而非 `Url::parse(...)?`：解析不了的写法只降级成没配，不能让建窗失败。
     if let Some(proxy_url) =
         proxy_url_argument(webview_proxy::resolve_for_webview(&webview_data, MAIN_WINDOW_LABEL))
     {
@@ -367,10 +318,8 @@ impl ExitState {
     }
 }
 
-/// 正常退出的准备预算（毫秒）：保存准备是有界的，超时/失败都**保窗可重试**。
-///
-/// 为什么不许无限等：`CoreShared::call` 自己就有 10 秒上限（[`commands::SETTINGS_CALL_TIMEOUT_SECS`]），
-/// 两次写 + 一次确认读必须落在这个预算里；否则用户会看到"点了退出没反应"的窗口。
+/// 正常退出的准备预算（毫秒）：保存准备有界，超时或失败都保留窗口让用户重试。
+/// 两次写加一次确认读必须落在 `CoreShared::call` 自带的 10 秒上限内，否则用户会以为点了退出没反应。
 pub const EXIT_PREPARE_BUDGET_MS: u64 = 4000;
 
 fn finish_app_exit(shutdown: impl FnOnce(), exit: impl FnOnce()) {
@@ -378,11 +327,8 @@ fn finish_app_exit(shutdown: impl FnOnce(), exit: impl FnOnce()) {
     exit();
 }
 
-/// 退出前的持久化校验（**纯函数**）：盘上的权威文档必须与 Rust 内存里的权威值一致。
-///
-/// 为什么必须比对而不是"写调用没报错就行"：`CoreShared::call` 超时后 sidecar 仍可能把那一帧
-/// 处理完（也可能永远不处理）。只有一次**排在写队列后面**的 `settings:get` 读回来的文档，
-/// 才能证明"最后一笔真的落盘了"。缺键按默认比（用户从没选过时盘上本来就没有这一格）。
+/// 退出前的持久化校验（纯函数）：盘上的权威文档必须与 Rust 内存里的权威值一致，缺键按默认值比。
+/// 写调用没报错不算落盘，只有排在写队列后面的 `settings:get` 读回来才能证明最后一笔真的写进去了。
 pub fn verify_persisted_documents(
     answer: &Value,
     theme: theme::ThemeChoice,
@@ -408,17 +354,8 @@ pub fn verify_persisted_documents(
     Ok(())
 }
 
-/// 取消**本应用自窗**的菜单/拖动模态（只在准备成功之后、排队退出之前调）。
-///
-/// 控制器真验（`.tmp/r44-own-cancel-menu.json`）：一个 own 系统菜单模态会把排队的 `app.exit`
-/// 堵住 8 秒以上（GUI flags 12 / menuOwner=main），只对精确 own HWND 发一次 `WM_CANCELMODE`
-/// 后 169ms 就退出了。三条限制写死在这里：
-///
-/// 1. **只发自己进程的窗口 HWND**：目标来自 `app.webview_windows()`（本应用注册过的窗），
-///    不枚举系统窗口、不碰 foreign HWND、不按类名/标题猜；
-/// 2. **`PostMessage`（异步、不等回包）**：不重入消息泵、不阻塞退出线程；不注入键盘、不点别人的窗；
-/// 3. **只在保存准备成功之后**：准备失败时用户的菜单/拖动状态不许先被摧毁（那会让"退出失败保窗"
-///    变成"退出失败还顺手关掉了用户正在用的菜单"）。
+/// 退出前给本应用自己的窗口异步发 `WM_CANCELMODE`（`PostMessage`），否则自窗的菜单或拖动模态会堵住 `app.exit`。
+/// 目标只取 `app.webview_windows()` 里的窗口，且只在保存准备成功之后调用，退出失败时不影响用户正在用的菜单。
 #[cfg(windows)]
 pub fn cancel_own_modal_menus(post: impl Fn(isize) -> bool, targets: impl IntoIterator<Item = (String, isize)>) -> Vec<String> {
     let mut cancelled = Vec::new();
@@ -492,11 +429,8 @@ fn prepare_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<(), Stri
     )
 }
 
-/// [`prepare_exit`] 的**可脱机测试**版本：每一步由参数注入，但**共用同一个绝对期限**。
-///
-/// 为什么要有这一层：退出准备的有界性是 review finding 4 的对象——4 秒是整段的上限，
-/// 不是"每一段各自 10 秒"。把步进抽出来的唯一目的就是让"每一步拿到的是不是同一个 deadline"
-/// 成为可断言的行为，而不是靠读源码。
+/// [`prepare_exit`] 的可脱机测试版本：每一步由参数注入，但共用同一个绝对期限。
+/// 抽出来的目的就是让"每一步拿到的是不是同一个 deadline"可断言，而不是靠读源码。
 fn prepare_exit_with(
     deadline: std::time::Instant,
     wait_drained: impl FnOnce(std::time::Instant) -> Result<(), String>,
@@ -570,14 +504,10 @@ fn commit_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     );
 }
 
-/// 准备失败：保窗、复位（**先**歌词保存解冻、**再**准入门回到 Running、CAS 清掉），把可操作提示交给渲染层。
-///
-/// 歌词那一格是 review finding 1：退出准备会冻结保存任务并把"本轮已重试过"置位；不解冻的话，
-/// 一次失败的退出会让这个会话再也保存不了歌词配置（手动重试与下一次 Quit 都被拒），
-/// 而盘上仍是旧值。解冻**不**碰 dirty/saved/saveError：没写成就不许宣布已保存。
+/// 准备失败就保窗、复位（先解冻歌词保存、再让准入门回到 Running、CAS 清掉），把可操作提示交给渲染层。
+/// 不解冻的话一次失败的退出会让这个会话再也保存不了歌词配置，而盘上仍是旧值，dirty 也要留给下次。
 fn abort_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>, reason: &str) {
-    // 顺序是合同（review round 2 finding 1）：歌词先解冻，准入门**最后**才开。门一开就有渲染层
-    // 写可以进来，那时歌词必须已经可写，否则受理的那一笔会落在冻结的队列上被静默丢掉。
+    // 歌词必须先解冻、准入门最后才开：门一开渲染层的写就能进来，那时歌词队列还冻着，受理的那一笔会被静默丢掉。
     let gate = commands::persistence_gate(app).ok();
     let lyrics = app.try_state::<lyrics_window::LyricsWindowState>();
     match (gate, lyrics) {
@@ -615,15 +545,8 @@ fn run_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     );
 }
 
-/// 建窗用的代理 URL 参数：取值链的**最后一道闸**。
-///
-/// 清洗（`webview_proxy::clean_host`）与 `tauri::Url::parse` 判的不是同一件事：清洗查字符集与形状，
-/// 解析查 URL 结构——`[1.2.3.4]`、`[::::]` 这类写法能过清洗却解析不了。**解析失败一律当没配**
-/// （直连）+ 一行日志：一个配置错误绝不能让主窗建不起来（简报：None 的所有情形都是"当作没配"而非错误）。
-/// 这道闸同时兜住将来清洗规则的漏网（结构校验与字符集校验本来就不同源）。
-///
-/// 入参只可能是 `webview_proxy` 拼出的 `http://host:port`（凭据在那里就被丢弃并报告了），
-/// 所以这行日志里不会有用户名/密码。
+/// 建窗用的代理 URL 参数是取值链的最后一道闸：解析失败一律当没配（直连），一个配置错误不能让主窗建不起来。
+/// 入参只可能是 `webview_proxy` 拼出的 `http://host:port`，凭据在那里就被丢弃，所以这行日志不含用户名密码。
 pub fn proxy_url_argument(candidate: Option<String>) -> Option<tauri::Url> {
     let raw = candidate?;
     match tauri::Url::parse(&raw) {
@@ -673,14 +596,12 @@ pub fn run() {
         )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
-        // R65：对话框插件**只从 Rust 侧用**（`local_library::pick_paths`）。登记插件本身不给
-        // 渲染层任何能力：JS 那条 `plugin:dialog|*` 要经 capabilities 授权，而本应用没有那条权限
-        // （见 `src-tauri/capabilities/main.json` 与 `test/packaging.test.mjs` 的扫描）。
+        // 对话框插件只从 Rust 侧用（`local_library::pick_paths`），渲染层拿不到能力：`plugin:dialog|*` 要 capabilities 授权。
+        // 本应用没有那条权限（见 `capabilities/main.json` 与 `test/packaging.test.mjs` 的扫描）。
         .plugin(tauri_plugin_dialog::init())
         /*
-          R65：本地曲库的自定义 URI 协议（`hwlocal`）。判定全在 `local_library::handle_protocol`（纯函数）：
-          只按 **id** 查索引（路径不进 URL）、只服务主窗（其它来源 webview 一律 404）、音频支持 Range。
-          磁盘读放在阻塞线程池上：同步读一个几十 MB 的文件会把那一帧的其它请求一起堵住。
+          本地曲库的自定义 URI 协议（`hwlocal`）：判定全在 `local_library::handle_protocol` 纯函数里。
+          只按 id 查索引、只服务主窗、支持 Range，磁盘读放阻塞线程池，免得堵住同一帧的其它请求。
         */
         .register_asynchronous_uri_scheme_protocol(local_library::PROTOCOL_SCHEME, |context, request, responder| {
             let app = context.app_handle().clone();
@@ -721,9 +642,8 @@ pub fn run() {
                 // 时间统一成**本地时间**：插件默认 UTC，与用户看到的系统时间差一个时区，
                 // 排障时对不上"刚才那一下"。（这一句会把行格式换成 [时间][级别][target]。）
                 .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
-                // 落点跟随数据根（R17/A）：旋钮指哪，日志就写那儿；旋钮没设时是插件的
-                // 默认 LogDir。留在这里而不是塞进 Builder 的默认值，是为了让"档位"与
-                // "落点"两件事各有一个看得见的位置。
+                // 落点跟随数据根：旋钮指哪日志就写那儿，没设时是插件的默认 LogDir。
+                // 放在这里而不是塞进 Builder 默认值，是为了让"档位"与"落点"各有一个看得见的位置。
                 .targets(log_plugin_targets(
                     std::env::var(DATA_DIR_ENV).ok().as_deref(),
                 ))
@@ -732,11 +652,9 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle();
 
-            // 关窗行为**先于建窗**恢复：窗一建出来用户就可能关它，而那一刻读的就是这里恢复出来的
-            // 值。顺序反了 = 第一次关窗按默认走，用户会以为"设置没生效"（R11 的顺序契约）。
+            // 关窗行为先于建窗恢复，否则第一次关窗按默认走，用户会以为"设置没生效"。
             let data_root = webview_data_root(handle)?;
-            // R27（用户三项之 3）：数据根与它的来源先落一行——"会话为什么不在"的一半答案在这里。
-            // 位置在建窗之前：建窗失败（`os error 5` 那类）时，这一行是唯一说出"当时读的是哪个根"的记录。
+            // 数据根与它的来源先落一行，位置在建窗之前：建窗失败时它是唯一说出当时读的是哪个根的记录。
             log::info!("{}（pid {}）", run_log::SESSION_MARKER, std::process::id());
             log::info!(
                 "{}",
@@ -744,23 +662,18 @@ pub fn run() {
             );
             app.manage(close_behavior::CloseBehaviorState::restore(&data_root));
 
-            // 主题（R25）：与关窗行为同一个位置（**先于建窗**读盘）。三个 webview
-            //（主窗 + 两个浮动控件）都要在挂载时读到它，而浮动控件是登录那一刻才建的
-            // ——早一步登记，就不存在"第一个读它的人比登记早"的窗口。
+            // 主题先于建窗读盘：三个 webview 挂载时都要读它，浮动控件还要等到用户点登录才建。
             app.manage(theme::ThemeState::restore(&data_root));
             app.manage(ExitState::default());
-            // R44e：持久化准入门**先于**任何能写盘的运行时登记（主题事务、歌词保存任务、退出编排
-            // 都要在受理时看到同一个阶段）。
+            // 持久化准入门必须先于任何会写盘的运行时登记，主题事务、歌词保存、退出编排都靠它看同一个阶段。
             app.manage(Arc::new(commands::PersistenceGate::new()));
 
             let data_root = create_main_window(handle)?;
             app.manage(WebviewDataRoot(data_root.clone()));
 
-            // 先登记运行配置与 revision（R44e：**只读**恢复盘上的歌词配置当基线——主窗不再
-            // bootstrap 写盘，内存与盘上必须一开始就一致），再起 Rust 拥有的保存任务。
+            // 先登记运行配置与 revision（只读恢复盘上的歌词配置当基线，内存与盘上必须一开始就一致），再起保存任务。
             app.manage(lyrics_window::LyricsWindowState::restore(&data_root));
-            // R51：设置弹出窗的会话内状态（锚点 / 量到的内容尺寸 / 最近失焦关闭的时刻）。
-            // 登记位置与歌词窗相邻：两者说的是同一件事的相邻两半，谁先谁后都不会被读到半份。
+            // 设置弹出窗的会话内状态（锚点 / 内容尺寸 / 最近失焦关闭时刻），登记在歌词窗旁边不会读到半份。
             app.manage(lyrics_settings::SettingsPopupState::default());
             lyrics_window::start_persistence(handle);
             #[cfg(windows)] {
@@ -769,21 +682,12 @@ pub fn run() {
                 taskbar_lyrics::Host::start(handle);
             }
 
-            // core（sidecar）的托管状态**先于托盘安装**登记（R11 修复轮 1/5）：
-            // 启动提示的排队能力住在 `Arc<CoreState>` 里，而 `tray::install` 装不上时要发一条
-            // `app:notice`。登记晚于 install 的后果不是"少一条日志"——`emit_core_event` 在
-            // `try_state` 取到 None 时走 `None => emit_now` 直接 `app.emit`，而 setup 时刻的
-            // webview 还没跑 `listen()`：事件发进空气，"托盘未能启用…关窗会直接退出"这句降级
-            // 用户永远看不到（他会以为关窗后还在托盘跑）。顺序由
-            // `tray_is_installed_after_the_window_and_never_blocks_startup` 钉住。
-            //
-            // core（sidecar）起不来也不拦启动——core_call 会返回结构化 core_unavailable，
-            // 比"应用直接起不来"更好排查，也不静默。
+            // core 的托管状态必须先于托盘安装登记，启动提示的排队能力住在 `Arc<CoreState>` 里，托盘装不上要发那条提示。
+            // 登记晚了事件会走 `app.emit`，setup 时刻的 webview 还没 listen，降级提示用户永远看不到。
             app.manage(Arc::new(commands::CoreState::default()));
 
-            // 托盘（R11）：建窗**之后**安装（建窗失败就没必要装）。装不上不拦启动——
-            // 启动提示（`app:notice`）经上面登记好的队列扣到渲染层就绪再冲刷，
-            // 托盘不可用时关窗回退退出。
+            // 托盘在建窗之后安装（建窗失败就没必要装），装不上不拦启动。
+            // 启动提示经上面登记好的队列扣到渲染层就绪，托盘不可用时关窗回退真退出。
             match tray::install(handle) {
                 tray::TrayInstall::Installed(_) => log::info!("托盘已装上（id={TRAY_ID}）"),
                 tray::TrayInstall::Unavailable { reason } => {
@@ -791,15 +695,8 @@ pub fn run() {
                 }
             }
 
-            // 快捷键（R13）：**逐条**注册（插件本身不注册任何组合——它遇到注册失败会把整个
-            // 启动带崩），主组合被占用时沿备选链试。三条纪律：
-            //
-            // - 顺序：排在 `tray::install` **之后**——失败提示要指路托盘菜单，那得先知道托盘
-            //   到底装上没有（指一个不存在的地方比不指更糟）；排在 core 状态登记之后同理
-            //   （提示要能排队到渲染层就绪）。
-            // - 失败/回退**逐条**经启动提示（`app:notice`）如实上报：真正生效的组合同时记进
-            //   `ShortcutState`，用户看到的是"现在用的是哪个键"，不是"设置里写着另一个键"。
-            // - 注册不上**不拦启动**：没有快捷键的用户仍然有主界面与托盘。
+            // 快捷键逐条注册（插件遇到注册失败会把启动带崩），主组合被占用时沿备选链试。
+            // 必须排在 `tray::install` 与 core 状态登记之后，失败逐条经 `app:notice` 上报且不拦启动。
             let shortcut_report = shortcuts::install(handle);
             for (level, text) in shortcuts::shortcut_log_entries(&shortcut_report, tray::available(handle)) {
                 log::log!(level, "快捷键：{text}");
@@ -807,10 +704,8 @@ pub fn run() {
             }
             app.manage(shortcuts::ShortcutState::new(shortcut_report));
 
-            // 登录窗的独占状态：同一时刻只允许一次登录（R7）。登记在这里而不是懒初始化，
-            // 免得"第一次登录时才发现没状态"要先写一段 fallback。
-            // （顺序无契约：它不在广播路径上——广播的排队能力只归 `Arc<CoreState>`。
-            //  真正要求"先登记"的是上面那条，别把两件事混起来。）
+            // 登录窗的独占状态：同一时刻只允许一次登录，登记在这里而不是懒初始化。
+            // 它不在广播路径上，顺序无契约，别把这条和"先登记 CoreState"混起来。
             app.manage(Arc::new(login::LoginState::default()));
 
             let knobs = sidecar::SidecarKnobs::from_env();
@@ -836,16 +731,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::core_call,
             commands::core_renderer_ready,
-            // R10：设置页的开机自启开关（读写都经主窗来源守卫；**不进 capabilities**——
-            // 自定义命令不走 ACL，理由与前置条件见 commands.rs 的注释）
+            // 设置页的开机自启开关，读写都经主窗来源守卫，不进 capabilities（自定义命令不走 ACL，见 commands.rs）
             commands::core_set_autostart,
             commands::core_get_autostart,
-            // R11：托盘可用性（R10 写死的 TRAY_AVAILABLE 占位改真查询的唯一来源）
+            // 托盘可用性的唯一来源（设置页据此显示，不能再写死占位值）
             commands::core_get_tray_available,
-            // R56：设置页「日志」标签的数据源（主窗来源守卫 + 返回前脱敏）
+            // 设置页「日志」标签的数据源（主窗来源守卫 + 返回前脱敏）
             commands::core_read_run_log,
-            // R65：本地曲库四条命令（选文件 / 快照 / 导入 / 移除）。对话框只在 Rust 侧开，
-            // 路径只在宿主里，渲染层拿到的每条记录只有 id 与元数据。
+            // 本地曲库四条命令（选文件 / 快照 / 导入 / 移除）：对话框只在 Rust 侧开，渲染层只拿到 id 与元数据。
             local_library::core_local_base_url,
             local_library::core_local_list,
             local_library::core_local_import,
@@ -856,14 +749,12 @@ pub fn run() {
             lyrics_window::core_lyrics_document,
             lyrics_window::core_lyrics_progress,
             lyrics_window::core_lyrics_unlock_zone,
-            // R51：歌词设置的**独立弹出窗**（打开 / 报尺寸 / 关闭）。位置与尺寸由 Rust 定，
-            // 所以这扇窗不授予任何 window 权限（见 capabilities/lyrics-settings.json）。
+            // 歌词设置的独立弹出窗（打开 / 报尺寸 / 关闭）：位置与尺寸由 Rust 定，所以不授予任何 window 权限。
             lyrics_settings::core_lyrics_settings_open,
             lyrics_settings::core_lyrics_settings_resize,
             lyrics_settings::core_lyrics_settings_close,
-            // R25：登录体验的浮动控件（返回 / 主题）。**另开一条命令**而不是放宽 core_call 的
-            // 来源守卫：浮动 webview 的 label 不是 main，而 core_call 收的是全部业务频道
-            //（守卫与两条动作的边界见 commands.rs 的 `require_login_chrome_source`）。
+            // 登录体验的浮动控件（返回 / 主题）另开一条命令而不放宽 core_call，浮动 webview 的 label 不是 main。
+            // 来源守卫的边界见 commands.rs 的 `require_login_chrome_source`。
             commands::core_login_chrome
         ])
         .build(tauri::generate_context!())
@@ -952,7 +843,7 @@ mod tests {
         for label in ["lyrics", "login", "login-theme", "login-return"] { assert!(!persist_window_state(label)); }
     }
 
-    // ---- R67：后台验证开关（只改启动期的窗口激活） ---------------------------------
+    // ---- 后台验证开关（只改启动期的窗口激活） --------------------------------------
 
     /// 开关只认显式的 `1` / `true`：环境里残留的 `0`/`false`/空白一律当没开。
     #[test]
@@ -1077,7 +968,7 @@ mod tests {
         assert!(guard < show, "开关判断必须挡在 show 之前");
     }
 
-    // ---- R44e：正常退出的保存准备 -------------------------------------------------
+    // ---- 正常退出的保存准备 ---------------------------------------------------------
 
     fn settings_document(theme: Option<&str>, lyrics: Option<Value>) -> Value {
         let mut data = serde_json::json!({ "closeBehavior": "tray" });
@@ -1156,11 +1047,8 @@ mod tests {
         assert!(cancel_own_modal_menus(|_| false, vec![("main".to_string(), 5)]).is_empty());
     }
 
-    /// R44e / I1：退出顺序是**合同**——准备成功之前不许做任何不可逆的事（取消用户菜单/拖动、
-    /// 停歌词保存任务、D 的 detach+收尸、`app.exit`）；准备失败一条都不做，只把原因报一次。
-    ///
-    /// 这条用例走的是 `run_exit` 用的那个 helper（生产路径本身），不是"源码里像不像那个顺序"：
-    /// 两个闭包各记一笔，断言两种结论下的次数。
+    /// 退出顺序是合同：准备成功之前不许做任何不可逆的事，失败时一条都不做，只把原因报一次。
+    /// 用例走的是 `run_exit` 用的那个 helper（生产路径本身），不是去比对源码里的顺序。
     #[test]
     fn r44e_irreversible_cleanup_never_runs_before_a_successful_prepare() {
         let log = std::cell::RefCell::new(Vec::new());
@@ -1208,10 +1096,7 @@ mod tests {
         assert!(state.1.load(Ordering::Acquire));
     }
 
-    /// R44e fix1 / review finding 4：整个退出准备**共用一个绝对期限**。
-    ///
-    /// 修复前只有"等在飞"与"歌词排空"拿 deadline；uncertain 重存与最终 `settings:get` 各自
-    /// 另起 10 秒等待——4 秒不是上限。这里跑的是 `prepare_exit` 用的那个 helper（生产路径本身）。
+    /// 整个退出准备共用一个绝对期限，各步不许各自另起等待，跑的是 `prepare_exit` 用的同一个 helper。
     #[test]
     fn fix4_the_whole_preparation_shares_one_absolute_deadline() {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(EXIT_PREPARE_BUDGET_MS);
@@ -1248,9 +1133,7 @@ mod tests {
         );
     }
 
-    /// R44e fix1 / review finding 4：预算用尽时**立刻**有界失败，后面的步骤一步都不许再跑。
-    ///
-    /// 失败走既有的可逆 abort（保窗、保 core、uncertain/dirty 留给下次），不进入不可逆清理。
+    /// 预算用尽时立刻有界失败，后面的步骤一步都不许再跑，失败走可逆 abort（保窗、保 core）而不进入不可逆清理。
     #[test]
     fn fix4_an_exhausted_budget_stops_the_preparation_before_any_further_write() {
         let ran = std::cell::RefCell::new(Vec::new());
@@ -1311,13 +1194,8 @@ mod tests {
         assert_eq!(data_root_override(Some(&raw)), Some(abs("hwmusic-data")));
     }
 
-    /// R27（用户三项之 3）：启动诊断要把**数据根**与**它是哪来的**写成一行。
-    ///
-    /// 为什么非要有它：用户报"每次重启都要重登"，而最可能的原因不是代码——调试用的根
-    /// （`HWMUSIC_DATA_DIR=.tmp/live-data`）与用户自跑时读的根（`%APPDATA%\<bundle>`）
-    /// **互不相通**。日志里没有这一行时，"会话为什么不在"要靠人去推断当时那个进程读的是哪个根。
-    /// sidecar 那一侧还有一行完整的诊断（数据根 + `session.enc` 存在性 + 恢复档位，
-    /// 见 `src/main/session-diagnostic.mjs`），两处说的是**同一个**根（宿主经 `--data-dir` 交给它）。
+    /// 启动诊断一行报出实际使用的数据根与它的来源，用于判断某个进程当时读的是哪个根。
+    /// sidecar 那侧也有一行完整诊断（见 `session-diagnostic.mjs`），说的是同一个根。
     #[test]
     fn the_startup_note_names_the_data_root_and_where_it_came_from() {
         let root = abs("hwmusic-data");
@@ -1365,7 +1243,7 @@ mod tests {
 
     #[test]
     fn pick_data_root_never_falls_back_to_cwd() {
-        // 旧仓缺陷：两级回退都失败时落到 "."，把数据写进进程当前目录
+        // 两级回退都失败时必须报错，不能落到 "." 把数据写进进程当前目录
         match pick_data_root(None, None) {
             Ok(picked) => panic!("两级回退都失败时必须报错，实际得到 {picked:?}"),
             Err(err) => assert_eq!(err, DataRootError::Unavailable),
@@ -1376,22 +1254,18 @@ mod tests {
         );
     }
 
-    // ---- R17 / A：日志落点跟随数据根 -------------------------------------------------
+    // ---- 日志落点跟随数据根 ----------------------------------------------------------------
 
-    /// 日志目录必须是数据根下的一级子目录，且名字钉死在 `LOG_DIR_NAME` 上。
-    ///
-    /// 钉名字而不是"随便拼一个"：这个目录既是排障入口（用户被要求去看它），
-    /// 也是清理脚本的靶子（`.tmp/<数据根>/logs`），改名等于同时弄坏这两件事。
+    /// 日志目录必须是数据根下的一级子目录，名字钉死在 `LOG_DIR_NAME` 上。
+    /// 这个目录既是排障入口，也是清理脚本的靶子（`.tmp/<数据根>/logs`），改名等于同时弄坏这两件事。
     #[test]
     fn log_dir_is_the_data_root_leaf_named_logs() {
         assert_eq!(LOG_DIR_NAME, "logs");
         assert_eq!(log_dir(&abs("hwmusic-data")), abs("hwmusic-data").join("logs"));
     }
 
-    /// 日志落点决议：**覆盖值可用 → `Folder(<覆盖值>/logs)`；否则 `None`（沿用插件默认目标）**。
-    ///
-    /// 三档非法输入（未设置 / 空白 / 相对路径）一律返回 `None`：相对路径随 cwd 漂移，
-    /// 而这条路只该把日志写到一个"现在就能确定"的地方。
+    /// 日志落点决议：覆盖值可用就 `Folder(<覆盖值>/logs)`，否则 `None` 沿用插件默认目标。
+    /// 未设置、空白、相对路径三档非法输入一律 `None`，相对路径随 cwd 漂移不可信。
     #[test]
     fn log_folder_override_only_accepts_an_absolute_data_root() {
         assert_eq!(log_folder(None), None, "未设置 → 沿用插件默认（LogDir + stdout）");
@@ -1415,10 +1289,8 @@ mod tests {
         );
     }
 
-    /// 接线钉：`run()` 里那条 `.targets(..)` 必须**经唯一构造点**取目标表，且带上数据根旋钮。
-    ///
-    /// 上一条用例只证明"决议函数算得对"——算得对而没接上去，日志照旧写 `%LOCALAPPDATA%`，
-    /// 沙箱里就是同一个 `os error 5`。所以这里扫源码钉住那一段真的写了。
+    /// 接线钉：`run()` 里那条 `.targets(..)` 必须经唯一构造点取目标表，且带上数据根旋钮。
+    /// 决议函数算得对但没接上去的话，日志照旧写 `%LOCALAPPDATA%`，沙箱里就是同一个 `os error 5`。
     #[test]
     fn the_log_plugin_follows_the_data_root_when_the_override_is_set() {
         let source = lib_source();
@@ -1434,9 +1306,8 @@ mod tests {
             "落点要感知数据根旋钮（沙箱/便携环境可写才是本次改动的目的）：{compact}"
         );
 
-        // 目标表本身的形状：stdout + 文件两档，文件那一档按覆盖值二选一。
-        // 扫的是生产代码全段：`TargetKind` 的构造在 `log_plugin_targets` 的函数体里，
-        // 不在插件注册那一段（整份扫也不会被本用例自己的字面量满足——本用例在 cfg(test) 之后）。
+        // 目标表形状是 stdout + 文件两档，文件那一档按覆盖值二选一。
+        // 扫生产代码全段：`TargetKind` 的构造在 `log_plugin_targets` 里，不在插件注册那一段。
         let production = production_source(&source);
         let body_start = production
             .find("pub fn log_plugin_targets(")
@@ -1453,19 +1324,14 @@ mod tests {
         );
         assert!(body.contains("file_name: None"), "文件名交给插件按应用名取（不另起一个名字）");
 
-        // 档位照旧（R13 的契约，本次不改）
+        // 日志档位是契约，调档要单独评估
         assert!(compact.contains(".level(log::LevelFilter::Info)"), "日志级别 Info");
         assert!(compact.contains(".max_file_size(4*1024*1024)"), "单文件 4MB");
         assert!(compact.contains("RotationStrategy::KeepOne"), "轮转只留一个文件");
     }
 
-    /// 事实钉：`proxy_url` 的取值链是 `tauri::Url` → `tauri_runtime_wry::parse_proxy_url`
-    /// （`url.host()` + `url.port()` → `--proxy-server=http://host:port`）。
-    ///
-    /// `url` crate 会把**默认端口**归一成 `None`（`http://host:80` → `port=None`），
-    /// 于是 wry 拼出的是 `--proxy-server=http://host:`（端口段为空）。按 URL 规范空端口 = 默认端口，
-    /// 预期仍等价于 80 —— 但**未实测**（真代理抓包属授权场景，见任务简报的范围外清单）。
-    /// 这条用例把它记成"已知事实"而不是"没人发现"：将来真要动 80 端口的代理，从这里查起。
+    /// 事实钉：`url` crate 把默认端口归一成 `None`，wry 会拼出 `--proxy-server=http://host:`（端口段为空）。
+    /// 按 URL 规范空端口等价于 80，但没有实测，真要动 80 端口的代理从这里查起。
     #[test]
     fn proxy_url_default_port_is_normalized_away_by_the_url_crate() {
         let default_port = tauri::Url::parse("http://proxy.local:80").expect("合法 URL");
@@ -1504,11 +1370,8 @@ mod tests {
         assert_eq!(proxy_url_argument(None), None);
     }
 
-    /// 跨语言不变式：**清洗放行的 host，建窗用的 URL 必须能解析**。
-    ///
-    /// 清洗（`webview_proxy::clean_host`）与 `Url::parse` 的判定范围不同：前者查字符集与形状，
-    /// 后者查 URL 结构。夹具里任何一条"放行"的写法若拼不出可解析的代理 URL，主窗就建不起来
-    /// （简报：None 的所有情形都是"当作没配"而非错误）。这条用例是那类漏网的通用防线。
+    /// 跨语言不变式：清洗放行的 host 建窗用的 URL 必须能解析。
+    /// `clean_host` 查字符集与形状、`Url::parse` 查 URL 结构，夹具里任何放行写法拼不出可解析的代理 URL 就建不起主窗。
     #[test]
     fn every_host_cleaning_accepts_is_a_parseable_proxy_url() {
         let raw = std::fs::read_to_string(host_fixture_path()).expect("跨语言夹具必须存在");
@@ -1539,11 +1402,8 @@ mod tests {
             .join("proxy-host-cases.json")
     }
 
-    /// R10：两条自启命令必须进 `generate_handler!`——只定义不注册，渲染层点了没反应
-    /// （`invoke` 报 "command not found"，而那是运行时才知道的事）。
-    ///
-    /// 源码扫描而不是行为测试：`generate_handler!` 展开后的白名单在运行期拿不到
-    /// （要起一个真 app），而这条契约的关键就在"这一行有没有写"。
+    /// 两条自启命令必须进 `generate_handler!`，只定义不注册时 `invoke` 只会报 "command not found"。
+    /// 源码扫描而不是行为测试，是因为展开后的白名单在运行期拿不到。
     #[test]
     fn autostart_commands_are_registered_in_the_invoke_handler() {
         let source = lib_source();
@@ -1558,8 +1418,7 @@ mod tests {
         }
     }
 
-    /// R11：托盘可用性命令也必须进 `generate_handler!`——只定义不注册，设置页就会一直显示
-    /// 「托盘不可用」（那正是 R10 写死 false 的那种假话，只是换了个来源）。
+    /// 托盘可用性命令也必须进 `generate_handler!`，漏注册时设置页会一直显示「托盘不可用」。
     #[test]
     fn tray_availability_command_is_registered_in_the_invoke_handler() {
         let source = lib_source();
@@ -1590,9 +1449,7 @@ mod tests {
         }
     }
 
-    /// R11 的顺序契约一：**关窗行为恢复必须先于建窗**。
-    ///
-    /// 反过来的后果是"第一次关窗按默认走"：窗一建出来用户就可能关它，而那一刻读的就是恢复出来的值。
+    /// 顺序契约一：关窗行为恢复必须先于建窗，否则窗一建出来用户关它就按默认走。
     #[test]
     fn close_behavior_is_restored_before_the_window_is_created() {
         let source = lib_source();
@@ -1614,8 +1471,7 @@ mod tests {
         assert!(register < restore, "先拿托管状态再恢复（manage 要在 restore 之前）");
     }
 
-    /// R25：主题状态同样**先于建窗**登记——三个 webview（主窗 + 两个浮动控件）挂载时都要读它，
-    /// 而浮动控件是"用户点登录那一刻"才建的：早一步登记，就不存在"第一个读它的人比登记早"的窗口。
+    /// 主题状态先于建窗登记，三个 webview 挂载时都要读它，浮动控件还是用户点登录那一刻才建的。
     #[test]
     fn the_theme_state_is_registered_before_the_window_is_created() {
         let source = lib_source();
@@ -1633,8 +1489,7 @@ mod tests {
         );
     }
 
-    /// R25：浮动控件的命令必须进 `generate_handler!`——只定义不注册，用户点浮动控件上的
-    /// 「返回扫码登录」或任一主题档位都只会拿到 `command not found`（点上没反应）。
+    /// 浮动控件的命令必须进 `generate_handler!`，只定义不注册时用户点它只会拿到 `command not found`。
     #[test]
     fn the_login_chrome_command_is_registered_in_the_invoke_handler() {
         let source = lib_source();
@@ -1645,7 +1500,7 @@ mod tests {
         );
     }
 
-    /// R11 的顺序契约二：托盘在**建窗之后**安装（建窗失败就别装了），且装不上不拦启动。
+    /// 顺序契约二：托盘在建窗之后安装（建窗失败就别装），且装不上不拦启动。
     #[test]
     fn tray_is_installed_after_the_window_and_never_blocks_startup() {
         let source = lib_source();
@@ -1664,13 +1519,8 @@ mod tests {
             assert!(setup.contains(outcome), "安装结论要显式处理：{outcome}");
         }
 
-        // 顺序契约三（R11 修复轮 1/5）：**core 状态必须先登记**，`tray::install` 才能碰它。
-        //
-        // 启动提示的排队能力住在 `Arc<CoreState>` 的队列里：`emit_core_event` 拿 `try_state` 取到
-        // 它才走 `deliver_or_queue`（未就绪 → 扣住，等 `core_renderer_ready` 冲刷）；取不到就走
-        // `None => emit_now` 直接 `app.emit`——setup 时刻那个 webview 还没跑 `listen()`，
-        // 事件发进空气。于是"托盘装不上"的降级在用户侧**完全不可见**（只剩日志），
-        // 用户会以为关窗后还在托盘跑，下次关窗就再也找不回窗口。
+        // 顺序契约三：core 状态必须先于 `tray::install` 登记，启动提示的排队能力住在它的队列里。
+        // 取不到 core 状态就只能 app.emit，而 setup 时刻渲染层还没 listen，托盘失败的降级在用户侧完全不可见。
         let core_state = setup
             .find("app.manage(Arc::new(commands::CoreState::default()))")
             .expect("setup 里必须登记 core 状态（启动提示队列住在它里面）");
@@ -1680,13 +1530,8 @@ mod tests {
         );
     }
 
-    /// R13 顺序契约一：快捷键注册排在 **core 状态登记之后、托盘安装之后**。
-    ///
-    /// - 排在 core 状态之前：失败提示取不到队列，`emit_core_event` 退回直接 `app.emit`——
-    ///   那时渲染层还没跑 `listen()`，提示发进空气（R11 修复轮 1/5 的同一个坑）。
-    /// - 排在托盘之前：提示里"请改用托盘菜单"就成了没根据的话（托盘可能压根没装上）。
-    ///
-    /// 注册本身**不拦启动**：一个注册不上的快捷键不该把应用带走（简报）。
+    /// 顺序契约一：快捷键注册排在 core 状态登记与托盘安装之后。
+    /// 否则失败提示要么发进还没 listen 的渲染层，要么说出"请改用托盘菜单"却压根没有托盘。
     #[test]
     fn shortcuts_are_registered_after_the_core_state_and_after_the_tray() {
         let source = lib_source();
@@ -1713,10 +1558,8 @@ mod tests {
         );
     }
 
-    /// R13 的接线：注册结论**逐条入队**（经 `emit_core_event`），生效组合记进托管状态。
-    ///
-    /// 扫的是那一小段（从 `shortcuts::install` 到 `invoke_handler`）：整份扫的话，
-    /// 别处（托盘 R11）的 `emit_core_event` 会把这条用例自己满足掉。
+    /// 注册结论逐条经 `emit_core_event` 入队，生效组合记进托管状态。
+    /// 只扫 `shortcuts::install` 到 `invoke_handler` 那一段，否则别处的 `emit_core_event` 会把用例自己满足掉。
     #[test]
     fn shortcut_failures_are_queued_as_notices_and_the_state_is_managed() {
         let source = lib_source();
@@ -1748,11 +1591,7 @@ mod tests {
         );
     }
 
-    /// R13 的插件口径：**插件本身不注册任何组合**。
-    ///
-    /// `tauri-plugin-global-shortcut` 的 `Builder::with_shortcut(s)` 在它自己的 setup 里注册，
-    /// 失败直接让 `setup` 返回 Err → tauri 在 `RuntimeRunEvent::Ready` 里 `panic!("Failed to setup
-    /// app")`。那正是简报要防的"注册失败把应用带走"：组合只能由我们在 setup 里逐条注册。
+    /// 插件本身不注册任何组合：`with_shortcut` 失败会让 tauri 在 setup 阶段直接 panic，组合只能由我们逐条注册。
     #[test]
     fn the_global_shortcut_plugin_registers_no_combos_itself() {
         let source = lib_source();
@@ -1774,19 +1613,8 @@ mod tests {
         );
     }
 
-    /// R13 收口核对（七项里的四项）：系统集成插件的**注册参数**是契约，逐项钉住。
-    ///
-    /// 这些参数各有一个"写错了要到用户机器上才发现"的后果：
-    /// - **single-instance 必须最先注册**：晚于其它插件的话，第二个实例会先走完那些插件的
-    ///   初始化（窗口状态恢复、日志文件打开）才被拦下——旧仓的"双击图标没反应"就是这么来的。
-    /// - **window-state 的 flags 只许 SIZE|POSITION|MAXIMIZED**：混进 `VISIBLE`，桌面歌词窗
-    ///   就会在**下次开机**自己弹出来（旧会话里它是可见的）；混进 `FULLSCREEN`/`DECORATIONS`
-    ///   会跟歌词窗的无边框/置顶属性打架。
-    /// - **filter 只放行 main/lyrics**：登录子窗的位置不该被持久化（一次性窗口）。
-    /// - **autostart 用 `MacosLauncher::LaunchAgent`**：macOS 上的另一档（AppleScript）会在
-    ///   系统设置里留一个"脚本"项，而自启注册失败在 macOS 上只有它这一条路。
-    /// - **log 的档位**：Info / 单文件 4MB / KeepOne（落 `app_log_dir` 是插件的默认目标，
-    ///   见 `tauri-plugin-log` 的 `DEFAULT_LOG_TARGETS`，不需要显式 `.target(..)`）。
+    /// 系统集成插件的注册参数是契约：single-instance 必须最先注册，window-state 的 flags 只许 SIZE|POSITION|MAXIMIZED。
+    /// 其余档位（filter 只放行 main/lyrics、autostart 用 LaunchAgent、log 用 Info/4MB/KeepOne）写错要到用户机器上才发现。
     #[test]
     fn the_system_integration_plugins_keep_their_registration_parameters() {
         let source = lib_source();
@@ -1807,7 +1635,7 @@ mod tests {
             "第二实例启动时必须 focus_main（否则用户双击图标什么都不会发生）"
         );
 
-        // 2. window-state：flags 与 filter（取值归 `window_state_flags`，开关那一档见 R67 用例）
+        // 2. window-state：flags 与 filter 的取值都归 `window_state_flags` 决策函数
         assert!(
             plugins.contains("with_state_flags(window_state_flags(background_test()))"),
             "窗口状态的 flags 必须走决策函数：{plugins}"
@@ -1825,7 +1653,7 @@ mod tests {
 
         assert!(plugins.contains("skip_initial_state(LYRICS_WINDOW_LABEL)"), "歌词几何由配置接管，插件不能在窗口 ready 时异步盖回旧尺寸/任务栏位置");
 
-        // 3. notification 照常注册（host:notify 的落地口，R3 已接）
+        // 3. notification 照常注册（host:notify 的落地口）
         assert!(plugins.contains("tauri_plugin_notification::init()"), "系统通知插件");
 
         // 4. autostart 的 macOS 档位
@@ -1885,7 +1713,7 @@ mod tests {
         let exit = production.split("fn request_app_exit<").nth(1).expect("退出工作线程").split("fn finish_prepared_exit(").next().expect("退出函数收口");
         assert!(exit.contains(".spawn(move || run_exit(&app))"), "退出必须在工作线程里跑（不许阻塞 UI 线程）");
         assert!(!exit.contains("commands::shutdown_core("), "请求本身不负责收尸：先做可失败的保存准备");
-        // R44e：顺序合同——准备成功才允许 commit_exit（取消自窗模态/D 屏障/shutdown_core/app.exit）
+        // 顺序合同：准备成功才允许 commit_exit（取消自窗模态、D 屏障、shutdown_core、app.exit）
         let runner = production
             .split("fn run_exit<")
             .nth(1)

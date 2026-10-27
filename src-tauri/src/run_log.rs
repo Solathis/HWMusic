@@ -1,4 +1,4 @@
-//! 运行日志读取（R56）：把插件日志文件的尾部读成结构化条目，供设置页展示。
+//! 运行日志读取：把插件日志文件的尾部读成结构化条目，供设置页展示。
 //!
 //! 唯一调用方是命令 `core_read_run_log`（主窗来源守卫 + 返回前脱敏）。
 
@@ -80,9 +80,7 @@ pub fn newest_log_file(dir: &Path) -> Option<PathBuf> {
 }
 
 /// 把插件日志的一行解析成条目。
-///
-/// 上游有**两种**行格式（都用 `[...]` 分段）：默认 Builder 是 `[日期][时间][target][级别]`，
-/// 而调过 `timezone_strategy()` 之后变成 `[日期][时间][级别][target]`——顺序不同，字段名不认位置只认值。
+/// 上游两种行格式的 `[...]` 段序不同（target 与级别互调），字段只能认值不能认位置。
 pub fn parse_line(raw: &str) -> RunLogEntry {
     let mut rest = raw;
     let mut fields: Vec<&str> = Vec::new();
@@ -159,9 +157,7 @@ pub fn parse_level(raw: &str) -> Option<&'static str> {
 }
 
 /// sidecar stderr 的一行 → 级别 + 正文。
-///
-/// sidecar 自己的标记是 `[hwmusic-core][<级别>] 正文`；没有标记的行（多行异常的续行）按 info，
-/// 正文一个字都不动——那半截栈正是排障要看的东西。
+/// 无标记的续行按 info 且正文一字不动——那半截栈正是排障要看的东西。
 pub fn stderr_line(raw: &str) -> (&'static str, String) {
     let line = raw.trim_end_matches(['\r', '\n']);
     let Some(body) = line.strip_prefix(crate::sidecar::STDERR_PREFIX) else {
@@ -219,9 +215,7 @@ const HEADER_KEYS: &[&str] = &[
 ];
 
 /// 把可能内联着凭据的文本打码。
-///
-/// 三条规则，按顺序：`Bearer <令牌>` → `头部名: 值` → `键=值`（键在 [`SECRET_KEYS`] 里）。
-/// 只打码值、保留键与其余文字：日志是给人看的，抹掉整行等于把排障线索一起抹掉。
+/// 依次处理 `Bearer <令牌>`、`头部名: 值`、`键=值`（键见 [`SECRET_KEYS`]）：只抹值，保留键与其余文字。
 pub fn redact(text: &str) -> String {
     let after_bearer = redact_marked(text, "bearer");
     let after_headers = redact_headers(&after_bearer);

@@ -1,18 +1,9 @@
-//! DPAPI 安全存储：Windows 上把明文封成只有本机本用户能解的信封，跨平台给出同形的结构化错误。
-//!
-//! 契约（R5）：
-//! - [`encrypt`] / [`decrypt`] 只在内存里搬字节，**不落盘**；落盘（0600 + 临时文件 + rename）在
-//!   Node 侧的 `src/main/session-store.mjs`。
-//! - 过桥形态是 base64 字符串（NDJSON 帧里只能放文本）：[`encode_cipher`] / [`decode_cipher`] 是
-//!   与平台无关的纯函数，所以 base64 层能在任何平台上单测。
-//! - 错误一律结构化（`CoreError{message, kind}`），**绝不 panic**、**绝不回显明文或密文**：
-//!   - `invalid_payload`：调用方给的空串/缺字段（在这之前就被拒，碰不到后端）；
-//!   - `invalid_cipher`：base64 不合法、信封被改过、不是本机本用户写的、解出来不是 UTF-8；
-//!   - `secure_store_unavailable`：平台没有后端（非 Windows）或后端拒绝加密——此时上层必须
-//!     保留内存会话并明确提示，**不允许退化成明文落盘**。
-//! - 加密用 `CRYPTPROTECT_UI_FORBIDDEN`：后台进程绝不能因为 DPAPI 弹窗而卡住。
-//!   刻意不传额外熵：熵不是密钥，只会变成又一处需要版本化的常量，而按用户作用域的 DPAPI 已经
-//!   把信封绑到当前用户凭据上。
+//! DPAPI 安全存储：Windows 上把明文封成只有本机本用户能解的信封，其他平台返回同形的结构化错误。
+//! 只搬内存字节，不落盘；落盘（0600 + 临时文件 + rename）由 Node 侧 `src/main/session-store.mjs` 负责。
+//! 过桥形态是 base64（NDJSON 帧只放文本），编解码与平台无关，因此能在任何平台单测。
+//! 错误一律结构化、绝不 panic、绝不回显明文或密文；`secure_store_unavailable` 时上层须保留内存会话，
+//! 不允许退化成明文落盘（`invalid_payload` 是调用方坏输入，`invalid_cipher` 是信封不可解）。
+//! 加密用 `CRYPTPROTECT_UI_FORBIDDEN`（后台进程不能被弹窗卡住），刻意不传额外熵：熵不是密钥。
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -74,10 +65,8 @@ pub fn decrypt(cipher_b64: &str) -> Result<String, CoreError> {
     })
 }
 
-/// 没有后端可用：说清平台、说清不会退化成明文。抽成纯函数，非 Windows 分支也能在测试里钉住。
-///
-/// 生产使用点只在 `#[cfg(not(windows))]` 的 `protect`/`unprotect` 里，所以 Windows 构建下
-/// 它是"暂时无生产构造点"的：显式允许，而不是把它藏进 cfg 里让形状失去测试覆盖。
+/// 没有后端可用时的结构化错误：说清平台，并说清不会退化成明文。
+/// 唯一生产使用点在 `#[cfg(not(windows))]`，故 Windows 下显式 `allow(dead_code)`，而非藏进 cfg 丢掉测试覆盖。
 #[allow(dead_code)]
 pub fn unavailable_error() -> CoreError {
     CoreError::new(
@@ -387,11 +376,8 @@ mod tests {
         }
     }
 
-    /// 实测事实（本机 DPAPI）：信封**尾部**多几个字节不会被拒——`CryptUnprotectData` 只认自己
-    /// 头部里的长度，多出来的尾字节既不改明文也不报错。
-    ///
-    /// 所以 R5 不宣称"追加字节 = 检测到篡改"：真正会被拒的是截断与翻位（见上一条用例）。
-    /// 这条钉住行为本身，免得后来者以为尾字节变化也该报 invalid_cipher。
+    /// DPAPI 只认自己头部里的长度：信封尾部多几个字节既不报错也不改明文，所以不算篡改。
+    /// 真正会被拒的是截断与翻位；此用例钉住尾字节行为，免得后来者误以为该报 `invalid_cipher`。
     #[cfg(windows)]
     #[test]
     fn trailing_bytes_after_the_envelope_are_ignored_by_dpapi() {
@@ -417,11 +403,8 @@ mod tests {
 
     // ---- 真 sidecar + 真 DPAPI + 真文件（默认不跑的端到端） ----
 
-    /// 为什么默认 `#[ignore]`：它要起真 sidecar 进程（node）并往数据目录写真文件。
-    ///
-    /// 也是为什么它只能"半程"端到端：R5 的 sidecar 还没有发起 `host:secure-*` 的调用方
-    /// （AuthManager 是 R7 的事），协议内没有触发点，所以这里起真 sidecar 证明接线在，
-    /// 再走宿主侧的同一条路由（`commands::plan_host_request`）把信封落到真文件上。
+    /// 默认 `#[ignore]`：它要 spawn 真 sidecar 进程并往数据目录写真文件。
+    /// 协议内还没有触发 `host:secure-*` 的调用方，故只起 sidecar 证明接线，再走宿主同一条路由落到真文件。
     #[cfg(windows)]
     #[ignore = "需要本机允许 spawn 真 sidecar 并写数据目录；用 cargo test -- --ignored 手动运行"]
     #[test]

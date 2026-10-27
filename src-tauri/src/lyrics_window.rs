@@ -1,6 +1,5 @@
 //! 桌面歌词的运行配置与 revision 由 Rust 原子持有；`settings.json` 的唯一写者是 sidecar。
-//! 持久化任务**由 Rust 拥有**（R44e）：它不依赖主窗 WebView、不依赖渲染层的保存队列，
-//! 认证卸载/渲染层崩溃/退出都改不了"最新配置最终落盘"这件事。
+//! 持久化任务**由 Rust 拥有**：不依赖主窗 WebView 与渲染层保存队列，认证卸载/渲染层崩溃/退出都改不了"最新配置最终落盘"。
 //! 配置/媒体专命令限 main/lyrics；开关、文档、进度与 core_call 仍限主窗。
 //! desktop 几何只随 mode/layout 变化；Windows taskbar 交独立原生宿主，失败停显而不贴边。
 
@@ -22,10 +21,8 @@ use crate::{LYRICS_WINDOW_LABEL, MAIN_WINDOW_LABEL};
 // 几何（纯函数）
 // ---------------------------------------------------------------------------
 
-/// 工作区矩形（物理像素）。
-///
-/// 注意坐标**可以是负的**：副屏摆在主屏左边/上边时，工作区原点就是负的。
-/// 把"负偏移钳 0"写成"把最终坐标钳到 0"会把窗口扔到另一块屏上——这是这条规矩最容易写错的地方。
+/// 工作区矩形（物理像素）——坐标**可以是负的**：副屏摆在主屏左边/上边时，工作区原点就是负的。
+/// 把"负偏移钳 0"写成"把最终坐标钳到 0"会把窗口扔到另一块屏上。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub x: f64,
@@ -54,9 +51,8 @@ pub const TASKBAR_SIZE: Size = Size {
     height: 44.0,
 };
 
-/// 桌面模式的窗口尺寸（R51 收紧：960×160 → 800×128）：一条紧凑的显示带，上下行各露一部分
-/// （AMLL 自己排版）。控件行与歌词左右留白同步收小（见 `LyricsWindow.tsx` 与 `amll-theme.css`），
-/// 所以变矮的不是"能看见的歌词"，而是那些空白。
+/// 桌面模式的窗口尺寸：一条紧凑的显示带，上下行各露一部分（AMLL 自己排版）。
+/// 控件行与歌词左右留白同步收小（见 `LyricsWindow.tsx` 与 `amll-theme.css`），变矮的是那些空白而不是"能看见的歌词"。
 pub const DESKTOP_SIZE: Size = Size {
     width: 800.0,
     height: 128.0,
@@ -83,10 +79,7 @@ pub fn window_size(area: Rect, mode: LyricsMode) -> Size {
     }
 }
 
-/// 任务栏位置：水平居中、贴 `work_area` 下沿，**偏移**负值钳 0。
-///
-/// 钳的是偏移（`居中量` 与 `贴底量`），不是最终坐标：窗口比工作区还宽/还高时，结果是
-/// 贴左上角摆（仍然在工作区内），而不是被推到屏幕外。
+/// 任务栏位置：水平居中、贴 `work_area` 下沿，**偏移**负值钳 0——钳的是偏移而非最终坐标，窗口比工作区还大时贴左上角摆而不是被推到屏幕外。
 pub fn taskbar_position(area: Rect, size: Size) -> Point {
     let offset_x = ((area.width - size.width) / 2.0).max(0.0);
     let offset_y = (area.height - size.height).max(0.0);
@@ -147,9 +140,8 @@ impl LyricsMode {
 pub const LYRICS_FONT_STEPS: &[(&str, u32)] =
     &[("sm", 16), ("md", 20), ("lg", 28), ("xl", 40), ("xxl", 56)];
 
-/// 任务栏专用字号档位（R59）：44px 高的槽位只放得下一行当前歌词，所以上限压到 20px，
-/// 档距 2px（桌面那张表最密的一档跨度是 8px，套到 12–20px 的区间里只剩两档可用）。
-/// id 与桌面那张表不重叠：两张表互不通用，`taskbarSize` 收桌面档位一律判非法。
+/// 任务栏专用字号档位：44px 高的槽位只放得下一行当前歌词，所以上限压到 20px、档距 2px。
+/// id 与桌面那张表不重叠——两张表互不通用，`taskbarSize` 收桌面档位一律判非法。
 pub const TASKBAR_FONT_STEPS: &[(&str, u32)] =
     &[("tsm", 12), ("tmd", 14), ("tlg", 16), ("txl", 18), ("txxl", 20)];
 
@@ -160,10 +152,8 @@ pub const TASKBAR_MAX_FONT_PX: u32 = 20;
 /// 只认设计令牌，绝不接受任意色值（`#fff`、`rgb(...)` 一律落回上一个合法值）。
 pub const LYRICS_COLOR_TOKENS: &[&str] = &["foreground", "muted", "primary", "contrast"];
 
-/// 自定义歌词颜色（R45B）：`#` + 6 位十六进制（与渲染层 `CUSTOM_COLOR_PATTERN` 同一口径）。
-///
-/// 为什么不是"任意 CSS 色值"：这个值会被写进官方 AMLL 组件消费的 CSS 变量，
-/// 能写色值就能写 `url(...)`/`;}`——六位 hex 是唯一"写成什么都只是一块颜色"的形状。
+/// 自定义歌词颜色：`#` + 6 位十六进制（与渲染层 `CUSTOM_COLOR_PATTERN` 同一口径）。
+/// 不接"任意 CSS 色值"是因为它会被写进官方 AMLL 组件消费的 CSS 变量，能写色值就能写 `url(...)`/`;}`。
 pub fn is_hex_color(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() == 7 && bytes[0] == b'#' && bytes[1..].iter().all(|byte| byte.is_ascii_hexdigit())
@@ -188,11 +178,8 @@ pub const MIN_WINDOW_HEIGHT_DIP: f64 = 120.0;
 /// 尺寸的绝对上限（DIP）：真正的上限是工作区，这里只是拦掉"明显是坏值"的数。
 pub const MAX_WINDOW_DIP: f64 = 100_000.0;
 
-/// 把一次改尺寸归一成 `Option<Option<f64>>`：`None` = 这次补丁没提这个键（不动），
-/// `Some(None)` = 明确清空，`Some(Some(v))` = 取整并夹进 [min, MAX_WINDOW_DIP]。
-///
-/// 为什么钳最小：`null` 之外的坏值（0/负数/NaN）已经在下面被丢掉了，而"小于 240×120"是
-/// 用户**确实**拖不到的状态（窗口本身有 `min_inner_size`），留在配置里只会让下次恢复出个怪尺寸。
+/// 归一尺寸补丁：`None` = 没提这个键（不动），`Some(None)` = 明确清空，`Some(Some(v))` = 取整并夹进 [min, MAX_WINDOW_DIP]。
+/// 钳最小是因为"小于 240×120"用户**确实**拖不到（窗口本身有 `min_inner_size`），留在配置里只会让下次恢复出个怪尺寸。
 fn size_patch(patch: &serde_json::Map<String, Value>, key: &str, min: f64) -> Option<Option<f64>> {
     match patch.get(key) {
         None => None,
@@ -209,7 +196,7 @@ fn size_patch(patch: &serde_json::Map<String, Value>, key: &str, min: f64) -> Op
 pub const DEFAULT_LYRICS_SIZE: &str = "lg";
 /// 默认颜色令牌。
 pub const DEFAULT_LYRICS_COLOR: &str = "foreground";
-/// 任务栏的默认字号：取上限那一档——R44 起任务栏把桌面 `lg` 压到的就是 20px（观感不变）。
+/// 任务栏的默认字号：取上限那一档（任务栏把桌面 `lg` 压到的就是 20px，观感不变）。
 pub const DEFAULT_TASKBAR_SIZE: &str = "txxl";
 /// 任务栏的默认颜色令牌。
 pub const DEFAULT_TASKBAR_COLOR: &str = "foreground";
@@ -225,9 +212,9 @@ pub struct LyricsConfig {
     pub style: String,
     pub size: String,
     pub color: String,
-    /// 自定义歌词颜色（`#RRGGBB`；空串 = 用 `color` 选的设计令牌）。R45B 新增。
+    /// 自定义歌词颜色（`#RRGGBB`；空串 = 用 `color` 选的设计令牌）。
     pub custom_color: String,
-    /// 桌面窗的 DIP 尺寸（未锁定时拖拽缩放后保存；`None` = 用该方向的默认尺寸）。R45B 新增。
+    /// 桌面窗的 DIP 尺寸（未锁定时拖拽缩放后保存；`None` = 用该方向的默认尺寸）。
     pub window_width: Option<f64>,
     pub window_height: Option<f64>,
     pub locked: bool,
@@ -235,7 +222,7 @@ pub struct LyricsConfig {
     pub enable_scale: bool,
     pub enable_spring: bool,
     pub show_controls: bool,
-    /// 任务栏模式的外观（R59）：与桌面那三样各存一份——两扇窗的观感是两件事。
+    /// 任务栏模式的外观：与桌面那三样各存一份——两扇窗的观感是两件事。
     pub taskbar_size: String,
     pub taskbar_color: String,
     pub taskbar_custom_color: String,
@@ -268,8 +255,7 @@ impl Default for LyricsConfig {
 }
 
 impl LyricsConfig {
-    /// 实际渲染的字号档位：两种模式各读自己那一列（R59 之后桌面选的档位不参与任务栏）。
-    ///
+    /// 实际渲染的字号档位：两种模式各读自己那一列，桌面选的档位不参与任务栏。
     /// 认不出的档位（盘上被手改过）落默认，绝不 panic，也不把坏值透给 CSS。
     pub fn effective_size(&self) -> &str {
         if self.mode != LyricsMode::Taskbar {
@@ -295,10 +281,10 @@ impl LyricsConfig {
         }
         if let Some(value) = patch.get("size").and_then(Value::as_str).filter(|v| LYRICS_FONT_STEPS.iter().any(|(id, _)| id == v)) { next.size = value.into(); }
         if let Some(value) = patch.get("taskbarSize").and_then(Value::as_str).filter(|v| TASKBAR_FONT_STEPS.iter().any(|(id, _)| id == v)) { next.taskbar_size = value.into(); }
-        // R45B：自定义颜色（空串 = 回设计令牌）；坏形状不覆盖上一个合法值
+        // 自定义颜色（空串 = 回设计令牌）；坏形状不覆盖上一个合法值
         if let Some(value) = patch.get("customColor").and_then(Value::as_str).filter(|v| custom_color_ok(v)) { next.custom_color = value.into(); }
         if let Some(value) = patch.get("taskbarCustomColor").and_then(Value::as_str).filter(|v| custom_color_ok(v)) { next.taskbar_custom_color = value.into(); }
-        // R45B：窗口 DIP 尺寸（`null` = 没有自定义尺寸；小数取整并夹进最小尺寸）
+        // 窗口 DIP 尺寸（`null` = 没有自定义尺寸；小数取整并夹进最小尺寸）
         if let Some(size) = size_patch(patch, "windowWidth", MIN_WINDOW_WIDTH_DIP) { next.window_width = size; }
         if let Some(size) = size_patch(patch, "windowHeight", MIN_WINDOW_HEIGHT_DIP) { next.window_height = size; }
         for (key, target) in [
@@ -334,17 +320,14 @@ impl LyricsConfig {
             "enableBlur": self.enable_blur,
             "enableScale": self.enable_scale, "enableSpring": self.enable_spring,
             "showControls": self.show_controls, "effectiveSize": self.effective_size(),
-            // R59：任务栏那扇窗的外观（与桌面各存一份）
+            // 任务栏那扇窗的外观（与桌面各存一份）
             "taskbarSize": self.taskbar_size, "taskbarColor": self.taskbar_color,
             "taskbarCustomColor": self.taskbar_custom_color, "taskbarKaraoke": self.taskbar_karaoke,
         })
     }
 
-    /// **落盘合同**：只有 `DEFAULT_LYRICS_CONFIG` 那 17 个字面键。
-    ///
-    /// 刻意与 [`LyricsConfig::payload`] 分开：`effectiveSize` 是派生值（由 mode+size 算出来的），
-    /// taskbar 的附着/可见/revision/dirty/saveError 是运行时状态——把它们写进 `settings.json`
-    /// 就是给同一件事造第二份真相（而且下次启动会读回一个不该有的字段）。
+    /// **落盘合同**：只有 `DEFAULT_LYRICS_CONFIG` 那 17 个字面键，刻意与 [`LyricsConfig::payload`] 分开。
+    /// 派生值（`effectiveSize`）和运行时状态（taskbar 的附着/可见/revision/dirty/saveError）写进 `settings.json` 就是给同一件事造第二份真相。
     pub fn persisted(&self) -> Value {
         json!({
             "mode": self.mode.as_str(), "layout": self.layout, "style": self.style,
@@ -385,18 +368,14 @@ fn dip_param(value: Option<f64>) -> String {
 
 pub fn desktop_topmost(config: &LyricsConfig) -> bool { config.mode == LyricsMode::Desktop }
 
-/// 拖拽缩放的资格（R45B）：**仅未锁的桌面窗**（渲染层 `resizableEnabled` 是同一口径）。
-///
+/// 拖拽缩放的资格：**仅未锁的桌面窗**（渲染层 `resizableEnabled` 是同一口径）。
 /// 任务栏那一条是原生宿主摆的，锁定意味着"这一块不该再被误拖大小"——两条都不可缩放。
 pub fn resizable_enabled(config: &LyricsConfig) -> bool {
     config.mode == LyricsMode::Desktop && !config.locked
 }
 
-/// 一次配置补丁的**归一结果**（纯函数）：布局/方向切换时，上一方向的自定义尺寸不再沿用。
-///
-/// 为什么要有这一条：竖版拖成 320×620、切回横版时若继续套用那个尺寸，用户看到的是一条
-/// 又窄又高的横版条——上一方向的自定义尺寸不属于新方向。反过来（补丁里明确带了尺寸）
-/// 就按补丁来：那是"设尺寸"这条动作本身，不是方向切换的副产物。
+/// 一次配置补丁的**归一结果**（纯函数）：布局/方向切换时，上一方向的自定义尺寸不再沿用（否则竖版 320×620 切回横版就成了又窄又高的一条）。
+/// 补丁里明确带了尺寸则按补丁来——那是"设尺寸"这条动作本身，不是方向切换的副产物。
 pub fn normalized_patch(current: &LyricsConfig, patch: &Value) -> LyricsConfig {
     let next = current.apply_patch(patch);
     let geometry_changed = next.mode != current.mode || next.layout != current.layout;
@@ -460,15 +439,8 @@ pub const LYRICS_SETTING_KEY: &str = "lyricsWindow";
 pub const SAVE_ERROR_WRITE_FAILED: &str = "settings_write_failed";
 pub const SAVE_ERROR_UNCONFIRMED: &str = "settings_write_unconfirmed";
 
-/// 歌词配置的持久化记账（**Rust 拥有**：与 WebView / React 生命周期无关）。
-///
-/// 单写者 + 单在途 + 最新待写（latestPending）：
-/// - `pending`：只保留**最新**一份（旧值没有意义：用户要的是最后那一下）；
-/// - `inflight`：正在写的那一代（成功只确认**对应快照**，新值继续写）；
-/// - `saved`：最后一次**确认**写进盘的那一份；`dirty = saved != 运行配置`；
-/// - `save_error`：失败也要用户看得见（不自动重试；`retrySave` 或下一次改动才重试）；
-/// - `frozen`：退出准备开始后不再自动受理新值（这时也不该有新值：准入门已经拦住了）；
-/// - `retried_for_exit`：**一次 Quit 至多一次**重试（不许无限重试把退出拖死）。
+/// 歌词配置的持久化记账（**Rust 拥有**：与 WebView / React 生命周期无关）：单写者、单在途、只留最新待写，成功只确认对应快照，`dirty = saved != 运行配置`。
+/// 失败不自动重试（`retrySave` 或下一次改动才重试）且错误要留给用户看；`frozen` 后不再受理新值；`retried_for_exit` 保证**一次 Quit 至多一次**重试。
 #[derive(Default)]
 struct LyricsPersistence {
     enabled: bool,
@@ -557,11 +529,8 @@ impl LyricsPersistence {
         false
     }
 
-    /// 退出准备**失败**（保窗）时的复原：解冻、并把"本轮已重试过"清掉——一次失败的退出不能
-    /// 把这个会话的保存能力一起带走。
-    ///
-    /// 只复原这两格：`saved`/`pending`/`save_error` **一格都不许动**（没写成就不许宣布已保存、
-    /// 也不许把错误洗掉——用户要看得见"上一次没存进去"）。
+    /// 退出准备**失败**（保窗）时的复原：解冻，并把"本轮已重试过"清掉——一次失败的退出不能把这个会话的保存能力一起带走。
+    /// 只复原这两格：`saved`/`pending`/`save_error` **一格都不许动**（没写成就不许宣布已保存，也不许把错误洗掉）。
     fn abort_exit_drain(&mut self) {
         self.frozen = false;
         self.retried_for_exit = false;
@@ -595,14 +564,8 @@ struct LyricsLifecycle {
 }
 
 impl LyricsWindowState {
-    /// 启动时的**只读**恢复：从 `settings.json` 读出歌词配置当基线。
-    ///
-    /// 为什么启动就要读：主窗不再 bootstrap 写盘（R44e 删掉了那个 writer），Rust 内存里这份
-    /// 必须与盘上一致，否则第一帧 `configure({})` 的读回会给出"默认值"——用户看到的配置
-    /// 会在他没改过任何东西的情况下被重置成默认，而下一次改动还会把默认值写回盘。
-    ///
-    /// **坏文件/坏字段不默认回写**：读不懂就当默认（与 `theme::read_theme` 同一条纪律），
-    /// 诊断留在日志里；真正的"文件认不出"由 sidecar 的 `save` 拒绝覆盖。
+    /// 启动时从 `settings.json` **只读**恢复基线，内存必须与盘上一致，否则第一帧 `configure({})` 读回默认值。
+    /// **坏文件/坏字段不默认回写**：读不懂就当默认（与 `theme::read_theme` 同一条纪律），诊断留在日志里；"文件认不出"由 sidecar 的 `save` 拒绝覆盖。
     pub fn restore(data_dir: &Path) -> Self {
         let raw: Option<String> = std::fs::read_to_string(data_dir.join(SETTINGS_FILE_NAME)).ok();
         let parsed: Option<Value> = raw.as_deref().and_then(|text| serde_json::from_str(text).ok());
@@ -642,14 +605,12 @@ impl LyricsWindowState {
     }
 
     /// 接受一次配置补丁：改运行配置 + 推进 revision，并在**同一步**把新值交给持久化任务。
-    ///
-    /// 两把锁的次序是死规矩：**先 config、后 persist，永不反向**（持久化线程只拿 persist）。
-    /// 从"接受"到"入队"之间**没有 await**，所以没有"配置已接受、保存队列丢了这一笔"的缝。
+    /// 锁序是死规矩：**先 config、后 persist，永不反向**（持久化线程只拿 persist），且"接受"到"入队"之间**没有 await**，不丢这一笔。
     fn configure(&self, patch: &Value) -> (LyricsConfig, LyricsSnapshot, bool) {
         let (previous, snapshot, changed) = {
             let mut state = lock(&self.config);
             let current = state.config.clone();
-            // R45B：方向/模式切换时把上一方向的自定义尺寸一起清掉（见 `normalized_patch`）
+            // 方向/模式切换时把上一方向的自定义尺寸一起清掉（见 `normalized_patch`）
             let next = normalized_patch(&current, patch);
             let changed = next != current;
             if changed { state.config = next; state.revision += 1; }
@@ -678,9 +639,7 @@ impl LyricsWindowState {
     }
 
     /// 退出准备**失败**（`abort_exit` 保窗）时的复原：解冻 + 唤醒保存任务。
-    ///
-    /// 这是 review finding 1 的修复点：`prepare_exit_persistence` 失败后若不解冻，`enqueue` 与
-    /// `retry_save` 会一直拒收，下一次 Quit 也不再重排——一次失败的退出把整个会话的保存能力带走。
+    /// 不解冻的话 `enqueue` 与 `retry_save` 会一直拒收、下一次 Quit 也不再重排，一次失败的退出就带走整个会话的保存能力。
     pub fn abort_exit_drain(&self) {
         {
             let mut persist = lock(&self.persist);
@@ -727,14 +686,11 @@ async fn read_status<R: Runtime>(app: &AppHandle<R>) -> Result<Value, CoreError>
 }
 
 // ---------------------------------------------------------------------------
-// 歌词配置持久化（R44e：唯一保存任务，Rust 拥有，与 WebView 生命周期无关）
+// 歌词配置持久化（唯一保存任务，Rust 拥有，与 WebView 生命周期无关）
 // ---------------------------------------------------------------------------
 
 /// 起持久化线程（`setup` 里调一次；重复调用无副作用）。
-///
-/// 为什么是**线程**而不是渲染层的保存队列：集成审查 I2 的复现是"认证卸载 LibraryShell →
-/// 桥取消订阅 → 仍开着的歌词窗继续合法改配置，但磁盘没有新写"。保存这件事必须与 React 的
-/// 挂载周期、与渲染层是否还活着完全脱钩——只有 Rust 拥有它，登出/崩溃都还在写。
+/// 保存必须与 React 的挂载周期、与渲染层是否还活着脱钩——只有 Rust 拥有它，登出/崩溃都还在写。
 pub fn start_persistence<R: Runtime>(app: &AppHandle<R>) {
     let state = app.state::<LyricsWindowState>();
     {
@@ -791,17 +747,8 @@ fn persistence_loop<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
-/// 渲染层发起的歌词配置：**先过退出准入门，再原子接受并入队**（review finding 2）。
-///
-/// 修复前 `core_lyrics_configure` 直接 `state.configure(...)`：退出线程校验完盘上文档、
-/// 还没进入不可逆阶段的那段窗口里，歌词窗发来的一笔配置仍会被接受——内存变了、worker 却已冻结，
-/// 磁盘永远停在旧值。这条缝与渲染层的 settings 写是同一条，所以走的也是同一个
-/// [`crate::commands::PersistenceGate`]。
-///
-/// 受理凭据（`PersistAdmission`）在本函数体内**持有到配置被接受、持久任务已入队**为止：
-/// - 判定与记账在 `admit` 的同一个临界区（不会"判定 Running、入队时已冻结"）；
-/// - 退出要等的正是这个凭据（`wait_drained`），所以"已受理还没入队"的那一笔挡得住退出；
-/// - 锁次序：准入门（`admit` 内部即放）→ config → persist，与既有纪律一致。
+/// 渲染层发起的歌词配置：**先过退出准入门，再原子接受并入队**（与渲染层 settings 写共用同一个 [`crate::commands::PersistenceGate`]）。
+/// 受理凭据持有到配置被接受、持久任务已入队为止，所以"已受理还没入队"的那一笔挡得住退出；锁次序：准入门 → config → persist。
 fn accept_renderer_configure(
     gate: &std::sync::Arc<crate::commands::PersistenceGate>,
     state: &LyricsWindowState,
@@ -817,14 +764,7 @@ fn accept_renderer_configure(
 }
 
 /// 退出准备**失败**（`abort_exit` 保窗）时把「准入门 ↔ 歌词持久化」一起复原。
-///
-/// **顺序是合同**（review round 2 finding 1）：先解冻歌词持久化（并唤醒保存任务），**再**把全局
-/// 准入门放回 `Running`。反过来的话，门一开、歌词还冻着，这中间到达的一笔 `core_lyrics_configure`
-/// 会被准入门受理，`configure` 改掉运行值，`enqueue` 却因 `frozen` 返回 false 且被忽略——
-/// 内存是新值、盘上是旧值、退出却是"成功"的。开门之后任何一笔写能进来时，歌词一定已经可写。
-///
-/// `while_gate_still_closed` 是这一刀的**观察点**（生产传空闭包）：它跑在"已解冻、门还关着"
-/// 的那一刻，让"顺序"成为可断言的行为，而不是靠读源码里的调用次序。
+/// **顺序是合同**：先解冻歌词再放门回 `Running`，否则门开了歌词还冻着，中间到达的写会被受理却入队失败。
 pub fn restore_after_failed_exit(
     gate: &std::sync::Arc<crate::commands::PersistenceGate>,
     state: &LyricsWindowState,
@@ -835,10 +775,8 @@ pub fn restore_after_failed_exit(
     gate.abort_prepare();
 }
 
-/// 退出准备：**冻结 + 重试一次（若上一次失败）+ 等排空**。
-///
-/// 返回 `Ok(())` 才允许往下走 D 的不可逆清理。失败/超时保持现状：盘上可能还是旧的，
-/// 但 Rust 侧的 dirty/saveError 仍在，主窗可以回读并给出可操作提示（保窗可重试）。
+/// 退出准备：**冻结 + 重试一次（若上一次失败）+ 等排空**；返回 `Ok(())` 才允许往下走不可逆清理。
+/// 失败/超时保持现状：盘上可能还是旧的，但 Rust 侧的 dirty/saveError 仍在，主窗能回读并给出可操作提示。
 pub fn prepare_exit_persistence<R: Runtime>(app: &AppHandle<R>, deadline: std::time::Instant) -> Result<(), CoreError> {
     let state = app.state::<LyricsWindowState>();
     let current = state.config();
@@ -922,8 +860,7 @@ pub fn schedule_rebuild<R: Runtime>(app: &AppHandle<R>) {
 pub fn begin_shutdown<R: Runtime>(app: &AppHandle<R>) {
     let state = app.state::<LyricsWindowState>();
     let mut lifecycle = lock(&state.lifecycle); lifecycle.shutting_down = true; lifecycle.requested = false;
-    // R51：设置弹出窗**直接销毁**（不排队、不等待）：它不持有任何要落盘的东西，
-    // 所以不该出现在 R44e 的退出预算里，也不该拖慢一次正常退出。
+    // 设置弹出窗**直接销毁**（不排队、不等待）：它不持有要落盘的东西，不该出现在退出预算里，也不该拖慢一次正常退出。
     crate::lyrics_settings::shutdown(app);
     #[cfg(windows)] {
         let host = app.state::<crate::taskbar_lyrics::Host>(); host.shutdown();
@@ -950,10 +887,8 @@ pub fn ready_generation(source: &str, document_generation: Option<u64>, live_gen
     if source == LYRICS_WINDOW_LABEL && empty_read && document_generation == live_generation { document_generation } else { None }
 }
 
-/// 谁可以改歌词配置：主窗、歌词窗，以及 R51 的设置弹出窗（那些控件就在它里面）。
-///
-/// 注意这条**不**等于"谁能用歌词专命令"：媒体控制另有 [`require_lyrics_control_source`]，
-/// 弹出窗不在其中——它能改外观，但没有任何理由替用户按上一首/下一首。
+/// 谁可以改歌词配置：主窗、歌词窗，以及装着那些控件的设置弹出窗。
+/// 这条**不**等于"谁能用歌词专命令"：媒体控制另有 [`require_lyrics_control_source`]，弹出窗能改外观，却不能替用户按上一首/下一首。
 pub fn require_lyrics_source(label: &str) -> Result<(), CoreError> {
     if [
         MAIN_WINDOW_LABEL,
@@ -978,8 +913,7 @@ pub fn require_lyrics_control_source(label: &str) -> Result<(), CoreError> {
 pub fn validate_configure(label: &str, patch: &Value, retry_save: Option<bool>, restore_if_pristine: Option<Value>) -> Result<(), CoreError> {
     require_lyrics_source(label)?;
     if restore_if_pristine.is_some() {
-        // R44e：启动时由 Rust **只读**恢复盘上配置（`LyricsWindowState::restore`），恢复不再由
-        // 渲染层触发——旧参数留着会被当成"又要覆盖一次盘"，所以明确拒，不静默当普通改值。
+        // 启动时由 Rust **只读**恢复盘上配置（`LyricsWindowState::restore`），恢复不再由渲染层触发——旧参数留着会被当成"又要覆盖一次盘"，所以明确拒。
         return Err(CoreError::new(
             "invalid_payload",
             "restoreIfPristine 已取消：启动配置由宿主只读恢复，不再接受渲染层恢复请求",
@@ -1002,11 +936,11 @@ pub fn validate_configure(label: &str, patch: &Value, retry_save: Option<bool>, 
             "style" => value.as_str().is_some_and(|v| LYRICS_STYLES.contains(&v)),
             "color" => value.as_str().is_some_and(|v| LYRICS_COLOR_TOKENS.contains(&v)),
             "size" => value.as_str().is_some_and(|v| LYRICS_FONT_STEPS.iter().any(|(id, _)| *id == v)),
-            // R59：任务栏那四个键各收各的（档位表不通用：桌面档位在 `taskbarSize` 里就是非法值）
+            // 任务栏那四个键各收各的（档位表不通用：桌面档位在 `taskbarSize` 里就是非法值）
             "taskbarColor" => value.as_str().is_some_and(|v| LYRICS_COLOR_TOKENS.contains(&v)),
             "taskbarSize" => value.as_str().is_some_and(|v| TASKBAR_FONT_STEPS.iter().any(|(id, _)| *id == v)),
             "taskbarKaraoke" => value.is_boolean(),
-            // R45B：自定义颜色只收空串或 `#RRGGBB`；窗口尺寸只收 null 或有限正数
+            // 自定义颜色只收空串或 `#RRGGBB`；窗口尺寸只收 null 或有限正数
             "customColor" => value.as_str().is_some_and(custom_color_ok),
             "taskbarCustomColor" => value.as_str().is_some_and(custom_color_ok),
             "windowWidth" | "windowHeight" => value.is_null()
@@ -1036,9 +970,7 @@ pub fn control_payload(label: &str, payload: &Value) -> Result<Value, CoreError>
 // ---------------------------------------------------------------------------
 
 /// 歌词文档归一（**纯函数**）：`{lines, status}`；不是对象就回 `None`（调用方按 `invalid_payload` 报错）。
-///
-/// 判据与 R12 起的那一版逐条相同（`lines` 不是数组就当空、`status` 认不出就 `unavailable`）——
-/// 这里只是把它从命令体里提出来，好让"缓存住的到底是哪一份"可以被单测钉住。
+/// `lines` 不是数组就当空、`status` 认不出就 `unavailable`；提成纯函数是为了让单测钉住"缓存住的是哪一份"。
 pub fn normalize_document(document: &Value) -> Option<Value> {
     let object = document.as_object()?;
     let lines = object
@@ -1125,32 +1057,17 @@ pub fn replay_after_page_load<R: Runtime>(app: &AppHandle<R>) {
 // ---------------------------------------------------------------------------
 
 /// 歌词窗的 webview 数据目录：`<数据根>/webview2/lyrics`（与登录窗 `webview2/login/<partition>` 同款）。
-///
-/// 独占目录而不是与主窗共用：WebView2 的数据目录同时被两个进程内 webview 打开会互相踩
-/// （缓存/Cookie 库的锁）。
+/// 独占目录而不是与主窗共用：WebView2 的数据目录同时被两个 webview 打开会互相踩（缓存/Cookie 库的锁）。
 pub fn lyrics_data_dir(data_root: &Path) -> PathBuf {
     data_root.join("webview2").join("lyrics")
 }
 
-/// 歌词窗的标题（R41）：这是窗口在 **Alt+Tab / 任务视图**里的名字。
-///
-/// 为什么必须有：tao 的默认标题是 `"Tauri App"`（`WebviewWindowBuilder` 不给 `.title()` 时），
-/// 而 `skip_taskbar(true)` 在 Windows 上只做 `ITaskbarList::DeleteTab`（tao 0.37.1 的
-/// `set_skip_taskbar`）——它把任务栏那个条目删掉，**没有**碰 `WS_EX_TOOLWINDOW`，
-/// 所以窗口仍会出现在 Alt+Tab 里（实测 exStyle `0x40118`：有 `WS_EX_APPWINDOW`、没有 TOOLWINDOW）。
-/// 一个没有标题的透明条在 Alt+Tab 里显示成"Tauri App"，用户没有任何线索知道那是什么。
+/// 歌词窗的标题：这是窗口在 **Alt+Tab / 任务视图**里的名字。
+/// Windows 上 `skip_taskbar(true)` 只删任务栏条目，不设 `WS_EX_TOOLWINDOW`，没有标题就会在 Alt+Tab 里显示成 "Tauri App"。
 pub const LYRICS_WINDOW_TITLE: &str = "桌面歌词";
 
 /// 建窗加载的地址：`lyrics.html?<配置>&theme=<档位>`（配置经查询串同步到位，见 [`LyricsConfig::query`]）。
-///
-/// **主题也走查询串**（R41），理由与配置同款、且多一条：歌词窗**调不动**读主题的那条命令
-/// （`core_login_chrome` 的来源守卫只放行主窗与两个浮动控件，见 `commands::require_login_chrome_source`），
-/// 所以它自己在启动时问不出"现在是哪一档"。查询串是同步到位的，之后的变化由 `theme:changed`
-/// 广播补上（订阅广播不需要任何权限）。
-///
-/// 不带这个参数会怎样（R12 起就一直是那样）：歌词窗永远停在 `:root` 的**浅色**令牌上
-/// （`lyrics-main.tsx` 里没有 `installThemeSync`），于是深色主题下歌词用近黑的字浮在深色桌面上
-/// ——"有歌词但看不见"。
+/// 主题也得走查询串：歌词窗调不动读主题的那条命令（`require_login_chrome_source` 只放行主窗与两个浮动控件），不传就永远停在浅色令牌上，深色主题下"有歌词但看不见"。
 pub fn lyrics_window_url(config: &LyricsConfig, theme: crate::theme::ThemeChoice) -> String {
     format!("lyrics.html?{}&theme={}", config.query(), theme.setting())
 }
@@ -1176,8 +1093,7 @@ fn work_area<R: Runtime>(app: &AppHandle<R>, preserve_position: bool) -> Result<
     Ok(work_area_rect(&monitor))
 }
 
-/// 一块显示器的工作区（物理像素）。**R51 起是唯一读数点**：歌词窗几何与设置弹出窗的定位
-/// 共用它，谁都不许在别处再写一遍 `monitor.work_area()`（两处各读一次，迟早有一处忘了负坐标这件事）。
+/// 一块显示器的工作区（物理像素）。**唯一读数点**：歌词窗几何与设置弹出窗定位共用它，别处不许再写 `monitor.work_area()`。
 pub fn work_area_rect(monitor: &tauri::Monitor) -> Rect {
     let area = monitor.work_area();
     Rect {
@@ -1218,7 +1134,7 @@ fn build_lyrics_window<R: Runtime>(
         )
     })?;
 
-    // 代理在**建窗时**读一次 → 改代理要重启应用才生效（与主窗/登录窗同款，R6 的已知限制）。
+    // 代理在建窗时读一次，改代理要重启应用才生效（主窗与登录窗相同）。
     // 三窗都接 proxy_url 是审计结论：不接的话 webview 自己的网络栈会绕过设置直连。
     let proxy = crate::proxy_url_argument(crate::webview_proxy::resolve_for_webview(
         &data_root,
@@ -1236,8 +1152,7 @@ fn build_lyrics_window<R: Runtime>(
     .shadow(false)
     .always_on_top(desktop_topmost(config))
     .skip_taskbar(true)
-    // R45B：桌面窗未锁定时可拖拽缩放（右下角拖柄调官方 startResizeDragging）；
-    // 锁定与任务栏模式下不可缩放——这是"锁定后功能键全部隐藏"的窗口层那一半。
+    // 桌面窗未锁定时可拖拽缩放（右下角拖柄调官方 startResizeDragging），锁定与任务栏模式下不可缩放——"锁定后功能键全部隐藏"的窗口层那一半。
     .resizable(resizable_enabled(config))
     .min_inner_size(MIN_WINDOW_WIDTH_DIP, MIN_WINDOW_HEIGHT_DIP)
     .focused(false)
@@ -1249,15 +1164,8 @@ fn build_lyrics_window<R: Runtime>(
     }
 
     let window = builder
-        // 页面（重新）加载完成 → 把最后一份歌词文档重发一次（R41a）。
-        //
-        // 为什么挂在这里：`apply_toggle` 每次显示已有窗口都会 `reload()`，而主窗的重推
-        // 与新页面的 `listen()` 是两条不同步的异步链——重推总是落在订阅之前（即转即弃），
-        // 用户会看到占位文案直到换歌。加载完成是**唯一**能确定"新页面已经在跑"的时刻。
-        //
-        // 只认 `Finished`：`Started` 时页面里的 JS 还没执行，重发等于发进空气。
-        // 按 label 过滤：这个回调跟着这个窗的 webview 走，判一次 label 是兜底
-        // （"这条广播只发给歌词窗"这件事由它自证，而不是靠"只有一个窗"这种当下的巧合）。
+        // 页面（重新）加载完成 → 把最后一份歌词文档重发一次：`apply_toggle` 每次显示已有窗口都会 `reload()`，而主窗的重推总落在新页面 `listen()` 之前（即转即弃）。
+        // 只认 `Finished`（`Started` 时页面的 JS 还没执行），并按 label 过滤，让"只发给歌词窗"由它自证。
         .on_page_load(move |webview, payload| {
             if payload.event() != PageLoadEvent::Finished || webview.label() != LYRICS_WINDOW_LABEL {
                 return;
@@ -1276,7 +1184,7 @@ fn build_lyrics_window<R: Runtime>(
     let events = app.clone();
     window.on_window_event(move |event| {
         if !matches!(event, tauri::WindowEvent::Destroyed) { return; }
-        // R51：歌词窗没了，设置弹出窗也一起收（它锚在歌词窗的齿轮上，没有锚就不该留着）。
+        // 歌词窗没了，设置弹出窗也一起收（它锚在歌词窗的齿轮上，没有锚就不该留着）。
         crate::lyrics_settings::close(&events);
         let mut recover = false;
         if let Some(state) = events.try_state::<LyricsWindowState>() {
@@ -1308,7 +1216,7 @@ fn build_lyrics_window<R: Runtime>(
 #[derive(Debug, PartialEq)]
 pub enum WindowEffect {
     Geometry(Size, Point),
-    /// **只改尺寸、不动位置**（R45B）：用户拖拽缩放后保存的 DIP 尺寸落到窗口上，并夹进工作区。
+    /// **只改尺寸、不动位置**：用户拖拽缩放后保存的 DIP 尺寸落到窗口上，并夹进工作区。
     /// 刻意与 [`WindowEffect::Geometry`] 分开：颜色/锁/演出/尺寸这些变化都不许让窗口跳位。
     Size(Size),
     ClickThrough(bool),
@@ -1316,7 +1224,7 @@ pub enum WindowEffect {
 
 pub fn geometry_plan(area: Rect, config: &LyricsConfig, scale: f64, current: Option<Point>) -> (Size, Point) {
     let wanted = if config.mode == LyricsMode::Taskbar { TASKBAR_SIZE }
-        // R45B：用户拖过的尺寸优先（它是 DIP，按缩放比换成物理像素后再夹进工作区）
+        // 用户拖过的尺寸优先（它是 DIP，按缩放比换成物理像素后再夹进工作区）
         else if let Some(size) = config.custom_size() { size }
         else if config.layout == "vertical" { DESKTOP_VERTICAL_SIZE }
         else { DESKTOP_SIZE };
@@ -1405,7 +1313,7 @@ fn apply_config<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<R>, previ
     let area = if geometry || resized { work_area(app, previous.is_some() && config.mode == LyricsMode::Desktop)? } else { Rect { x:0.0, y:0.0, width:1.0, height:1.0 } };
     let current = window.outer_position().ok().map(|p| Point {x: p.x.into(), y: p.y.into()});
     let mut result = Ok(());
-    // R45B：可缩放资格是窗口属性（锁定 = 不可拖大小）。失败只留痕：它是增强，不该让配置应用失败。
+    // 可缩放资格是窗口属性（锁定 = 不可拖大小）。失败只留痕：它是增强，不该让配置应用失败。
     if let Err(source) = window.set_resizable(resizable_enabled(config)) {
         log::warn!("歌词窗的缩放资格没能应用（{source}）：锁定态仍由渲染层不显示缩放拖柄兜住");
     }
@@ -1422,10 +1330,7 @@ fn apply_config<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<R>, previ
 }
 
 /// 桌面窗上允许做的两种动作（生产实现包住 `WebviewWindow`；测试用会计数的那种假的）。
-///
-/// 为什么要为一个"就两行"的动作抽出窄接口：D3 的规矩是**撤销态下一`reload`/`show` 都不许发**
-/// （旧 taskbar HWND 可能还挂在 Explorer 下）。这条只有**行为**上被钉住才算数——扫源码只能
-/// 证明写了 `if`，证明不了它挡在副作用之前。所以动作与判定收进同一处，假的窗直接数次数。
+/// 抽成窄接口是为了让"撤销态下一个 `reload`/`show` 都不许发"能按行为验证——扫源码只证明写了 `if`，证明不了它挡在副作用之前。
 pub trait DesktopWindowOps {
     fn reload(&mut self) -> Result<(), String>;
     fn show(&mut self) -> Result<(), String>;
@@ -1443,14 +1348,7 @@ impl<R: Runtime> DesktopWindowOps for LyricsWindowOps<'_, R> {
 }
 
 /// 桌面「打开」那一步的窄收口（**行为可测**）：所有对已有窗的 `reload`/`show` 只从这里出去。
-///
-/// - `revoked`：这扇窗是不是**已 revoke 但仍活着**的旧代次（唯一事实来源是宿主：
-///   [`revoked_window`] ← `Host::revoked_live()`；`live`/`saved` 刻意保留，好让同一代次重试
-///   restore/detach）。撤销态下这里**一次也不碰它**——不 reload、不 show——直接回
-///   `destroy_failed`：窗保持隐藏，用户再点一次就是明确的重试，撤销只能由**新代次 register**
-///   或同一代次的受控 detach/restore 成功来解除。
-/// - `fresh`：刚建出来的窗（本来就在加载）：reload 会打断首次加载，所以只 show。
-/// - 已有窗的 reload 失败只留一行 warn：页面刷新不了不该让"打开歌词"这件事失败。
+/// 撤销态下不碰旧代次，直接回 `destroy_failed`。新建的窗只 show 不 reload，已有窗 reload 失败只留 warn。
 pub fn open_desktop(
     revoked: bool,
     fresh: bool,
@@ -1474,37 +1372,8 @@ pub fn open_desktop(
         .map_err(|source| CoreError::new("internal", format!("歌词窗显示不出来：{source}")))
 }
 
-/// 开关落地：开 = 建（没有就建）/摆好/**重新加载**/显示；关 = **隐藏**（不销毁，webview 与进度都留着）。
-///
-/// ## 为什么"已经有了的窗"在 show 之前要 reload（R41）
-///
-/// 这条是**实测出来的缺陷**（R41 真机诊断，见任务报告）：
-/// 歌词窗的页面只在**建窗那一刻**加载一次，此后没有任何重新加载的路径——`toggle` 只 hide/show、
-/// `configure` 只改尺寸/位置/点透、模块里没有 destroy。于是**任何一次没加载完的页面都会被永久保留**：
-///
-/// - 实测现场：dev server（`http://localhost:1420`）在 16:27:50 挂掉，歌词窗恰好在那一刻建出来
-///   ——HTML/CSS 到了、JS 模块没到，React 从未挂载。窗口是**全透明**的，所以屏幕上什么都看不到
-///   （连页内那句占位文案都没有），而用户再怎么开关这个勾选都不会有任何变化，**只有重启应用能救**。
-///   取证：品红背板实验里那块 960×120 全是品红（非品红像素 0）——页面确实一个像素都没画。
-/// - 生产（`tauri://localhost` 的内嵌资源）虽然极少失败，但"加载失败即永久空白且无路可退"这条性质
-///   与触发原因无关：换台慢盘、杀毒软件拦一下、webview 渲染进程崩一次，都会落到同一个状态。
-///
-/// 所以规则改成：**每一次显示都让页面重新加载一次**（新建的窗除外——它本来就在加载）。
-///
-/// ## 重新加载之后，歌词从哪来（R41a 修的那一次）
-///
-/// 页面一重载就回到初始态（没有行、状态是"尚未配置"），所以必须有人把**当前这首**的文档补上。
-/// R41 把这件事交给主窗"窗口可见时重推一次"（`use-lyrics-window.ts`），但那一次**必然太早**：
-/// `reload()` 是异步的，主窗拿到"已显示"的回执时新页面还在加载——文档落在新页 `listen()` 之前，
-/// 此后没有任何补发路径，用户看到的是占位文案，**直到换歌**（换歌会重新走一遍数据链）。
-///
-/// 现在改成：`core_lyrics_document` 留一份最后发出去的文档（[`remember_document`]），
-/// **页面加载完成时由 webview 自己那条回调重发**（[`replay_after_page_load`]，见 [`build_lyrics_window`]）。
-/// 帧的顺序由"知道页面何时就绪"的那一侧定，而不是靠"希望主窗推得够晚"。
-/// 主窗那次重推因此删掉了（它在任何时序下都不落在可用的那一刻，留着只会让人以为它在起作用）。
-///
-/// 普通 desktop 开关仍隐藏不销毁；跨 mode/parent/monitor 重建与退出另走受控销毁。
-/// taskbar 的 show/hide、几何、点透全交原生宿主，不混用 tao 样式缓存。
+/// 开关落地：开 = 建/摆好/**重新加载**/显示；关 = **隐藏**（不销毁，webview 与进度都留着；跨 mode/parent/monitor 重建与退出另走受控销毁）。
+/// 已有的窗在 show 前必须 reload（页面只在建窗那一刻加载，加载失败就永久空白），重载后的歌词由页面加载完成回调重发；taskbar 的显隐/几何/点透全交原生宿主。
 fn apply_toggle<R: Runtime>(
     app: &AppHandle<R>,
     config: &LyricsConfig,
@@ -1534,15 +1403,14 @@ fn apply_toggle<R: Runtime>(
                 .hide()
                 .map_err(|source| CoreError::new("internal", format!("歌词窗隐藏失败：{source}")))?;
         }
-        // R51：歌词窗收起来了，挂在它上面的设置弹出窗一起收（否则会有一份菜单浮在桌面上）。
+        // 歌词窗收起来了，挂在它上面的设置弹出窗一起收（否则会有一份菜单浮在桌面上）。
         crate::lyrics_settings::close(app);
         return Ok(false);
     }
 
     let (window, fresh) = match app.get_webview_window(LYRICS_WINDOW_LABEL) {
-        // 已经有了（多半是上次隐藏下来的）：**不重摆几何**——用户可能刚把它拖到别处，
-        // 每次开关都把它拽回计算位置等于"拖了白拖"。模式/点透变化由 configure 那条路负责。
-        // 重新加载（见函数头）由 [`open_desktop`] 做，而且它先问撤销态。
+        // 已经有了（多半是上次隐藏下来的）：**不重摆几何**——用户可能刚把它拖到别处，每次开关都拽回计算位置等于"拖了白拖"。
+        // 模式/点透变化由 configure 那条路负责，重新加载由 [`open_desktop`] 做（它先问撤销态）。
         Some(window) => (window, false),
         None => {
             let window = build_lyrics_window(app, config)?;
@@ -1552,18 +1420,14 @@ fn apply_toggle<R: Runtime>(
             (window, true)
         }
     };
-    // 显示这一步只走窄收口：已 revoke 的旧代次在这里被挡住（`destroy_failed`、窗保持隐藏），
-    // 命令层那条 `DesktopReopen::ReplaceRevoked` 是正常路径，这里是**竞态兜底**：
-    // 判定之后、显示之前若宿主刚被 revoke，也绝不再把旧 HWND 显示出来。
+    // 显示这一步只走窄收口：命令层的 `DesktopReopen::ReplaceRevoked` 是正常路径，这里是**竞态兜底**。
+    // 判定之后、显示之前若宿主刚被 revoke，已 revoke 的旧代次照样被挡住（`destroy_failed`、窗保持隐藏）。
     open_desktop(revoked_window(app), fresh, &mut LyricsWindowOps(&window))?;
     Ok(true)
 }
 
 /// 开关失败时的收口（纯函数）：勾选态回到**窗实际在不在**，并给一句给用户看的提示。
-///
-/// 为什么不建"勾选态 ↔ 窗存在性"的双向同步链：那两条链迟早给出两个不同的答案。
-/// 这里的规矩只有一条——**失败时以事实为准**（窗在就是勾着，不在就是没勾），
-/// 而"勾"这个动作本身仍由托盘自己翻转（R11）。
+/// 不做"勾选态 ↔ 窗存在性"的双向同步链（两条链迟早给出不同答案）：失败时一律以事实为准，勾这个动作仍由托盘自己翻转。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToggleFailurePlan {
     /// 托盘勾选项应当被改成什么（= 窗此刻的实际状态）。
@@ -1581,16 +1445,7 @@ pub fn toggle_failure_plan(requested_open: bool, window_visible: bool, reason: &
 }
 
 /// 桌面重开时"已经存在的那扇窗"能不能直接沿用（**纯函数**：决定权不在调用点）。
-///
-/// R44d 复审 D3 的 Important：`Host::revoke` 之后旧 taskbar HWND **仍然活着**
-/// （`live`/`saved` 都刻意保留，好让同一代次重试 restore/detach），只是永久禁探测/禁显示。
-/// 此时配置已经切到 desktop，一次 `core_lyrics_toggle(true)` 若照旧 `reload()` + `show()`，
-/// 就把**可能还挂在 Explorer 下的旧子窗**重新显示出来了——既不是桌面歌词该有的样子，
-/// 也绕过了 revoke 的失败关闭。
-///
-/// 所以桌面重开分两条路：普通窗照旧沿用（没有就建、有就 reload + show）；
-/// 被 revoke 的旧代次先走**既有的受控 detach/restore/destroy**，再由新代次重建
-/// （新代次 `register` 即 disabled，且不继承旧 saved）。
+/// 被 revoke 的旧 taskbar HWND 仍活着但永久禁探测/禁显示，照旧 `reload()` + `show()` 会把它显示出来；这种代次必须先受控销毁再重建（新代次不继承旧 saved）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesktopReopen {
     /// 没有旧代次问题：按原来的规则（没有就建，有就 reload + show）。
@@ -1636,8 +1491,7 @@ pub async fn core_lyrics_toggle(
     let state = app.state::<LyricsWindowState>();
     let _operation = state.operations.lock().await;
     let snapshot = state.snapshot();
-    // R44d 复审 D3：先判定"已经存在的那扇窗"能不能沿用。被 `Host::revoke` 过的旧 taskbar
-    // 代次仍活着（live/saved 保留给 restore 重试），照旧 reload + show 就会把它重新显示出来。
+    // 先判定"已经存在的那扇窗"能不能沿用：被 `Host::revoke` 过的旧 taskbar 代次仍活着（live/saved 留给 restore 重试），照旧 reload+show 会把它重新显示出来。
     let reopened = desktop_reopen(
         checked,
         snapshot.config.mode,
@@ -1647,12 +1501,8 @@ pub async fn core_lyrics_toggle(
     let result = match reopened {
         DesktopReopen::Direct => apply_toggle(&app, &snapshot.config, checked).map(|_| ()),
         DesktopReopen::ReplaceRevoked => {
-            // `rebuild_window` 只按 `lifecycle.requested` 决定重建后要不要重新打开，
-            // 所以先把"用户想要开着"落进状态；它内部走的仍是既有的受控销毁
-            // （detach → restore/hide → destroy），失败即 `destroy_failed`：窗保持隐藏、
-            // saved 不动，用户再点一次就是明确的重试。
-            // 没有登记代次就没有受控 detach 可走：宁可保守失败（窗本来就被 revoke 隐藏着），
-            // 也绝不落到 apply_toggle 去 reload/show 一扇旧 HWND。
+            // `rebuild_window` 只按 `lifecycle.requested` 决定重建后是否重开，所以这一支先把用户意图落进状态，失败即 `destroy_failed`。
+            // 没有登记代次就没有受控 detach 可走：宁可保守失败，也绝不落到 apply_toggle 去 reload/show 一扇旧 HWND。
             if lock(&state.lifecycle).live_generation.is_none() {
                 Err(CoreError::new("destroy_failed", "歌词窗清理未完成，已停显；请关闭歌词后重试"))
             } else {
@@ -1677,14 +1527,8 @@ pub async fn core_lyrics_toggle(
     }
 }
 
-/// 改歌词配置（窄命令）：`{config, retrySave?}`。
-///
-/// - `config: {}`（无 `retrySave`）= **纯读**当前运行状态（回执含 config/visible/revision/dirty/saveError）；
-/// - `config: {...}` = 接受一次补丁：改运行值、推进 revision，并由 Rust 的保存任务落盘；
-/// - `{config: {}, retrySave: true}` = 重存当前运行配置（保存失败后的手动重试；main/lyrics 都可调）。
-///
-/// `restoreIfPristine` 已取消：启动配置由 Rust 只读恢复（见 [`LyricsWindowState::restore`]），
-/// 传进来明确回 `invalid_payload`，不静默当成普通改值。
+/// 改歌词配置（窄命令）：空 `config` 纯读运行状态，带字段则打补丁并推进 revision，`retrySave` 重存当前配置。
+/// 传 `restoreIfPristine` 明确回 `invalid_payload`：启动配置只由 Rust 只读恢复（见 [`LyricsWindowState::restore`]），不静默当成普通改值。
 #[tauri::command]
 pub async fn core_lyrics_configure(
     app: AppHandle,
@@ -1722,8 +1566,7 @@ pub async fn core_lyrics_configure(
                 log::warn!("歌词窗配置已更新，但窗口属性未完全应用（{error}）");
             }
         }
-        // R51：锁定 / 切任务栏之后设置弹出窗都不该再留着——锁定意味着"这一块不该再被误改"，
-        // 任务栏那条根本不挂控件。放在应用之后：先把窗口本身摆对，再收菜单。
+        // 锁定 / 切任务栏之后设置弹出窗都不该再留着（任务栏那条根本不挂控件）；放在应用之后：先摆对窗口再收菜单。
         if snapshot.config.locked || snapshot.config.mode == LyricsMode::Taskbar {
             crate::lyrics_settings::close(&app);
         }
@@ -1751,11 +1594,8 @@ pub async fn core_lyrics_unlock_zone(app: AppHandle, webview: tauri::Webview, zo
     Ok(Value::Null)
 }
 
-/// 把歌词文档转发给歌词窗（歌词窗没有业务频道权限，数据只能由主窗转发）。
-///
-/// 顺手**留一份**（[`remember_document`]）：歌词窗每显示一次都会重新加载页面，那一份要由
-/// [`replay_after_page_load`] 在加载完成时重发。留的是归一之后的形状——缓存里躺着的与发出去的
-/// 必须是同一份，否则"重发"会是一种谁都没见过的形状。
+/// 把歌词文档转发给歌词窗（歌词窗没有业务频道权限，数据只能由主窗转发），顺手留一份供 [`replay_after_page_load`] 重发。
+/// 留的是归一之后的形状——缓存里躺着的与发出去的必须是同一份。
 #[tauri::command]
 pub async fn core_lyrics_document(
     app: AppHandle,
@@ -1897,11 +1737,8 @@ mod tests {
         assert!(lock(&state.lifecycle).requested);
     }
 
-    /// R44d-D3 复审 Important：桌面重开**不得**沿用已被 revoke 的旧 taskbar 代次。
-    ///
-    /// 现场：`Host::revoke` 之后旧 HWND 仍活着（`live`/`saved` 故意保留，好让同一代次重试
-    /// restore/detach），而配置已经切到 desktop。这时一次 `core_lyrics_toggle(true)` 若照旧
-    /// `reload()` + `show()`，就把**可能还挂在 Explorer 下**的旧子窗重新显示出来了。
+    /// 桌面重开**不得**沿用已被 revoke 的旧 taskbar 代次（旧 HWND 仍活着，但可能还挂在 Explorer 下）。
+    /// 那种情况下照旧 `reload()` + `show()` 就会把旧子窗重新显示出来，必须先受控销毁再重建。
     #[test]
     fn d3_desktop_reopen_replaces_a_revoked_generation_instead_of_reusing_it() {
         assert_eq!(
@@ -2012,11 +1849,8 @@ mod tests {
         }
     }
 
-    /// R44d-D3 复审 Important（**行为级**）：撤销态 + 桌面 toggle ⇒ 旧 HWND 的 `show`/`reload`
-    /// 计数必须都是 0，窗保持隐藏，回 `destroy_failed`（用户可重试）。
-    ///
-    /// 为什么这条必须验行为而不是扫源码：缺陷的本质就是"判定写了、副作用照发"。这里用假宿主
-    /// （`revoked_live` 语义）+ 假窗（数次数）驱动生产那条窄收口，副作用一旦漏发就直接红。
+    /// 撤销态 + 桌面 toggle ⇒ 旧 HWND 的 `show`/`reload` 计数必须都是 0，窗保持隐藏，回 `destroy_failed`（可重试）。
+    /// 这条必须验行为而不是扫源码："判定写了、副作用照发"正是缺陷本身。
     #[test]
     fn d3_revoked_generation_is_never_reloaded_or_shown_by_a_desktop_toggle() {
         // 现场：Beta 显示中切回 Desktop，restore 失败 → 旧 g1 被 revoke 但 HWND 仍活着。
@@ -2050,7 +1884,7 @@ mod tests {
         assert_eq!((fresh.reloads, fresh.shows, fresh.visible), (0, 1, true), "新建的窗不 reload");
     }
 
-    /// R44e：原子 revision 仍成立；`restoreIfPristine` 那条旧入口**已取消**（启动恢复由宿主只读做）。
+    /// 原子 revision 仍成立；`restoreIfPristine` 那条旧入口**已取消**（启动恢复由宿主只读做）。
     #[test]
     fn r44e_atomic_revision_and_the_retired_pristine_restore() {
         let state = LyricsWindowState::default();
@@ -2106,7 +1940,7 @@ mod tests {
             assert!(control_payload(source, &json!({"action":"next"})).is_err());
             assert!(validate_configure(source, &json!({}), None, None).is_err());
         }
-        // R44e：恢复已取消，任何来源（含主窗）传旧参数都拒；retrySave 只接受空 config。
+        // 恢复已取消：任何来源（含主窗）传旧参数都拒；retrySave 只接受空 config。
         assert!(validate_configure(MAIN_WINDOW_LABEL, &json!({}), None, Some(json!(false))).is_err());
         assert!(validate_configure(MAIN_WINDOW_LABEL, &json!({}), Some(true), None).is_ok());
         assert!(validate_configure(MAIN_WINDOW_LABEL, &json!({"locked":true}), Some(true), None).is_err());
@@ -2167,9 +2001,7 @@ mod tests {
     }
 
     /// 默认尺寸紧凑（横版 800×128、竖版 240×600），最小尺寸与任务栏尺寸不变。
-    ///
-    /// 为什么这条要有：默认尺寸是**用户什么都不改时看到的那个窗**。它一旦悄悄长回去，
-    /// 用户会以为"改成紧凑"这件事根本没做（而内边距那半已经在渲染层改掉了）。
+    /// 默认尺寸是**用户什么都不改时看到的那个窗**，悄悄长回去就等于"改成紧凑"这件事没做。
     #[test]
     fn r51_the_default_desktop_sizes_are_compact() {
         assert_eq!((DESKTOP_SIZE.width, DESKTOP_SIZE.height), (800.0, 128.0));
@@ -2193,9 +2025,8 @@ mod tests {
         );
     }
 
-    /// R51：设置弹出窗的四条关闭路径都接在歌词窗这一侧（隐藏/销毁/锁定或切任务栏/退出）。
-    ///
-    /// 扫的是"这些时刻有没有人去收弹出窗"——真窗行为由任务报告里的真机证据兜住。
+    /// 设置弹出窗的四条关闭路径都接在歌词窗这一侧（隐藏/销毁/锁定或切任务栏/退出）。
+    /// 扫的是"这些时刻有没有人去收弹出窗"，真窗行为不在这条用例的范围内。
     #[test]
     fn r51_the_popup_is_closed_on_every_lyrics_lifecycle_event() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs"))
@@ -2284,9 +2115,7 @@ mod tests {
     }
 
     /// **负坐标**：副屏摆在主屏左边时工作区原点就是负的（-1920）。
-    ///
-    /// 这条用例钉的正是"负偏移钳 0"最容易写错的地方：钳的是**偏移**，不是最终坐标——
-    /// 把坐标钳到 0 会把窗口从左侧副屏扔到主屏上，而用户明明把应用放那边。
+    /// 钳的是**偏移**而不是最终坐标——把坐标钳到 0 会把窗口从左侧副屏扔回主屏。
     #[test]
     fn a_monitor_left_of_the_primary_keeps_its_negative_origin() {
         let left = area(-1920.0, 0.0, 1920.0, 1040.0);
@@ -2373,10 +2202,8 @@ mod tests {
         assert!(!patched.locked);
     }
 
-    /// 简报钉死的上限：任务栏档位表每一档都 ≤ 20px（R59 之后上限由表本身保证）。
-    ///
-    /// R59 **有意替换** R44 的"把桌面档位压到 ≤20px"那一条：任务栏现在有自己的一列档位
-    /// （`TASKBAR_FONT_STEPS`），桌面选的字号不再参与任务栏的渲染。
+    /// 任务栏档位表每一档都 ≤ 20px（上限由表本身保证，不靠桌面档位去压）。
+    /// 任务栏有自己的一列档位（`TASKBAR_FONT_STEPS`），桌面选的字号不再参与任务栏渲染。
     #[test]
     fn taskbar_font_steps_never_exceed_the_pinned_ceiling() {
         assert_eq!(
@@ -2396,7 +2223,7 @@ mod tests {
         }
     }
 
-    // ---- R59：任务栏歌词的独立外观（颜色 / 逐字高亮 / 字号）--------------------------
+    // ---- 任务栏歌词的独立外观（颜色 / 逐字高亮 / 字号）--------------------------
 
     /// 四个任务栏字段各有默认值，且默认值本身合法（不靠"碰巧表里第一个"）。
     #[test]
@@ -2408,7 +2235,7 @@ mod tests {
         assert!(config.taskbar_karaoke, "逐字高亮默认开：R58 修好的观感就是默认观感");
         assert!(TASKBAR_FONT_STEPS.iter().any(|(id, _)| *id == DEFAULT_TASKBAR_SIZE));
         assert!(LYRICS_COLOR_TOKENS.contains(&DEFAULT_TASKBAR_COLOR));
-        // 默认字号沿用 R58 的实际观感（旧逻辑把桌面 lg=28px 压到 20px 那一档）
+        // 默认字号 = 20px（沿用桌面 lg 被压到这一档时的实际观感）
         let default_px = TASKBAR_FONT_STEPS
             .iter()
             .find(|(id, _)| *id == DEFAULT_TASKBAR_SIZE)
@@ -2602,7 +2429,7 @@ mod tests {
         assert!(url.contains("color=contrast"), "{url}");
         assert!(url.contains("locked=1"), "布尔写成 0/1（渲染层只认这两个值）：{url}");
         assert!(!url.contains("clickThrough"), "{url}");
-        // R41：主题也走查询串（歌词窗调不动读主题的那条命令，只能由建窗那一刻同步给它）
+        // 主题也走查询串（歌词窗调不动读主题的那条命令，只能由建窗那一刻同步给它）
         assert!(url.contains("&theme=dark"), "深色档位要真的带上：{url}");
         assert!(
             lyrics_window_url(&config, crate::theme::ThemeChoice::System).contains("&theme=system"),
@@ -2615,10 +2442,8 @@ mod tests {
         );
     }
 
-    /// R41：显示已有窗口之前必须**重新加载**页面（从"页面没加载完 ⇒ 永久空白"里恢复的唯一出路）。
-    ///
-    /// R44d-D3 之后这条 reload 与 show 都在 [`open_desktop`] 这一个窄收口里——因为
-    /// "撤销态下什么动作都不许发"必须**行为**可测，而行为可测的前提是这些动作只从一处出去。
+    /// 显示已有窗口之前必须**重新加载**页面（从"页面没加载完 ⇒ 永久空白"里恢复的唯一出路）。
+    /// reload 与 show 都收口在 `open_desktop` 一处，因为"撤销态下什么动作都不许发"必须行为可测。
     #[test]
     fn showing_an_existing_lyrics_window_reloads_the_page_but_a_fresh_one_is_left_alone() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs"))
@@ -2636,7 +2461,7 @@ mod tests {
         assert!(reload < show, "先 reload 再 show");
     }
 
-    /// R41a：歌词文档的归一（缓存里躺着的与发出去的必须是同一份形状）。
+    /// 歌词文档的归一（缓存里躺着的与发出去的必须是同一份形状）。
     #[test]
     fn the_document_is_normalized_before_it_is_kept_and_broadcast() {
         assert_eq!(
@@ -2659,7 +2484,7 @@ mod tests {
         assert_eq!(normalize_document(&Value::Null), None);
     }
 
-    /// R41a：最后一份文档真的留在状态里（`None` = 这次会话还没有歌词可重发）。
+    /// 最后一份文档真的留在状态里（`None` = 这次会话还没有歌词可重发）。
     #[test]
     fn the_state_keeps_the_last_document_for_the_replay() {
         let state = LyricsWindowState::default();
@@ -2682,10 +2507,7 @@ mod tests {
         assert_eq!(state.document(), Some(json!({ "lines": [], "status": "unavailable" })));
     }
 
-    /// R41a：**页面加载完成**时重发最后一份文档（按 label 过滤），且只认 `Finished`。
-    ///
-    /// 这条只能扫源码（本任务不能重启应用、也起不了真窗），扫的是"重发挂在哪个回调上、
-    /// 什么时候发"——正是 R41 缺的那一环。
+    /// **页面加载完成**时重发最后一份文档（按 label 过滤），且只认 `Finished`；只能扫源码验（回调时机没有真窗可测）。
     #[test]
     fn a_finished_page_load_replays_the_last_document_to_the_lyrics_window() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs"))
@@ -2736,7 +2558,7 @@ mod tests {
         );
     }
 
-    /// R41a：缓存发生在**发出去之前**（缓存住的必须是用户本来能看到的那一份）。
+    /// 缓存发生在**发出去之前**（缓存住的必须是用户本来能看到的那一份）。
     #[test]
     fn the_document_command_keeps_the_document_it_broadcasts() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs"))
@@ -2757,7 +2579,7 @@ mod tests {
         );
     }
 
-    /// R41：窗口标题是给 Alt+Tab 看的（`skip_taskbar` 只删任务栏条目，不碰 WS_EX_TOOLWINDOW）。
+    /// 窗口标题是给 Alt+Tab 看的（`skip_taskbar` 只删任务栏条目，不碰 WS_EX_TOOLWINDOW）。
     #[test]
     fn the_window_carries_a_human_title_for_alt_tab() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs"))
@@ -2810,10 +2632,7 @@ mod tests {
         assert!(!toggle_failure_plan(false, false, "x").tray_checked);
     }
 
-    /// 源码扫描：窗属性一次到位 + **隐藏不销毁** + 代理三窗收口。
-    ///
-    /// 这些是"建窗那一刻"的性质，跑不起来真窗就没法验（本任务环境起不了真窗，如实记 untested），
-    /// 所以用源码扫描把它们钉住——至少有据可查，而不是靠人眼。
+    /// 源码扫描：窗属性一次到位 + **隐藏不销毁** + 代理三窗收口（真窗在测试环境起不来，只能扫源码钉住）。
     #[test]
     fn the_window_is_built_with_the_contract_attributes_and_hidden_not_destroyed() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs"))
@@ -2826,7 +2645,7 @@ mod tests {
             ".shadow(false)",
             ".always_on_top(desktop_topmost(config))",
             ".skip_taskbar(true)",
-            // R45B：可缩放资格按配置算（桌面未锁才可拖大小；锁定与任务栏不可）
+            // 可缩放资格按配置算（桌面未锁才可拖大小；锁定与任务栏不可）
             ".resizable(resizable_enabled(config))",
             ".min_inner_size(MIN_WINDOW_WIDTH_DIP, MIN_WINDOW_HEIGHT_DIP)",
             ".focused(false)",
@@ -2852,7 +2671,7 @@ mod tests {
                 "{name} 要在本模块里真的发出去（emit_core_event 的唯一构造点）"
             );
         }
-        // 信封的唯一构造点仍是 commands::emit_core_event（R11 的纪律）
+        // 信封的唯一构造点仍是 commands::emit_core_event
         assert!(!production.contains("app.emit("), "不许绕开唯一构造点自己 emit");
         assert!(production.contains("emit_core_event("));
     }
@@ -2875,7 +2694,7 @@ mod tests {
         assert_eq!(production.matches("#[tauri::command]").count(), 6);
     }
 
-    // ---- R44e：歌词配置持久化（Rust 拥有的保存任务）--------------------------------
+    // ---- 歌词配置持久化（Rust 拥有的保存任务）----------------------------------
 
     fn persisted_config(patch: Value) -> LyricsConfig {
         LyricsConfig::default().apply_patch(&patch)
@@ -2890,9 +2709,9 @@ mod tests {
         let mut expected = vec![
             "mode", "layout", "style", "size", "color", "locked",
             "enableBlur", "enableScale", "enableSpring", "showControls",
-            // R45B：歌词颜色与窗口尺寸也是用户配置（要落盘、要重启恢复）
+            // 歌词颜色与窗口尺寸也是用户配置（要落盘、要重启恢复）
             "customColor", "windowWidth", "windowHeight",
-            // R59：任务栏歌词的独立外观（不与桌面共用）
+            // 任务栏歌词的独立外观（不与桌面共用）
             "taskbarSize", "taskbarColor", "taskbarCustomColor", "taskbarKaraoke",
         ];
         expected.sort_unstable();
@@ -3034,7 +2853,7 @@ mod tests {
         assert!(!persist.plan_exit_drain(&vertical), "已经在队里就不再补（幂等）");
     }
 
-    // ---- R44e fix1：退出准备失败后的可恢复性（review finding 1）--------------------
+    // ---- 退出准备失败后的可恢复性 ---------------------------------------------
 
     /// 一个"保存任务在线、盘上还是默认值"的状态（这几条用例的起点）。
     fn enabled_state() -> LyricsWindowState {
@@ -3070,11 +2889,8 @@ mod tests {
         (state, vertical)
     }
 
-    /// R44e fix1 / review finding 1：退出准备失败（`abort_exit` 保窗）之后，歌词保存必须**解冻**。
-    ///
-    /// 现场：一次保存失败 → Quit（冻结 + 本轮至多重试一次）→ 重试也失败 → 退出失败保窗。
-    /// 修复前 `frozen`/`retried_for_exit` 留在原处：手动 retrySave 不入队、下一次 Quit 不再重排，
-    /// 本次会话再也保存不了（盘上永远是旧的），而界面又不能说"存过了"。
+    /// 退出准备失败（`abort_exit` 保窗）之后，歌词保存必须**解冻**并清掉本轮的退出重试标记。
+    /// 否则手动 retrySave 不入队、下一次 Quit 不再重排，本次会话再也保存不了。
     #[test]
     fn fix1_aborting_a_failed_exit_makes_lyrics_persistence_writable_again() {
         let (state, vertical) = state_after_a_failed_exit_drain();
@@ -3118,7 +2934,7 @@ mod tests {
         assert!(lock(&state.persist).plan_exit_drain(&newest), "失败保窗后的下一次 Quit 必须能重排最新值");
     }
 
-    /// R44e fix1：abort 必须**唤醒**保存任务——它可能正睡在 condvar 上等下一笔。
+    /// abort 必须**唤醒**保存任务——它可能正睡在 condvar 上等下一笔。
     #[test]
     fn fix1_aborting_a_failed_exit_wakes_the_persistence_worker() {
         let state = std::sync::Arc::new(state_after_a_failed_exit_drain().0);
@@ -3142,13 +2958,10 @@ mod tests {
         assert!(waiter.join().expect("worker 线程"), "abort 必须 notify 保存任务，否则队列里有值也永远不动");
     }
 
-    // ---- R44e fix1：歌词配置走退出准入门（review finding 2）------------------------
+    // ---- 歌词配置走退出准入门 -------------------------------------------------
 
-    /// R44e fix1 / review finding 2：退出准备开始后，渲染层发起的 `core_lyrics_configure`
-    /// 必须被**结构化拒绝**（与渲染层 settings 写同一条准入）。
-    ///
-    /// 修复前它绕过准入门：退出线程刚校验完盘上文档、还没进入不可逆阶段时，歌词窗发来一笔配置
-    /// 仍会被接受——内存变了、worker 却已冻结，磁盘永远停在旧值。
+    /// 退出准备开始后，渲染层发起的 `core_lyrics_configure` 必须被**结构化拒绝**（与渲染层 settings 写同一条准入）。
+    /// 否则内存变了、worker 却已冻结，磁盘永远停在旧值。
     #[test]
     fn fix2_lyrics_configure_is_refused_once_exit_preparation_closed_admission() {
         let gate = std::sync::Arc::new(crate::commands::PersistenceGate::new());
@@ -3212,18 +3025,10 @@ mod tests {
         assert!(gate.wait_drained(std::time::Instant::now()), "入队之后退出不再被这一笔挡住");
     }
 
-    // ---- R44e fix2：abort 的顺序（review round 2 finding 1）-----------------------
+    // ---- abort 的顺序 ---------------------------------------------------------
 
-    /// R44e fix2 / review round 2 finding 1：退出失败的复原必须**先解冻歌词、再打开准入门**。
-    ///
-    /// 反过来的顺序留了一条真实的丢写缝：`gate.abort_prepare()` 一执行，渲染层写立刻可受理；
-    /// 此时歌词那一格还冻着。夹在中间到达的一笔 `core_lyrics_configure` 会通过准入门，`configure`
-    /// 改掉运行值与 revision，`enqueue` 却因 `frozen` 返回 false——而调用方忽略这个返回值。
-    /// 结果：内存是新值、盘上是旧值，退出却已经"成功"了。
-    ///
-    /// 探针切在**生产顺序的那一刀**上（`restore_after_failed_exit` 就是 `abort_exit` 调的那个
-    /// helper）：歌词已解冻、门还关着。顺序一旦换回来，探针会先看到 Running（或看到仍未解冻），
-    /// 断言立刻红——不是靠读源码里的调用顺序。
+    /// 退出失败的复原必须**先解冻歌词、再打开准入门**：否则夹在中间到达的写会通过准入门却入队失败，内存是新值、盘上还是旧值。
+    /// 探针切在生产顺序的那一刀上（歌词已解冻、门还关着），顺序换回来断言就红。
     #[test]
     fn fix2_abort_unfreezes_lyrics_before_it_reopens_the_admission_gate() {
         use crate::commands::{PersistKind, PersistPhase};
@@ -3266,7 +3071,7 @@ mod tests {
         );
     }
 
-    /// R45B：自定义颜色 / 窗口 DIP 尺寸的形状校验与往返（坏值不覆盖上一个合法值）。
+    /// 自定义颜色 / 窗口 DIP 尺寸的形状校验与往返（坏值不覆盖上一个合法值）。
     #[test]
     fn r45b_custom_color_and_window_size_are_validated_and_round_trip() {
         assert!(is_hex_color("#a1b2c3"));
@@ -3318,7 +3123,7 @@ mod tests {
         );
     }
 
-    /// R45B：方向/模式切换不再沿用上一方向的自定义尺寸（一个纯函数说得清）。
+    /// 方向/模式切换不再沿用上一方向的自定义尺寸（一个纯函数说得清）。
     #[test]
     fn r45b_switching_layout_or_mode_drops_the_previous_custom_size() {
         let sized = LyricsConfig::default().apply_patch(&json!({
@@ -3343,7 +3148,7 @@ mod tests {
         assert_eq!(snapshot.config.custom_size(), None, "方向切换后运行配置里不再留着上一方向的尺寸");
     }
 
-    /// R45B：自定义尺寸是 DIP，按缩放比换成物理像素并夹进工作区；尺寸变化只改尺寸不动位置。
+    /// 自定义尺寸是 DIP，按缩放比换成物理像素并夹进工作区；尺寸变化只改尺寸不动位置。
     #[test]
     fn r45b_custom_size_is_dip_scaled_clamped_and_never_moves_the_window() {
         let area = Rect { x: -1920.0, y: 0.0, width: 1920.0, height: 1040.0 };
@@ -3380,7 +3185,7 @@ mod tests {
         }
     }
 
-    /// R45B：缩放资格 = 未锁的桌面窗（锁定与任务栏两条都不可缩）。
+    /// 缩放资格 = 未锁的桌面窗（锁定与任务栏两条都不可缩）。
     #[test]
     fn r45b_resize_is_only_available_while_the_desktop_window_is_unlocked() {
         let base = LyricsConfig::default();

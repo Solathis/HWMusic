@@ -1,10 +1,6 @@
-//! R7 登录窗策略 · 集成测试（**不依赖真 GUI**：策略全部走纯函数）。
-//!
-//! 为什么这些用例在 `tests/` 而不是 `#[cfg(test)] mod tests`：它们钉的是**登录窗对外契约**
-//! （导航白名单、回调原样交付、payload 不回显、partition 路径安全、双期限、结论 take-once、独占），
-//! 与 login.rs 内部实现无关；放在集成测试里，将来把策略拆成子模块也不会让钉子失效。
-//!
-//! 真窗（`tauri dev`）与真实扫码联调**不在本任务范围**，见 task-7-report.md 的 untested 清单。
+//! 登录窗策略集成测试，全部走纯函数所以不依赖真 GUI。
+//! 放在 `tests/` 而不是 `#[cfg(test)] mod tests`，是为了钉住登录窗对外契约而非 login.rs 内部实现。
+//! 真窗与真实扫码联调不在本文件覆盖范围内。
 
 use std::cell::Cell;
 use std::path::Path;
@@ -41,27 +37,25 @@ fn error_of(payload: serde_json::Value) -> huawei_music_desktop_lib::bridge::Cor
 fn navigation_allows_only_explicit_whitelist_entries() {
     // 白名单里的整域（含 query/hash/任意路径）
     for allowed in [
-        // R32：授权入口换成参考实现实测的 oauth-login.platform.hicloud.com，
-        // 令牌域 oauth-login.cloud.huawei.com 同时进白名单（授权域与令牌域是两个主机）
+        // 授权域与令牌域是两个主机，两个都要进白名单
         "https://oauth-login.platform.hicloud.com/oauth2/v3/authorize?client_id=1&state=S",
         "https://oauth-login.cloud.huawei.com/oauth2/v3/token",
         "https://account.huawei.com/",
         "https://consumer.huawei.com/",
         // oauth-login1 只剩 loginCallback 这一条精确例外（扫码路径的 CAS 回调落点）
         "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?code=C&state=S",
-        // R16 增补：授权页把浏览器送到这里（https://id1.cloud.huawei.com:443/CAS/remoteLogin?… 的落地页）。
-        // 默认端口 `:443` 在 origin 里被归一化掉，两种写法都要放行。
+        // 授权页会落到这个页面，默认端口 :443 在 origin 里被归一化掉，两种写法都要放行。
         "https://id1.cloud.huawei.com/CAS/portal/loginAuth.html?clientID=101444301&state=S",
         "https://id1.cloud.huawei.com:443/CAS/portal/loginAuth.html?clientID=101444301",
     ] {
         assert_eq!(navigation_for(allowed), Navigation::Allow, "白名单条目必须放行：{allowed}");
     }
 
-    // oauth-login1 的**整域**已经不放行了（R32 降级为精确例外）：授权页那个路径现在必须被拦
+    // oauth-login1 整域不放行，只留精确例外，授权页那个路径必须被拦
     for blocked in [
         "https://oauth-login1.cloud.huawei.com/oauth2/v3/authorize",
         "https://oauth-login1.cloud.huawei.com/oauth2/v2/loginCallback?code=C",
-        // R32 移出的旧 CAS 域（参考清单里没有它）
+        // 旧 CAS 域已移出白名单
         "https://login.cloud.huawei.com/",
         "https://login.cloud.huawei.com/sso/index.html?x=1#frag",
     ] {
@@ -96,8 +90,7 @@ fn navigation_allows_only_explicit_whitelist_entries() {
         assert_eq!(navigation_for(blocked), Navigation::Block, "必须拦下：{blocked}");
     }
 
-    // 白名单是**显式条目**，不是后缀通配：这一条钉的就是"别改成 endsWith(huawei.com)"
-    // R32 起是五条（参考 LOGIN_HOSTS 的五个主机）+ 一条 loginCallback 精确例外
+    // 白名单是显式条目而不是后缀通配，别改成按域名后缀匹配。
     assert_eq!(LOGIN_ALLOWED_ORIGINS.len(), 5);
     assert_eq!(LOGIN_ALLOWED_URLS.len(), 1);
 }
@@ -139,7 +132,7 @@ fn navigation_hands_back_hms_urls_verbatim() {
 fn parse_config_rejects_bad_payloads_without_echoing_them() {
     let secrets = "CODE-SECRET-42";
 
-    // url 非 https / 不在白名单 / 解析不了 —— 错误里不得出现 url 原文（旧仓缺陷：错误回显整段 URL）
+    // url 非 https、不在白名单或解析不了时，错误里都不得出现 url 原文
     let bad_urls = vec![
         "http://oauth-login1.cloud.huawei.com/oauth2/v3/authorize".to_string(),
         "https://oauth-login1.cloud.huawei.com.attacker.invalid/oauth2/v3/authorize".to_string(),
@@ -158,8 +151,7 @@ fn parse_config_rejects_bad_payloads_without_echoing_them() {
         );
     }
 
-    // R25：`topInset` 已从载荷里退休——多给的字段**不是错误**（前向兼容：老调用方多传一个键
-    // 不该让登录起不来），但它也不改变任何几何（登录页铺满整窗，见 §8）。
+    // 多给的 `topInset` 不是错误（向前兼容老调用方），但它也不改变任何几何。
     let config = config_of(json!({"url": AUTHORIZE, "partition": "p1", "topInset": 48}));
     assert_eq!(config.url, AUTHORIZE);
     assert_eq!(config.partition, "p1");
@@ -329,10 +321,7 @@ fn session_wait_returns_the_conclusion_and_never_stalls_on_a_settled_slot() {
     assert!(started.elapsed() < Duration::from_secs(1), "已结算的槽必须立刻返回");
 
     // 未结算：到点返回 None（由调用方用 deadline_conclusion 定夺），不永久挂住。
-    //
-    // 这里断言的是**超时路径的返回语义**（返回 None + 控制权交回调用方 + 槽未被这次等待动过），
-    // 不是挂钟耗时：下界卡在超时值本身会被 Windows 计时器粒度钳住而偶发打红
-    //（实测 ~1/12），且"多久才算到点"的阈值语义已由纯函数 deadline_conclusion 的用例覆盖。
+    // 这里只钉超时路径的返回语义，不钉挂钟耗时，计时器粒度会让下界偶发变红。
     let idle = LoginSession::new();
     assert_eq!(
         idle.wait(Duration::from_millis(50)),
@@ -395,8 +384,7 @@ fn login_state_is_exclusive() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. 几何（R23：登录页是**同窗** webview ⇒ 坐标是客户区相对的，没有屏幕坐标、也没有跨窗换算。
-//    R25：登录页**铺满整个客户区**——用户四项之 3"不挤压网页"）
+// 8. 几何：登录页与主窗同窗、铺满整个客户区，坐标相对客户区，没有屏幕坐标与跨窗换算
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -425,8 +413,7 @@ fn layout_target_fills_the_whole_main_client_area() {
     }
 }
 
-/// R25：浮动控件的几何（用户四项之 2/4）——左上角「返回扫码登录」、右上角主题控件，
-/// 贴边留 8px、尺寸按缩放比换算，且**不会越过客户区**（越界就等于点不到）。
+/// 浮动控件贴边留 8px、尺寸按缩放比换算，且不会越过客户区，越界就等于点不到。
 #[test]
 fn chrome_widgets_are_anchored_to_the_two_top_corners() {
     let [back, theme] = chrome_rects(1280.0, 800.0, 1.0);
@@ -458,7 +445,7 @@ fn chrome_widgets_are_anchored_to_the_two_top_corners() {
     }
 }
 
-/// R25：浮动控件只许停在应用自己的本地页面上（它们握着 `core_login_chrome` 的来源资格）。
+/// 浮动控件握着 `core_login_chrome` 的来源资格，所以只许停在本应用自己的本地页面上。
 #[test]
 fn chrome_widgets_may_only_navigate_within_the_app() {
     assert!(chrome_navigation_allowed("tauri://localhost/login-chrome.html?kind=theme"));
@@ -475,10 +462,7 @@ fn chrome_widgets_may_only_navigate_within_the_app() {
     }
 }
 
-/// R24：几何的**输入**也可能"量不到"——真机 2026-10-20 同一个进程里那两行日志就是这个契约的两端：
-/// 主窗可测量 → `rect=(0,48,1280,752)`（R25 起是 `(0,0,1280,800)`）；主窗最小化
-/// （`inner_size()` 是 `(0,0)`）→ **没有几何**，而不是 `rect=(0,48,320,160)`
-///（那是两条钳制下限凑出来的假盒子：登录页真的被摆成了 320×160，创建日志一次、跟随每 250ms 又一次）。
+/// 主窗最小化时 inner_size 是 (0,0)，这种情况必须判成没有几何，不能拿钳制下限凑一个假盒子。
 #[test]
 fn an_unmeasurable_client_area_has_no_geometry() {
     let measurable = ClientArea {
@@ -503,7 +487,7 @@ fn an_unmeasurable_client_area_has_no_geometry() {
         "原始读数要能进日志（简报 R24 要求）"
     );
 
-    // 主窗最小化：tao 的 inner_size 就是 GetClientRect 的结果，真机读数是 (0,0)
+    // 主窗最小化时 tao 的 inner_size 就是 GetClientRect 的结果，读到 (0,0)
     let minimized = ClientArea {
         width: 0.0,
         height: 0.0,
@@ -534,13 +518,10 @@ fn an_unmeasurable_client_area_has_no_geometry() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. 收尾失败分级（修复轮 1 · Important 2）：预期失败只留日志，app:notice 只给真残留
+// 9. 收尾失败分级：预期失败只留日志，app:notice 只给真残留
 // ---------------------------------------------------------------------------
-//
-// 场景：登录窗已经消失时（"窗口消失"轮询判 Closed，或用户/系统在收尾前就关掉了窗），
-// `clear_all_browsing_data` / `close` 必然失败——而数据目录会被整棵删掉，实际上什么都没残留。
-// 旧写法把每一次预期失败都无条件广播成 app:notice，等于每结束一次登录就弹一条
-// "建议手动清理"，让用户去清理一个**刚刚被删掉**的东西。
+// 登录窗已消失时 clear 与 close 必然失败，但目录会被整棵删掉，实际什么都没残留。
+// 每次都无条件广播 app:notice，等于让用户去清理一个刚刚被删掉的东西。
 
 #[test]
 fn failures_on_an_already_gone_window_are_log_only_and_never_notice_the_user() {
@@ -614,13 +595,9 @@ fn failures_on_an_already_gone_window_are_log_only_and_never_notice_the_user() {
 }
 
 // ---------------------------------------------------------------------------
-// 10. 建窗结果交付（修复轮 1 · Important 1）：没人等待的窗必须销毁，不许留在屏幕上
+// 10. 建窗结果交付：没人等待的窗必须销毁，不许留在屏幕上
 // ---------------------------------------------------------------------------
-//
-// 场景：`create_login_window` 把建窗闭包投到主线程后只等 `BUILD_TIMEOUT`（10s）。主线程忙到超时时，
-// 那个闭包**稍后仍会执行**：它会建出、显示并聚焦一个无人等待的登录窗，而此刻 `LoginState` 已经
-// `finish()`——用户再点登录只会撞 duplicate-label，人卡在一个没人管的无边框窗里。
-// 交付守卫就是这条路：`send` 失败意味着等待方已经走了，把刚建出来的窗就地销毁。
+// 建窗闭包可能在建窗超时之后才执行，会建出一个没人等待的窗，所以 `send` 失败就地销毁。
 
 #[test]
 fn a_window_nobody_waits_for_is_discarded_instead_of_left_on_screen() {
@@ -685,11 +662,8 @@ fn an_orphan_window_is_destroyed_and_its_one_shot_directory_removed() {
     assert!(!dir_again.exists(), "销毁失败不该连累目录清理");
 }
 
-/// 纯函数测不了"有没有真接上"：钉住生产代码走的是交付守卫，而不是旧写法 `let _ = sender.send(built)`。
-///
-/// R23：宿主换成同窗 webview 之后，"建出来但接不下去"的形态只剩**孤儿**一种——旧宿主还有第二条
-/// （`build()` 成功而 `show()` 失败 → 回头销毁）；同窗宿主没有 `show()` 那一步，那条机制连同它的
-/// 用例一起删掉了（不留一个永不触发的检查）。这里改为钉住**新宿主的形状**：登录页挂在主窗上。
+/// 纯函数测不了"有没有真接上"，这里钉住生产代码走的是交付守卫而不是旧写法。
+/// 同窗宿主下"建出来但接不下去"只剩孤儿一种形态，登录页挂在主窗上。
 #[test]
 fn the_build_handoff_is_wired_through_the_delivery_guard() {
     let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/login.rs"))
@@ -729,9 +703,7 @@ fn the_build_handoff_is_wired_through_the_delivery_guard() {
     );
 }
 
-/// 建窗失败那条路（终审 C）：`create_login_window` 可能在"目录已建、窗没建起来"之后失败
-/// （`build()` / `show()` 失败）。那条路上 `shutdown_window` **永远不会跑**（它只在建窗成功的路径上
-/// 被调用），于是那个一次性数据目录没人负责——里面可能已经有本次的 cookie。
+/// 建窗失败时 `shutdown_window` 不会跑，那个一次性数据目录没人负责，而里面可能已有本次 cookie。
 #[test]
 fn a_window_that_never_opened_does_not_leave_its_data_dir_behind() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -1,18 +1,9 @@
-//! 关窗行为（`tray` / `quit`）：读盘时将精确旧值 `minimize` 迁移为 `tray`。
+//! 关窗行为（`tray` / `quit`）：读盘时把精确旧值 `minimize` 迁移为 `tray`。
 //!
-//! 为什么读盘这侧在 Rust：关窗回调在 Rust 里（窗口是 Rust 建的），它要在**用户关窗的那一刻**
-//! 知道设置里选的是什么。写盘的是 core（设置页 → `settings:set` → `settings.json`），
-//! 所以这里的读盘与 `webview_proxy` 用**同一套 schema 闸门**（同一个文件名常量、同一个
-//! schemaVersion 判定）：非 JSON、不是对象、`schemaVersion` 不是 1、缺 `data`、
-//! `data.closeBehavior` 不在枚举里 —— 一律当"没配"。
-//!
-//! **退化方向刻意保守**：认不出的形状一律回落 `quit`（能真正退出的那一个），绝不猜 `tray`。
-//! 猜成 `tray` 而托盘又没装上，用户关一次窗就再也找不回应用（窗口藏了、托盘里没有）；
-//! 猜成 `quit` 最坏也只是"多退出一次"，重开就有。
-//!
-//! 状态的形状：启动时 `restore()` 读一次盘并记日志（**先于建窗**：窗一建出来，用户就可能关它），
-//! 每次关窗前 `refresh()` 再读一次——写盘的是设置页，**改完就该立刻生效**；内存里那份只当兜底，
-//! 不拿去和磁盘较劲（旧仓的教训：自己记一份状态，迟早与磁盘说法不一致）。
+//! 读盘放在 Rust 侧：关窗回调在这里，必须在用户关窗那一刻知道设置值；写盘的是 core 的 `settings:set`。
+//! 读盘与 `webview_proxy` 共用同一套 schema 闸门：非 JSON、非对象、版本不是 1、枚举不认识，一律当"没配"。
+//! 认不出的形状一律回落 `quit`，绝不猜 `tray`——猜错会让用户关一次窗就找不回应用。
+//! 启动时 `restore()` 先于建窗读一次，每次关窗前 `refresh()` 再读；内存值只当兜底，不与磁盘较劲。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -67,27 +58,16 @@ impl std::fmt::Display for CloseBehavior {
     }
 }
 
-/// core 的默认值（`src/main/settings.mjs` 的 `DEFAULT_CLOSE_BEHAVIOR` = 枚举第一项 = `tray`）。
-///
-/// 用在**设置里还没有这一项**的情形（`settings.json` 不存在 = 用户从没保存过设置）。
-/// 那时设置页经 `settings:get` 拿到的就是 core 的这个默认值、界面显示"最小化到托盘"——
-/// Rust 这侧必须按同一句话走，否则就是"界面说藏起来、关窗却退出了"。
-/// 与 `webview_proxy::read_proxy` 同款：**文件不在 = 没配 = 用两端一致的默认**。
+/// core 的默认值（`DEFAULT_CLOSE_BEHAVIOR` = 枚举第一项 = `tray`）。
+/// 用于设置里还没有这一项的情形，须与设置页显示的默认一致，否则界面说藏起来、关窗却退出。
 pub const CORE_DEFAULT_CLOSE_BEHAVIOR: CloseBehavior = CloseBehavior::Tray;
 
-/// 形状不认识时的落点（**保守方向的唯一落点**，见模块注释）：认不出的盘一律按"退出"。
-///
-/// 与 [`CORE_DEFAULT_CLOSE_BEHAVIOR`] 是两件事：那边是"用户还没选"，这边是"盘上的东西看不懂"。
-/// 猜 `tray` 而托盘又没装上，用户关一次窗就再也找不回应用。
+/// 形状不认识时的落点：认不出的盘一律按"退出"，不藏窗口。
+/// 与 [`CORE_DEFAULT_CLOSE_BEHAVIOR`] 是两件事：那边是"用户还没选"。
 pub const CONSERVATIVE_CLOSE_BEHAVIOR: CloseBehavior = CloseBehavior::Quit;
 
-/// `settings.json` 文本 → 关窗行为。
-///
-/// **形状不认识一律 [`CONSERVATIVE_CLOSE_BEHAVIOR`]**：非 JSON、不是对象、`schemaVersion` 不是 1、
-/// 缺 `data`、`data.closeBehavior` 不在枚举里 —— 都是"退出"。
-///
-/// 入参是 `Option<&str>`：`None` = 没有文本可读（读盘失败那一侧），与"文本在但认不出"同一档
-/// ——保守方向只需要一个落点。**文件不存在**不走这里（那是"用户还没选"，见 [`read_close_behavior`]）。
+/// `settings.json` 文本 → 关窗行为；形状认不出一律 [`CONSERVATIVE_CLOSE_BEHAVIOR`]。
+/// `None` 表示没有文本可读（读盘失败），与"文本在但认不出"同一档；文件不存在不走这里。
 pub fn parse_close_behavior(raw: Option<&str>) -> CloseBehavior {
     raw.and_then(|raw| {
         let value: Value = serde_json::from_str(raw).ok()?;
@@ -101,14 +81,8 @@ pub fn parse_close_behavior(raw: Option<&str>) -> CloseBehavior {
     .unwrap_or(CONSERVATIVE_CLOSE_BEHAVIOR)
 }
 
-/// 读数据目录下的 `settings.json`，分三档：
-///
-/// 1. **文件不存在** → [`CORE_DEFAULT_CLOSE_BEHAVIOR`]（用户还没选过；界面显示的也是它）；
-/// 2. 文件在、形状认识 → 照读；
-/// 3. 文件在但读不了（权限/IO）或形状不认识 → [`CONSERVATIVE_CLOSE_BEHAVIOR`]（保守：不藏窗口）。
-///
-/// 写入路径是 core 的 `settings:set`（同目录临时文件 + rename，原子落盘），所以正常情形下
-/// 这里读到的要么是旧文档、要么是新文档，不会是半个。
+/// 读数据目录下的 `settings.json`：不存在 → core 默认；认得 → 照读；读不了或认不出 → 退出。
+/// 写入是 core 的 `settings:set`（临时文件 + rename 原子落盘），不会读到半份文档。
 pub fn read_close_behavior(data_dir: &Path) -> CloseBehavior {
     match std::fs::read_to_string(data_dir.join(SETTINGS_FILE_NAME)) {
         Ok(raw) => parse_close_behavior(Some(&raw)),
@@ -137,10 +111,8 @@ impl CloseBehaviorState {
         state
     }
 
-    /// **现读磁盘**并更新当前值；返回本次读到的值。
-    ///
-    /// 关窗前调用：设置页刚写下去的那一档必须当场生效（用户改完设置再关窗，
-    /// 期待的就是新的行为——等下次启动才生效，等于设置页在撒谎）。
+    /// 现读磁盘并更新当前值，返回本次读到的值。
+    /// 关窗前调用，让设置页刚写下的那一档当场生效，而不是等下次启动。
     pub fn refresh(&self) -> CloseBehavior {
         let current = read_close_behavior(&self.data_dir);
         *lock(&self.behavior) = current;
@@ -158,9 +130,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// 关窗那一刻的行为：现读磁盘。
-///
-/// 托管状态没登记（理论上不会：它先于建窗登记）时退回 [`CONSERVATIVE_CLOSE_BEHAVIOR`]——
-/// 与"读不出合法值"同一个保守方向，并且留一行 warn（"状态没登记"本身是要修的事）。
+/// 托管状态没登记时退回 [`CONSERVATIVE_CLOSE_BEHAVIOR`] 并留一行 warn。
 pub fn close_behavior_now(app: &AppHandle) -> CloseBehavior {
     match app.try_state::<CloseBehaviorState>() {
         Some(state) => state.refresh(),
@@ -237,10 +207,8 @@ mod tests {
         assert!(!CloseBehavior::Quit.hides_on_close());
     }
 
-    /// 兜底方向：**"用户还没选"给 core 的默认，"盘上的东西看不懂"给退出**。
-    ///
-    /// 两个常量分开是刻意的：混成一个就会出现两种错之一——
-    /// 新装的用户被"退出"（与设置页显示的默认不一致），或认不出的盘被"藏窗口"（找不回应用）。
+    /// 兜底方向："用户还没选"给 core 的默认，"盘上的东西看不懂"给退出。
+    /// 两个常量刻意分开：混成一个会让新装用户被退出，或让认不出的盘藏起窗口。
     #[test]
     fn the_two_fallbacks_are_different_things() {
         assert_eq!(

@@ -1,6 +1,6 @@
 //! NDJSON 帧协议与 core（sidecar）调用内核。
 //!
-//! R3 范围：分帧状态机、请求/响应帧、sidecar → 宿主的效果分类、pending 表（调用在途登记与结清）。
+//! 负责分帧状态机、请求/响应帧、sidecar → 宿主的效果分类、pending 表（调用在途登记与结清）。
 //! 这里不碰 tauri，也不碰进程：进程与线程在 `sidecar.rs`，命令面与宿主路由在 `commands.rs`。
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -20,51 +20,32 @@ pub const CALL_TIMEOUT_SECS: u64 = 60;
 pub const CORE_EVENT: &str = "core:event";
 
 /// 广播频道白名单（src/shared/channels.ts 的 BROADCAST_CHANNELS 镜像，两侧由一致性测试钉住）。
-///
-/// 集合内容：`app:notice`（宿主级提示，控制器裁决的初始集合）+ `auth:status`（R7 增补：
-/// 登录状态变化，渲染层门禁与 R8 主界面靠它决定"该显示哪一层"）+ `player:command`
-/// （R9 增补的**预登记**：R11 托盘发出的播放控制意图）+ `lyrics:toggle` 与 `app:open-settings`
-/// （R11 增补：托盘"桌面歌词"勾选与"设置…"两项要发给渲染层的意图）。增补时两侧一起改。
-///
-/// 数组里保持**字面量**：`test/channel-parity.test.mjs` 直接扫这一行的字符串集合，
-/// 写成常量引用它会扫不到（`bridge_broadcast_channels_match_the_named_constants` 兜住这份重复）。
+/// 数组里保持字面量：`test/channel-parity.test.mjs` 直接扫这一行的字符串集合，写成常量引用会扫不到。
 pub const APP_NOTICE: &str = "app:notice";
-/// 登录状态广播频道（R7）：`{loggedIn: bool}`。
+/// 登录状态广播频道：`{loggedIn: bool}`，说的是会话（登录了没有、忙不忙）。
 pub const AUTH_STATUS: &str = "auth:status";
-/// 二维码登录状态广播频道（R16）：`{status, content?, expiresInMs?, message?, errorKind?}`。
-///
-/// 与 `auth:status` 分开：那一条说的是**会话**（登录了没有、忙不忙），这一条说的是
-/// **一张二维码的生命周期**（pending/scanned/confirmed/expired/failed）。门禁要同时知道两件事。
+/// 二维码登录状态广播频道：`{status, content?, expiresInMs?, message?, errorKind?}`。
+/// 与 `auth:status` 分开：这一条说的是一张二维码的生命周期，门禁要同时知道两件事。
 pub const AUTH_QR: &str = "auth:qr";
-/// 播放控制广播频道（R9 预登记，发送方是 R11 的托盘）：`{command: "play"|"pause"|...}`。
+/// 播放控制广播频道：`{command: "play"|"pause"|...}`，发送方是宿主托盘。
 pub const PLAYER_COMMAND: &str = "player:command";
-/// 桌面歌词开关广播频道（R11）：`{checked: bool}` —— **目标态**（点完这一下之后应当是什么）。
-///
-/// 为什么是目标态而不是"切换一下"：消费方（R12 的歌词窗）要按它决定开还是关，
-/// 让消费方自己去猜"现在是开还是关"等于把状态分裂成两份。勾选态由托盘的 CheckMenuItem 镜像。
+/// 桌面歌词开关广播频道：`{checked: bool}` —— 目标态（点完这一下之后应当是什么）。
+/// 消费方按目标态决定开还是关，若让它自己推断当前状态就等于把状态分裂成两份。
 pub const LYRICS_TOGGLE: &str = "lyrics:toggle";
-/// 打开设置页广播频道（R11）：`{view: "settings"}`（托盘菜单"设置…"）。
-///
-/// 托盘点不了渲染层的页面切换（视图状态在渲染层），所以发一条"去设置页"的意图，
-/// 由渲染层自己走它既有的 `navigate`（不新增任何 IPC 通道）。
+/// 打开设置页广播频道：`{view: "settings"}`（托盘菜单“设置…”）。
+/// 托盘点不了渲染层的页面切换，所以只发一条意图，由渲染层走既有的 `navigate`，不新增 IPC 通道。
 pub const APP_OPEN_SETTINGS: &str = "app:open-settings";
-/// 歌词文档广播频道（R12）：`{lines, status}` —— 主窗转发给桌面歌词窗。
-///
-/// 歌词窗**没有业务频道权限**（`core_call` 只收主窗来源），所以它唯一的输入就是广播；
-/// 少一条白名单的后果是桌面歌词永远空白，而日志里什么都看不出来。
+/// 歌词文档广播频道：`{lines, status}` —— 主窗转发给桌面歌词窗。
+/// 歌词窗没有业务频道权限（`core_call` 只收主窗来源），少一条白名单会让桌面歌词永远空白。
 pub const LYRICS_DOCUMENT: &str = "lyrics:document";
-/// 歌词进度广播频道（R12）：`{timeMs, playing, seekGeneration}`（主窗 rAF 节流后推）。
+/// 歌词进度广播频道：`{timeMs, playing, seekGeneration}`，主窗订阅播放器通知后推送。
 pub const LYRICS_PROGRESS: &str = "lyrics:progress";
 /// 歌词配置权威广播：`{config, visible, revision}`；`{ready:true}` 是单独的就绪握手。
 pub const LYRICS_STATE: &str = "lyrics:state";
 /// 锁定的桌面歌词：光标进出歌词窗 `{inside: bool}`（Rust 轮询光标后广播）。
 pub const LYRICS_POINTER: &str = "lyrics:pointer";
-/// 主题变化广播频道（R25）：`{theme: "light"|"dark"|"system"}` —— **目标态**。
-///
-/// 发送方是 Rust 侧（`theme::set_theme`，由 `core_login_chrome` 的 `theme` 动作触发）：
-/// 主题状态归 Rust 持有（`settings.json` 的 `theme` 键），改它的入口有三个
-/// （gate 里的控件、浮动 `login-theme` 控件、将来的设置页），而它们活在三个不同的 webview 里
-/// ——各存一份必然漂移。一条广播让主窗与两个浮动控件的 `<html>` 类一起变。
+/// 主题变化广播频道：`{theme: "light"|"dark"|"system"}` —— 目标态。
+/// 主题状态归 Rust 持有；三个 webview 各存一份必然漂移，一条广播让主窗与两个浮动控件一起变。
 pub const THEME_CHANGED: &str = "theme:changed";
 pub const BROADCAST_CHANNELS: &[&str] = &[
     "app:notice",
@@ -333,12 +314,8 @@ impl FrameDecoder {
 /// `FRAME_EXCERPT_BYTES` 同一口径，两侧都改才不会一边漏）。
 pub const FRAME_EXCERPT_BYTES: usize = 64;
 
-/// 帧摘要：日志里**只给前 [`FRAME_EXCERPT_BYTES`] 字节 + 总字节数**。
-///
-/// 为什么不是"原样带上那段残余"：截断帧是唯一会把**未解析的字节**交出来的地方，而它可能正是
-/// 一帧带着凭据的 JSON（负载里躺着一个密码字段的那种安全存储请求）。
-/// 日志会落盘、会被贴进 issue，所以按裁决取 64 字节上限：够认出"是哪个频道、坏在哪一段"，
-/// 第 64 字节之后的凭据进不了日志。按 UTF-8 字符边界切，不产生半个汉字。
+/// 帧摘要：日志里只给前 [`FRAME_EXCERPT_BYTES`] 字节加总字节数。
+/// 截断帧可能是带凭据的 JSON，64 字节上限让凭据进不了日志。
 pub fn frame_excerpt(text: &str) -> String {
     let total = text.len();
     if total <= FRAME_EXCERPT_BYTES {
@@ -781,8 +758,7 @@ mod tests {
         // 生产路径用的是 FramePolicy::default()；集合为空时这里会退化成 Reject，
         // 无 id 的广播帧只能进日志——等于 sidecar 发出去的广播被静默丢弃。
         let default_policy = FramePolicy::default();
-        // R7 增补了 auth:status、R9 预登记了 player:command、R11 增补了托盘那两条、
-        // R12 增补了歌词窗那三条（文档/进度/配置）、R25 增补了主题那一条：每加一个都在这里同步。
+        // 白名单与这份预期列表必须逐条对应：每新增一个频道都在这里同步。
         let expected: &[&str] = &[
             "app:notice",
             "auth:status",
@@ -807,7 +783,7 @@ mod tests {
             other => panic!("默认策略下 app:notice 必须分类为 Emit，实际 {other:?}"),
         }
 
-        // R7 的登录状态广播同样必须被默认策略放行（否则渲染层永远等不到"已登录"）
+        // 登录状态广播同样必须被默认策略放行，否则渲染层永远等不到“已登录”。
         let auth_frame = r#"{"channel":"auth:status","payload":{"loggedIn":true}}"#;
         match classify_line(auth_frame, &default_policy) {
             LineOutcome::Effect(Effect::Emit { channel, payload }) => {
@@ -817,8 +793,7 @@ mod tests {
             other => panic!("默认策略下 auth:status 必须分类为 Emit，实际 {other:?}"),
         }
 
-        // R9 预登记的托盘播放控制：预登记的意义就在这条用例里——不预先放进白名单，
-        // R11 的托盘广播会被静默丢弃（用户点了没反应，日志里只有一条 Reject）。
+        // 托盘播放控制的预登记由这条用例钉住：不在白名单的广播会被静默丢弃，日志里只剩一条 Reject。
         let player_frame = r#"{"channel":"player:command","payload":{"command":"toggle"}}"#;
         match classify_line(player_frame, &default_policy) {
             LineOutcome::Effect(Effect::Emit { channel, payload }) => {
@@ -828,8 +803,7 @@ mod tests {
             other => panic!("默认策略下 player:command 必须分类为 Emit，实际 {other:?}"),
         }
 
-        // R11 增补的两条：托盘的"桌面歌词"勾选与"设置…"。白名单缺一条的后果与 player:command
-        // 完全一样——广播被静默丢掉，用户只看到"点了没反应"。
+        // 托盘的两条同样要进白名单；缺一条的后果与 player:command 一样——广播被静默丢掉。
         let lyrics_frame = r#"{"channel":"lyrics:toggle","payload":{"checked":true}}"#;
         match classify_line(lyrics_frame, &default_policy) {
             LineOutcome::Effect(Effect::Emit { channel, payload }) => {

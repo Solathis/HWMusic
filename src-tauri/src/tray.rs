@@ -1,32 +1,9 @@
-//! 托盘与关窗 fail-safe（R11）。
+//! 托盘菜单、关窗 fail-safe 与可用性判断。
 //!
-//! 三件事：
-//!
-//! 1. **菜单**：9 槽位 / 7 项 / 2 条分隔线（显示窗口 / — / 播放·暂停 / 上一首 / 下一首 /
-//!    桌面歌词（勾选）/ 设置… / — / 退出程序），菜单项 id 前缀 `tray:`。
-//!    槽位写成**数据表**（[`MENU_SLOTS`]）而不是一长串构造调用：表能被单测逐项钉住，
-//!    构造调用只能靠人眼看。认不出的 id **不猜、不 panic**（只记一行日志）。
-//! 2. **关窗 fail-safe**：[`decide_close`] —— 只有"设置里选了托盘"**且**"托盘真的装上"才
-//!    `prevent_close + hide`；其余退出应用。旧仓缺陷：托盘没装上却把窗口藏了，
-//!    用户看到"窗口没了、托盘里也没有"，只能去任务管理器找进程。
-//! 3. **可用性**：[`available`] 现问托盘表，Windows 同时查原生 Shell 注册位置，**不维护第二份镜像**。
-//!
-//! 两条纪律：
-//!
-//! - **本模块不发事件信封**：广播只能经 `commands::emit_core_event`（信封形状与"渲染层没就绪
-//!   就先排队"两条规矩都在那一个函数里），自己直接 emit 等于绕开启动期队列——启动期发出去的
-//!   提示会直接发进空气（旧仓缺陷）。
-//!   排队能力本身住在 `Arc<CoreState>` 里，所以**调用方必须先把 core 状态登记好**
-//!   （`lib.rs` 的 `setup` 里 `app.manage(Arc::new(commands::CoreState::default()))` 排在
-//!   [`install`] 之前，并有顺序断言钉住）：登记晚于安装时，`emit_core_event` 取不到状态会退回
-//!   "直接 emit"，提示照样发进空气——**经唯一入口 ≠ 一定排得上队**。
-//! - **安装失败绝不 panic**：落一条启动提示（`app:notice`）+ 一句日志，应用照常起来。
-//!   一个装不上的托盘不该把应用带走（代价应当是"关窗即退出"，而不是"起不来"）。
-//!
-//! 跨平台口径（简报）：Windows 用多尺寸 `icons/icon.ico`（高 DPI 不糊），其余平台用
-//! `icons/32x32.png`，macOS 再叠 `icon_as_template(true)`（图标跟着系统亮暗反色）。
-//! Linux 需要 `libayatana-appindicator3` 且 `TrayIconEvent` 不派发（只有菜单可用）——
-//! 真机验证属 R15 的 PLATFORM_DIFFERENCES，本任务如实记 untested。
+//! 本模块不发事件信封：广播一律经 `commands::emit_core_event`，排队能力依赖已登记的 core 状态。
+//! 安装失败绝不 panic：落一条 `app:notice` 提示后应用照常启动，降级为"关窗即退出"。
+//! 菜单槽位写成 [`MENU_SLOTS`] 数据表以便单测逐项钉住；认不出的 id 只记日志、不猜也不 panic。
+//! 跨平台：Windows 用多尺寸 ico，macOS 叠模板图标，Linux 需 libayatana-appindicator3。
 
 use std::sync::Arc;
 
@@ -40,10 +17,8 @@ use crate::bridge::{APP_NOTICE, APP_OPEN_SETTINGS, LYRICS_TOGGLE, PLAYER_COMMAND
 use crate::close_behavior::CloseBehavior;
 use crate::commands;
 
-/// 菜单项 id 前缀（`tray:<动作>`）。
-///
-/// 与 `lib.rs` 的 `TRAY_ID`（托盘**图标** id，`"tray"`）是两件事：图标 id 只是一个句柄名，
-/// 菜单 id 是跨模块契约——这条前缀同时也是"这个 id 归托盘管"的判据（见 [`action_for`]）。
+/// 菜单项 id 前缀（`tray:<动作>`），也是"该 id 归托盘管"的判据。
+/// 与 `lib.rs` 的 `TRAY_ID`（托盘图标句柄名）无关。
 pub const MENU_ID_PREFIX: &str = "tray:";
 
 /// 显示窗口（`focus_main`：还原 + 显示 + 聚焦）。
@@ -54,7 +29,7 @@ pub const ID_PLAY_PAUSE: &str = "tray:play-pause";
 pub const ID_PREVIOUS: &str = "tray:previous";
 /// 下一首。
 pub const ID_NEXT: &str = "tray:next";
-/// 桌面歌词（CheckMenuItem：勾选态由托盘镜像并广播，歌词窗本体是 R12）。
+/// 桌面歌词勾选项：勾选态由托盘镜像并广播，歌词窗本身不归本模块。
 pub const ID_LYRICS: &str = "tray:lyrics";
 /// 设置…（广播 `app:open-settings`，渲染层切到设置页）。
 pub const ID_SETTINGS: &str = "tray:settings";
@@ -142,9 +117,7 @@ pub fn action_for(id: &str) -> Option<TrayAction> {
 }
 
 /// 播放三项 → `player:command` 广播的命令词。
-///
-/// 词表是 R9 定下的（`src/renderer/features/playback/player-commands.mjs` 是执行侧的唯一真源）：
-/// 托盘发出去的命令词**必须是渲染层认得的那几个**，认不出的只会被结构化拒绝（点了没反应）。
+/// 命令词必须是渲染层认得的那几个，否则会被结构化拒绝（点了没反应）。
 pub fn player_command_for(action: TrayAction) -> Option<&'static str> {
     match action {
         TrayAction::PlayPause => Some("toggle"),
@@ -155,12 +128,7 @@ pub fn player_command_for(action: TrayAction) -> Option<&'static str> {
 }
 
 /// 桌面歌词勾选的镜像计划（纯函数）。
-///
-/// **目标态广播**：`{checked}` 是"点完这一下之后应当是什么"，不是"现在是什么"——
-/// 消费方（R12 的歌词窗）按目标态开关，不必知道托盘点之前的状态。
-///
-/// 勾选态由托盘自己翻转（不去问渲染层"现在是什么"：那要等一个来回，菜单会闪一下）。
-/// 勾选态与歌词窗**存在性**的同步是 R12 的事，本任务只保证这条广播发得出去、发得对。
+/// `checked` 是点完之后的目标态；由托盘自己翻转，免去等渲染层来回导致菜单闪烁。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LyricsTogglePlan {
     /// 翻转之后的勾选态。
@@ -178,14 +146,8 @@ pub fn plan_lyrics_toggle(checked: bool) -> LyricsTogglePlan {
     LyricsTogglePlan { checked: !checked }
 }
 
-/// 把"桌面歌词"勾选态**改回窗的实际状态**（R12：歌词窗命令失败时的收口）。
-///
-/// 勾选态是托盘自己镜像并翻转的（R11），所以"翻回"也只能由托盘做——歌词窗/R12 手上
-/// 没有 `CheckMenuItem` 句柄。返回是否真的改到了：托盘不在（没装上、句柄早没了）时
-/// 只记一行日志，**绝不 panic**（与安装路径同一条纪律）。
-///
-/// 只改勾选、不发广播：这是对**已发生的事实**的修正，不是一条新的目标态。再发一条广播
-/// 会让渲染层再跑一遍开关命令，而那次命令大概率还是失败——两个循环互相点火。
+/// 把勾选态改回歌词窗的实际状态，返回是否真的改到；句柄只在托盘手里，失败只记日志不 panic。
+/// 只改勾选、不发广播——这是对已发生事实的修正，再广播会让两层互相重试。
 pub fn revert_lyrics_checked<R: Runtime>(app: &AppHandle<R>, checked: bool) -> bool {
     let Some(state) = app.try_state::<Arc<TrayState<R>>>() else {
         log::warn!("桌面歌词勾选态翻回失败：托盘状态不在（托盘没装上或已消失）");
@@ -250,12 +212,8 @@ fn check_registration(rect: Result<Option<tauri::Rect>, String>) -> Result<(), S
     }
 }
 
-/// 托盘的托管状态：握着托盘与"桌面歌词"勾选项的句柄。
-///
-/// 归属：登记成托管状态（`app.manage`）而不是 setup 里的局部变量——`TrayIcon` 是引用计数的，
-/// 句柄一放下、再加上 tauri 资源表里那一份被移除（`AppHandle::remove_tray_by_id`）之后，
-/// 托盘才会真的从系统托盘区消失；进程退出时由 tauri 统一清理。
-/// 所以"托盘在不在"**不靠这个结构体判断**（见 [`available`]），它只负责"别让句柄提前没了"。
+/// 托盘的托管状态：握着托盘与勾选项句柄，避免 `TrayIcon` 引用计数提前归零。
+/// "托盘在不在"不看它（见 [`available`]），它只保证句柄不提前释放。
 pub struct TrayState<R: Runtime> {
     tray: TrayIcon<R>,
     lyrics_item: CheckMenuItem<R>,
@@ -304,18 +262,8 @@ impl<R: Runtime> TrayInstall<R> {
     }
 }
 
-/// 安装托盘（**必须在主线程调用**：tauri 的菜单与托盘构造都要在主线程上跑）。
-///
-/// 成功 → 句柄登记成托管状态；失败 → 一条启动提示（`app:notice`）+ 结构化结论，**不 panic**。
-/// 日志由调用方（`lib.rs` 的 setup）打：这里只管"装上/降级"两件事。
-///
-/// **前置条件（R11 修复轮 1/5 补正）**：调用前必须已经 `app.manage(Arc::new(CoreState::default()))`。
-/// 提示的排队能力住在 core 状态里——`emit_core_event` 取不到它时会退回直接 `app.emit`
-/// （`commands.rs` 的 `None => emit_now`），而 setup 时刻的 webview 还没跑 `listen()`，
-/// 事件被丢，用户只会看到"窗口关了就退出"却不知道托盘没装上。*原先这里的注释只写"渲染层
-/// 没就绪会先排队"，把"队列已经存在"当成默认事实——那是错的，实际顺序曾反着来。*
-/// `lib.rs` 的 setup 现已把登记排在本函数之前，由
-/// `tray_is_installed_after_the_window_and_never_blocks_startup` 的顺序断言钉住。
+/// 安装托盘，必须在主线程调用；成功则登记托管状态，失败返回降级结论且不 panic。
+/// 前置条件：调用前已 `manage` core 状态，否则 `emit_core_event` 退回直接 emit 会丢掉提示。
 pub fn install<R: Runtime>(app: &AppHandle<R>) -> TrayInstall<R> {
     match build(app) {
         Ok(state) => {
@@ -394,7 +342,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> Result<(Menu<R>, CheckMenuItem<
         match slot {
             MenuSlot::Item { id, label } => {
                 if *id == ID_LYRICS {
-                    // 勾选项：初始未勾选（真实状态由 R12 的歌词窗存在性决定，本任务不建假同步）
+                    // 勾选项初始未勾选：真实勾选态取决于歌词窗是否存在，这里不建假同步。
                     lyrics = Some(
                         CheckMenuItem::with_id(app, *id, *label, true, false, None::<&str>)
                             .map_err(|error| format!("菜单项 {id} 创建失败：{error}"))?,
@@ -441,10 +389,8 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> Result<(Menu<R>, CheckMenuItem<
     Ok((menu, lyrics))
 }
 
-/// 菜单事件 → 动作 → 落地。
-///
-/// 认不出的 id 只记日志（见 [`action_for`]）。`lyrics_item` 就是菜单里那个勾选项的句柄：
-/// 勾选镜像在它身上翻转，广播**目标态**给渲染层/R12。
+/// 菜单事件 → 动作 → 落地；认不出的 id 只记日志。
+/// 勾选镜像在 `lyrics_item` 上翻转，并向渲染层广播目标态。
 fn dispatch<R: Runtime>(app: &AppHandle<R>, lyrics_item: &CheckMenuItem<R>, id: &str) {
     let Some(action) = action_for(id) else {
         log::warn!("托盘菜单事件来自不认识的 id：{id}（已忽略）");
@@ -627,7 +573,7 @@ mod tests {
         ] {
             assert_eq!(player_command_for(action), None, "{action:?} 不该发播放命令");
         }
-        // 词表与外层的契约（R9 的 player:command 载荷形状）
+        // 词表与外层的契约：载荷形状必须与 `player:command` 的约定一致。
         let command = player_command_for(TrayAction::PlayPause).expect("toggle");
         assert_eq!(json!({ "command": command }), json!({ "command": "toggle" }));
     }

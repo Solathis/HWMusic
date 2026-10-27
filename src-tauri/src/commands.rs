@@ -1,6 +1,6 @@
 //! tauri 命令面：`core_call`（唯一业务通道 + 主窗来源守卫 + 请求频道准入）、`core_renderer_ready`
 //! （渲染层就绪钩子），以及宿主要求路由（`host:notify` 走系统通知；`host:secure-encrypt` /
-//! `host:secure-decrypt` 走 DPAPI 安全存储；R7 的频道如实回未实现）。
+//! `host:secure-decrypt` 走 DPAPI 安全存储）。
 //!
 //! 判定逻辑刻意抽成纯函数（`require_main_webview` / `require_request_channel` / `plan_host_request`），
 //! 这样不依赖 `tauri::test` mock runtime 就能钉住来源守卫与路由表。
@@ -16,42 +16,8 @@ use crate::bridge::{CoreError, CoreShared, Effect, ResponseFrame, CALL_TIMEOUT_S
 use crate::sidecar::SidecarProcess;
 use crate::MAIN_WINDOW_LABEL;
 
-/// 渲染层 → core 的请求频道白名单。
-///
-/// 这是刻意与 src/shared/request-channels.ts 同源的镜像副本（Rust 无法 import TS）：
-/// test/channel-parity.test.mjs 扫描两侧源码，集合必须相等——改这里就必须同步改那里。
-///
-/// R8 增补 `library:*` 七条：主界面六个库页面的唯一数据通道。少一条的后果是那个页面
-/// 的请求在**这里**就被拒（`unknown_channel`）——渲染层只会显示"加载失败"，很难看出是准入问题。
-///
-/// R9 增补 `playback:resolve-url`：拿**当次**播放地址（地址只作当次播放结果交给渲染层，
-/// 不写日志、不持久化）。少了它，播放器点播放只会拿到 `unknown_channel`。
-///
-/// R10 增补 `settings:test-proxy`：设置页的"测试连接"（core 侧用独立的 ProxyAgent 发一次请求）。
-/// 少了它，那个按钮只会拿到 `unknown_channel`——而它看起来像"代理不通"。
-///
-/// R12 增补 `playback:lyrics`：歌词**文本**来源（`{trackId}` → 原始 LRC 文本；解析在渲染层，
-/// 由官方 `parseLrc` 负责）。少了它，桌面歌词窗与主窗歌词面板都只会空白，而设置页显示
-/// "歌词来源尚未配置"——那句话本身没错，但原因是频道压根没接（两个原因长得一模一样）。
-///
-/// R16 增补 `auth:qr-start`：引导页**自动**发起二维码会话（R7 的 `auth:login` 是"开官方登录窗"
-/// 那条路）。少了它，引导页只会拿到 `unknown_channel`，用户看到的是一张显示不出来的二维码。
-///
-/// R19 增补 `auth:get-status`：渲染层主动查一次当前登录状态。`auth:status` 只在 sidecar 启动时
-/// 广播一次（`NoticeQueue` 冲刷**只发生一次**），渲染层 reload/崩溃重启之后那一条已经错过了 ——
-/// 门禁会永远停在 `checking`（"正在检查登录状态…"）。少了这条频道，`core_call` 会在**这里**
-/// 就被拒（`unknown_channel`），而渲染层看到的仍然只是"一直在检查"。
-///
-/// R41 增补 `lyrics:*` 三条：**歌词体系**的三件事（本地导入 / 缓存占用 / 清缓存）。
-/// 少了它们的后果各不相同，但都表现为"按钮点了没反应或界面说错话"：
-/// - `lyrics:import` 缺失 → 用户导入 `.lrc` 之后那首歌仍然放的是在线歌词（导入悄悄失败）；
-/// - `lyrics:cache-info` 缺失 → 设置页那张卡永远显示"读不到占用"；
-/// - `lyrics:cache-clear` 缺失 → "清除缓存"按下去什么都没发生，而用户以为清了。
-/// 三条都在**这里**被准入，与 `library:*` / `playback:*` 同一条规矩（唯一真源在
-/// `src/shared/request-channels.ts`，本数组是它的镜像副本，由 channel-parity 测试钉住）。
-///
-/// R53 增补 `auth:cancel-qr`：渲染层门禁收场时停掉二维码轮询（切主界面 / 卸载）。
-/// 与 `auth:cancel-login`（关宿主登录窗）是两件事；镜像副本由 channel-parity 测试钉住。
+/// 渲染层 → core 的请求频道白名单：与 src/shared/request-channels.ts 刻意同源的镜像副本（Rust 无法 import TS），集合必须相等。
+/// 少一条的后果是那个页面的请求在**这里**就被当 `unknown_channel` 拒（渲染层只会显示"加载失败"），由 test/channel-parity.test.mjs 钉住两侧。
 pub const REQUEST_CHANNELS: &[&str] = &[
     "auth:login",
     "auth:logout",
@@ -77,32 +43,19 @@ pub const REQUEST_CHANNELS: &[&str] = &[
 ];
 
 /// core → 宿主 的宿主要求频道（与 src/shared/request-channels.ts 的 HOST_REQUEST_CHANNELS 同源）。
-///
-/// R7 增补 `host:cancel-login`：渲染层的"取消登录"走 `core_call(auth:cancel-login)` → sidecar →
-/// 这条宿主要求，最终由 `login.rs` 把结论槽结算成 Cancelled。
+/// 渲染层的"取消登录"走 `core_call(auth:cancel-login)` → sidecar → 这里的 `host:cancel-login`，最终由 `login.rs` 结算结论槽。
 pub const HOST_REQUEST_CHANNELS: &[&str] = &[
     "host:open-login",
     "host:cancel-login",
     "host:secure-encrypt",
     "host:secure-decrypt",
     "host:notify",
-    // R65：本地曲目的歌词来源（载荷只有 id；返回原始字节，解码在 sidecar）
+    // 本地曲目的歌词来源（载荷只有 id；返回原始字节，解码在 sidecar）
     "host:local-lyrics-source",
 ];
 
 /// 主窗来源守卫：只有主窗那个 **webview** 能调 `core_call`（登录页、歌词窗、托盘一律拒绝）。
-///
-/// **为什么判的是 webview label 而不是窗口 label**（R23 的安全性前提）：R23 把官方登录页从"独立子窗"
-/// 改成**主窗里的第二个 webview**（用户指令：在程序内跳转）。同窗之后
-/// `Webview::window_ref().label()` 对这个登录页**恒为 `main`**（tauri 2.12.4 `src/webview/mod.rs:1793`
-/// `window_label()` 返回宿主窗的 label），于是任何"按窗口 label 判来源"的守卫都会被登录页绕过。
-/// 能区分两者的只有 **webview label**：主窗 `main`（`WebviewWindowBuilder::new` 把 webview 的 label
-/// 取成同一个值，`src/webview/webview_window.rs:101-107`），登录页 `login`（[`crate::login`]）。
-///
-/// 命令侧怎么拿到它：命令参数声明成 `tauri::Webview` 而不是 `tauri::Window`
-/// （`CommandArg for Webview` 直接把发起这一帧的 webview 交出来，`src/webview/mod.rs:2604-2609`；
-/// 而 `CommandArg for Window` 给的是 `webview().window()`，`src/window/mod.rs:1099-1104`）。
-/// 这条"必须按 webview label 判"由 `every_guarded_command_judges_by_webview_label_not_window_label` 扫描钉住。
+/// 必须按 webview label 判：登录页同窗之后窗口 label 恒为 `main`，按窗口判会被绕过，所以命令参数声明成 `tauri::Webview`（扫描测试钉住）。
 pub fn require_main_webview(label: &str) -> Result<(), CoreError> {
     if label == MAIN_WINDOW_LABEL {
         return Ok(());
@@ -113,17 +66,8 @@ pub fn require_main_webview(label: &str) -> Result<(), CoreError> {
     ))
 }
 
-/// `core_login_chrome` 的来源守卫（R25）：**只有**主窗与两个浮动控件能调这条命令。
-///
-/// 为什么另开一份而不是放宽 [`require_main_webview`]：那条守卫管的是 `core_call`（**全部业务频道**），
-/// 放宽它等于把库/播放/设置的请求面交给登录体验的浮动控件。这里收的是一条**只有两个动作**
-///（取消登录 / 改主题）的专用命令，允许集合就那三个 label：
-///
-/// - `main`：gate 视图右上角那个主题控件就在主窗里（与浮动那份是同一个 React 组件）；
-/// - `login-return` / `login-theme`：两个浮动控件（[`crate::login`]）。
-///
-/// **官方登录页（label `login`）不在集合里**，歌词窗、托盘同理：它们拿不到"改主题 / 取消登录"的口子。
-/// 判的仍然是 **webview label**（同窗宿主里窗口 label 恒为 `main`，按窗口判等于把守卫让出去）。
+/// `core_login_chrome` 的来源守卫：只放行主窗与两个浮动控件（`login-return` / `login-theme`），官方登录页、歌词窗与托盘都不在集合里。
+/// 另开一份而不放宽 `require_main_webview`：那条管的是**全部业务频道**；判的仍是 webview label（窗口 label 恒为 `main`）。
 pub fn require_login_chrome_source(label: &str) -> Result<(), CoreError> {
     if label == MAIN_WINDOW_LABEL || crate::login::LOGIN_CHROME_LABELS.contains(&label) {
         return Ok(());
@@ -145,15 +89,8 @@ pub enum LoginChromeAction {
     SetTheme(crate::theme::ThemeChoice),
 }
 
-/// `core_login_chrome` 的载荷 → 动作（纯函数；坏形状一律结构化 `invalid_payload`）。
-///
-/// 载荷形状只有三种，由 `action` 加"有没有带 `theme`"决定：
-/// - `{action:"return"}`；
-/// - `{action:"theme"}`（**没有** `theme` = 读回当前档位，与 `core_lyrics_configure` 的
-///   "空补丁 = 读回"同一条纪律：再开一条命令只会多一个要同步的地方）；
-/// - `{action:"theme", theme:"light"|"dark"|"system"}`。
-///
-/// 认不出的动作/档位**不猜**（宁可回结构化错误，也不要"点了没反应"）。
+/// `core_login_chrome` 的载荷 → 动作（纯函数）：由 `action` 加"有没有带 `theme`"决定，认不出的动作/档位**不猜**。
+/// 省略 `theme` = 读回当前档位（与 `core_lyrics_configure` 的空补丁同一条纪律）；坏形状一律结构化 `invalid_payload`。
 pub fn parse_login_chrome_action(payload: &Value) -> Result<LoginChromeAction, CoreError> {
     let invalid =
         |message: &str| CoreError::new("invalid_payload", format!("core_login_chrome {message}"));
@@ -191,24 +128,18 @@ pub fn require_request_channel(channel: &str) -> Result<(), CoreError> {
 }
 
 // ---------------------------------------------------------------------------
-// R44e：持久化准入（唯一写者是 sidecar 的 writeTail；这里只管"谁能进、谁在飞"）
+// 持久化准入（唯一写者是 sidecar 的 writeTail；这里只管"谁能进、谁在飞"）
 // ---------------------------------------------------------------------------
 
 /// `settings:set` / `settings:get` 的频道名（与 `src/shared/request-channels.ts` 同源）。
 pub const SETTINGS_SET_CHANNEL: &str = "settings:set";
 pub const SETTINGS_GET_CHANNEL: &str = "settings:get";
 
-/// **保留键**：只能经各自的运行时命令改（`core_login_chrome` 的 theme、`core_lyrics_configure`），
-/// 渲染层不许用一条 `settings:set` 绕过运行时直接 patch 它们。
-///
-/// 绕过的代价不是"少一条广播"，而是**两份真相**：盘上写成了新主题/新歌词配置，Rust 内存里的
-/// 权威值、`theme:changed` 广播与原生标题栏都还停在旧的那一份（重启才"变回去"）。
+/// **保留键**：只能经各自的运行时命令改（`core_login_chrome` 的 theme、`core_lyrics_configure`），渲染层不许用 `settings:set` 直接 patch。
+/// 绕过的代价不是少一条广播，而是**两份真相**：盘上写了新值，内存权威值与广播、原生标题栏却停在旧的那一份。
 pub const RESERVED_SETTINGS_KEYS: &[&str] = &["theme", "lyricsWindow"];
 
-/// 内部 settings 调用的超时（秒）。
-///
-/// 刻意比 `CALL_TIMEOUT_SECS`（60，渲染层业务调用）短得多：这两条内部调用服务于**退出**与
-/// **主题/歌词落盘**，它们的调用方都要在有界时间内给结论（保窗可重试，而不是吊死退出）。
+/// 内部 settings 调用的超时（秒）：刻意比 `CALL_TIMEOUT_SECS`（60，渲染层业务调用）短得多，它们的调用方都要在有界时间内给结论。
 pub const SETTINGS_CALL_TIMEOUT_SECS: u64 = 10;
 
 /// 持久化阶段（退出编排的状态机；只是"准入门"，不是进程状态）。
@@ -247,11 +178,8 @@ pub fn decide_persist_admission(phase: PersistPhase, kind: PersistKind) -> Resul
     }
 }
 
-/// 一次已受理的持久写（RAII 凭据）。
-///
-/// **它就是"在飞"的记账**：退出编排等的是"没有凭据还活着"，而不是"调用方还在等"。
-/// 凭据必须由**拥有任务**持有到实际调用有结论为止——`spawn_blocking`/后台线程里的
-/// 那一份守卫一旦交给 invoke 的等待者，WebView 一关（或一次导航）就会提前放行退出。
+/// 一次已受理的持久写的 RAII 凭据：它就是"在飞"的记账，退出等的是"没有凭据还活着"。
+/// 必须由**拥有任务**持有到调用有结论为止——交给 invoke 的等待者，WebView 一关就会提前放行退出。
 pub struct PersistAdmission {
     gate: Arc<PersistenceGate>,
 }
@@ -368,10 +296,7 @@ pub fn persistence_gate<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Arc<Per
         .ok_or_else(|| CoreError::new("internal", "持久化准入门未登记（setup 未完成）：这次不写盘"))
 }
 
-/// `core_call(settings:set)` 的**保留键闸门**（纯函数）。
-///
-/// 只拒"渲染层直接 patch 保留键"，其余载荷（proxy / queue / closeBehavior / reset / 未知键）
-/// 原样放过：那些字段本来就归设置页写。
+/// `core_call(settings:set)` 的**保留键闸门**（纯函数）：只拒渲染层直接 patch 保留键，其余字段（含未知键）原样放过。
 pub fn reject_reserved_settings_keys(channel: &str, payload: &Value) -> Result<(), CoreError> {
     if channel != SETTINGS_SET_CHANNEL {
         return Ok(());
@@ -403,15 +328,8 @@ pub struct CoreState {
     notices: NoticeQueue,
 }
 
-/// 启动期提示队列 + 渲染层就绪标志。
-///
-/// 旧仓缺陷：启动期 `emit` 直接发进空气（那时渲染层还没订阅）。代理启动提示（R6 的环境变量兜底）
-/// 恰好就是这种时机，所以队列在这里落地——R7 的门禁提示可以直接复用。
-///
-/// **就绪标志与队列必须在同一把锁下**：判定就绪与入队是两个动作，若分两次拿锁
-/// （先读标志、再入队），中间那一段就是 check-then-act 的缝——渲染层恰好在这一刻完成
-/// 「标记就绪 + 冲刷」，提示就 push 进那个**已经冲刷过**的队列，而冲刷只发生一次，
-/// 这条提示再没有人管（用户永远看不到）。
+/// 启动期提示队列 + 渲染层就绪标志：就绪标志与队列必须在同一把锁下，分两次拿锁就是 check-then-act 的缝。
+/// 分两次时渲染层恰在这一刻完成"标记就绪 + 冲刷"，提示就落进那个已冲刷过的队列，而冲刷只发生一次，用户永远看不到。
 #[derive(Default)]
 pub struct NoticeQueue {
     state: Mutex<NoticeState>,
@@ -432,10 +350,7 @@ pub struct FlushOutcome {
 }
 
 impl NoticeQueue {
-    /// 就绪判定 + 入队的**唯一入口**（同一把锁内完成，调用方没有第二步可写）。
-    ///
-    /// - `Some(envelope)`：渲染层已就绪 → 调用方立刻投递（拿回去 emit）；
-    /// - `None`：已就绪之前的提示，已排队，等 [`NoticeQueue::mark_ready_and_flush`]。
+    /// 就绪判定 + 入队的**唯一入口**（同一把锁内完成，调用方没有第二步可写）：`Some` = 立刻投递，`None` = 已排队等冲刷。
     pub fn deliver_or_queue(&self, envelope: EmitEnvelope) -> Option<EmitEnvelope> {
         let mut state = lock(&self.state);
         match plan_broadcast(state.renderer_ready) {
@@ -504,10 +419,8 @@ impl CoreState {
         }
     }
 
-    /// 广播落地决策 + 入队：**一个加锁方法**，判定与入队之间没有缝（见 [`NoticeQueue`]）。
-    ///
-    /// `Some(..)` = 立刻投递，`None` = 已排队。就绪与否**只经这个方法对外可见**：
-    /// 刻意不再暴露"读就绪标志"的公开口子（那正是缝的形状，谁读到谁就想自己再判一次）。
+    /// 广播落地决策 + 入队：**一个加锁方法**，判定与入队之间没有缝；`Some` = 立刻投递，`None` = 已排队。
+    /// 就绪与否只经这个方法对外可见：刻意不暴露"读就绪标志"的口子（谁读到谁就想自己再判一次）。
     pub fn deliver_or_queue(&self, envelope: EmitEnvelope) -> Option<EmitEnvelope> {
         self.notices.deliver_or_queue(envelope)
     }
@@ -536,17 +449,17 @@ pub fn require_shared(state: &CoreState) -> Result<Arc<CoreShared>, CoreError> {
 /// 宿主要求的路由决策（纯函数，便于单测）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostRoute {
-    /// 系统通知（R3 已实现）
+    /// 系统通知
     Notify,
-    /// DPAPI 加密（R5 已接通）
+    /// DPAPI 加密
     SecureEncrypt,
-    /// DPAPI 解密（R5 已接通）
+    /// DPAPI 解密
     SecureDecrypt,
-    /// 打开官方登录页（R7）：**长轮询性质**——答复发生在登录页收场之后
+    /// 打开官方登录页：**长轮询性质**——答复发生在登录页收场之后
     OpenLogin,
-    /// 取消进行中的登录（R7）：把结论槽结算成 Cancelled
+    /// 取消进行中的登录：把结论槽结算成 Cancelled
     CancelLogin,
-    /// 本地曲目的歌词原始字节（R65）：只有 id，路径与"同名文件"的判定都在 `local_library`
+    /// 本地曲目的歌词原始字节：只有 id，路径与"同名文件"的判定都在 `local_library`
     LocalLyrics,
     /// 路由表不认识这个频道
     Unknown,
@@ -571,16 +484,11 @@ pub enum HostPlan {
     Notify { text: String, ack: ResponseFrame },
     /// 直接回一帧（结构化错误也走这里）
     Respond(ResponseFrame),
-    /// 已有人负责答复：调用方不得再写第二帧。
-    ///
-    /// R7 唯一的构造点是 `host:open-login` 的合法载荷——答复由 `login-view` 线程在登录页
-    /// 收场后写出（旧仓把"等扫码"做成了同步阻塞，效果线程被占住，随后的取消请求永远送不进来）。
+    /// 已有人负责答复：调用方不得再写第二帧；唯一构造点是 `host:open-login` 的合法载荷，答复由 `login-view` 线程在收场后写出。
     Deferred,
-    /// 取消登录（R7）：答复里要带"到底取消掉了没有"，那个答案只有 app 知道（计划阶段拿不到），
-    /// 所以由 `apply_host_request` 算完**立刻**答复。
+    /// 取消登录：答复要带"到底取消掉了没有"，只有 app 知道，所以由 `apply_host_request` 算完**立刻**答复。
     CancelLogin,
-    /// 本地曲目歌词（R65）：要读索引与磁盘（app 才拿得到数据根），计划阶段只校验载荷，
-    /// 所以这里带上解析好的曲目 id，由 `apply_host_request` 去读字节。
+    /// 本地曲目歌词：要读索引与磁盘（app 才拿得到数据根），计划阶段只校验载荷后带出曲目 id。
     LocalLyrics(String),
 }
 
@@ -676,14 +584,8 @@ fn required_string(payload: &Value, field: &str) -> Result<String, CoreError> {
     }
 }
 
-/// 安全存储类宿主要求的计划：先校验载荷，再交给 [`crate::secure_store`]，后端错误原样结构化返回。
-///
-/// 载荷形状（R5 定形；Node 侧 `src/main/session-store.mjs` 消费）：
-/// - `host:secure-encrypt`：入 `{plaintext}` → 出 `{cipher}`；
-/// - `host:secure-decrypt`：入 `{cipher}` → 出 `{plaintext}`。
-///
-/// 刻意不做任何"失败就降级成明文"的分支：后端不可用就如实回 `secure_store_unavailable`，
-/// 由上层决定保留内存会话（提示 UI 是 R7+ 的事）。
+/// 安全存储类宿主要求的计划：先校验载荷再交给 [`crate::secure_store`]（Node 侧 `src/main/session-store.mjs` 消费）。
+/// 刻意不做"失败就降级成明文"的分支：后端不可用就如实回 `secure_store_unavailable`。
 fn secure_plan(
     id: &str,
     payload: &Value,
@@ -739,11 +641,8 @@ pub fn apply_effect(app: &AppHandle, shared: &Arc<CoreShared>, effect: Effect) {
     }
 }
 
-/// 向渲染层广播一条漏斗事件：**事件信封的唯一构造点**。
-///
-/// 宿主侧模块（R11 的托盘）发广播只能经这里：信封形状（`{channel, payload}`）与
-/// **"渲染层没就绪就先排队"**两条规矩都收在这一个函数里。模块里直接写 `app.emit(` 等于绕开
-/// 启动期队列——启动期发出去的提示会直接发进空气（旧仓缺陷，R6 修复轮的 NoticeQueue 就是为它）。
+/// 向渲染层广播一条漏斗事件：事件信封的唯一构造点，信封形状与"没就绪就先排队"两条规矩都收在这里。
+/// 宿主侧模块直接写 `app.emit(` 等于绕开启动期队列，那时发出的提示会发进空气。
 pub fn emit_core_event<R: tauri::Runtime>(app: &AppHandle<R>, channel: &str, payload: Value) {
     let envelope = emit_envelope(channel, payload);
     match app.try_state::<Arc<CoreState>>() {        // 判定与入队是同一个加锁方法：不存在"判定说没就绪、入队时已经就绪"的缝，
@@ -768,7 +667,7 @@ fn emit_now<R: tauri::Runtime>(app: &AppHandle<R>, envelope: EmitEnvelope) {
     }
 }
 
-/// 宿主要求路由：系统通知与安全存储已接通；登录窗由 R7 的 `login.rs` 承接。
+/// 宿主要求路由：系统通知与安全存储已接通；登录窗由 `login.rs` 承接。
 pub fn apply_host_request(
     app: &AppHandle,
     shared: &Arc<CoreShared>,
@@ -862,9 +761,7 @@ pub fn shutdown_core<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
 }
 
 /// 渲染层唯一业务通道：来源守卫 → 频道准入 → sidecar 调用（带超时）。
-///
-/// 阻塞等待（最长 [`CALL_TIMEOUT_SECS`] 秒）放在 `spawn_blocking` 里：同步命令会占住主线程，
-/// 异步命令里直接阻塞又会卡住 async 运行时的工作线程。
+/// 阻塞等待放进 `spawn_blocking`：同步命令会占住主线程，异步命令里直接阻塞又会卡住运行时的工作线程。
 #[tauri::command]
 pub async fn core_call(
     app: AppHandle,
@@ -877,11 +774,10 @@ pub async fn core_call(
 
     let state = app.state::<Arc<CoreState>>().inner().clone();
     let payload = payload.unwrap_or(Value::Null);
-    // R44e：保留键只能走各自运行时命令（绕过去就是盘上与内存两份真相）。
+    // 保留键只能走各自的运行时命令（绕过去就是盘上与内存两份真相）。
     reject_reserved_settings_keys(&channel, &payload)?;
     let shared = require_shared(&state)?;
-    // R44e：settings:set 是**持久写**，要过准入门；凭据随阻塞任务一起活到调用有结论为止
-    //（invoke 的等待者消失不会提前放行退出——它只是不再收结果）。
+    // settings:set 是持久写，要过准入门；凭据随阻塞任务活到调用有结论为止（等待者消失只是不再收结果）。
     let admission = if channel == SETTINGS_SET_CHANNEL {
         Some(persistence_gate(&app)?.admit(PersistKind::Renderer)?)
     } else {
@@ -902,14 +798,11 @@ pub async fn core_call(
 }
 
 // ---------------------------------------------------------------------------
-// R44e：内部 settings 调用（Rust 拥有的运行时写；不经 invoke、不持进程槽锁）
+// 内部 settings 调用（Rust 拥有的运行时写；不经 invoke、不持进程槽锁）
 // ---------------------------------------------------------------------------
 
-/// 把一次内部 settings 调用限制在**整个退出准备的绝对期限**之内（review finding 4）。
-///
-/// 退出准备只有一条 4 秒预算（[`crate::EXIT_PREPARE_BUDGET_MS`]）：uncertain 重存与最终的
-/// `settings:get` 屏障要拿的是**这一刻剩下的**时间，而不是各自再起一个 10 秒等待；剩下的
-/// 时间连一次调用都不够时直接结构化失败（`timeout`）——退出走既有的可逆 abort，保窗可重试。
+/// 把一次内部 settings 调用限制在整个退出准备的绝对期限之内：拿的是这一刻剩下的预算，不是另起一个 10 秒。
+/// 剩下时间连一次调用都不够就直接结构化 `timeout`（退出走可逆 abort、保窗可重试），单笔仍受 `cap` 约束。
 pub fn call_timeout_within(
     deadline: std::time::Instant,
     now: std::time::Instant,
@@ -924,19 +817,8 @@ pub fn call_timeout_within(
     Ok((deadline - now).min(cap))
 }
 
-/// 一次内部调用放在**拥有任务**里跑：写帧与等回执都在后台线程上，调用方只等到自己的绝对期限。
-///
-/// 为什么不能只把 timeout 交给 [`CoreShared::call`]（review round 2 finding 2）：那是
-/// `recv_timeout` 的上限，而 `call` 在等回执**之前**要**同步**写一帧（`write_line` 锁写入端 →
-/// `write_all` → `flush`）。对端管道堵住时这一段没有任何上限，4 秒的退出预算能被一次写盘整个
-/// 拖穿——"有界退出"就不成立了。
-///
-/// 两条不变：
-/// 1. **所有权随任务走**：`owned`（受理凭据）由后台线程持有到那一笔真正有结论为止（响应 /
-///    自己的超时 / 收尸）。调用方超时返回时它**不**被释放，所以 `wait_drained` 仍看得见这一笔：
-///    "可能已经发出去的迟到写"没落定之前，退出不可能成功，也不会有"退出成功之后才写盘"。
-/// 2. **不阻塞 UI 线程**：调用方是退出线程 / 主题事务线程 / 歌词保存线程；写帧的阻塞只留在
-///    这一条后台线程里。
+/// 一次内部调用放在**拥有任务**里跑：写帧与等回执都在后台线程，调用方只等到自己的绝对期限。
+/// 受理凭据随任务走到那一笔真正有结论为止（调用方超时返回也不释放），所以迟到写没落定前退出不可能成功。
 pub fn call_owned_within(
     shared: Arc<CoreShared>,
     channel: &'static str,
@@ -979,14 +861,8 @@ fn shared_for_call<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Arc<CoreShar
     require_shared(state.inner())
 }
 
-/// 内部 `settings:set`：同步语义的一次写（调用方负责把它放到不占主线程的线程上）。
-///
-/// 三条不变量：
-/// 1. 准入凭据由**拥有任务**持有到 `call` 有结论（调用方是 Rust 拥有的任务，不是 WebView 等待者）；
-/// 2. 等待期间不持进程槽锁（`shared_for_call` 只克隆 `Arc`）；
-/// 3. 返回 `timeout` 只说明"调用方没等到"，**写可能迟到**（`CoreShared::call` 超时后 `forget` 了
-///    接收槽，sidecar 仍可能把那一帧处理完）。所以调用方必须把"超时"当 `uncertain`，不能当"没写"；
-///    而那一笔的准入凭据要等它自己落定才放（超时返回不释放，退出因此挡得住）。
+/// 内部 `settings:set`：同步语义的一次写；返回 `timeout` 只说明调用方没等到，写可能迟到，所以必须当 `uncertain`。
+/// 那一笔的准入凭据要等它自己落定才放（超时返回不释放），退出因此挡得住。
 pub fn settings_write_owned<R: tauri::Runtime>(
     app: &AppHandle<R>,
     patch: Value,
@@ -994,10 +870,7 @@ pub fn settings_write_owned<R: tauri::Runtime>(
     settings_write_owned_within(app, patch, Duration::from_secs(SETTINGS_CALL_TIMEOUT_SECS))
 }
 
-/// 同上，但**整次调用**（同步写帧 + 等回执）不许超过 `timeout`。
-///
-/// 时间上限不是转手给 `CoreShared::call` 的 `recv_timeout`（那只管等回执）：写帧也在限时之内，
-/// 由 [`call_owned_within`] 的拥有任务在期限上把控制权交回调用方。
+/// 同上，但**整次调用**（同步写帧 + 等回执）不许超过 `timeout`：写帧也在限时内，由 [`call_owned_within`] 的拥有任务把控制权交回。
 pub fn settings_write_owned_within<R: tauri::Runtime>(
     app: &AppHandle<R>,
     patch: Value,
@@ -1017,12 +890,8 @@ pub fn settings_write_owned_within<R: tauri::Runtime>(
     )
 }
 
-/// 内部 `settings:get`：**读也是屏障**（sidecar 先排空已受理的写再读盘）。
-///
-/// 上限来自**退出准备的绝对期限**（剩余预算；没预算就立刻失败），并且与写共用同一条拥有任务
-/// 边界（[`call_owned_within`]）——"同步写帧被堵住"不会把调用方拖过它的期限。
-///
-/// 只有这一个入口：退出路径的读**永远**拿剩余预算，没有"另起一个 10 秒"的变体。
+/// 内部 `settings:get`：读也是屏障（sidecar 先排空已受理的写再读盘），上限只来自退出准备的剩余预算，没预算就立刻失败。
+/// 只有这一个入口：退出路径的读永远拿剩余预算，没有"另起一个 10 秒"的变体。
 pub fn settings_read_owned_before<R: tauri::Runtime>(
     app: &AppHandle<R>,
     deadline: std::time::Instant,
@@ -1037,12 +906,8 @@ pub fn settings_read_owned_before<R: tauri::Runtime>(
     )
 }
 
-/// 内部 `settings:set` 的**拥有任务**形式：起一条后台线程跑 [`settings_write_owned`]，
-/// 结果经通道回来。
-///
-/// 为什么是线程而不是"让命令自己 await"：主题的整笔事务（写 → 校验回执 → 更新内存/原生/广播）
-/// 必须由 Rust 拥有——invoke 的等待者（WebView 导航、组件卸载）消失**不能**取消后半提交。
-/// 丢弃返回的 receiver 只会让结果没人看，线程照样跑完、凭据照样在结论时放掉。
+/// 内部 `settings:set` 的拥有任务形式：起一条后台线程跑 [`settings_write_owned`]，结果经通道回来。
+/// 必须由 Rust 拥有的线程做：等待者消失不能取消后半提交，丢掉 receiver 只让结果没人看，线程照样跑完。
 pub fn spawn_settings_write<R: tauri::Runtime>(
     app: &AppHandle<R>,
     patch: Value,
@@ -1062,10 +927,7 @@ pub fn settings_receipt_value<'a>(answer: &'a Value, key: &str) -> Option<&'a Va
     answer.get("settings")?.get("data")?.get(key)
 }
 
-/// 渲染层就绪通知：启动期提示队列的冲刷钩子。
-///
-/// 返回值 = 本次冲刷的提示条数。渲染层必须先订阅 `core:event` 再调这里，否则提示还是会丢
-/// （订阅在渲染层，R8 的 main.tsx 负责；R6 只保证"排了队、就绪即冲刷"）。
+/// 渲染层就绪通知：返回本次冲刷的提示条数；渲染层必须先订阅 `core:event` 再调这里，否则提示还是会丢。
 #[tauri::command]
 pub fn core_renderer_ready(
     webview: Webview,
@@ -1087,16 +949,10 @@ pub fn core_renderer_ready(
 }
 
 // ---------------------------------------------------------------------------
-// 开机自启（R10）
+// 开机自启
 // ---------------------------------------------------------------------------
 
-/// 开机自启的读写口子。
-///
-/// 抽成 trait 的两个理由：
-/// 1. 单测不需要 tauri app / mock runtime（`AutoLaunchManager` 是插件 setup 里托管的，拿不到就
-///    只能整段不测）；
-/// 2. **单测绝不能写本机注册表**——真跑一次 `enable()` 会在开发机上留下一个自启项，
-///    而那是用户的机器状态，不是测试夹具。假 manager 覆盖判定逻辑，真插件调用层只做转发。
+/// 开机自启的读写口子；抽成 trait 好让单测不需要 tauri app，更要紧的是**单测绝不能写本机注册表**。
 pub trait AutoStart {
     fn enable(&self) -> Result<(), String>;
     fn disable(&self) -> Result<(), String>;
@@ -1117,11 +973,7 @@ impl AutoStart for tauri_plugin_autostart::AutoLaunchManager {
     }
 }
 
-/// 应用自启开关，并**回报观测到的实际状态**。
-///
-/// 为什么写完要回读：`enable()` 返回 `Ok` 只说明这次调用没报错，不代表系统真的记下了
-/// （Windows 上是 `Run` 键写入，可能被策略/权限挡回）。把请求回显成"已开启"，
-/// 代价是用户下次开机才发现没生效——而这中间界面一直在说"已开启"。
+/// 应用自启开关并回读实际状态：`enable()` 返回 `Ok` 只说明调用没报错，不代表系统真的记下了（Windows 上可能被策略挡回）。
 pub fn apply_autostart(enabled: bool, manager: &dyn AutoStart) -> Result<bool, CoreError> {
     let applied = if enabled { manager.enable() } else { manager.disable() };
     if let Err(detail) = applied {
@@ -1142,13 +994,8 @@ pub fn read_autostart(manager: &dyn AutoStart) -> Result<bool, CoreError> {
     })
 }
 
-/// 取插件的 `AutoLaunchManager` 托管状态。
-///
-/// 用 `try_state` 而不是插件扩展 trait 的 `autolaunch()`：后者在插件没注册时**直接 panic**，
-/// 命令里 panic 的后果是整个应用崩掉，而不是界面上显示一句"改不了开机自启"。
-///
-/// 入参是 [`tauri::Webview`]（R23 起命令面一律拿 webview）：托管状态的查找两者同源，
-/// 拿 webview 是为了**来源判定**那一头（见 [`require_main_webview`]）。
+/// 取插件的 `AutoLaunchManager` 托管状态；用 `try_state` 而不是 `autolaunch()`——后者在插件没注册时直接 panic，整个应用会崩。
+/// 入参是 `Webview`：托管状态两者同源，拿它是为了来源判定那一头（见 [`require_main_webview`]）。
 fn autostart_manager<R: tauri::Runtime>(
     webview: &Webview<R>,
 ) -> Result<State<'_, tauri_plugin_autostart::AutoLaunchManager>, CoreError> {
@@ -1162,19 +1009,8 @@ fn autostart_manager<R: tauri::Runtime>(
         })
 }
 
-/// 设置页的"开机自启"开关。
-///
-/// **为什么不加 capabilities 权限条目**（Tauri 2.12 语义，逐行出处已核对）：
-/// `tauri::Webview::on_message`（tauri-2.12.4 `src/webview/mod.rs:2080`）只在三种情形查 ACL——
-/// ① 命令名带 `plugin:` 前缀；② 应用定义了 app 级 ACL manifest；③ 来源不是本地
-/// （`!is_local`，远程 URL）。而 ② 的前置是 `tauri-build` 侧算出的 `has_app_manifest`
-/// （`src/acl.rs:421`：`app_manifest` 带 commands，或 `src-tauri/permissions` 非空）——
-/// 本应用 `build.rs` 只调 `tauri_build::build()`（无 app_manifest）、没有 `permissions/` 目录，
-/// 渲染层来源是本地 `tauri://localhost`，所以自定义命令**不经 ACL**（`core_call` /
-/// `core_renderer_ready` 一直如此）。这些前置条件由 `test/autostart.test.mjs` 钉住：
-/// 将来谁加了 app 级 manifest，那条用例会先红，提醒他同步加权限条目。
-///
-/// 顺带：这条命令挂在 `require_main_webview` 后面——登录页/歌词窗/托盘都改不了系统自启。
+/// 设置页的"开机自启"开关：本应用没有 app 级 ACL manifest，自定义命令不走 ACL（Tauri 2.12 语义），所以不加 capabilities 权限条目。
+/// 将来谁加了 app 级 manifest 就得同步加权限条目（`test/autostart.test.mjs` 盯这一条）；命令挂在 `require_main_webview` 后面。
 #[tauri::command]
 pub fn core_set_autostart(webview: Webview, enabled: bool) -> Result<bool, CoreError> {
     require_main_webview(webview.label()).map_err(|error| logged("core_set_autostart", error))?;
@@ -1190,29 +1026,18 @@ pub fn core_get_autostart(webview: Webview) -> Result<bool, CoreError> {
     read_autostart(manager.inner()).map_err(|error| logged("core_get_autostart", error))
 }
 
-/// 命令失败时先把**原文**记进运行日志，再原样返回给渲染层。
-///
-/// 界面只说一句可操作的话（原因 + 下一步）；core 侧的原文留给日志面板——
-/// 同一个失败说两遍，第二遍还带着技术细节，用户既读不懂也帮不上排障。
+/// 命令失败时先把**原文**记进运行日志，再原样返回给渲染层：界面只说一句可操作的话，技术细节留给日志面板。
 fn logged(command: &str, error: CoreError) -> CoreError {
     log::warn!("{command} 未完成：{error}");
     error
 }
 
 // ---------------------------------------------------------------------------
-// 托盘可用性（R11）
+// 托盘可用性
 // ---------------------------------------------------------------------------
 
-/// 托盘**是不是真的可用**（设置页的关窗行为提示与托盘文案要这一条）。
-///
-/// R10 之前渲染层的 `TRAY_AVAILABLE` 是写死的 `false`——那是**如实**（宿主侧当时没有"托盘在不在"
-/// 的口子），但托盘装上之后，那句写死的话就变成假话了。这条命令是那个口子的唯一来源。
-///
-/// **只认"确实装上了"这一个事实**（Windows 同时检查 Shell 原生注册，不只看 tauri 对象）：
-/// 查不到就回 `false`——保守方向与 `tray::decide_close` 的 fail-safe 一致。
-/// 界面说"不可用"而实际能用，比反过来（界面说能用、关窗却退出了）代价小得多。
-///
-/// 与自启那两条同一个门（`require_main_webview`）：登录页/歌词窗问不了这件事。
+/// 托盘是不是真的可用：只认"确实装上了"这一个事实（Windows 同时查 Shell 原生注册），查不到就回 `false`——保守方向与 `tray::decide_close` 的 fail-safe 一致。
+/// 与自启同一道门（`require_main_webview`）：登录页与歌词窗问不了这件事。
 #[tauri::command]
 pub fn core_get_tray_available(webview: Webview) -> Result<bool, CoreError> {
     require_main_webview(webview.label())?;
@@ -1220,13 +1045,11 @@ pub fn core_get_tray_available(webview: Webview) -> Result<bool, CoreError> {
 }
 
 // ---------------------------------------------------------------------------
-// 运行日志（R56）
+// 运行日志
 // ---------------------------------------------------------------------------
 
-/// 设置页「日志」标签的数据源：最新日志文件的最后 [`crate::run_log::READ_LIMIT`] 条（旧的在前）。
-///
+/// 设置页「日志」标签的数据源：最新日志文件的最后 [`crate::run_log::READ_LIMIT`] 条，旧的在前；每条 `message` 返回前已脱敏。
 /// 只给主窗（与自启/托盘同一道门）：日志是宿主的诊断面，登录页与浮动控件不该读到。
-/// 每条 `message` 在返回前已脱敏（`run_log::redact`），渲染层拿到的就是能直接显示的东西。
 #[tauri::command]
 pub fn core_read_run_log(
     webview: Webview,
@@ -1245,26 +1068,11 @@ pub fn core_read_run_log(
 }
 
 // ---------------------------------------------------------------------------
-// 登录体验的浮动控件（R25）
+// 登录体验的浮动控件
 // ---------------------------------------------------------------------------
 
-/// 登录体验的控件命令：**取消登录**与**主题三态**两条动作。
-///
-/// 为什么需要它（而不是复用 `core_call`）：两个浮动控件是主窗里的**另外两个子 webview**
-/// （label `login-return` / `login-theme`），而 `core_call` 的来源守卫只认主窗那一个 label
-/// （[`require_main_webview`]）——放宽它等于把**全部业务频道**交给登录体验的浮动控件。
-/// 这条命令的守卫（[`require_login_chrome_source`]）只放行 `main` 与那两个 label。
-///
-/// 回执是**事实**：
-/// - `{action:"return"}` → `{cancelled: bool}`：与 `auth:cancel-login` 落到**同一个结论槽**
-///   （[`crate::login::cancel_login`]），之后 sidecar 的登录流程照常收场并广播带文案的
-///   `auth:status`，门禁据此回到二维码态——R18 那条链一个字都没改；
-/// - `{action:"theme"}` → `{theme: "light"|"dark"|"system"}`：读回当前档位；
-/// - `{action:"theme", theme}` → 落盘 + 更新内存 + 广播 `theme:changed`，回执是**实际生效**的档位。
-///
-/// 异步命令：`theme` 的**整笔事务**（写盘 → 校验回执 → 内存/原生/revision/广播）由 Rust 拥有的
-/// 线程完成，所以这条命令是 async——它等的是"事务有结论"，而不是"这一次调用返回了"。
-/// 等待者消失（WebView 导航/组件卸载）不会取消后半提交（见 [`crate::theme::spawn_theme_transaction`]）。
+/// 登录体验的浮动控件（取消登录 / 主题三态）专用命令：两个控件是主窗里的另外两个子 webview，走不了只认 `main` 的 `core_call` 守卫。
+/// 回执都是事实；`theme` 的整笔事务在 Rust 线程里跑完，所以这里是 async（等的是事务有结论）。
 #[tauri::command]
 pub async fn core_login_chrome(
     app: AppHandle,
@@ -1308,9 +1116,7 @@ mod tests {
         }
     }
 
-    /// R25：浮动控件的专用命令守卫。允许集合恰好是三个 label，其余一律拒——
-    /// **官方登录页（`login`）不在里面**（它手里不该多一个"改主题 / 取消登录"的口子），
-    /// 歌词窗与托盘同理。
+    /// 浮动控件专用守卫：允许集合恰是主窗与两个控件，官方登录页（`login`）不在里面，歌词窗与托盘同理。
     #[test]
     fn the_login_chrome_guard_allows_exactly_the_main_window_and_the_two_widgets() {
         for label in [
@@ -1408,12 +1214,7 @@ mod tests {
         );
     }
 
-    /// R23 的关键钉子（同窗宿主的**安全前提**）：登录页与主窗共用同一个窗口，
-    /// 于是 `window.label()` 恒为 `main`——按窗口 label 判来源等于把守卫让给登录页。
-    /// 唯一能区分两者的东西是 **webview label**（登录页 `login` ≠ 主窗 `main`）。
-    ///
-    /// 扫的是字面量：命令面必须拿 `Webview` 并判 `webview.label()`；一旦有人改回
-    /// `Window` + `window.label()`，这条会立刻红（那是"登录页获得业务命令权限"的形状）。
+    /// 同窗宿主的安全前提：窗口 label 恒为 `main`，只能按 webview label 判来源，所以扫字面量盯住这个形状。
     #[test]
     fn every_guarded_command_judges_by_webview_label_not_window_label() {
         for relative in ["/src/commands.rs", "/src/lyrics_window.rs"] {
@@ -1516,8 +1317,7 @@ mod tests {
         assert!(!state.mark_renderer_ready_and_flush().first_time, "重复调用不再是首次");
     }
 
-    /// 旧仓缺陷：启动期 emit 发进空气 —— 代理启动提示（R6）正是这种时机，所以启动期提示要先排队，
-    /// `core_renderer_ready` 时冲刷（顺序保持、只冲一次、之后就绪的直接投递）。
+    /// 启动期的 emit 会发进空气（那时渲染层还没订阅），所以先排队，`core_renderer_ready` 时按序冲刷一次。
     #[test]
     fn startup_notices_are_queued_until_renderer_ready() {
         assert_eq!(plan_broadcast(false), BroadcastPlan::Queue);
@@ -1558,11 +1358,7 @@ mod tests {
         assert_eq!(state.queued_notices(), 0);
     }
 
-    /// 这条钉的是 Important 3 的缝：**判定就绪与入队之间不能有第二步**。
-    /// 旧写法是 `plan_broadcast(state.renderer_ready())` → `state.queue_notice(..)` 两步。
-    /// 两步之间渲染层若完成 `mark_renderer_ready` + `flush_notices`，提示就 push 进那个**已经冲刷过**
-    /// 的队列，而《冲刷只发生一次》，这条提示再没有人管——永远发不出去。
-    /// 现在判定与入队是同一个加锁方法，把"就绪已翻"的那一刻原样交给调用方去投递。
+    /// 判定就绪与入队必须在同一个加锁方法里：分两步时提示会落进已冲刷过的队列，再也发不出去。
     #[test]
     fn notice_is_not_stranded_when_readiness_flips_before_enqueue() {
         let state = CoreState::default();
@@ -1607,10 +1403,7 @@ mod tests {
         assert!(state.mark_renderer_ready_and_flush().flushed.is_empty(), "第二次冲刷是空操作");
     }
 
-    /// 并发交错下的守恒律（真线程，不是模拟）：任何交错都不许丢提示、也不许重复投递。
-    ///
-    /// `queued == 冲刷出来的条数` 是这条缝的直接表述：旧写法在这个用例下会偶发少几条
-    /// （进了已冲刷过的队列）。判定与入队在同一个锁里完成之后，这是一条恒等式。
+    /// 并发交错下的守恒律（真线程）：判定与入队在同一把锁里，`queued == 冲刷条数` 恒成立，不丢也不重复投递。
     #[test]
     fn no_notice_is_lost_or_delivered_twice_under_concurrent_readiness_flip() {
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -1664,12 +1457,7 @@ mod tests {
         assert_eq!(state.queued_notices(), 0, "就绪之后队列必须永远为空（否则那些提示再没人冲刷）");
     }
 
-    /// 源码扫描：广播分支只走 `emit_core_event` 这一个入口，而它内部只走 `deliver_or_queue`
-    /// 这一个加锁口子——「先读就绪标志、再入队」的两步写法不许复活。
-    ///
-    /// R11 之前这段是"从 apply_effect 扫到 emit_now"一整段；托盘也成了广播发送方之后
-    /// 把信封构造与投递收进 `emit_core_event`（唯一构造点），于是这条用例拆成两段：
-    /// 上一段管"效果分支必须经唯一入口"，下一段管"唯一入口内部必须是同一个加锁方法"。
+    /// 源码扫描：广播只经 `emit_core_event` 这一个入口，入口内部只走 `deliver_or_queue` 的加锁口子，「先读就绪标志、再入队」不许复活。
     #[test]
     fn broadcast_effect_uses_the_single_locked_entry_point() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/commands.rs"))
@@ -1773,8 +1561,7 @@ mod tests {
             other => panic!("坏配置必须在计划阶段被拒，实际 {other:?}"),
         }
 
-        // 合法配置 → Deferred：答复交给登录窗线程（它在窗收场之后写这一帧）
-        // R32：白名单换成参考实测的授权入口域，这里的 URL 也要跟着换（否则会被当"不在白名单"拒掉）
+        // 合法配置 → Deferred：答复由登录窗线程在窗收场后写，URL 必须落在白名单里。
         let good = json!({
             "url": "https://oauth-login.platform.hicloud.com/oauth2/v3/authorize?client_id=101444301",
             "partition": "p-1",
@@ -1922,13 +1709,10 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 开机自启（R10）：只测判定逻辑，**绝不碰本机注册表**
+    // 开机自启：只测判定逻辑，绝不碰本机注册表
     // -----------------------------------------------------------------------
 
-    /// 假的自启后端：记录调用顺序，可分别让"写"或"读"失败。
-    ///
-    /// `ignore_write` 模拟"调用没报错，但系统没真的改"（策略挡回、注册表被改写）——
-    /// 这正是"必须回读实际状态"那条规矩要抓的情形。
+    /// 假的自启后端；`ignore_write` 模拟"调用没报错但系统没真的改"，用来钉住回读实际状态的规矩。
     #[derive(Default)]
     struct FakeAutostart {
         enabled: std::cell::Cell<bool>,
@@ -1994,7 +1778,7 @@ mod tests {
         assert_eq!(manager.calls.borrow().as_slice(), ["disable", "is_enabled"]);
     }
 
-    /// 旧仓缺陷的形状：把"这次调用没报错"当成"已经打开了"。
+    /// 开关报的是观测到的状态，不能把"这次调用没报错"当成"已经打开了"。
     #[test]
     fn autostart_reports_the_observed_state_not_the_request() {
         let manager = FakeAutostart {
@@ -2051,7 +1835,7 @@ mod tests {
         assert_eq!(read_autostart(&on), Ok(true));
     }
 
-    // ---- R44e：持久化准入 ---------------------------------------------------------
+    // ---- 持久化准入 ---------------------------------------------------------
 
     /// 准入矩阵（纯函数）：只有"退出准备中的渲染层写"与"正在不可逆清理"被拒，
     /// 内部保存/退出 drain 在准备阶段仍然收。
@@ -2103,10 +1887,7 @@ mod tests {
         assert_eq!(gate.phase(), PersistPhase::Exiting, "不可逆清理阶段不能被复位成 Running");
     }
 
-    /// R44e fix1 / review finding 4：内部 settings 调用只能拿**整个退出准备剩下的**时间。
-    ///
-    /// 修复前 uncertain 重存与最终 `settings:get` 各自另起一个 10 秒等待：4 秒预算之外的
-    /// 两段等待合起来还能把"有界退出"拖到 20 秒。这里钉的是"剩余预算才是上限，没预算就立刻失败"。
+    /// 内部 settings 调用只能拿整个退出准备剩下的时间：没预算就立刻结构化失败，不许另起一笔等待。
     #[test]
     fn fix4_a_settings_call_never_gets_more_time_than_the_exit_budget_that_is_left() {
         let now = std::time::Instant::now();
@@ -2165,13 +1946,9 @@ mod tests {
         );
     }
 
-    // ---- R44e fix2：同步写帧也能拖穿退出预算（review round 2 finding 2）-------------
+    // ---- 同步写帧也不得超出退出预算 ----------------------------------------------
 
-    /// 一个"写进去就停住"的管道：真的会阻塞的 `Write`。
-    ///
-    /// 生产里的 `CoreShared::write_line` 是**同步**的（锁写入端 → `write_all` → `flush`）：
-    /// 对端管道堵住时它就停在 `write` 里。给 `recv_timeout` 一个 timeout 对这一段毫无作用——
-    /// 这正是 finding 2 说的"deadline 只限制了等回执"。
+    /// 一个写进去就停住的管道：生产的 `write_line` 是同步写，给 `recv_timeout` 设时限管不到这一段。
     #[derive(Clone)]
     struct BlockingWriter {
         entered: Arc<(Mutex<bool>, std::sync::Condvar)>,
@@ -2225,12 +2002,7 @@ mod tests {
         }
     }
 
-    /// R44e fix2 / review round 2 finding 2：写帧被堵住时，调用方仍必须在**自己的**期限上回来。
-    ///
-    /// 修复前 `settings_write_owned_within` 只把时间上限交给 `CoreShared::call` 的 `recv_timeout`，
-    /// 而同步写帧在它之前，可以先把整个退出预算吃掉。这里用真的会阻塞的 `Write`：调用方必须按
-    /// deadline（200ms）返回结构化 `timeout`，而**迟到的那一笔仍然算在准入账上**——退出不可能
-    /// 在"可能已发出的迟到写"落定之前成功，也不会出现"退出成功之后才写盘"。
+    /// 写帧被堵住时调用方仍须按自己的期限返回，而迟到的那一笔仍计在准入账上，退出得等它落定。
     #[test]
     fn fix2_a_blocked_bridge_write_still_returns_by_the_exit_deadline() {
         let writer = BlockingWriter::new();

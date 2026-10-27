@@ -1,43 +1,9 @@
-//! 全局快捷键的注册编排（R13）。
+//! 全局快捷键的注册编排：组合清单是数据表，注册计划是纯函数，结论如实上报。
 //!
-//! 三件事，件件都做成"没有 app 也能钉住"的形状：
-//!
-//! 1. **组合清单是数据表**（[`SHORTCUT_BINDINGS`]）：媒体三键（`MediaPlayPause` /
-//!    `MediaTrackPrevious` / `MediaTrackNext`）与两条提示型组合（`CmdOrCtrl+Alt+L` 桌面歌词、
-//!    `CmdOrCtrl+Alt+S` 设置）。表能被单测逐条钉住（含"每个组合都得解析得出来"），
-//!    写成散落在 setup 里的一串调用就只能靠人眼。
-//! 2. **注册计划是纯函数**（[`plan_binding`]）：主组合被别的程序占用时沿备选链往下试，
-//!    试过哪些、为什么失败、最后生效的是哪条，全部落在 [`ShortcutPlan`] 里。
-//!    注册动作本身由调用方注入（`register` 闭包）——所以"占用/全废/回退"这些分支
-//!    不需要真机就能覆盖。
-//! 3. **结论如实上报**：生效的组合记进 [`ShortcutState`]（设置页后续可读），
-//!    回退与失败逐条经启动提示说清楚"现在用的是哪个键"（[`shortcut_notices`]）。
-//!
-//! 三条纪律：
-//!
-//! - **组合只能在这里逐条注册**，不许用插件的 `Builder::with_shortcut(..)`：
-//!   `tauri-plugin-global-shortcut` 在它自己的 setup 里注册，失败会让整个 `setup` 返回 Err，
-//!   而 tauri 收到 Err 会在启动期直接崩（`Failed to setup app`）——**一个被占用的媒体键不该把
-//!   应用带走**（Windows 上媒体键注册失败是常态）。
-//! - **不静默换键**：回退一定会经启动提示说出来（原来想用哪个、现在实际是哪个）。
-//!   媒体三键**没有备选链**——给媒体键配一条 `Ctrl+...` 备选，等于用户按了媒体键没反应、
-//!   却多出一个他从不认识的组合在起作用。
-//! - **广播只经 `commands::emit_core_event`**（事件信封的唯一构造点，启动期排队也在那里）。
-//!   本模块不自己 `emit`。
-//!
-//! ## 平台差异：Wayland（如实记录，未实测）
-//!
-//! `tauri-plugin-global-shortcut` 的 Linux 后端是 `global-hotkey`，而它只有 **X11** 实现
-//! （`x11rb` + `xkeysym`，见 `global-hotkey-0.8.0/src/platform_impl/x11/`）：Wayland 原生会话
-//! 下没有 X 连接，注册会失败（没有隐藏的降级路径可走）。本模块的处理是**如实降级**——
-//! `GlobalHotKeyManager::new()` 在 X11 后端里只是起一个线程、当场返回 Ok，真正的连接错误落在
-//! 每条 `register` 上，于是每个动作各自走"注册失败"这条路：一条启动提示说清哪个键没能注册，
-//! 并指路托盘菜单/主界面。**Wayland 上快捷键可用性未在真机验证**（本任务范围外，如实记
-//! `untested`）；文案不承诺 Wayland，也不假装有替代方案。
-//!
-//! 计划里"Wayland 热键限制写入 PLATFORM_DIFFERENCES"的落点：`docs/PLATFORM_DIFFERENCES.md`
-//! 是 R15 的交付物（本任务时尚未创建），所以这条事实先钉在本模块的注释与一条源码扫描用例里
-//! （[`tests::the_wayland_limitation_is_written_down_where_the_code_is`]），R15 直接取用。
+//! 组合只能在这里逐条注册，不许用插件的 `Builder::with_shortcut`：它在自己的 setup 里注册，失败会让
+//! 整个 `setup` 返回 Err 并在启动期崩溃，而一个被占用的媒体键不该把应用带走（Windows 上是常态）。
+//! 不静默换键：回退一定经启动提示说出来；媒体三键没有备选链。广播只经 `commands::emit_core_event`。
+//! Wayland：Linux 后端只有 X11 实现（无隐藏降级路径），注册会失败并逐条降级为启动提示，未真机验证。
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Runtime};
@@ -74,9 +40,7 @@ impl ShortcutAction {
     }
 
     /// 播放类动作的 `player:command` 命令词；其余动作 `None`（不发播放命令）。
-    ///
-    /// 词表是 R9 定的（`src/renderer/features/playback/player-commands.mjs` 是执行侧的唯一真源）：
-    /// 发一个渲染层不认识的词，只会被结构化拒绝 = 用户按了没反应。
+    /// 词表以 `src/renderer/features/playback/player-commands.mjs` 为唯一真源，发渲染层不认识的词只会被拒。
     pub fn play_command(self) -> Option<&'static str> {
         match self {
             ShortcutAction::PlayPause => Some("toggle"),
@@ -104,10 +68,8 @@ impl ShortcutBinding {
     }
 }
 
-/// 组合清单一（**唯一真源**）：媒体三键 + 两条提示型组合。
-///
-/// 提示型组合的备选刻意"同键加 Shift、再减一层 Alt"：用户按主组合失败后，能在提示里看到
-/// 一个**还记得住**的键（同一个字母键），而不是一个毫无关系的组合。
+/// 组合清单的唯一真源：媒体三键 + 两条提示型组合。
+/// 提示型组合的备选刻意同键加 Shift、再减一层 Alt，让用户按失败后还记得住那个字母键。
 pub const SHORTCUT_BINDINGS: &[ShortcutBinding] = &[
     ShortcutBinding {
         action: ShortcutAction::PlayPause,
@@ -178,10 +140,8 @@ impl ShortcutPlan {
     }
 }
 
-/// 按备选链试注册：**试到第一条成功为止**，一条都不成就如实报"没有组合"。
-///
-/// `register` 由调用方注入（生产里是 `app.global_shortcut().on_shortcut(..)`，单测里是桩）：
-/// 注册这件事的唯一不可测部分是那一次 FFI 调用，判定逻辑全在这个纯函数里。
+/// 按备选链试注册到第一条成功为止，全不成则如实报"没有组合"。
+/// `register` 由调用方注入，唯一的不可测部分只有那一次 FFI 调用。
 pub fn plan_binding(
     binding: &ShortcutBinding,
     mut register: impl FnMut(&str) -> Result<(), String>,
@@ -251,11 +211,8 @@ impl ShortcutReport {
 // 状态
 // ---------------------------------------------------------------------------
 
-/// 托管状态：本进程**实际生效**的组合。
-///
-/// 名字与插件的 `ShortcutState`（事件状态枚举）撞了，所以那边在 import 时改名成 `HotKeyState`；
-/// 托管状态沿用简报给的名字。注册只在 setup 里发生一次，所以这里是**快照**而不是可变的表
-/// （不维护第二份会漂移的镜像：状态页将来要显示的就是这张快照）。
+/// 托管状态：本进程实际生效的组合快照，注册只在 setup 里做一次，不维护会漂移的第二份表。
+/// 名字与插件的事件状态枚举撞车，那边 import 时改名成 `HotKeyState`。
 pub struct ShortcutState {
     report: ShortcutReport,
 }
@@ -287,11 +244,8 @@ impl Default for ShortcutState {
 // 注册
 // ---------------------------------------------------------------------------
 
-/// 逐条注册全部组合，返回结论。**不 panic、不拦启动**。
-///
-/// 前置条件（顺序契约，由 `lib.rs` 的用例钉住）：调用前 core 状态必须已登记
-/// （失败提示要经 `emit_core_event` 排队到渲染层就绪），且托盘可用性已确定
-/// （提示里"请改用托盘菜单"得有根据）。
+/// 逐条注册全部组合并返回结论，单个组合失败不 panic、不拦启动。
+/// 调用前 core 状态必须已登记（提示要经 `emit_core_event` 排队），托盘可用性也须已确定。
 pub fn install<R: Runtime>(app: &AppHandle<R>) -> ShortcutReport {
     let mut plans = Vec::new();
 
@@ -330,10 +284,8 @@ fn dispatch<R: Runtime>(app: &AppHandle<R>, action: ShortcutAction) {
         return;
     };
 
-    // 勾选态由托盘的 CheckMenuItem 自己持有（R11）：**谁发起翻转谁负责把它改到目标态**——
-    // 托盘菜单自己是这么做的（`tray::plan_lyrics_toggle`），快捷键这条路径同理，
-    // 否则按了歌词键、托盘里的勾还是旧的（两处状态各说各话）。
-    // 失败收口仍归 R12：歌词窗命令失败时，那条路径会把勾选翻回窗的实际状态。
+    // 勾选态由托盘的 CheckMenuItem 自己持有，谁发起翻转谁负责把它改到目标态，否则勾会停在旧值。
+    // 歌词窗命令失败时，那条路径会把勾选翻回窗的实际状态。
     if let Some(checked) = broadcast.mirror_tray_checked {
         crate::tray::revert_lyrics_checked(app, checked);
     }
@@ -389,11 +341,7 @@ pub fn player_command_for(action: ShortcutAction) -> Option<&'static str> {
 // 提示文案
 // ---------------------------------------------------------------------------
 
-/// 把库的写法翻译成用户认得的写法。
-///
-/// `CmdOrCtrl` 是 global-hotkey 的写法（macOS 上是 Cmd、其余平台是 Ctrl）：提示里直接印
-/// `CmdOrCtrl+Alt+L`，用户会在自己键盘上找一个叫 CmdOrCtrl 的键。
-/// **认不出的组合原样显示**——宁可露出库的写法，也不许翻译成一个别的键。
+/// 把库的写法翻成用户认得的键位，认不出的组合原样返回，宁可露出库写法也不翻成别的键。
 pub fn display_combo(combo: &str, macos: bool) -> String {
     match combo {
         "MediaPlayPause" => return "播放/暂停媒体键".to_string(),
@@ -421,10 +369,8 @@ pub fn shortcut_notices(report: &ShortcutReport, tray_available: bool) -> Vec<St
     shortcut_log_entries(report, tray_available).into_iter().map(|(_, text)| text).collect()
 }
 
-/// 单个动作的提示文案（`None` = 一切按计划，不必打扰用户）。
-///
-/// 文案要说清三件事：**哪个动作**、**为什么**、**下一步去哪**。下一步按事实分两种：
-/// 托盘在就指托盘菜单，托盘没装上就指应用窗口——指一个不存在的地方比不指更糟。
+/// 单个动作的提示文案（`None` = 一切按计划，不必打扰用户），要说清哪个动作、为什么、下一步去哪。
+/// 下一步按事实分两种：托盘在就指托盘菜单，托盘没装上就指应用窗口——指一个不存在的地方比不指更糟。
 pub fn shortcut_notice(plan: &ShortcutPlan, tray_available: bool) -> Option<String> {
     let label = plan.action.label();
     let advice = if tray_available {
@@ -871,8 +817,7 @@ mod tests {
         assert_eq!(settings.mirror_tray_checked, None, "设置键与托盘勾选无关");
     }
 
-    /// 快捷键发的三条广播都必须在桥的白名单里：不在的话那条广播会被当白名单外的帧丢掉
-    /// （用户按了没反应，日志里只有一条 Reject）。
+    /// 快捷键发的广播必须都在桥白名单里，否则会被当白名单外的帧丢掉，用户按了没反应。
     #[test]
     fn every_broadcast_a_shortcut_sends_is_on_the_bridge_whitelist() {
         for action in [
