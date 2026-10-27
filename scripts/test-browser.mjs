@@ -199,6 +199,8 @@ let lyricsProgressCalls = 0;
 let unlockZones = [];
 /** R45C：core_lyrics_toggle 的请求次数与每次的意图（"一次点击只发一次"按它判）。 */
 const lyricsToggles = [];
+/** 歌词窗当前是否真的开着（configure 回执按它报，免得"开着时换模式"被误判成关）。 */
+let desktopVisible = false;
 /**
  * R45C：每一次 core_lyrics_toggle 的时间戳与当时的夹具延迟。
  *
@@ -394,9 +396,9 @@ mockIPC(async (command, args) => {
     if ((!args.restoreIfPristine || desktopRevision === 0) && Object.keys(args.config).length) {
       configureCalls.push({ ...args.config });
       desktopConfig = { ...desktopConfig, ...args.config }; desktopRevision += 1;
-      await emit("core:event", { channel: "lyrics:state", payload: { config: desktopConfig, revision: desktopRevision, visible: false, taskbar: taskbarStatus() } });
+      await emit("core:event", { channel: "lyrics:state", payload: { config: desktopConfig, revision: desktopRevision, visible: desktopVisible, taskbar: taskbarStatus() } });
     }
-    return { config: desktopConfig, revision: desktopRevision, visible: false, taskbar: taskbarStatus() };
+    return { config: desktopConfig, revision: desktopRevision, visible: desktopVisible, taskbar: taskbarStatus() };
   }
   if (command === "core_lyrics_toggle") {
     const checked = args.checked === true;
@@ -409,6 +411,7 @@ mockIPC(async (command, args) => {
       togglePlan = { ...togglePlan, failTimes: togglePlan.failTimes - 1 };
       throw { kind: "internal", message: "守卫夹具：这一次歌词开关被故意拒绝" };
     }
+    desktopVisible = checked;
     return { config: desktopConfig, revision: desktopRevision, visible: checked, requestedVisible: checked };
   }
   if (command === "core_lyrics_settings_open") {
@@ -548,7 +551,7 @@ function Guard() {
       async setTaskbarSupported(value) {
         taskbarSupported = value === true;
         await emit("core:event", { channel: "lyrics:state", payload: {
-          config: desktopConfig, revision: desktopRevision, visible: false, taskbar: taskbarStatus(),
+          config: desktopConfig, revision: desktopRevision, visible: desktopVisible, taskbar: taskbarStatus(),
         }});
       },
       /** R50：settings 夹具后端（播放器歌词那一份）。 */
@@ -1514,6 +1517,107 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
   await plan({ delayMs: 0, failTimes: 0 });
   await page.keyboard.press("Escape");
   await stage.waitFor({ state: "detached" });
+}
+
+/** 歌词显示目标快捷切换：播放栏与沉浸页的下拉、平台不支持时禁用任务栏、开着时只换模式不重复开窗（自己开一页）。 */
+export async function checkLyricsTargetMenus(browser, port, guardDir, add) {
+  const names = ["r71-bar-target-menu-items", "r71-bar-target-desktop-opens", "r71-bar-target-taskbar-switches-mode-only", "r71-bar-target-off-closes", "r71-stage-target-menu"];
+  const done = new Set();
+  const record = (name, ok, detail) => { done.add(name); add(name, ok, detail); };
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
+  try {
+    page.setDefaultTimeout(15_000);
+    await routeGuardAudio(page, fixtureAudio());
+    await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
+    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+    await page.evaluate(() => window.__guard.ready());
+    await page.waitForFunction(() => window.__guard.snapshot().lyrics.status === "ready");
+    const readMenu = (testid) => page.evaluate((id) => {
+      const menu = document.querySelector(`[data-testid="${id}"]`);
+      const items = [...(menu?.querySelectorAll('[role="menuitemradio"]') ?? [])];
+      return {
+        open: Boolean(menu),
+        items: items.map((item) => (item.textContent ?? "").trim()),
+        checked: items.filter((item) => item.getAttribute("aria-checked") === "true").map((item) => (item.textContent ?? "").trim()),
+        taskbarDisabled: items.some((item) => (item.textContent ?? "").includes("任务栏") && item.hasAttribute("data-disabled")),
+        note: (menu?.textContent ?? "").includes("仅支持 Windows"),
+      };
+    }, testid);
+    const openMenu = async (trigger, menu) => {
+      await page.getByTestId(trigger).click();
+      await page.getByTestId(menu).waitFor();
+      await page.waitForTimeout(200);
+    };
+    const pick = async (menu, label) => {
+      await page.getByTestId(menu).getByRole("menuitemradio", { name: label }).click();
+      await page.waitForTimeout(450);
+    };
+    const calls = () => page.evaluate(() => ({ toggles: window.__guard.lyricsToggles(), modes: window.__guard.configureCalls().filter((patch) => "mode" in patch).map((patch) => patch.mode) }));
+
+    await page.evaluate(() => window.__guard.setTaskbarSupported(false));
+    await page.evaluate(() => { window.__guard.resetLyricsToggles(); window.__guard.resetConfigureCalls(); });
+    await openMenu("player-lyrics-target", "player-bar-lyrics-target-menu");
+    const unsupported = await readMenu("player-bar-lyrics-target-menu");
+    await page.screenshot({ path: path.join(guardDir, "r71-bar-target-menu.png") });
+    record("r71-bar-target-menu-items",
+      unsupported.items.length === 3 && unsupported.items[0] === "关闭歌词" && unsupported.items[1] === "桌面歌词" && unsupported.items[2].startsWith("任务栏歌词")
+        && unsupported.checked.length === 1 && unsupported.checked[0] === "关闭歌词" && unsupported.taskbarDisabled && unsupported.note,
+      JSON.stringify(unsupported));
+
+    await pick("player-bar-lyrics-target-menu", "桌面歌词");
+    const afterDesktop = await calls();
+    record("r71-bar-target-desktop-opens",
+      afterDesktop.toggles.length === 1 && afterDesktop.toggles[0] === true && afterDesktop.modes.length === 0,
+      JSON.stringify(afterDesktop));
+
+    await page.evaluate(() => window.__guard.setTaskbarSupported(true));
+    await page.waitForTimeout(300);
+    await openMenu("player-lyrics-target", "player-bar-lyrics-target-menu");
+    const supported = await readMenu("player-bar-lyrics-target-menu");
+    await pick("player-bar-lyrics-target-menu", "任务栏歌词（Beta）");
+    const afterTaskbar = await calls();
+    await openMenu("player-lyrics-target", "player-bar-lyrics-target-menu");
+    const onTaskbar = await readMenu("player-bar-lyrics-target-menu");
+    await page.keyboard.press("Escape");
+    await page.getByTestId("player-bar-lyrics-target-menu").waitFor({ state: "detached" });
+    record("r71-bar-target-taskbar-switches-mode-only",
+      supported.checked[0] === "桌面歌词" && !supported.taskbarDisabled && !supported.note
+        && afterTaskbar.modes.length === 1 && afterTaskbar.modes[0] === "taskbar" && afterTaskbar.toggles.length === 1
+        && onTaskbar.checked[0]?.startsWith("任务栏歌词"),
+      JSON.stringify({ supported: supported.checked, afterTaskbar, onTaskbar: onTaskbar.checked }));
+
+    await openMenu("player-lyrics-target", "player-bar-lyrics-target-menu");
+    await pick("player-bar-lyrics-target-menu", "关闭歌词");
+    const afterOff = await calls();
+    record("r71-bar-target-off-closes",
+      afterOff.toggles.length === 2 && afterOff.toggles[1] === false && afterOff.modes.length === 1,
+      JSON.stringify(afterOff));
+
+    await page.evaluate(() => window.__guard.setTaskbarSupported(false));
+    await page.getByRole("button", { name: "歌词", exact: true }).click();
+    await page.getByTestId("playback-stage").waitFor();
+    await page.waitForTimeout(800);
+    const stageGeometry = await page.evaluate(() => {
+      const toggle = document.querySelector('[data-testid="stage-lyrics-toggle"]')?.getBoundingClientRect();
+      const trigger = document.querySelector('[data-testid="stage-lyrics-target"]')?.getBoundingClientRect();
+      return toggle && trigger ? { toggle: [toggle.left, toggle.top, toggle.width, toggle.height], trigger: [trigger.left, trigger.top, trigger.width, trigger.height] } : null;
+    });
+    await openMenu("stage-lyrics-target", "playback-stage-lyrics-target-menu");
+    const stageMenu = await readMenu("playback-stage-lyrics-target-menu");
+    await page.screenshot({ path: path.join(guardDir, "r71-stage-target-menu.png") });
+    await page.keyboard.press("Escape");
+    await page.getByTestId("playback-stage-lyrics-target-menu").waitFor({ state: "detached" });
+    record("r71-stage-target-menu",
+      stageGeometry !== null && stageGeometry.trigger[0] >= stageGeometry.toggle[0] + stageGeometry.toggle[2] - 1
+        && Math.abs(stageGeometry.trigger[1] - stageGeometry.toggle[1]) <= 2 && Math.abs(stageGeometry.trigger[3] - stageGeometry.toggle[3]) <= 1
+        && stageMenu.items.length === 3 && stageMenu.taskbarDisabled && stageMenu.note,
+      JSON.stringify({ stageGeometry, stageMenu }));
+  } catch (cause) {
+    const detail = `检查过程抛错：${String(cause?.message ?? cause).split("\n")[0]}`;
+    for (const name of names) if (!done.has(name)) add(name, false, detail);
+  } finally {
+    await page.close();
+  }
 }
 
 /**
@@ -2887,6 +2991,7 @@ import { DEFAULT_LYRICS_CONFIG, normalizeLyricsConfig } from "../../src/renderer
 
 let config = { ...DEFAULT_LYRICS_CONFIG };
 let revision = 0;
+let taskbarSupported = new URLSearchParams(window.location.search).get("taskbar") === "1";
 /** 每次 core_lyrics_configure 的补丁（"控件真的改了配置、且只走那条窄命令"按它判）。 */
 const configureCalls = [];
 /** 弹出窗报上来的尺寸（页面自己量、宿主设窗口）。 */
@@ -2917,9 +3022,9 @@ mockIPC(async (command, args) => {
       configureCalls.push(JSON.parse(JSON.stringify(patch)));
       config = normalizeLyricsConfig(patch, config);
       revision += 1;
-      await emit("core:event", { channel: "lyrics:state", payload: { config, revision, visible: true } });
+      await emit("core:event", { channel: "lyrics:state", payload: { config, revision, visible: true, taskbar: { supported: taskbarSupported, attached: false, reason: taskbarSupported ? "disabled" : "unsupported" } } });
     }
-    return { config, revision, visible: true };
+    return { config, revision, visible: true, taskbar: { supported: taskbarSupported, attached: false, reason: taskbarSupported ? "disabled" : "unsupported" } };
   }
   if (command === "core_lyrics_settings_resize") {
     resizeCalls.push({ width: args.width, height: args.height, atMs: Math.round(performance.now()) });
@@ -2938,6 +3043,7 @@ window.__popupGuard = {
   closeCalls: () => closeCalls.slice(),
   config: () => ({ ...config }),
   bubble: () => BUBBLE,
+  async setTaskbarSupported(value) { taskbarSupported = value === true; await emit("core:event", { channel: "lyrics:state", payload: { config, revision, visible: true, taskbar: { supported: taskbarSupported, attached: false, reason: taskbarSupported ? "disabled" : "unsupported" } } }); },
   reset: () => { configureCalls.length = 0; resizeCalls.length = 0; closeCalls.length = 0; },
 };
 
@@ -3262,6 +3368,28 @@ export async function checkLyricsSettingsPopup(page, port, guardDir, add) {
     await page.evaluate(() => document.querySelector('[data-testid="gear-marker"]')?.remove());
   }
   await page.evaluate(() => { document.documentElement.className = "light"; });
+
+  // 位置：不支持时任务栏禁用并说明，支持后可切
+  const targetState = () => page.evaluate(() => ({
+    desktop: document.querySelector('[data-testid="lyrics-target-desktop"]')?.getAttribute("data-state") ?? null,
+    taskbarDisabled: document.querySelector('[data-testid="lyrics-target-taskbar"]')?.hasAttribute("disabled") ?? null,
+    note: Boolean(document.querySelector('[data-testid="lyrics-target-note"]')),
+  }));
+  const targetUnsupported = await targetState();
+  await page.evaluate(() => window.__popupGuard.setTaskbarSupported(true));
+  await page.waitForTimeout(250);
+  const targetSupported = await targetState();
+  await page.screenshot({ path: path.join(guardDir, "r71-popup-target.png") });
+  await page.getByTestId("lyrics-target-taskbar").click();
+  await page.waitForFunction(() => window.__popupGuard.config().mode === "taskbar");
+  const switched = await page.evaluate(() => window.__popupGuard.configureCalls().at(-1));
+  await page.getByTestId("lyrics-target-desktop").click();
+  await page.waitForFunction(() => window.__popupGuard.config().mode === "desktop");
+  await page.evaluate(() => window.__popupGuard.setTaskbarSupported(false));
+  add("r71-popup-target-field",
+    targetUnsupported.desktop === "on" && targetUnsupported.taskbarDisabled === true && targetUnsupported.note
+      && targetSupported.taskbarDisabled === false && !targetSupported.note && switched?.mode === "taskbar",
+    JSON.stringify({ targetUnsupported, targetSupported, switched }));
 }
 
 /** R52：走到 设置 → 歌词（外壳里那一条真实路径）。沉浸页开着就先收起。 */
@@ -5897,6 +6025,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
      * 放在两轮主题之后、分页之前：它自己重新载入主页，只碰播放栏与沉浸页。
      */
     await checkPlaybackLyricsToggle(page, port, guardDir, add);
+    await checkLyricsTargetMenus(browser, port, guardDir, add);
     /**
      * R45A3：库列表触底分页（真滚轮 + 真 IPC 计数）。放在两轮主题之后、桌面歌词之前：
      * 它会把主界面导航到歌单/专辑/歌手/历史/搜索，之后的桌面窗验收本来就要重挂整个壳。

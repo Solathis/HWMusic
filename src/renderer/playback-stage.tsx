@@ -11,7 +11,7 @@ import { Button } from "./components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "./components/ui/dropdown-menu"
 import { AmllBackground, useAlbumImage } from "./AmllBackground.tsx"
 import { AmllLyricsPanel } from "./AmllLyricsPanel.tsx"
-import { lyricsToggleView } from "./components.tsx"
+import { LyricsTargetMenu, lyricsToggleView } from "./components.tsx"
 import { lyricsNoticeText, playbackModeLabel } from "./features/playback/playback-state.mjs"
 import { PLAYBACK_MODES } from "./features/playback/player.mjs"
 import { formatDuration, trackAlbumOf, trackArtistsOf, trackCoverUrlOf, trackNameOf } from "./features/library/track-fields.mjs"
@@ -166,13 +166,16 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
             </DropdownMenuRadioGroup>
           </DropdownMenuContent>
         </DropdownMenu>
-        {/* R50：歌词开关落在工具行尾部，与音量/模式同档（size-8 + 图标 size-4）。
-            语义一个字没变：状态/标签来自 components.tsx 的 lyricsToggleView，取反交给
-            binding 的意图机（渲染快照在同一次任务里连点两次时是旧的）。 */}
-        {lyricsView === null ? null : (
-          <MediaButton className="size-8 shrink-0" aria-label={lyricsView.label} aria-pressed={lyricsView.on} data-testid="stage-lyrics-toggle" onClick={() => lyrics?.toggleVisible("playback-stage")}>
-            <CaptionsIcon className="size-4" />
-          </MediaButton>
+        {/* 歌词开关与显示目标落在工具行尾部，与音量、模式同档 */}
+        {lyricsView === null ? null : lyrics === null ? null : (
+          <>
+            <MediaButton className="size-8 shrink-0" aria-label={lyricsView.label} aria-pressed={lyricsView.on} data-testid="stage-lyrics-toggle" onClick={() => lyrics?.toggleVisible("playback-stage")}>
+              <CaptionsIcon className="size-4" />
+            </MediaButton>
+            <LyricsTargetMenu lyrics={lyrics} surface="playback-stage" trigger={
+              <MediaButton className="size-8 shrink-0" aria-label="选择歌词显示位置" data-testid="stage-lyrics-target"><ChevronDownIcon className="size-4" /></MediaButton>
+            } />
+          </>
         )}
       </div>
       {/*

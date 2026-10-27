@@ -30,6 +30,7 @@ import {
   LYRICS_FONT_STEPS,
   LYRICS_MODES,
   LYRICS_STATUS,
+  LYRICS_TARGETS,
   MIN_PROGRESS_INTERVAL_MS,
   TASKBAR_FONT_STEPS,
   TASKBAR_MAX_FONT_PX,
@@ -48,6 +49,8 @@ import {
   lyricsBackdrop,
   lyricsConfigFromSearch,
   lyricsStatusFromFailure,
+  lyricsTargetOf,
+  lyricsTargetPlan,
   modeLabel,
   normalizeLyricsConfig,
   progressOf,
@@ -1823,4 +1826,32 @@ test("R59 桌面歌词设置面板不含任务栏字段（两套配置各有各�
   const card = read(TASKBAR_CARD);
   assert.equal(card.includes("coreLyricsSettingsOpen"), false, "任务栏卡不去开桌面歌词的弹出窗");
   assert.equal(card.includes("coreLyricsConfigure"), false, "卡片不直接发命令（写入经壳层绑定）");
+});
+
+test("歌词显示目标：目标词表与开关计划只看模式与开关，开着换模式不重复开窗", () => {
+  assert.deepEqual(LYRICS_TARGETS, ["off", "desktop", "taskbar"], "三个目标就是关闭/桌面/任务栏");
+  assert.equal(lyricsTargetOf(false, "taskbar"), "off", "没开就是关闭");
+  assert.equal(lyricsTargetOf(true, "taskbar"), "taskbar", "开着且模式是任务栏");
+  assert.equal(lyricsTargetOf(true, "desktop"), "desktop", "开着且模式是桌面");
+  assert.equal(lyricsTargetOf(true, undefined), "desktop", "模式缺失按桌面算");
+  assert.deepEqual(lyricsTargetPlan(false, "desktop", "desktop"), { mode: null, visible: true }, "关着选桌面：只开窗");
+  assert.deepEqual(lyricsTargetPlan(false, "desktop", "taskbar"), { mode: "taskbar", visible: true }, "关着选任务栏：先改模式再开窗");
+  assert.deepEqual(lyricsTargetPlan(true, "desktop", "taskbar"), { mode: "taskbar", visible: null }, "开着换任务栏：只改模式，不重复开窗");
+  assert.deepEqual(lyricsTargetPlan(true, "taskbar", "taskbar"), { mode: null, visible: null }, "已经在这个目标上：什么都不发");
+  assert.deepEqual(lyricsTargetPlan(true, "taskbar", "off"), { mode: null, visible: false }, "开着选关闭：只关窗");
+  assert.deepEqual(lyricsTargetPlan(false, "desktop", "off"), { mode: null, visible: null }, "本来就关着再选关闭：什么都不发");
+  assert.deepEqual(lyricsTargetPlan(true, "desktop", "bogus"), { mode: null, visible: null }, "认不出的目标不猜");
+});
+
+test("歌词显示目标：两处快捷菜单 + 设置面板的位置切换 + binding 的 selectTarget 都在", () => {
+  const components = read("src/renderer/components.tsx");
+  assert.match(components, /export function LyricsTargetMenu/, "播放栏与沉浸页共用同一个菜单组件");
+  assert.match(components, /data-testid="player-lyrics-target"/, "播放栏有那枚小下拉按钮");
+  const stage = read("src/renderer/playback-stage.tsx");
+  assert.match(stage, /LyricsTargetMenu/, "沉浸页用同一个菜单");
+  assert.match(stage, /data-testid="stage-lyrics-target"/, "沉浸页有那枚小下拉按钮");
+  const popup = read("src/renderer/LyricsSettingsPopup.tsx");
+  assert.match(popup, /data-testid="lyrics-target-taskbar"/, "设置面板有位置切换");
+  assert.match(popup, /disabled=\{!taskbarSupported\}/, "平台不支持时任务栏那一项禁用");
+  assert.match(read("src/renderer/use-lyrics-window.ts"), /selectTarget/, "binding 直接给出 selectTarget");
 });

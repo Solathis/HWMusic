@@ -86,6 +86,7 @@ export function LyricsSettingsPopup() {
   const [bubble, setBubble] = useState<null | { side: string; arrow: number; pad: number }>(null)
   const revisionRef = useRef(-1)
   const contentRef = useRef<HTMLDivElement | null>(null)
+  const [taskbarSupported, setTaskbarSupported] = useState(false)
 
   const themeHex = useTokenColorHex(config.color)
   const customColor = isCustomColor(config.customColor) ? config.customColor : null
@@ -93,10 +94,11 @@ export function LyricsSettingsPopup() {
   const geometry = bubble ?? defaultBubbleGeometry(panel.width)
 
   const acceptStatus = useCallback((payload: unknown) => {
-    const next = payload as { ready?: boolean; config?: unknown; revision?: number; saveError?: unknown } | null
+    const next = payload as { ready?: boolean; config?: unknown; revision?: number; saveError?: unknown; taskbar?: { supported?: boolean } } | null
     if (next?.ready || !next?.config || !Number.isSafeInteger(next.revision) || next.revision! < revisionRef.current) return
     revisionRef.current = next.revision!
     setConfig(normalizeLyricsConfig(next.config))
+    setTaskbarSupported(next.taskbar?.supported === true)
     setSaveError(saveErrorText(typeof next.saveError === "string" ? next.saveError : null))
   }, [])
 
@@ -175,7 +177,7 @@ export function LyricsSettingsPopup() {
   }, [])
 
   /** 单选组的写入：radix 在"再点一次已选中项"时给空串，那一支什么都不写。 */
-  const pick = useCallback((key: "style" | "layout" | "size") => (value: string) => {
+  const pick = useCallback((key: "style" | "layout" | "size" | "mode") => (value: string) => {
     if (value === "") return
     configure({ [key]: value })
   }, [configure])
@@ -196,6 +198,15 @@ export function LyricsSettingsPopup() {
           <PopoverTitle>桌面歌词外观</PopoverTitle>
         </PopoverHeader>
         <Separator />
+
+        <Field label="位置">
+          <ToggleGroup type="single" size="sm" variant="outline" value={config.mode}
+            onValueChange={pick("mode")} data-testid="lyrics-target">
+            <ToggleGroupItem value="desktop" data-testid="lyrics-target-desktop">桌面</ToggleGroupItem>
+            <ToggleGroupItem value="taskbar" disabled={!taskbarSupported} data-testid="lyrics-target-taskbar">任务栏（Beta）</ToggleGroupItem>
+          </ToggleGroup>
+        </Field>
+        {taskbarSupported ? null : <p className="text-xs text-muted-foreground" data-testid="lyrics-target-note">任务栏歌词仅支持 Windows</p>}
 
         <Field label="样式">
           <ToggleGroup type="single" size="sm" variant="outline" value={config.style}

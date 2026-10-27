@@ -241,6 +241,23 @@ export function modeLabel(id) {
   return MODE_LABELS[id] ?? MODE_LABELS[DEFAULT_LYRICS_CONFIG.mode];
 }
 
+/** 歌词显示目标：off（关闭）、desktop（桌面悬浮）、taskbar（任务栏）。 */
+export const LYRICS_TARGETS = ["off", "desktop", "taskbar"];
+
+/** 当前目标：没开就是 off，开着就看模式。 */
+export function lyricsTargetOf(on, mode) {
+  if (on !== true) return "off";
+  return mode === "taskbar" ? "taskbar" : "desktop";
+}
+
+/** 切到某个目标要做什么：mode 为 null 表示不改模式，visible 为 null 表示不改开关。 */
+export function lyricsTargetPlan(on, mode, target) {
+  const current = mode === "taskbar" ? "taskbar" : "desktop";
+  if (target === "off") return { mode: null, visible: on === true ? false : null };
+  if (target !== "desktop" && target !== "taskbar") return { mode: null, visible: null };
+  return { mode: target === current ? null : target, visible: on === true ? null : true };
+}
+
 /**
  * 配置归一（纯函数）：`patch` 里**认不出的值一律不猜**，落回 `base` 里那一个合法值
  * （`base` 也认不出就落默认）。布尔只认真正的布尔——`"yes"`、`1` 都不算。

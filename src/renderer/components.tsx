@@ -18,9 +18,10 @@
  * 不做"点了看起来成功、其实什么都没存"的乐观更新。
  */
 import { useState } from "react"
-import type { ComponentType } from "react"
+import type { ComponentType, ReactElement } from "react"
 import {
   CaptionsIcon,
+  ChevronDownIcon,
   HeartIcon,
   ListMusicIcon,
   MusicIcon,
@@ -70,6 +71,7 @@ import {
   formatDuration,
 } from "./features/library/track-fields.mjs"
 import { PLAYBACK_MODES } from "./features/playback/player.mjs"
+import { lyricsTargetOf } from "./features/lyrics/lyrics-window.mjs"
 import { TRACK_MENU_TARGET } from "./features/shell/track-menu.mjs"
 import {
   playbackModeLabel,
@@ -79,7 +81,7 @@ import {
 } from "./features/playback/playback-state.mjs"
 import type { PlayerRuntime } from "./features/playback/player-runtime.ts"
 import type { PlayerState } from "./features/playback/use-player.ts"
-import type { LyricsWindowBinding } from "./use-lyrics-window.ts"
+import type { LyricsToggleSurface, LyricsWindowBinding } from "./use-lyrics-window.ts"
 import { TrackRowMenu, type TrackRowActions } from "./track-menu.tsx"
 
 /** 空态：一句话（文案来自纯逻辑模块，克制且不冒充）。 */
@@ -452,6 +454,30 @@ export function lyricsToggleView(lyrics?: LyricsWindowBinding | null): {
   return { on, mode, label: `${on ? "隐藏" : "显示"}${surface}` }
 }
 
+/** 歌词显示目标的快捷切换（播放栏与沉浸页共用，触发按钮由调用方给出）。 */
+export function LyricsTargetMenu({ lyrics, surface, trigger }: {
+  lyrics: LyricsWindowBinding
+  surface: LyricsToggleSurface
+  trigger: ReactElement
+}) {
+  const view = lyricsToggleView(lyrics)
+  const target = lyricsTargetOf(view?.on, view?.mode)
+  const taskbarSupported = lyrics.taskbar?.supported === true
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-52" data-testid={`${surface}-lyrics-target-menu`}>
+        <DropdownMenuRadioGroup value={target} onValueChange={(next) => lyrics.selectTarget(next as "off" | "desktop" | "taskbar", surface)}>
+          <DropdownMenuRadioItem value="off">关闭歌词</DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="desktop">桌面歌词</DropdownMenuRadioItem>
+          <DropdownMenuRadioItem value="taskbar" disabled={!taskbarSupported}>任务栏歌词（Beta）</DropdownMenuRadioItem>
+        </DropdownMenuRadioGroup>
+        {taskbarSupported ? null : <p className="px-2 py-1.5 text-xs text-muted-foreground">任务栏歌词仅支持 Windows</p>}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
 export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: PlayerBarProps) {
   const [dragMs, setDragMs] = useState<number | null>(null)
   const player = runtime.player
@@ -592,27 +618,26 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
           </Button>
         </div>
 
-        {/*
-          R46：歌词快捷开关搬到**尾部工具区**（用户裁决：传输组要回到 mode → previous → play → next）。
-
-          R45C 曾把它夹在播放与下一首之间（实测顺序 mode, previous, play, lyrics, next），
-          传输控件被一枚非传输按钮劈成两半——"播放→下一首"的肌肉记忆会点错。
-          现在它和传输组之间隔开（尾部工具区在右端，`justify-end`），语义一个字没变：
-          状态/标签仍只来自 `lyricsToggleView`，点击仍只转一次 `toggleVisible()`，
-          取反由 binding 的意图机决定（同一个任务里连点两次也不会把同一个 `true` 发两遍）。
-        */}
+        {/* 歌词开关与显示目标在尾部工具区，与传输组隔开 */}
         <div className="flex min-w-0 flex-1 items-center justify-end gap-1" data-testid="player-bar-trailing">
-          {lyricsView === null ? null : (
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={lyricsView.label}
-              aria-pressed={lyricsView.on}
-              data-testid="player-lyrics-toggle"
-              onClick={() => lyrics?.toggleVisible("player-bar")}
-            >
-              <CaptionsIcon />
-            </Button>
+          {lyricsView === null ? null : lyrics === null ? null : (
+            <>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={lyricsView.label}
+                aria-pressed={lyricsView.on}
+                data-testid="player-lyrics-toggle"
+                onClick={() => lyrics?.toggleVisible("player-bar")}
+              >
+                <CaptionsIcon />
+              </Button>
+              <LyricsTargetMenu lyrics={lyrics} surface="player-bar" trigger={
+                <Button variant="ghost" size="icon-sm" aria-label="选择歌词显示位置" data-testid="player-lyrics-target">
+                  <ChevronDownIcon />
+                </Button>
+              } />
+            </>
           )}
         </div>
       </div>

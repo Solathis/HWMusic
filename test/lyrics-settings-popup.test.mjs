@@ -122,16 +122,17 @@ test("R60 面板是官方 Popover（不是 Card，也不是 DropdownMenu），�
 
 test("R60 面板内容紧凑化：三个单选组 + 四个开关 + 颜色一行，锚点与 R50/R51 一致", () => {
   const code = stripComments(read(POPUP));
-  for (const label of ["桌面歌词外观", "样式", "方向", "字号", "透明", "面板", "横版", "竖版",
+  for (const label of ["桌面歌词外观", "样式", "位置", "方向", "字号", "透明", "面板", "横版", "竖版",
     "模糊", "缩放", "弹簧动画", "媒体按钮", "颜色"]) {
     assert.ok(code.includes(label), `面板必须包含「${label}」`);
   }
-  // 样式 / 方向 / 字号：单选组（不是菜单项，点一下不该关面板）
-  assert.equal((code.match(/<ToggleGroup type="single"/g) ?? []).length, 3, "三组单选：样式、方向、字号");
+  // 位置 / 样式 / 方向 / 字号：单选组（不是菜单项，点一下不该关面板）
+  assert.equal((code.match(/<ToggleGroup type="single"/g) ?? []).length, 4, "四组单选：位置、样式、方向、字号");
   assert.match(code, /from "\.\/components\/ui\/toggle-group"/, "单选组来自 shadcn 原语");
   for (const testid of [
     "lyrics-style-clean", "lyrics-style-panel", "lyrics-layout-horizontal", "lyrics-layout-vertical",
     "lyrics-appearance-color", "lyrics-appearance-color-reset",
+    "lyrics-target-desktop", "lyrics-target-taskbar",
   ]) {
     assert.ok(code.includes(testid), `R50 的稳定锚点必须保留：${testid}`);
   }

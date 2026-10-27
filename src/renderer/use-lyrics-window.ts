@@ -7,6 +7,7 @@ import {
   DEFAULT_LYRICS_CONFIG,
   LYRICS_STATUS,
   importPlanOf,
+  lyricsTargetPlan,
 } from "./features/lyrics/lyrics-window.mjs"
 import { createProgressPump } from "./features/lyrics/progress-pump.mjs"
 import { trackArtistsOrNull, trackDurationOf, trackNameOrNull } from "./features/library/track-fields.mjs"
@@ -42,6 +43,8 @@ export interface LyricsWindowBinding {
    * `surface` 说明是哪一面按的：失败时那句话只印在那一面（同一个失败在界面上只有一句）。
    */
   toggleVisible: (surface?: LyricsToggleSurface) => void
+  /** 直接切到关闭 / 桌面歌词 / 任务栏歌词（先改模式，再开窗；失败只记日志）。 */
+  selectTarget: (target: "off" | "desktop" | "taskbar", surface?: LyricsToggleSurface) => void
   /**
    * 上一次开关失败的人话（原因 + 下一步）；`null` = 没有失败。
    * 播放栏与沉浸页在**发起面**直接显示它（不另弹 toast，也不只写 console）。
@@ -195,6 +198,16 @@ export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): Lyr
     void intent.request(!current, surface ?? null)
   }, [intent])
 
+  const selectTarget = useCallback((target: "off" | "desktop" | "taskbar", surface?: LyricsToggleSurface) => {
+    const { pending } = intent.snapshot()
+    const on = (pending ?? statusRef.current.requestedVisible ?? statusRef.current.visible) === true
+    const plan = lyricsTargetPlan(on, statusRef.current.config?.mode, target)
+    void (async () => {
+      if (plan.mode !== null) await bridge.applyConfig({ mode: plan.mode })
+      if (plan.visible !== null) await intent.request(plan.visible, surface ?? null)
+    })().catch((cause: unknown) => log("歌词显示目标没能切换：", cause))
+  }, [bridge, intent])
+
   const retryToggle = useCallback(() => {
     void intent.retry()
   }, [intent])
@@ -244,6 +257,7 @@ export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): Lyr
       taskbar,
       setVisible,
       toggleVisible,
+      selectTarget,
       toggleError: toggleState.error,
       toggleErrorSurface: (toggleState.surface as LyricsToggleSurface | null) ?? null,
       retryToggle,
@@ -264,6 +278,7 @@ export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): Lyr
       taskbar,
       setVisible,
       toggleVisible,
+      selectTarget,
       retryToggle,
       dismissToggleError,
       updateConfig,
