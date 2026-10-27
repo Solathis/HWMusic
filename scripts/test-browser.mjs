@@ -180,6 +180,7 @@ const guardRunLogEntries = () => [
 ];
 let runLogPlan = { failTimes: 0, mode: "entries" };
 const runLogReads = [];
+const runLogScopes = [];
 let dragCalls = 0;
 /** R45B：官方 startResizeDragging 的方向记录（缩放手柄"真的调了官方 API"按它判）。 */
 const resizeCalls = [];
@@ -429,6 +430,7 @@ mockIPC(async (command, args) => {
   /** R56：日志文件的夹具（失败、空文件、正常三种都由 runLogPlan 造）。 */
   if (command === "core_read_run_log") {
     runLogReads.push(Math.round(performance.now()));
+    runLogScopes.push(args?.scope ?? null);
     if (runLogPlan.failTimes > 0) {
       runLogPlan = { ...runLogPlan, failTimes: runLogPlan.failTimes - 1 };
       throw { kind: "internal", message: "守卫夹具：这一次日志读取被故意拒绝" };
@@ -570,7 +572,8 @@ function Guard() {
       /** R56：日志夹具（mode=entries|empty，failTimes）与读取次数。 */
       setRunLogPlan: (patch) => { runLogPlan = { ...runLogPlan, ...(patch ?? {}) }; },
       runLogReads: () => runLogReads.slice(),
-      resetRunLog: () => { runLogPlan = { failTimes: 0, mode: "entries" }; runLogReads.length = 0; },
+      runLogScopes: () => runLogScopes.slice(),
+      resetRunLog: () => { runLogPlan = { failTimes: 0, mode: "entries" }; runLogReads.length = 0; runLogScopes.length = 0; },
       /** R56：经**真实广播通道**播一条 app:notice（提示条目的来源是这条广播）。 */
       async emitNotice(text) {
         await emit("core:event", { channel: "app:notice", payload: { text } });
@@ -3956,6 +3959,31 @@ export async function checkSettingsLogPane(page, guardDir, add) {
   await page.waitForTimeout(150);
 }
 
+/** 日志页默认只读本次启动，切到「全部」后改读整份文件。 */
+export async function checkRunLogScope(page, guardDir, add) {
+  await page.evaluate(() => window.__guard.resetRunLog());
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByTestId("settings-page").waitFor();
+  await page.getByTestId("settings-page").getByRole("tab", { name: "日志", exact: true }).click();
+  await page.getByTestId("log-terminal").waitFor();
+  await page.waitForTimeout(300);
+  const first = await page.evaluate(() => window.__guard.runLogScopes());
+  const pressed = await page.evaluate(() => document.querySelector('[data-testid="log-scope-session"]')?.getAttribute("data-state") ?? null);
+  await page.getByTestId("log-scope-all").click();
+  await page.waitForTimeout(300);
+  const afterAll = await page.evaluate(() => window.__guard.runLogScopes());
+  await page.screenshot({ path: path.join(guardDir, "r72-log-scope.png") });
+  await page.getByTestId("log-scope-session").click();
+  await page.waitForTimeout(200);
+  add("r72-log-scope-session-default-then-all",
+    first.length >= 1 && first.every((value) => value === "session") && pressed === "on"
+      && afterAll.length > first.length && afterAll.at(-1) === "all",
+    JSON.stringify({ first, pressed, afterAll }));
+  await page.evaluate(() => window.__guard.resetRunLog());
+  await page.getByRole("button", { name: "我的收藏", exact: true }).click();
+  await page.waitForTimeout(150);
+}
+
 /**
  * R52：沉浸式歌词**禁止改色**——桌面歌词的颜色与它无关（R50 的 `playerLyrics` 已整段删除）。
  *
@@ -6019,6 +6047,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     await checked("r60-lyrics-color-swatches", () => checkLyricsColorSwatches(page, guardDir, add));
     /** R56：设置页「日志」标签（日志文件条目 + 级别标识 + 筛选 + 脱敏 + 空态）。 */
     await checked("r56-settings-log-pane", () => checkSettingsLogPane(page, guardDir, add));
+    await checked("r72-log-scope", () => checkRunLogScope(page, guardDir, add));
     await checked("r52-immersive-lyrics-color-fixed", () => checkImmersiveLyricsColorIsFixed(page, guardDir, add));
     /**
      * R45C：播放栏/沉浸页快捷开关的真行为（延迟 IPC 下的双击、拒绝后恢复、两种模式、菜单层级）。

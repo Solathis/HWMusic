@@ -11,6 +11,26 @@ use serde::Serialize;
 /// 一次最多返回多少条。
 pub const READ_LIMIT: usize = 500;
 
+/// 每次启动写的标记行：日志页默认只看最后一次标记之后的条目。
+pub const SESSION_MARKER: &str = "运行日志：本次启动";
+
+/// 只保留最后一次启动标记（含）之后的行；找不到标记就原样返回。
+pub fn session_slice(lines: Vec<String>) -> Vec<String> {
+    match lines.iter().rposition(|line| line.contains(SESSION_MARKER)) {
+        Some(index) => lines.into_iter().skip(index).collect(),
+        None => lines,
+    }
+}
+
+/// 日志页的范围参数：缺省或 "session" 只看本次启动，"all" 看整份文件。
+pub fn session_scope(scope: Option<&str>) -> Result<bool, crate::bridge::CoreError> {
+    match scope {
+        None | Some("session") => Ok(true),
+        Some("all") => Ok(false),
+        Some(_) => Err(crate::bridge::CoreError::new("invalid_payload", "日志范围只接受 session 或 all")),
+    }
+}
+
 /// 从文件尾部读多少字节（足够 500 条，又不把 4MB 日志整份读进内存）。
 const TAIL_WINDOW: u64 = 512 * 1024;
 
@@ -378,11 +398,12 @@ pub fn read_window(path: &Path, window: u64) -> io::Result<Vec<String>> {
 }
 
 /// 目录里最新日志文件的最后 `limit` 条（旧的在前）。
-pub fn read_entries(dir: &Path, limit: usize) -> io::Result<Vec<RunLogEntry>> {
+pub fn read_entries(dir: &Path, limit: usize, session_only: bool) -> io::Result<Vec<RunLogEntry>> {
     let Some(path) = newest_log_file(dir) else {
         return Ok(Vec::new());
     };
     let lines = read_tail(&path, limit)?;
+    let lines = if session_only { session_slice(lines) } else { lines };
     Ok(lines
         .into_iter()
         .map(|line| {
@@ -574,7 +595,7 @@ mod tests {
             .collect();
         write_lines(&dir, "华为音乐第三方客户端.log", &lines);
 
-        let entries = read_entries(&dir, 3).expect("读条目");
+        let entries = read_entries(&dir, 3, false).expect("读条目");
         assert_eq!(entries.len(), 3, "只要最后 3 条");
         assert_eq!(entries[2].message, "第 7 条 token=***", "返回前必须脱敏");
         assert!(entries.iter().all(|entry| !entry.message.contains("secret")), "任何一条都不许带凭据");
@@ -585,7 +606,7 @@ mod tests {
     #[test]
     fn missing_directory_reads_as_empty_not_an_error() {
         let dir = scratch("missing").join("nope");
-        assert_eq!(read_entries(&dir, 10).expect("没有日志目录不是错误"), Vec::new());
+        assert_eq!(read_entries(&dir, 10, false).expect("没有日志目录不是错误"), Vec::new());
         assert_eq!(newest_log_file(&dir), None);
     }
 
@@ -600,5 +621,51 @@ mod tests {
         assert_eq!(resolve_dir(None, Some(fallback.clone())), fallback, "没设旋钮时跟插件默认落点");
         assert_eq!(resolve_dir(Some("relative"), Some(fallback.clone())), fallback, "相对路径不算覆盖");
         assert_eq!(resolve_dir(None, None), PathBuf::from(crate::LOG_DIR_NAME), "两级都取不到时不许 panic");
+    }
+
+    #[test]
+    fn session_slice_keeps_only_the_last_launch() {
+        let lines: Vec<String> =
+            ["a", SESSION_MARKER, "b", SESSION_MARKER, "c"].iter().map(|line| line.to_string()).collect();
+        assert_eq!(
+            session_slice(lines),
+            vec![SESSION_MARKER.to_string(), "c".to_string()],
+            "两个标记只留最后一个及其后的行"
+        );
+
+        let no_marker: Vec<String> = ["a", "b"].iter().map(|line| line.to_string()).collect();
+        assert_eq!(session_slice(no_marker.clone()), no_marker, "没有标记就原样返回");
+    }
+
+    #[test]
+    fn session_scope_accepts_session_and_all_and_rejects_the_rest() {
+        assert_eq!(session_scope(None).ok(), Some(true), "缺省只看本次启动");
+        assert_eq!(session_scope(Some("session")).ok(), Some(true));
+        assert_eq!(session_scope(Some("all")).ok(), Some(false), "all 看整份文件");
+        assert!(session_scope(Some("bogus")).is_err(), "只接受 session 或 all");
+    }
+
+    #[test]
+    fn session_only_reads_start_after_the_last_marker() {
+        let dir = scratch("session");
+        let lines: Vec<String> = vec![
+            "[2026-10-26][05:00:00][hwmusic_core][WARN] 上一次启动的旧警告".to_string(),
+            format!("[2026-10-26][05:00:01][hwmusic_core][INFO] {SESSION_MARKER}（pid 1）"),
+            "[2026-10-26][05:00:02][hwmusic_core][WARN] 上一次启动的旧警告".to_string(),
+            format!("[2026-10-26][05:00:03][hwmusic_core][INFO] {SESSION_MARKER}（pid 2）"),
+            "[2026-10-26][05:00:04][hwmusic_core][INFO] 本次启动的日志".to_string(),
+        ];
+        write_lines(&dir, "华为音乐第三方客户端.log", &lines);
+
+        let entries = read_entries(&dir, 10, true).expect("读条目");
+        assert_eq!(entries.len(), 2, "只留最后一次标记及其后的行：{entries:?}");
+        assert!(entries[0].message.contains(SESSION_MARKER), "标记那一条自己也在里面：{entries:?}");
+        assert_eq!(entries[1].message, "本次启动的日志");
+        assert_eq!(
+            read_entries(&dir, 10, false).expect("读条目").len(),
+            5,
+            "all 仍是整份文件"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

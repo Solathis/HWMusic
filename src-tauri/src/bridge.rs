@@ -192,8 +192,8 @@ pub enum Effect {
         channel: String,
         payload: Value,
     },
-    /// 进程退出：结清 pending、关写入端，此后调用立刻失败而不是再等超时
-    CoreGone { code: Option<i32> },
+    /// 进程退出：结清 pending、关写入端；requested 表示是否由我们主动请求退出
+    CoreGone { code: Option<i32>, requested: bool },
     /// 只进日志（协议异常、提示文本）
     Notice(String),
 }
@@ -447,6 +447,7 @@ pub struct CoreShared {
     answered: Mutex<AnsweredIds>,
     next_id: AtomicU64,
     closed: AtomicBool,
+    shutdown_requested: AtomicBool,
 }
 
 impl CoreShared {
@@ -457,6 +458,7 @@ impl CoreShared {
             answered: Mutex::new(AnsweredIds::default()),
             next_id: AtomicU64::new(1),
             closed: AtomicBool::new(false),
+            shutdown_requested: AtomicBool::new(false),
         })
     }
 
@@ -549,6 +551,10 @@ impl CoreShared {
         self.close_write_end();
         settled
     }
+
+    /// 标记"是我们主动请求它退出的"（收尸时先标记，再关写入端）。
+    pub fn mark_shutdown_requested(&self) { self.shutdown_requested.store(true, Ordering::SeqCst); }
+    pub fn shutdown_requested(&self) -> bool { self.shutdown_requested.load(Ordering::SeqCst) }
 
     /// 关写入端（幂等）：sidecar 收到 stdin EOF 会自己 exit(0)。
     pub fn close_write_end(&self) {

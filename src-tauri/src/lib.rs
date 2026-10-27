@@ -737,6 +737,7 @@ pub fn run() {
             let data_root = webview_data_root(handle)?;
             // R27（用户三项之 3）：数据根与它的来源先落一行——"会话为什么不在"的一半答案在这里。
             // 位置在建窗之前：建窗失败（`os error 5` 那类）时，这一行是唯一说出"当时读的是哪个根"的记录。
+            log::info!("{}（pid {}）", run_log::SESSION_MARKER, std::process::id());
             log::info!(
                 "{}",
                 data_root_note(std::env::var(DATA_DIR_ENV).ok().as_deref(), &data_root)
@@ -800,8 +801,8 @@ pub fn run() {
             //   `ShortcutState`，用户看到的是"现在用的是哪个键"，不是"设置里写着另一个键"。
             // - 注册不上**不拦启动**：没有快捷键的用户仍然有主界面与托盘。
             let shortcut_report = shortcuts::install(handle);
-            for text in shortcuts::shortcut_notices(&shortcut_report, tray::available(handle)) {
-                log::warn!("快捷键：{text}");
+            for (level, text) in shortcuts::shortcut_log_entries(&shortcut_report, tray::available(handle)) {
+                log::log!(level, "快捷键：{text}");
                 commands::emit_core_event(handle, crate::bridge::APP_NOTICE, serde_json::json!({ "text": text }));
             }
             app.manage(shortcuts::ShortcutState::new(shortcut_report));
@@ -1726,8 +1727,8 @@ mod tests {
         let compact: String = setup[start..end].chars().filter(|c| !c.is_whitespace()).collect();
 
         assert!(
-            compact.contains("shortcuts::shortcut_notices("),
-            "失败与回退要经 shortcut_notices 逐条问出来：{compact}"
+            compact.contains("shortcuts::shortcut_log_entries("),
+            "失败与回退要经 shortcut_log_entries 逐条问出来（连同日志级别）：{compact}"
         );
         assert!(
             compact.contains("tray::available(handle)"),

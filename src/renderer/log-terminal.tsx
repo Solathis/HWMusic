@@ -16,6 +16,7 @@ import { Badge } from "./components/ui/badge"
 import { Button } from "./components/ui/button"
 import { Switch } from "./components/ui/switch"
 import { Label } from "./components/ui/label"
+import { ToggleGroup, ToggleGroupItem } from "./components/ui/toggle-group"
 import { EmptyState } from "./components"
 import { onCoreEvent, readRunLog } from "./host-api"
 import { APP_NOTICE } from "../shared/channels.ts"
@@ -29,6 +30,8 @@ import {
   RUN_LOG_LEVEL_LABELS,
   RUN_LOG_NO_MATCH_TEXT,
   RUN_LOG_DEFAULT_LEVELS,
+  RUN_LOG_SCOPES,
+  RUN_LOG_SCOPE_LABELS,
   filterRunLogEntries,
   mergeRunLogEntries,
   runLogCountText,
@@ -97,10 +100,11 @@ export function LogTerminal({ notices = [] }: { notices?: LogEntry[] }) {
   const [levels, setLevels] = useState<string[]>(() => [...RUN_LOG_DEFAULT_LEVELS])
   const [query, setQuery] = useState("")
   const [autoRefresh, setAutoRefresh] = useState(false)
+  const [scope, setScope] = useState<"session" | "all">("session")
 
   const refresh = useCallback(async () => {
     try {
-      const answer = await readRunLog()
+      const answer = await readRunLog(scope)
       setPayload(answer)
       setFailed(false)
     } catch {
@@ -108,7 +112,7 @@ export function LogTerminal({ notices = [] }: { notices?: LogEntry[] }) {
       setPayload([])
       setFailed(true)
     }
-  }, [])
+  }, [scope])
 
   useEffect(() => {
     void refresh()
@@ -127,6 +131,15 @@ export function LogTerminal({ notices = [] }: { notices?: LogEntry[] }) {
   return (
     <div className="flex flex-col gap-2" data-testid="log-terminal">
       <div className="flex flex-wrap items-center gap-2">
+        <ToggleGroup type="single" size="sm" variant="outline" value={scope}
+          onValueChange={(next) => { if (next === "session" || next === "all") setScope(next) }}
+          aria-label="日志范围" data-testid="log-scope">
+          {RUN_LOG_SCOPES.map((value) => (
+            <ToggleGroupItem key={value} value={value} data-testid={`log-scope-${value}`}>
+              {RUN_LOG_SCOPE_LABELS[value as "session" | "all"]}
+            </ToggleGroupItem>
+          ))}
+        </ToggleGroup>
         {/* 级别多选：四档都点得开，最后一档取消不掉（见 toggleLevel） */}
         <div className="flex flex-wrap items-center gap-1" role="group" aria-label="级别筛选">
           {RUN_LOG_LEVELS.map((level) => {

@@ -403,7 +403,7 @@ impl SidecarProcess {
             let gone = CoreError::new("core_gone", format!("sidecar 进程已退出（退出码 {code:?}）"));
             let settled = shared.core_gone(gone);
             log::info!("core 进程结束：退出码 {code:?}，结清在途调用 {settled} 个");
-            let _ = sender.send(Effect::CoreGone { code });
+            let _ = sender.send(Effect::CoreGone { code, requested: shared.shutdown_requested() });
         });
 
         let effects = thread::spawn(move || {
@@ -428,6 +428,7 @@ impl SidecarProcess {
             "core 收尸（{reason}）：关闭写入端并等待退出（在途调用 {} 个）",
             self.shared.pending_len()
         );
+        self.shared.mark_shutdown_requested();
         self.shared.close_write_end();
         if let Some(code) = reap(&self.child, SHUTDOWN_GRACE) {
             log::info!("core 已退出（退出码 {code:?}）");
@@ -723,11 +724,21 @@ mod tests {
             .unwrap()
             .iter()
             .find_map(|effect| match effect {
-                Effect::CoreGone { code } => Some(*code),
+                Effect::CoreGone { code, .. } => Some(*code),
                 _ => None,
             })
             .flatten();
         assert_eq!(core_gone, Some(0), "sidecar 收到 stdin EOF 应以 0 退出（双向收尸）");
+        let requested = effects
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::CoreGone { requested, .. } => Some(*requested),
+                _ => None,
+            })
+            .expect("帧泵必须报 CoreGone");
+        assert!(requested, "这一次是我们主动 terminate 的，CoreGone 要带 requested == true");
         assert!(started.elapsed() < Duration::from_secs(20));
         assert!(process.shared().is_closed());
     }

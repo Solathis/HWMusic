@@ -20,6 +20,8 @@ import {
   RUN_LOG_LEVELS,
   RUN_LOG_LEVEL_BADGE,
   RUN_LOG_READ_LIMIT,
+  RUN_LOG_SCOPES,
+  RUN_LOG_SCOPE_LABELS,
 } from "../src/renderer/features/settings/run-log.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -48,7 +50,7 @@ test("命令与 Rust 侧同源：名字逐字相等，条数上限两边一致",
 
   const hostApi = read("src/renderer/host-api.ts");
   assert.match(hostApi, /CORE_READ_RUN_LOG/, "host-api 用共享常量（不写字面量）");
-  assert.match(hostApi, /invoke<[^>]*>\(\s*CORE_READ_RUN_LOG\s*\)/, "封装真的调了那条命令");
+  assert.match(hostApi, /invoke<[^>]*>\(\s*CORE_READ_RUN_LOG\s*,\s*\{ scope \}\s*\)/, "封装真的调了那条命令，并带上范围");
 
   const rust = read("src-tauri/src/run_log.rs");
   assert.match(rust, new RegExp(`pub const READ_LIMIT: usize = ${RUN_LOG_READ_LIMIT};`),
@@ -124,6 +126,19 @@ test("刷新：按钮 + 自动刷新开关，失败与空态各有说法", () =>
   assert.match(code, /RUN_LOG_FAILURE_TEXT/, "读失败是第三句");
   assert.match(code, /<EmptyState text=\{RUN_LOG_EMPTY_TEXT\}/, "空态真的显示出来");
   assert.match(code, /<EmptyState text=\{RUN_LOG_NO_MATCH_TEXT\}/, "筛空真的显示出来");
+});
+
+test("日志范围：默认只读本次启动，切成「全部」时把 scope 交给命令", () => {
+  assert.deepEqual(RUN_LOG_SCOPES, ["session", "all"], "两个范围，session 在前");
+  assert.equal(RUN_LOG_SCOPE_LABELS.session, "本次启动");
+  assert.equal(RUN_LOG_SCOPE_LABELS.all, "全部");
+
+  const terminal = stripComments(read(TERMINAL_FILE));
+  assert.match(terminal, /readRunLog\(scope\)/, "读日志时带上当前范围");
+  assert.match(terminal, /data-testid="log-scope"/, "范围切换真的在界面上");
+
+  const hostApi = read("src/renderer/host-api.ts");
+  assert.match(hostApi, /invoke<unknown>\(CORE_READ_RUN_LOG, \{ scope \}\)/, "范围作为命令参数传下去");
 });
 
 test("不提供导出/复制：没有新增 dialog/fs/clipboard 的能力面", () => {

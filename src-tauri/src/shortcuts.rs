@@ -404,13 +404,21 @@ pub fn display_combo(combo: &str, macos: bool) -> String {
     combo.replace("CmdOrCtrl", if macos { "Cmd" } else { "Ctrl" })
 }
 
-/// 一条问题一条提示：回退与全废才有话可说，一切正常时**不打扰用户**。
-pub fn shortcut_notices(report: &ShortcutReport, tray_available: bool) -> Vec<String> {
+/// 每条快捷键提示连同日志级别：改用备选组合成功只是信息，一个组合都没注册上才是警告。
+pub fn shortcut_log_entries(report: &ShortcutReport, tray_available: bool) -> Vec<(log::Level, String)> {
     report
         .plans()
         .iter()
-        .filter_map(|plan| shortcut_notice(plan, tray_available))
+        .filter_map(|plan| {
+            let level = if plan.chosen.is_some() { log::Level::Info } else { log::Level::Warn };
+            shortcut_notice(plan, tray_available).map(|text| (level, text))
+        })
         .collect()
+}
+
+/// 一条问题一条提示：回退与全废才有话可说，一切正常时**不打扰用户**。
+pub fn shortcut_notices(report: &ShortcutReport, tray_available: bool) -> Vec<String> {
+    shortcut_log_entries(report, tray_available).into_iter().map(|(_, text)| text).collect()
 }
 
 /// 单个动作的提示文案（`None` = 一切按计划，不必打扰用户）。
@@ -739,6 +747,22 @@ mod tests {
         assert!(text.contains("托盘菜单"), "指路托盘菜单：{text}");
         assert!(text.contains("该组合已被其它程序注册"), "带上原因：{text}");
         assert!(text.contains("1 个组合"), "说清试了几个（媒体键只有一条路）：{text}");
+    }
+
+    /// 回退成功只是信息，一个组合都没注册上才是警告。
+    #[test]
+    fn only_a_fully_dead_shortcut_is_logged_as_a_warning() {
+        let report = report_of(vec![
+            plan_of(ShortcutAction::ToggleLyrics, &["CmdOrCtrl+Alt+L"]),
+            plan_binding(binding(ShortcutAction::PlayPause), free_nothing()),
+        ]);
+        let entries = shortcut_log_entries(&report, true);
+
+        let texts: Vec<String> = entries.iter().map(|(_, text)| text.clone()).collect();
+        assert_eq!(texts, shortcut_notices(&report, true), "两边说的是同一件事");
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert_eq!(entries[0].0, log::Level::Info, "回退成功不是问题：{:?}", entries[0].1);
+        assert_eq!(entries[1].0, log::Level::Warn, "全都注册不上才是问题：{:?}", entries[1].1);
     }
 
     /// 托盘没装上还指路托盘菜单 = 让用户去一个不存在的地方找。这时只能指主界面。

@@ -728,8 +728,12 @@ pub fn apply_effect(app: &AppHandle, shared: &Arc<CoreShared>, effect: Effect) {
             channel,
             payload,
         } => apply_host_request(app, shared, &id, &channel, &payload),
-        Effect::CoreGone { code } => {
-            log::warn!("core（sidecar）已退出：退出码 {code:?}；在途调用已结清，此后调用立刻失败");
+        Effect::CoreGone { code, requested } => {
+            if requested {
+                log::info!("core（sidecar）按请求退出：退出码 {code:?}");
+            } else {
+                log::warn!("core（sidecar）已退出：退出码 {code:?}；在途调用已结清，此后调用立刻失败");
+            }
         }
         Effect::Notice(text) => log::info!("core 提示：{text}"),
     }
@@ -1224,13 +1228,17 @@ pub fn core_get_tray_available(webview: Webview) -> Result<bool, CoreError> {
 /// 只给主窗（与自启/托盘同一道门）：日志是宿主的诊断面，登录页与浮动控件不该读到。
 /// 每条 `message` 在返回前已脱敏（`run_log::redact`），渲染层拿到的就是能直接显示的东西。
 #[tauri::command]
-pub fn core_read_run_log(webview: Webview) -> Result<Vec<crate::run_log::RunLogEntry>, CoreError> {
+pub fn core_read_run_log(
+    webview: Webview,
+    scope: Option<String>,
+) -> Result<Vec<crate::run_log::RunLogEntry>, CoreError> {
     require_main_webview(webview.label())?;
+    let session_only = crate::run_log::session_scope(scope.as_deref())?;
     let dir = crate::run_log::resolve_dir(
         std::env::var(crate::DATA_DIR_ENV).ok().as_deref(),
         webview.path().app_log_dir().ok(),
     );
-    crate::run_log::read_entries(&dir, crate::run_log::READ_LIMIT).map_err(|source| {
+    crate::run_log::read_entries(&dir, crate::run_log::READ_LIMIT, session_only).map_err(|source| {
         log::warn!("读运行日志失败（{}）：{source}", dir.display());
         CoreError::new("internal", format!("读不到运行日志：{source}"))
     })

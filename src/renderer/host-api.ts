@@ -147,14 +147,14 @@ export async function getTrayAvailable(): Promise<boolean> {
 }
 
 /**
- * 运行日志（R56）：日志文件的最后 N 条（旧的在前）。
+ * 运行日志：日志文件的最后 N 条（旧的在前），默认只取本次启动之后的。
  *
  * 回执是**已经脱敏**的结构化条目（`{time, level, source, message}`）：脱敏在 Rust 侧做，
  * 渲染层不再有"原文"这一层可用。条数上限也在那里（`run_log::READ_LIMIT`）。
  */
-export async function readRunLog(): Promise<unknown> {
+export async function readRunLog(scope: "session" | "all" = "session"): Promise<unknown> {
   try {
-    return await invoke<unknown>(CORE_READ_RUN_LOG);
+    return await invoke<unknown>(CORE_READ_RUN_LOG, { scope });
   } catch (failure) {
     throw normalizeFailure(failure);
   }

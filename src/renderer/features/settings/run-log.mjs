@@ -25,6 +25,10 @@ export const RUN_LOG_LEVEL_LABELS = {
   error: "错误",
 };
 
+/** 日志范围：本次启动（默认）或整份日志文件。 */
+export const RUN_LOG_SCOPES = ["session", "all"];
+export const RUN_LOG_SCOPE_LABELS = { session: "本次启动", all: "全部" };
+
 /** 级别 → shadcn `Badge` 的**官方**变体（不写自定义颜色类）。 */
 /** @type {Record<string, "default" | "secondary" | "destructive" | "outline" | "ghost" | "link">} */
 export const RUN_LOG_LEVEL_BADGE = {
