@@ -1,15 +1,8 @@
 /**
- * 竖版桌面歌词的纯逻辑：当前句/下一句、字号、滚动偏移、逐字进度。
- * 数据仍是 AMLL 解析出的行与 `withKaraokeWords` 的逐字时间；字号与平移量的常数必须与
- * vertical-lyrics.css 的 clamp 逐一对齐（test/vertical-lyrics.test.mjs 钉住）。
+ * 竖版桌面歌词的纯逻辑：当前句/下一句、滚动偏移、逐字进度。
+ * 数据仍是 AMLL 解析出的行与 `withKaraokeWords` 的逐字时间；字号沿用横版档位（由样式表决定）。
  */
 
-/** 字号下限：再小就读不出字。 */
-export const VERTICAL_FONT_MIN_PX = 16;
-/** 字号上限：再大一列只放得下一个字。 */
-export const VERTICAL_FONT_MAX_PX = 96;
-/** 一列的厚度 ≈ 字号 × 这个系数（含行距），用来判"下一句那一列放不放得下"。 */
-export const VERTICAL_FONT_WIDTH_RATIO = 0.26;
 /** 视口左右留白（竖排的块轴两端）。 */
 export const VERTICAL_COLUMN_PADDING_PX = 8;
 /** 列厚系数：竖排一列占的横向空间不止字号本身（字距 + 行距）。 */
@@ -30,16 +23,6 @@ function finite(value) {
 function textOf(line) {
   if (line === null || line === undefined || !Array.isArray(line.words)) return "";
   return line.words.map((word) => (typeof word?.word === "string" ? word.word : "")).join("");
-}
-
-/**
- * 竖版字号（px）只由**窗口宽度**决定：宽窗字大、窄窗字小，两端夹住。
- * 坏入参一律落到下限（宁可小，不许算出 NaN 让整列消失）。
- */
-export function verticalFontPx(width) {
-  const value = finite(typeof width === "number" ? width : null);
-  if (value === null || value <= 0) return VERTICAL_FONT_MIN_PX;
-  return Math.round(clamp(value * VERTICAL_FONT_WIDTH_RATIO, VERTICAL_FONT_MIN_PX, VERTICAL_FONT_MAX_PX));
 }
 
 /**
@@ -151,6 +134,15 @@ export function karaokeStates(line, timeMs, karaoke = true) {
     if (token.startTime !== null && time >= token.startTime) return "active";
     return "pending";
   });
+}
+
+/** 正在唱的那个字的进度（0–1），用来连续扫亮；时间不全或不在这个字的范围内时为 0。 */
+export function wordProgress(token, timeMs) {
+  const start = typeof token?.startTime === "number" ? token.startTime : null;
+  const end = typeof token?.endTime === "number" ? token.endTime : null;
+  const time = finite(timeMs);
+  if (start === null || end === null || time === null || end <= start) return 0;
+  return clamp((time - start) / (end - start), 0, 1);
 }
 
 /**

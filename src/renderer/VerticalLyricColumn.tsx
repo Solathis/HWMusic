@@ -1,6 +1,6 @@
 /**
  * 竖版桌面歌词：一句一列，按演唱进度沿书写方向平移。
- * 判定（当前句/逐字状态/字号/平移量）全在 features/lyrics/vertical-lyrics.mjs；这里只渲染、量布局，
+ * 判定（当前句/逐字状态与进度/平移量）全在 features/lyrics/vertical-lyrics.mjs；这里只渲染、量布局，
  * 并把平移量写进 CSS 自定义属性（视觉值在 vertical-lyrics.css）。无帧时扫亮仍按进度消息推进。
  */
 import { useLayoutEffect, useMemo, useRef, useState } from "react"
@@ -11,10 +11,10 @@ import {
   karaokeTokens,
   lineProgress,
   nextColumnFits,
-  verticalFontPx,
   verticalFollowOffset,
   verticalLinePlan,
   verticalScrollOffset,
+  wordProgress,
 } from "./features/lyrics/vertical-lyrics.mjs"
 import { cn } from "./lib/utils"
 
@@ -122,8 +122,8 @@ export function VerticalLyricColumn({ lines, timeMs, karaoke }: VerticalLyricCol
 
   /** 时间驱动的基座位置 + 量出来的字位跟随修正（正在唱的字必须整块在视口里）。 */
   const progress = lineProgress(currentLine, timeMs, plan.next >= 0 ? Number(lines[plan.next]?.startTime) : null)
-  const singing = states.indexOf("active")
-  const box = singing >= 0 ? metrics.boxes[singing] : undefined
+  const activeIndex = states.indexOf("active")
+  const box = activeIndex >= 0 ? metrics.boxes[activeIndex] : undefined
   const base = verticalScrollOffset({
     contentHeight: metrics.contentHeight,
     viewportHeight: metrics.viewportHeight,
@@ -132,14 +132,19 @@ export function VerticalLyricColumn({ lines, timeMs, karaoke }: VerticalLyricCol
   const offset = box === undefined ? base : verticalFollowOffset({
     offset: base,
     charTop: box.top,
-    charHeight: box.height || verticalFontPx(metrics.viewportWidth),
+    charHeight: box.height || metrics.fontPx,
     contentHeight: metrics.contentHeight,
     viewportHeight: metrics.viewportHeight,
   })
 
+  const activeProgress = activeIndex < 0 ? 0 : wordProgress(column[activeIndex], timeMs)
+
   useLayoutEffect(() => {
-    viewportRef.current?.style.setProperty("--vertical-lyric-shift", `${Number(offset.toFixed(1))}px`)
-  }, [offset])
+    const root = viewportRef.current
+    root?.style.setProperty("--vertical-lyric-shift", `${Number(offset.toFixed(1))}px`)
+    // 正在唱的字只有一个，进度写在视口上即可，由样式表的 .is-active 读取
+    root?.style.setProperty("--vertical-word-progress", activeProgress.toFixed(3))
+  }, [offset, activeProgress])
 
   return (
     <div ref={viewportRef} className="vertical-lyric" data-testid="lyrics-vertical" data-vertical-current={plan.current}>

@@ -91,8 +91,6 @@ export function LyricsSettingsPopup() {
   const customColor = isCustomColor(config.customColor) ? config.customColor : null
   const swatchValue = customColor ?? themeHex ?? ""
   const geometry = bubble ?? defaultBubbleGeometry(panel.width)
-  /** 竖版的字号由窗口宽度决定，档位在竖版下不生效。 */
-  const sizeByWidth = config.mode === "desktop" && config.layout === "vertical"
 
   const acceptStatus = useCallback((payload: unknown) => {
     const next = payload as { ready?: boolean; config?: unknown; revision?: number; saveError?: unknown } | null
@@ -219,9 +217,8 @@ export function LyricsSettingsPopup() {
         </Field>
 
         <Field label="字号">
-          {/* 竖版字号由窗口宽度决定（容器查询单位），档位在竖版下没法生效：禁用并说清原因 */}
           <ToggleGroup type="single" size="sm" variant="outline" value={config.size}
-            disabled={sizeByWidth} onValueChange={pick("size")} data-testid="lyrics-size">
+            onValueChange={pick("size")} data-testid="lyrics-size">
             {LYRICS_FONT_STEPS.map((step) => (
               <ToggleGroupItem key={step.id} value={step.id} data-testid={`lyrics-size-${step.id}`}>
                 {fontStepLabel(step.id)}
@@ -229,11 +226,6 @@ export function LyricsSettingsPopup() {
             ))}
           </ToggleGroup>
         </Field>
-        {sizeByWidth ? (
-          <p className="text-xs text-muted-foreground" data-testid="lyrics-size-vertical-note">
-            竖版的字号随窗口宽度变化：拉宽窗口字就变大，这里不用挑档位。
-          </p>
-        ) : null}
 
         <Separator />
 

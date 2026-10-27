@@ -1,11 +1,5 @@
-/**
- * 竖版桌面歌词：自渲染的单列竖排，一句一列、按演唱进度平移，只用标准 CSS（无 canvas、无裸色值）。
- * 颜色只从 `.amll-lyrics-stage .vertical-lyric` 的变量映射继承（见 amll-theme.css），自定义色写在同一变量上。
- */
+/** 竖版桌面歌词：单列竖排，一句一列，按演唱进度平移；字号与颜色的别名在 amll-theme.css。 */
 .vertical-lyric {
-  /* 字号用容器查询单位：拉宽窗口字号变大。容器的申报在这一层，且这一层不放内边距——
-     `cqw` 量的是容器的内容盒，留白挪到轨道上，字号才正好等于"窗口宽度 × 比例"。 */
-  container-type: inline-size;
   position: relative;
   display: flex;
   width: 100%;
@@ -26,7 +20,8 @@
   width: 100%;
   height: 100%;
   padding-inline: 8px;
-  font-size: clamp(1rem, 26cqw, 6rem);
+  /* 与横版同一档位（别名在 amll-theme.css） */
+  font-size: var(--vertical-lyric-font-size);
   line-height: 1.15;
   /* 运行时量出来的平移量（VerticalLyricColumn 用 setProperty 写这一条自定义属性） */
   transform: translateY(var(--vertical-lyric-shift, 0px));
@@ -60,10 +55,22 @@
   color: inherit;
 }
 
-/* 已唱：满色；正在唱：满色（时间每帧推进，扫亮由状态切换完成，不加动画） */
-.vertical-lyric__word.is-sung,
+/* 已唱：满色 */
+.vertical-lyric__word.is-sung {
+  opacity: 1;
+}
+
+/* 正在唱：按 --vertical-word-progress（0–1，每帧更新）由上往下扫亮，边缘留一小段过渡 */
 .vertical-lyric__word.is-active {
   opacity: 1;
+  background-image: linear-gradient(
+    to bottom,
+    var(--vertical-lyric-color) calc(var(--vertical-word-progress, 0) * 100% - 0.15em),
+    color-mix(in oklab, var(--vertical-lyric-color) 45%, transparent) calc(var(--vertical-word-progress, 0) * 100% + 0.15em)
+  );
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
 }
 
 /* 未唱：压暗，但仍要看得清是哪个字 */
@@ -75,5 +82,10 @@
 @media (prefers-reduced-motion: reduce) {
   .vertical-lyric__track {
     transition: none;
+  }
+
+  .vertical-lyric__word.is-active {
+    background-image: none;
+    color: var(--vertical-lyric-color);
   }
 }

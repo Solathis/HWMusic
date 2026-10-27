@@ -9,18 +9,15 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import {
-  VERTICAL_FONT_MAX_PX,
-  VERTICAL_FONT_MIN_PX,
-  VERTICAL_FONT_WIDTH_RATIO,
   activeLyricIndex,
   karaokeStates,
   karaokeTokens,
   lineProgress,
   nextColumnFits,
-  verticalFontPx,
   verticalFollowOffset,
   verticalLinePlan,
   verticalScrollOffset,
+  wordProgress,
 } from "../src/renderer/features/lyrics/vertical-lyrics.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -40,21 +37,19 @@ const line = (startTime, endTime, text, extra = {}) => ({
 });
 
 // ---------------------------------------------------------------------------
-// 1. 字号：由窗口宽度决定，带上下限
+// 1. 逐字扫亮进度：正在唱的那个字按时间连续推进
 // ---------------------------------------------------------------------------
 
-test("R61 竖版字号随窗口宽度变化：比例来自宽度，上下限夹住极端窗口", () => {
-  assert.equal(verticalFontPx(260), Math.round(Math.min(VERTICAL_FONT_MAX_PX, 260 * VERTICAL_FONT_WIDTH_RATIO)));
-  assert.ok(verticalFontPx(380) > verticalFontPx(260), "宽窗字号必须更大");
-  assert.ok(verticalFontPx(220) < verticalFontPx(260), "窄窗字号必须更小");
-  assert.equal(verticalFontPx(40), VERTICAL_FONT_MIN_PX, "极窄窗口落到下限（再小就读不出字）");
-  assert.equal(verticalFontPx(4000), VERTICAL_FONT_MAX_PX, "极宽窗口落到上限（一列最多一个字也读不了）");
-  // 坏入参不猜：认不出宽度按下限，且不抛
-  for (const value of [undefined, null, Number.NaN, Number.POSITIVE_INFINITY, -260, "260"]) {
-    assert.equal(verticalFontPx(value), VERTICAL_FONT_MIN_PX, `坏入参 ${String(value)} 必须落到下限`);
-  }
-  assert.equal(VERTICAL_FONT_MIN_PX, 16);
-  assert.equal(VERTICAL_FONT_MAX_PX, 96);
+test("wordProgress：正在唱的字按时间连续推进，坏入参为 0", () => {
+  const token = { text: "字", startTime: 1000, endTime: 1400 };
+  assert.equal(wordProgress(token, 1000), 0);
+  assert.equal(wordProgress(token, 1100), 0.25);
+  assert.equal(wordProgress(token, 1300), 0.75);
+  assert.equal(wordProgress(token, 2000), 1);
+  assert.equal(wordProgress(token, 500), 0);
+  assert.equal(wordProgress({ text: "字", startTime: null, endTime: 1400 }, 1200), 0);
+  assert.equal(wordProgress({ text: "字", startTime: 1400, endTime: 1400 }, 1400), 0);
+  assert.equal(wordProgress(token, Number.NaN), 0);
 });
 
 // ---------------------------------------------------------------------------
@@ -179,18 +174,16 @@ test("R61 竖版下一句那一列：宽度足够才显示（列厚随字号）"
 // 5. 样式表与组件的静态约束
 // ---------------------------------------------------------------------------
 
-test("R61 竖版样式表：标准 CSS 竖排（writing-mode/text-orientation/nowrap）+ 容器查询单位字号", () => {
+test("R61 竖版样式表：标准 CSS 竖排（writing-mode/text-orientation/nowrap）+ 字号沿用横版档位", () => {
   const css = stripComments(read("src/renderer/vertical-lyrics.css"));
   assert.match(css, /writing-mode:\s*vertical-rl/, "竖排必须落在新组件的列上（不再借 AMLL 行盒）");
   assert.match(css, /text-orientation:\s*mixed/, "Unicode 默认竖排方向：CJK 直立、拉丁/数字旋转");
   assert.doesNotMatch(css, /text-orientation:\s*upright/, "全 upright 会把拉丁字母拉成方块");
   assert.match(css, /white-space:\s*nowrap/, "一句一列：不许被折成多列（不再出现 R45B/R46 的折列 + 横向滚动条）");
-  assert.match(css, /container-type:\s*inline-size/, "字号要用容器查询单位，容器必须自己申报");
-  const font = css.match(/font-size:\s*clamp\(\s*([\d.]+)rem\s*,\s*([\d.]+)cqw\s*,\s*([\d.]+)rem\s*\)/);
-  assert.ok(font, "竖版字号写成 clamp(下限, 宽度的百分比, 上限)");
-  assert.equal(Number(font[1]) * 16, VERTICAL_FONT_MIN_PX, "样式表的下限必须等于 verticalFontPx 的常数");
-  assert.equal(Number(font[2]), VERTICAL_FONT_WIDTH_RATIO * 100);
-  assert.equal(Number(font[3]) * 16, VERTICAL_FONT_MAX_PX, "样式表的上限必须等于 verticalFontPx 的常数");
+  assert.match(css, /\.vertical-lyric__track[^}]*font-size:\s*var\(--vertical-lyric-font-size\)/, "竖版字号沿用横版档位");
+  assert.doesNotMatch(css, /cqw|container-type/, "字号不再随窗口宽度变化");
+  assert.doesNotMatch(css, /--amll-/, "竖版样式表不直接引用 AMLL 变量");
+  assert.match(css, /\.vertical-lyric__word\.is-active[^}]*--vertical-word-progress/, "正在唱的字按进度连续扫亮");
   assert.match(css, /overflow:\s*hidden/, "竖版的滚动由进度驱动，不许出现原生滚动条");
   assert.match(css, /prefers-reduced-motion:\s*reduce[\s\S]*transition:\s*none/,
     "减少动效时取消平滑滚动（直接定位）");

@@ -2435,7 +2435,6 @@ export async function checkDesktopInteraction(page, guardDir, add) {
    * 横向滚动条、RTL 滚动容器）。竖版现在自渲染，选择器与几何判据都换成新组件的 DOM。
    */
   const verticalRootSelector = '[data-testid="lyrics-vertical"]';
-  const expectedFontPx = (width) => Math.round(Math.min(96, Math.max(16, width * 0.26)));
   /** 竖版几何：当前句每个字素框（Range 选中文字，不含 span 的盒子）、列、平移量、字号、译文/下一句。 */
   const verticalGeometry = (pad = 1) => page.evaluate(({ selector, tolerance }) => {
     const root = document.querySelector(selector);
@@ -2517,16 +2516,23 @@ export async function checkDesktopInteraction(page, guardDir, add) {
     JSON.stringify({ ...narrow, chars: narrow.chars.map((char) => `${char.text}@${char.x},${char.y}`) }));
   await page.screenshot({ path: path.join(guardDir, "r61-vertical-narrow.png") });
 
-  // ⑦b 字号随窗口宽度：宽 260 → 68px，宽 380 → 96px（上限），与纯函数同一套常数
+  // ⑦b 字号跟横版同一档位，不随窗口宽度变化
   await page.setViewportSize({ width: 380, height: 520 });
   await page.waitForTimeout(520);
   const wide = await verticalGeometry();
-  add("r61-vertical-font-follows-width",
-    Math.abs(narrow.fontSize - expectedFontPx(260)) <= 1.5 && Math.abs(wide.fontSize - expectedFontPx(380)) <= 1.5
-      && wide.fontSize > narrow.fontSize + 10 && wide.chars.length >= 5
+  const tierPx = await page.evaluate(() => {
+    const stage = document.querySelector('[data-testid="lyrics-window"]');
+    const raw = stage ? getComputedStyle(stage).getPropertyValue("--amll-lp-font-size").trim() : "";
+    const value = Number.parseFloat(raw);
+    if (!Number.isFinite(value)) return null;
+    return raw.endsWith("rem") ? value * 16 : value;
+  });
+  add("r70-vertical-font-follows-size-tier",
+    tierPx !== null && Math.abs(narrow.fontSize - tierPx) <= 1 && Math.abs(wide.fontSize - tierPx) <= 1
+      && wide.chars.length >= 5
       && wide.overflow !== null && wide.overflow.x === 0,
-    JSON.stringify({ narrow: { width: 260, font: narrow.fontSize, expected: expectedFontPx(260) },
-      wide: { width: 380, font: wide.fontSize, expected: expectedFontPx(380) } }));
+    JSON.stringify({ narrow: { fontSize: narrow.fontSize },
+      wide: { fontSize: wide.fontSize, chars: wide.chars.length, overflow: wide.overflow }, tierPx }));
   await page.screenshot({ path: path.join(guardDir, "r61-vertical-wide.png") });
 
   // ⑦c 方向：CJK 直立（字形框高 ≈ 字号）、拉丁/数字旋转（矮而宽）；整列没有被 transform 旋转
@@ -2580,6 +2586,47 @@ export async function checkDesktopInteraction(page, guardDir, add) {
       && karaokeDiff > 0.01 && pendingOpacity < sungOpacity,
     `逐字扫亮：已唱 ${sungOf(karaokeEarly)} → ${sungOf(karaokeLate)}，像素差异 ${(karaokeDiff * 100).toFixed(2)}%，未唱不透明度 ${pendingOpacity}`);
 
+  // ⑦e2 连续扫亮：同一个字在两个相邻时刻的进度都在 0–1 之间，且后一个更大
+  await showVertical(FIXTURE_LRC, 400);
+  const readSweep = () => page.evaluate(() => {
+    const viewport = document.querySelector('[data-testid="lyrics-vertical"]');
+    const raw = viewport ? getComputedStyle(viewport).getPropertyValue("--vertical-word-progress").trim() : "";
+    const active = viewport?.querySelector(".vertical-lyric__word.is-active") ?? null;
+    return {
+      progress: Number.parseFloat(raw),
+      text: (active?.textContent ?? "").trim(),
+      background: active ? getComputedStyle(active).backgroundImage : null,
+    };
+  });
+  const sweepSamples = [];
+  for (let t = 400; t <= 2800; t += 60) {
+    await setVerticalTime(t);
+    const sample = await readSweep();
+    if (Number.isFinite(sample.progress) && sample.progress > 0 && sample.progress < 1) {
+      sweepSamples.push({ t, progress: sample.progress, text: sample.text, background: sample.background });
+    }
+  }
+  let sweepPair = null;
+  for (let i = 0; i < sweepSamples.length && sweepPair === null; i += 1) {
+    const firstSample = sweepSamples[i];
+    const later = sweepSamples.find((sample) => sample.t > firstSample.t && sample.text === firstSample.text
+      && sample.progress > firstSample.progress);
+    if (later) sweepPair = { first: firstSample, second: later };
+  }
+  add("r70-vertical-karaoke-continuous",
+    sweepPair !== null
+      && sweepPair.first.background?.includes("linear-gradient") === true
+      && sweepPair.second.background?.includes("linear-gradient") === true,
+    JSON.stringify({
+      pair: sweepPair && {
+        first: { t: sweepPair.first.t, progress: sweepPair.first.progress, text: sweepPair.first.text },
+        second: { t: sweepPair.second.t, progress: sweepPair.second.progress, text: sweepPair.second.text },
+      },
+      samples: sweepSamples.length,
+    }));
+  if (sweepPair) await setVerticalTime(sweepPair.first.t);
+  await page.screenshot({ path: path.join(guardDir, "r70-vertical-karaoke-mid.png") });
+
   // ⑦f 译文：同一时间戳的第二行并成译文，落在相邻的第二列、字号略小
   await showVertical(R61_TRANSLATION_LRC, 700);
   const translated = await verticalGeometry();
@@ -2599,13 +2646,22 @@ export async function checkDesktopInteraction(page, guardDir, add) {
     return { property: style?.transitionProperty ?? null, duration: style?.transitionDuration ?? null };
   });
   const animated = await transitionOf();
+  /** 回到有正在唱的字的时刻，用来比较扫亮底色在两种动效偏好下的差异。 */
+  const sweepTime = sweepPair?.first.t ?? 1000;
+  await setVerticalTime(sweepTime);
+  const sweepAnimated = await readSweep();
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.waitForTimeout(200);
   const reducedMotion = await transitionOf();
+  await setVerticalTime(sweepTime);
+  const sweepReduced = await readSweep();
   add("r61-vertical-reduced-motion",
     animated.property !== null && animated.property !== "none" && animated.duration !== "0s"
       && (reducedMotion.property === "none" || reducedMotion.duration === "0s"),
     JSON.stringify({ animated, reduced: reducedMotion }));
+  add("r70-vertical-reduced-motion-no-sweep",
+    sweepReduced.background === "none" && sweepAnimated.background?.includes("linear-gradient") === true,
+    JSON.stringify({ sweepTime, animated: sweepAnimated, reduced: sweepReduced }));
   await page.emulateMedia({ reducedMotion: "no-preference" });
 
   // ⑦h 面板样式 + 深色主题：竖版在面板里同样是一列（控件/衬底/面板样式不受影响）
@@ -3091,29 +3147,32 @@ export async function checkLyricsSettingsPopup(page, port, guardDir, add) {
   add("r60-popup-style-layout-apply",
     styleLayout.at(-2)?.style === "panel" && styleLayout.at(-1)?.layout === "vertical",
     JSON.stringify(styleLayout));
-  /**
-   * R61：竖版下"字号"档位禁用，并给一句用户能懂的说明（竖版的字号随窗口宽度变化）。
-   * 其余控件不受影响——样式/方向/开关/颜色在竖版下照旧可用（后面的用例继续点它们）。
-   */
+  /** 竖版下字号档位照常可选（与横版同一档位）。 */
   const verticalSizeState = await page.evaluate(() => {
     const group = document.querySelector('[data-testid="lyrics-size"]');
     const items = [...(group?.querySelectorAll('[data-testid^="lyrics-size-"]') ?? [])];
-    const note = document.querySelector('[data-testid="lyrics-size-vertical-note"]');
     return {
       items: items.length,
-      allDisabled: items.length > 0 && items.every((item) => item.hasAttribute("disabled") || item.getAttribute("data-disabled") !== null),
-      note: (note?.textContent ?? "").trim(),
+      allEnabled: items.length > 0 && items.every((item) => !item.hasAttribute("disabled")
+        && item.getAttribute("data-disabled") === null),
+      notes: document.querySelectorAll('[data-testid="lyrics-size-vertical-note"]').length,
     };
   });
   const callsBeforeSizeClick = await page.evaluate(() => window.__popupGuard.configureCalls().length);
-  await page.locator('[data-testid="lyrics-size-xxl"]').click({ force: true }).catch(() => undefined);
-  await page.waitForTimeout(200);
-  const sizeClickWrote = await page.evaluate((count) => window.__popupGuard.configureCalls().length, callsBeforeSizeClick);
-  add("r61-popup-size-disabled-in-vertical",
-    verticalSizeState.items === 5 && verticalSizeState.allDisabled
-      && verticalSizeState.note.includes("窗口宽度") && sizeClickWrote === callsBeforeSizeClick,
-    JSON.stringify({ ...verticalSizeState, sizeClickWrote, callsBeforeSizeClick }));
-  await page.screenshot({ path: path.join(guardDir, "r61-vertical-settings-size-disabled.png") });
+  await page.getByTestId("lyrics-size-xxl").click();
+  await page.waitForFunction(() => window.__popupGuard.config().size === "xxl").catch(() => undefined);
+  const sizeAfterClick = await page.evaluate(() => ({
+    calls: window.__popupGuard.configureCalls(),
+    size: window.__popupGuard.config().size,
+  }));
+  add("r70-popup-size-enabled-in-vertical",
+    verticalSizeState.items === 5 && verticalSizeState.allEnabled && verticalSizeState.notes === 0
+      && sizeAfterClick.calls.length === callsBeforeSizeClick + 1 && sizeAfterClick.calls.at(-1)?.size === "xxl",
+    JSON.stringify({ ...verticalSizeState, callsBeforeSizeClick, calls: sizeAfterClick.calls.length,
+      last: sizeAfterClick.calls.at(-1) ?? null, size: sizeAfterClick.size }));
+  await page.screenshot({ path: path.join(guardDir, "r70-vertical-settings-size-enabled.png") });
+  await page.getByTestId("lyrics-size-lg").click();
+  await page.waitForFunction(() => window.__popupGuard.config().size === "lg").catch(() => undefined);
   await page.getByTestId("lyrics-layout-horizontal").click();
   await page.waitForFunction(() => window.__popupGuard.config().layout === "horizontal");
   await page.getByTestId("lyrics-window-enableBlur").click();

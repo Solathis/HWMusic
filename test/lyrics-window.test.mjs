@@ -1698,13 +1698,13 @@ test("R51 歌词窗只剩齿轮：不再内嵌菜单内容，点它把锚点交�
 /**
  * R51（brief 第二项之二）：默认尺寸收紧成紧凑一档。
  *
- * 这条是**有意更改 R44 起的默认值**：横版 960×160 → 800×128、竖版 320×620 → 260×520。
+ * 这条是**有意更改 R44 起的默认值**：横版 960×160 → 800×128、竖版 260×520 → 240×600。
  * 最小尺寸（240×120）与任务栏（1200×44）不变；用户保存过的自定义尺寸照旧优先。
  */
 test("R51 默认尺寸紧凑：Rust 常量与几何入口都换了，最小/任务栏/自定义尺寸不动", () => {
   const rust = rustProduction(rustSource("lyrics_window.rs"));
   assert.match(rust, /pub const DESKTOP_SIZE: Size = Size \{\s*width: 800\.0,\s*height: 128\.0,/, "横版默认 800×128");
-  assert.match(rust, /pub const DESKTOP_VERTICAL_SIZE: Size = Size \{\s*width: 260\.0,\s*height: 520\.0,/, "竖版默认 260×520");
+  assert.match(rust, /pub const DESKTOP_VERTICAL_SIZE: Size = Size \{\s*width: 240\.0,\s*height: 600\.0,/, "竖版默认 240×600");
   assert.match(rust, /width: 1200\.0,\s*height: 44\.0/, "任务栏尺寸不变");
   assert.match(rust, /MIN_WINDOW_WIDTH_DIP: f64 = 240\.0/, "最小宽度不变");
   assert.match(rust, /MIN_WINDOW_HEIGHT_DIP: f64 = 120\.0/, "最小高度不变");

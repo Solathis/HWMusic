@@ -62,10 +62,10 @@ pub const DESKTOP_SIZE: Size = Size {
     height: 128.0,
 };
 
-/// 竖版桌面窗的默认尺寸（R51 收紧：320×620 → 260×520，同一比例区间）。
+/// 竖版桌面窗的默认尺寸：窄而高（宽度不低于最小宽度 240，工具栏要放得下）。
 pub const DESKTOP_VERTICAL_SIZE: Size = Size {
-    width: 260.0,
-    height: 520.0,
+    width: 240.0,
+    height: 600.0,
 };
 
 /// 桌面模式在任务栏位置之上再抬多少（正好让开任务栏那一条）。
@@ -2125,8 +2125,8 @@ mod tests {
         effects.clear();
         let vertical = visual.apply_patch(&json!({"layout":"vertical"}));
         apply_window_effects(Some(&visual), &vertical, area, 1.25, Some(Point {x:-200.0,y:700.0}), |effect| effects.push(effect));
-        // R51：竖版默认尺寸收紧到 260×520 DIP → 1.25 缩放比下 325×650 物理像素（旧期望是 320×620 → 400×775）
-        assert_eq!(effects[0], WindowEffect::Geometry(Size {width:325.0,height:650.0}, Point {x:-325.0,y:190.0}));
+        // 竖版默认 240×600 DIP → 1.25 缩放比下 300×750 物理像素
+        assert_eq!(effects[0], WindowEffect::Geometry(Size {width:300.0,height:750.0}, Point {x:-300.0,y:90.0}));
         let taskbar = vertical.apply_patch(&json!({"mode":"taskbar"}));
         let (size, _) = geometry_plan(area, &taskbar, 1.0, None);
         assert_eq!(size, TASKBAR_SIZE);
@@ -2166,14 +2166,14 @@ mod tests {
         assert_eq!(point.y, 1040.0 - 44.0, "贴工作区下沿（= 任务栏上沿）");
     }
 
-    /// R51：默认尺寸收紧（横版 800×128、竖版 260×520），最小尺寸与任务栏尺寸不变。
+    /// 默认尺寸紧凑（横版 800×128、竖版 240×600），最小尺寸与任务栏尺寸不变。
     ///
     /// 为什么这条要有：默认尺寸是**用户什么都不改时看到的那个窗**。它一旦悄悄长回去，
     /// 用户会以为"改成紧凑"这件事根本没做（而内边距那半已经在渲染层改掉了）。
     #[test]
     fn r51_the_default_desktop_sizes_are_compact() {
         assert_eq!((DESKTOP_SIZE.width, DESKTOP_SIZE.height), (800.0, 128.0));
-        assert_eq!((DESKTOP_VERTICAL_SIZE.width, DESKTOP_VERTICAL_SIZE.height), (260.0, 520.0));
+        assert_eq!((DESKTOP_VERTICAL_SIZE.width, DESKTOP_VERTICAL_SIZE.height), (240.0, 600.0));
         assert_eq!((TASKBAR_SIZE.width, TASKBAR_SIZE.height), (1200.0, 44.0), "任务栏尺寸不变");
         assert_eq!((MIN_WINDOW_WIDTH_DIP, MIN_WINDOW_HEIGHT_DIP), (240.0, 120.0), "最小尺寸不变");
 

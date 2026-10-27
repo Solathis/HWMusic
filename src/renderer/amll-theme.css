@@ -90,4 +90,7 @@
  */
 .amll-lyrics-stage .vertical-lyric {
   color: var(--amll-lp-color);
+  /* 竖版样式表只读这两个别名，不直接引用 AMLL 变量 */
+  --vertical-lyric-color: var(--amll-lp-color);
+  --vertical-lyric-font-size: var(--amll-lp-font-size);
 }
