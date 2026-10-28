@@ -287,7 +287,7 @@ export function LyricsWindow() {
     </div>
   )
   const controls = config.locked ? lockedControls : (
-    <div className="flex shrink-0 items-center justify-center gap-0.5" data-testid="lyrics-controls">
+    <div className="flex shrink-0 flex-wrap items-center justify-center gap-0.5" data-testid="lyrics-controls">
       <Tooltip>
         <TooltipTrigger asChild>
           <span>

@@ -19,6 +19,7 @@ import {
   verticalScrollOffset,
   wordProgress,
 } from "../src/renderer/features/lyrics/vertical-lyrics.mjs";
+import { LYRICS_FONT_STEPS } from "../src/renderer/features/lyrics/lyrics-window.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const read = (relative) => readFileSync(`${repoRoot}${relative}`, "utf8");
@@ -168,6 +169,15 @@ test("R61 竖版下一句那一列：宽度足够才显示（列厚随字号）"
   assert.equal(nextColumnFits({ viewportWidth: 140, fontPx: 68, columns: 1 }), false, "窄窗放不下第二列");
   assert.equal(nextColumnFits({ viewportWidth: 600, fontPx: 68, columns: 2 }), true);
   assert.equal(nextColumnFits(null), false, "坏入参回 false（宁可不画）");
+});
+
+test("R76 竖版默认宽度：lg 档正好两列（当前句 + 下一句或译文），放不下第三列", () => {
+  const rust = read("src-tauri/src/lyrics_window.rs");
+  const width = Number(rust.match(/pub const DESKTOP_VERTICAL_SIZE: Size = Size \{\s*width: ([\d.]+),/)?.[1]);
+  const lg = LYRICS_FONT_STEPS.find((step) => step.id === "lg")?.px;
+  assert.ok(Number.isFinite(width) && Number.isFinite(lg), "读得到竖版默认宽度与 lg 档字号");
+  assert.equal(nextColumnFits({ viewportWidth: width, fontPx: lg, columns: 1 }), true, "当前句旁边还放得下下一句");
+  assert.equal(nextColumnFits({ viewportWidth: width, fontPx: lg, columns: 2 }), false, "已有两列时不再留第三列的空白");
 });
 
 // ---------------------------------------------------------------------------

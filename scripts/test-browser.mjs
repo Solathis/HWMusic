@@ -2726,6 +2726,65 @@ export async function checkDesktopInteraction(page, guardDir, add) {
   await showVertical(FIXTURE_LRC, 700);
   await page.waitForTimeout(240);
 
+  // ⑦h2 默认竖版宽度：lg 档正好两列，左边不再留出放得下另一列的空白；工具栏换行后不溢出
+  const rustLyrics = await readFile(path.join(ROOT, "src-tauri", "src", "lyrics_window.rs"), "utf8");
+  const verticalDefault = rustLyrics.match(/pub const DESKTOP_VERTICAL_SIZE: Size = Size \{\s*width: ([\d.]+),\s*height: ([\d.]+),/);
+  const defaultWidth = Number(verticalDefault?.[1]);
+  const defaultHeight = Number(verticalDefault?.[2]);
+  const viewportBefore = page.viewportSize() ?? { width: 260, height: 520 };
+  const twoColumnRuns = [];
+  await page.setViewportSize({ width: Math.round(defaultWidth), height: Math.round(defaultHeight) });
+  for (const style of ["clean", "panel"]) {
+    for (const [label, lrc] of [["next", FIXTURE_LRC], ["translation", R61_TRANSLATION_LRC]]) {
+      await configure({ ...DESKTOP_BASELINE, layout: "vertical", style });
+      await page.waitForTimeout(240);
+      await showVertical(lrc, 700);
+      const run = await page.evaluate(() => {
+        const stage = document.querySelector('[data-testid="lyrics-window"]');
+        const root = document.querySelector('[data-testid="lyrics-vertical"]');
+        const track = root?.querySelector(".vertical-lyric__track");
+        const stageRect = stage?.getBoundingClientRect();
+        const rootRect = root?.getBoundingClientRect();
+        const columns = [...(root?.querySelectorAll(".vertical-lyric__column") ?? [])].map((node) => {
+          const rect = node.getBoundingClientRect();
+          return { left: rect.left, width: rect.width };
+        });
+        const controls = stage?.querySelector('[data-testid="lyrics-controls"]');
+        const buttons = [...(controls?.querySelectorAll("button") ?? [])].map((button) => button.getBoundingClientRect());
+        const style = track ? getComputedStyle(track) : null;
+        return {
+          rootWidth: rootRect ? Math.round(rootRect.width) : null,
+          columns: columns.length,
+          translation: Boolean(root?.querySelector('[data-testid="lyrics-vertical-translation"]')),
+          next: Boolean(root?.querySelector('[data-testid="lyrics-vertical-next"]')),
+          leftGap: rootRect && columns.length > 0 ? Math.round(Math.min(...columns.map((column) => column.left)) - rootRect.left) : null,
+          minColumnWidth: columns.length > 0 ? Math.round(Math.min(...columns.map((column) => column.width))) : null,
+          gap: style ? Number.parseFloat(style.columnGap) || 0 : null,
+          padding: style ? Number.parseFloat(style.paddingLeft) || 0 : null,
+          buttons: buttons.length,
+          buttonsInside: stageRect !== undefined && buttons.length > 0 && buttons.every((rect) =>
+            rect.left >= stageRect.left - 1 && rect.right <= stageRect.right + 1),
+          controlsOverflow: controls ? controls.scrollWidth - controls.clientWidth : null,
+        };
+      });
+      twoColumnRuns.push({ style, label, ...run });
+    }
+    await page.screenshot({ path: path.join(guardDir, `r76-vertical-default-${style}.png`) });
+  }
+  add("r76-vertical-default-two-columns",
+    Number.isFinite(defaultWidth) && defaultWidth < 240 && twoColumnRuns.length === 4
+      && twoColumnRuns.every((run) => run.columns === 2
+        && (run.label === "next" ? run.next && !run.translation : run.translation && !run.next)
+        && run.leftGap !== null && run.gap !== null && run.padding !== null && run.minColumnWidth !== null
+        && run.leftGap < run.padding + run.gap + run.minColumnWidth
+        && run.buttons >= 6 && run.buttonsInside && run.controlsOverflow === 0),
+    JSON.stringify({ defaultWidth, defaultHeight, runs: twoColumnRuns }));
+  await page.setViewportSize(viewportBefore);
+  await configure({ ...DESKTOP_BASELINE, layout: "vertical", style: "clean" });
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await showVertical(FIXTURE_LRC, 700);
+  await page.waitForTimeout(240);
+
   // ⑦i 竖版下控件、拖动、缩放柄、透明衬底照旧可用；锁定后仍然只剩解锁按钮
   const verticalControlState = () => page.evaluate(() => {
     const stage = document.querySelector('[data-testid="lyrics-window"]');

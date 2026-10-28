@@ -58,9 +58,9 @@ pub const DESKTOP_SIZE: Size = Size {
     height: 128.0,
 };
 
-/// 竖版桌面窗的默认尺寸：窄而高（宽度不低于最小宽度 240，工具栏要放得下）。
+/// 竖版桌面窗的默认尺寸：窄而高，lg 档正好放下两列（当前句 + 下一句或译文）。
 pub const DESKTOP_VERTICAL_SIZE: Size = Size {
-    width: 240.0,
+    width: 112.0,
     height: 600.0,
 };
 
@@ -172,14 +172,23 @@ pub fn encode_custom_color(value: &str) -> String {
     format!("%23{}", &value[1..])
 }
 
-/// 桌面窗的最小尺寸（DIP）：比这更小就没法显示一行/一列歌词了（240×120）。
+/// 横版与任务栏的最小尺寸（DIP）：比这更小就放不下一行歌词。
 pub const MIN_WINDOW_WIDTH_DIP: f64 = 240.0;
 pub const MIN_WINDOW_HEIGHT_DIP: f64 = 120.0;
+/// 竖版桌面窗的最小宽度（DIP）：最大字号档也还放得下一列。
+pub const MIN_VERTICAL_WINDOW_WIDTH_DIP: f64 = 96.0;
+
+/// 歌词窗的最小尺寸（DIP）按布局取：只有桌面竖版用窄的那一档。
+pub fn min_window_size(config: &LyricsConfig) -> Size {
+    let width = if config.mode == LyricsMode::Desktop && config.layout == "vertical" { MIN_VERTICAL_WINDOW_WIDTH_DIP } else { MIN_WINDOW_WIDTH_DIP };
+    Size { width, height: MIN_WINDOW_HEIGHT_DIP }
+}
+
 /// 尺寸的绝对上限（DIP）：真正的上限是工作区，这里只是拦掉"明显是坏值"的数。
 pub const MAX_WINDOW_DIP: f64 = 100_000.0;
 
 /// 归一尺寸补丁：`None` = 没提这个键（不动），`Some(None)` = 明确清空，`Some(Some(v))` = 取整并夹进 [min, MAX_WINDOW_DIP]。
-/// 钳最小是因为"小于 240×120"用户**确实**拖不到（窗口本身有 `min_inner_size`），留在配置里只会让下次恢复出个怪尺寸。
+/// 钳最小是因为比 `min_window_size` 更小的尺寸用户拖不到（窗口有最小尺寸），留在配置里只会让下次恢复出个怪尺寸。
 fn size_patch(patch: &serde_json::Map<String, Value>, key: &str, min: f64) -> Option<Option<f64>> {
     match patch.get(key) {
         None => None,
@@ -284,9 +293,10 @@ impl LyricsConfig {
         // 自定义颜色（空串 = 回设计令牌）；坏形状不覆盖上一个合法值
         if let Some(value) = patch.get("customColor").and_then(Value::as_str).filter(|v| custom_color_ok(v)) { next.custom_color = value.into(); }
         if let Some(value) = patch.get("taskbarCustomColor").and_then(Value::as_str).filter(|v| custom_color_ok(v)) { next.taskbar_custom_color = value.into(); }
-        // 窗口 DIP 尺寸（`null` = 没有自定义尺寸；小数取整并夹进最小尺寸）
-        if let Some(size) = size_patch(patch, "windowWidth", MIN_WINDOW_WIDTH_DIP) { next.window_width = size; }
-        if let Some(size) = size_patch(patch, "windowHeight", MIN_WINDOW_HEIGHT_DIP) { next.window_height = size; }
+        // 窗口 DIP 尺寸（`null` = 没有自定义尺寸；小数取整并夹进当前布局的最小尺寸）
+        let min = min_window_size(&next);
+        if let Some(size) = size_patch(patch, "windowWidth", min.width) { next.window_width = size; }
+        if let Some(size) = size_patch(patch, "windowHeight", min.height) { next.window_height = size; }
         for (key, target) in [
             ("locked", &mut next.locked),
             ("enableBlur", &mut next.enable_blur), ("enableScale", &mut next.enable_scale),
@@ -1141,6 +1151,7 @@ fn build_lyrics_window<R: Runtime>(
         LYRICS_WINDOW_LABEL,
     ));
 
+    let min_size = min_window_size(config);
     let mut builder = WebviewWindowBuilder::new(
         app,
         LYRICS_WINDOW_LABEL,
@@ -1154,7 +1165,7 @@ fn build_lyrics_window<R: Runtime>(
     .skip_taskbar(true)
     // 桌面窗未锁定时可拖拽缩放（右下角拖柄调官方 startResizeDragging），锁定与任务栏模式下不可缩放——"锁定后功能键全部隐藏"的窗口层那一半。
     .resizable(resizable_enabled(config))
-    .min_inner_size(MIN_WINDOW_WIDTH_DIP, MIN_WINDOW_HEIGHT_DIP)
+    .min_inner_size(min_size.width, min_size.height)
     .focused(false)
     .visible(false)
     .data_directory(lyrics_data);
@@ -1216,6 +1227,8 @@ fn build_lyrics_window<R: Runtime>(
 #[derive(Debug, PartialEq)]
 pub enum WindowEffect {
     Geometry(Size, Point),
+    /// 最小尺寸（DIP）：必须排在 `Geometry` 之前，否则竖版会被横版的下限夹住缩不下去。
+    MinSize(Size),
     /// **只改尺寸、不动位置**：用户拖拽缩放后保存的 DIP 尺寸落到窗口上，并夹进工作区。
     /// 刻意与 [`WindowEffect::Geometry`] 分开：颜色/锁/演出/尺寸这些变化都不许让窗口跳位。
     Size(Size),
@@ -1241,6 +1254,7 @@ pub fn apply_window_effects(previous: Option<&LyricsConfig>, config: &LyricsConf
     let geometry = previous.is_none_or(|old| old.mode != config.mode || old.layout != config.layout);
     if geometry {
         let (size, point) = geometry_plan(area, config, scale, current);
+        apply(WindowEffect::MinSize(min_window_size(config)));
         apply(WindowEffect::Geometry(size, point));
     } else if let (Some(old), Some(size)) = (previous.and_then(LyricsConfig::custom_size), config.custom_size()) {
         // 只有"自定义尺寸变了"才动尺寸；方向切换那一支已经把尺寸清空（见 `normalized_patch`），
@@ -1321,6 +1335,7 @@ fn apply_config<R: Runtime>(app: &AppHandle<R>, window: &WebviewWindow<R>, previ
         let applied = match effect {
             WindowEffect::Geometry(size, point) => window.set_size(PhysicalSize::new(size.width.round() as u32, size.height.round() as u32))
                 .and_then(|_| window.set_position(PhysicalPosition::new(point.x.round() as i32, point.y.round() as i32))),
+            WindowEffect::MinSize(size) => window.set_min_size(Some(tauri::LogicalSize::new(size.width, size.height))),
             WindowEffect::Size(size) => window.set_size(PhysicalSize::new(size.width.round() as u32, size.height.round() as u32)),
             WindowEffect::ClickThrough(through) => window.set_ignore_cursor_events(through),
         };
@@ -1959,8 +1974,11 @@ mod tests {
         effects.clear();
         let vertical = visual.apply_patch(&json!({"layout":"vertical"}));
         apply_window_effects(Some(&visual), &vertical, area, 1.25, Some(Point {x:-200.0,y:700.0}), |effect| effects.push(effect));
-        // 竖版默认 240×600 DIP → 1.25 缩放比下 300×750 物理像素
-        assert_eq!(effects[0], WindowEffect::Geometry(Size {width:300.0,height:750.0}, Point {x:-300.0,y:90.0}));
+        // 竖版默认 112×600 DIP → 1.25 缩放比下 140×750 物理像素；最小尺寸先于几何
+        assert_eq!(effects, vec![
+            WindowEffect::MinSize(Size { width: MIN_VERTICAL_WINDOW_WIDTH_DIP, height: MIN_WINDOW_HEIGHT_DIP }),
+            WindowEffect::Geometry(Size {width:140.0,height:750.0}, Point {x:-200.0,y:90.0}),
+        ]);
         let taskbar = vertical.apply_patch(&json!({"mode":"taskbar"}));
         let (size, _) = geometry_plan(area, &taskbar, 1.0, None);
         assert_eq!(size, TASKBAR_SIZE);
@@ -2000,14 +2018,15 @@ mod tests {
         assert_eq!(point.y, 1040.0 - 44.0, "贴工作区下沿（= 任务栏上沿）");
     }
 
-    /// 默认尺寸紧凑（横版 800×128、竖版 240×600），最小尺寸与任务栏尺寸不变。
+    /// 默认尺寸紧凑（横版 800×128、竖版 112×600），横版最小尺寸与任务栏尺寸不变。
     /// 默认尺寸是**用户什么都不改时看到的那个窗**，悄悄长回去就等于"改成紧凑"这件事没做。
     #[test]
     fn r51_the_default_desktop_sizes_are_compact() {
         assert_eq!((DESKTOP_SIZE.width, DESKTOP_SIZE.height), (800.0, 128.0));
-        assert_eq!((DESKTOP_VERTICAL_SIZE.width, DESKTOP_VERTICAL_SIZE.height), (240.0, 600.0));
+        assert_eq!((DESKTOP_VERTICAL_SIZE.width, DESKTOP_VERTICAL_SIZE.height), (112.0, 600.0));
         assert_eq!((TASKBAR_SIZE.width, TASKBAR_SIZE.height), (1200.0, 44.0), "任务栏尺寸不变");
-        assert_eq!((MIN_WINDOW_WIDTH_DIP, MIN_WINDOW_HEIGHT_DIP), (240.0, 120.0), "最小尺寸不变");
+        assert_eq!((MIN_WINDOW_WIDTH_DIP, MIN_WINDOW_HEIGHT_DIP), (240.0, 120.0), "横版最小尺寸不变");
+        assert_eq!(MIN_VERTICAL_WINDOW_WIDTH_DIP, 96.0, "竖版最小宽度");
 
         let area = main_monitor();
         let horizontal = LyricsConfig::default();
@@ -2023,6 +2042,30 @@ mod tests {
             Size { width: 640.0, height: 200.0 },
             "自定义尺寸优先于新的默认值"
         );
+    }
+
+    /// 最小尺寸跟着布局走：横版切竖版时先放宽下限再改几何，竖版的尺寸补丁按竖版下限夹。
+    #[test]
+    fn r76_min_size_follows_layout_and_is_applied_before_geometry() {
+        let horizontal = LyricsConfig::default();
+        let vertical = horizontal.apply_patch(&json!({"layout": "vertical"}));
+        let taskbar = vertical.apply_patch(&json!({"mode": "taskbar"}));
+        assert_eq!(min_window_size(&horizontal), Size { width: 240.0, height: 120.0 });
+        assert_eq!(min_window_size(&vertical), Size { width: 96.0, height: 120.0 });
+        assert_eq!(min_window_size(&taskbar), Size { width: 240.0, height: 120.0 }, "任务栏不用竖版下限");
+
+        let mut effects = Vec::new();
+        apply_window_effects(Some(&horizontal), &vertical, main_monitor(), 1.0, None, |effect| effects.push(effect));
+        assert_eq!(effects.first(), Some(&WindowEffect::MinSize(Size { width: 96.0, height: 120.0 })), "先放宽下限：{effects:?}");
+        assert!(matches!(effects.get(1), Some(WindowEffect::Geometry(size, _)) if *size == DESKTOP_VERTICAL_SIZE), "再改几何：{effects:?}");
+
+        effects.clear();
+        apply_window_effects(Some(&vertical), &horizontal, main_monitor(), 1.0, None, |effect| effects.push(effect));
+        assert_eq!(effects.first(), Some(&WindowEffect::MinSize(Size { width: 240.0, height: 120.0 })), "切回横版也先改下限：{effects:?}");
+
+        assert_eq!(vertical.apply_patch(&json!({"windowWidth": 50.0})).window_width, Some(96.0), "竖版按竖版下限夹");
+        assert_eq!(horizontal.apply_patch(&json!({"windowWidth": 100.0})).window_width, Some(240.0), "横版仍按 240 夹");
+        assert_eq!(horizontal.apply_patch(&json!({"layout": "vertical", "windowWidth": 100.0})).window_width, Some(100.0), "同一补丁里先换布局，再按新布局的下限夹");
     }
 
     /// 设置弹出窗的四条关闭路径都接在歌词窗这一侧（隐藏/销毁/锁定或切任务栏/退出）。
@@ -2647,7 +2690,8 @@ mod tests {
             ".skip_taskbar(true)",
             // 可缩放资格按配置算（桌面未锁才可拖大小；锁定与任务栏不可）
             ".resizable(resizable_enabled(config))",
-            ".min_inner_size(MIN_WINDOW_WIDTH_DIP, MIN_WINDOW_HEIGHT_DIP)",
+            ".min_inner_size(min_size.width, min_size.height)",
+            "let min_size = min_window_size(config);",
             ".focused(false)",
             ".visible(false)",
             ".data_directory(",
@@ -3101,7 +3145,7 @@ mod tests {
         assert_eq!(
             (small.window_width, small.window_height),
             (Some(MIN_WINDOW_WIDTH_DIP), Some(MIN_WINDOW_HEIGHT_DIP)),
-            "最小尺寸 240×120（比这更小的窗口连一列歌词都放不下）"
+            "横版最小尺寸 240×120"
         );
 
         // 落盘合同 / 回执 / 查询串三处都带上，且往返一字不差
@@ -3198,7 +3242,7 @@ mod tests {
         let production = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
         assert!(production.contains(".resizable(resizable_enabled(config))"), "建窗时就按资格设可缩放");
         assert!(production.contains("window.set_resizable(resizable_enabled(config))"), "锁定后要收回缩放资格");
-        assert!(production.contains(".min_inner_size(MIN_WINDOW_WIDTH_DIP, MIN_WINDOW_HEIGHT_DIP)"), "最小尺寸由窗口层兜住");
+        assert!(production.contains(".min_inner_size(min_size.width, min_size.height)"), "最小尺寸由窗口层兜住");
     }
 
     /// 唯一写者的形状：本模块不自己写 `settings.json`，写盘走内部 `settings:set`。

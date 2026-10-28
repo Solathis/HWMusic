@@ -597,14 +597,15 @@ test("Rust：建窗属性一次到位（无边框/透明/无阴影/置顶/不进
     [".shadow(false)", "无阴影"],
     [".always_on_top(desktop_topmost(config))", "仅桌面置顶"],
     [".skip_taskbar(true)", "不进任务栏"],
-    // 缩放资格按配置算（未锁的桌面窗可拖大小；锁定/任务栏不可），最小尺寸 240×120
+    // 缩放资格与最小尺寸都按配置算（竖版 96×120，横版与任务栏 240×120）
     [".resizable(resizable_enabled(config))", "可缩放资格按配置算（锁定/任务栏不可）"],
-    [".min_inner_size(MIN_WINDOW_WIDTH_DIP, MIN_WINDOW_HEIGHT_DIP)", "最小尺寸由窗口层兜住"],
+    [".min_inner_size(min_size.width, min_size.height)", "最小尺寸由窗口层兜住（按布局取）"],
     [".focused(false)", "不抢焦点"],
     [".visible(false)", "先建出来是隐藏的（防闪默认样式，按配置再 show）"],
   ]) {
     assert.ok(builder.includes(call), `歌词窗必须 ${call}（${why}）`);
   }
+  assert.match(rust, /let min_size = min_window_size\(config\);/, "建窗前按配置算最小尺寸");
   assert.match(rust, /window\.set_resizable\(resizable_enabled\(config\)\)/, "锁定配置落下去时也要收回缩放资格");
   assert.match(builder, /WebviewUrl::App\(/, "歌词窗加载的是应用内的 lyrics.html");
   assert.match(rust, /lyrics\.html\?/, "入口就是 lyrics-main.tsx 那一份（R1 已建双入口），配置经查询串带过去");
@@ -1649,13 +1650,14 @@ test("R51 歌词窗只剩齿轮：不再内嵌菜单内容，点它把锚点交�
     "歌词窗不摆弹出窗（尺寸/位置/关闭全归宿主；拖动与缩放那两条官方调用不在此列）");
 });
 
-/** 默认尺寸收紧成紧凑一档（横版 800×128、竖版 240×600），最小 / 任务栏 / 自定义尺寸不变。 */
-test("R51 默认尺寸紧凑：Rust 常量与几何入口都换了，最小/任务栏/自定义尺寸不动", () => {
+/** 默认尺寸收紧成紧凑一档（横版 800×128、竖版 112×600），横版最小 / 任务栏 / 自定义尺寸不变。 */
+test("R51/R76 默认尺寸紧凑：Rust 常量与几何入口都换了，横版最小/任务栏/自定义尺寸不动", () => {
   const rust = rustProduction(rustSource("lyrics_window.rs"));
   assert.match(rust, /pub const DESKTOP_SIZE: Size = Size \{\s*width: 800\.0,\s*height: 128\.0,/, "横版默认 800×128");
-  assert.match(rust, /pub const DESKTOP_VERTICAL_SIZE: Size = Size \{\s*width: 240\.0,\s*height: 600\.0,/, "竖版默认 240×600");
+  assert.match(rust, /pub const DESKTOP_VERTICAL_SIZE: Size = Size \{\s*width: 112\.0,\s*height: 600\.0,/, "竖版默认 112×600");
   assert.match(rust, /width: 1200\.0,\s*height: 44\.0/, "任务栏尺寸不变");
-  assert.match(rust, /MIN_WINDOW_WIDTH_DIP: f64 = 240\.0/, "最小宽度不变");
+  assert.match(rust, /MIN_WINDOW_WIDTH_DIP: f64 = 240\.0/, "横版最小宽度不变");
+  assert.match(rust, /MIN_VERTICAL_WINDOW_WIDTH_DIP: f64 = 96\.0/, "竖版最小宽度 96");
   assert.match(rust, /MIN_WINDOW_HEIGHT_DIP: f64 = 120\.0/, "最小高度不变");
   const geometry = rust.slice(rust.indexOf("pub fn geometry_plan"), rust.indexOf("pub fn apply_window_effects"));
   assert.match(geometry, /DESKTOP_VERTICAL_SIZE/, "竖版默认值只有一处真源（几何入口引用常量，不写第二份数字）");
