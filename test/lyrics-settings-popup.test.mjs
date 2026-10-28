@@ -1,13 +1,9 @@
 /**
- * R60：桌面歌词设置**气泡面板**（独立小窗里的 shadcn `Popover`）与气泡定位的契约。
+ * 桌面歌词设置气泡面板（独立小窗里的 shadcn `Popover`）与气泡定位的契约。
  *
- * 纯几何在 Rust 单测（`lyrics_settings.rs` 的 `bubble_*`），真观感与箭头指向在浏览器守卫
- * （`scripts/test-browser.mjs` 的 `checkLyricsSettingsPopup`），本文件管：
- *
- * 1. 面板本体是**官方 Popover + 官方箭头**，不再有 DropdownMenu 那一套；
- * 2. 内容紧凑化（样式/方向/字号单选组、四个开关、颜色一行），改任一项都**不关面板**；
- * 3. 尺寸只上报、位置只听宿主：面板在页面里的左边缘与箭头偏移都由 `lyrics-popover.mjs` 算；
- * 4. Rust 那侧的气泡定位纯函数、窗口属性、命令注册与来源守卫。
+ * 几何在 Rust 单测，真观感在浏览器守卫，本文件管：面板是官方 Popover + 官方箭头；
+ * 内容紧凑化且改任一项都不关面板；尺寸只上报、位置只听宿主；
+ * 以及 Rust 侧的气泡定位纯函数、窗口属性、命令注册与来源守卫。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -113,7 +109,7 @@ test("R60 面板是官方 Popover（不是 Card，也不是 DropdownMenu），�
   assert.match(code, /className="w-\[336px\]/, "固定宽度（与 Rust 的默认宽度同口径）");
   assert.match(code, /data-testid="lyrics-appearance-panel"/, "面板内容体锚点保留");
 
-  // 先删后写：DropdownMenu 那一套整段删掉，不留两套
+  // DropdownMenu 那一套整段删掉，不留两套。
   assert.doesNotMatch(code, /dropdown-menu|DropdownMenu/, "旧的下拉菜单实现必须整段删除");
   assert.doesNotMatch(code, /components\/ui\/card|<Card\b/, "不许用 Card 仿气泡外观");
   assert.doesNotMatch(code, /overflow-[xy]-(?:auto|scroll)/, "不许自搭滚动容器");
@@ -140,7 +136,7 @@ test("R60 面板内容紧凑化：三个单选组 + 四个开关 + 颜色一行�
   for (const key of ["enableBlur", "enableScale", "enableSpring", "showControls"]) {
     assert.ok(code.includes(`["${key}", `), `四个开关保留 ${key}`);
   }
-  // 字号（R51 新增）：档位来自唯一真源，一项一个按钮
+  // 字号档位来自唯一真源，一项一个按钮。
   assert.match(code, /LYRICS_FONT_STEPS\.map/, "字号档位来自 lyrics-window.mjs（不另抄一张表）");
   assert.match(code, /data-testid=\{`lyrics-size-\$\{step\.id\}`\}/, "每个档位有自己的锚点");
   assert.match(code, /fontStepLabel\(step\.id\)/, "档位文案来自纯逻辑模块（不在这里另写一份中文）");

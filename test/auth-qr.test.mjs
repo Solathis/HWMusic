@@ -1,9 +1,7 @@
 /**
- * R16 · B 部分：认证状态机的二维码路径（`auth-manager.startQrLogin` / `cancelQrLogin`）。
- *
- * 端口（`src/main/qr-login.mjs`）注入成假实现：本文件只钉 auth-manager 的职责——
- * **每次二维码会话一对新的 PKCE/state、确认后走同一条兑换链、失败如实广播**。
- * 真实网络链路由 test/qr-port.test.mjs 覆盖（离线）；真机扫码是用户在场的验证，不在测试里。
+ * 认证状态机的二维码路径（auth-manager.startQrLogin / cancelQrLogin）。
+ * 端口注入成假实现，本文件只钉每次会话一对新的 PKCE/state、确认后走同一条兑换链、失败如实广播。
+ * 真实网络链路归 test/qr-port.test.mjs，真机扫码不在测试里。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -270,9 +268,7 @@ test("二维码登录：已登录就不再扫码（already_logged_in）", async 
   assert.equal(again.error.kind, AUTH_ERROR_KINDS.alreadyLoggedIn);
 });
 
-// ---------------------------------------------------------------------------
-// 修复轮 1/5：两条"错误路径卡死界面"的回归钉（都先红后绿）
-// ---------------------------------------------------------------------------
+// 两条错误路径（会话中失败、确认后兑换失败）都不许把界面卡死：屏上始终有可点的出路。
 
 test("二维码登录：会话全程 busy 都是 false（常驻入口在整个等扫码期间都点得动）", async () => {
   const { auth, broadcasts, qrPort } = managerOf();
@@ -287,8 +283,8 @@ test("二维码登录：会话全程 busy 都是 false（常驻入口在整个�
 
   assert.equal(qrEvents(broadcasts).at(-1).status, "failed");
   assert.equal(statusEvents(broadcasts).at(-1).loggedIn, false);
-  // R18：二维码那条路**不许占 busy**（busy 只描述"开窗那条路正在跑"）——
-  // 否则常驻的「在网页中打开登录」会在最需要它的时刻被 disabled（R17 抓到的正是这一类）
+  // 二维码那条路不许占 busy（busy 只描述开窗那条路正在跑）。
+  // 否则常驻的「在网页中打开登录」会在最需要它的时刻被 disabled。
   assert.ok(statusEvents(broadcasts).length > 0, "这条会话至少播过一次 auth:status（否则下面的断言是空转）");
   assert.ok(
     statusEvents(broadcasts).every((payload) => payload.busy === false),
@@ -385,9 +381,7 @@ test("二维码登录：取消 → 端口被叫停 + busy:false（用户关了�
   assert.deepEqual(statusEvents(broadcasts).at(-1), { loggedIn: false, busy: false });
 });
 
-// ---------------------------------------------------------------------------
-// R18：两条路互斥（开窗之前先把二维码会话停掉）
-// ---------------------------------------------------------------------------
+// 两条路互斥：发起网页登录之前先把二维码会话停掉，否则可能各换一次码。
 
 test("互斥：发起网页登录时先把二维码会话停掉（否则两条路并发，可能各换一次码）", async () => {
   const qrPort = fakeQrPort();
@@ -461,10 +455,8 @@ test("互斥：确认之后的换码不会被迟到的二维码事件顶掉（at
   await pending;
 });
 
-// ---------------------------------------------------------------------------
-// R20：手动刷新（会话期间重启）与「返回扫码登录」（网页那条路的回退）
-// R21（用户指令）：过期不再自动换新——sidecar 也不在过期之后自己再发一次 qr-start
-// ---------------------------------------------------------------------------
+// 手动刷新（会话期间重启）与「返回扫码登录」的回退。
+// 过期不再自动换新：sidecar 只把 expired 播出去，换新只能由用户点击触发。
 
 test("R21 过期：sidecar 只把 expired 播出去，绝不自己重启会话（换新只能由用户点击触发）", async () => {
   const { auth, qrPort, broadcasts } = managerOf();
@@ -593,27 +585,10 @@ test("R20 返回扫码登录：没有进行中的登录时如实回 cancelled:fa
   assert.equal(hostCancels, 0, "没有进行中的登录就不去打扰宿主");
 });
 
-// ---------------------------------------------------------------------------
-// R36（用户真机诊断定案 2026-10-21）：二维码确认之后的最后一跳**交给登录 webview**
-//
-// 真机证据（R35 的诊断日志）：`loginCallback` 页的查询里**没有 `code`**（只有 ticket/siteID/flowID
-// 一类的票据参数），那份 200 的 14KB HTML 里**没有 `hms` 字样**（跳转目标是页面 JS 现拼的）。
-// ⇒ 服务端 fetch **结构性地拿不到 code**，R33 的"跟随 302"与 R34 的三策略全是在猜形状 → 整体退役。
-//
-// 定案依据是同一个应用里的**对照组**：账号密码网页登录实证走通，走的正是
-// "webview 里加载官方页 → 页面自己的 JS 执行 → 跳 `hms://` → 被导航拦截器接住"。
-// 所以这条链的最后一跳也交给**登录 webview**（复用既有 `host:open-login` 那条路径）：
-// 宿主加载 `codeRemoteLogin` 交回的 `callbackURL`，页面 JS 跑完跳 `hms://`，拦截器把原样 URL
-// 交回 → `consumeCallback → exchangeCode → loginex → 会话落地`（**同一条兑换链**）。
-//
-// **选型：两流合一**——这一段的等待/取消/超时/清理**直接复用 R7 的 `runLoginFlow`**
-// （auth-manager 里同一个 `startLoginFlow` 装配点），不在这一层另写一份"等 webview 结论"的循环：
-// 四收场（callback/cancelled/closed/timed_out）+ failed 的语义与清理因此只有一份实现，
-// 两条路不可能各自演化。QR 的 attempt 传进同一条流，**state 就是 attempt.state**（R34 已核实），
-// 所以 `consumeCallback` 的校验天然成立。
-// ---------------------------------------------------------------------------
+// 二维码确认后的最后一跳交给登录 webview：服务端 fetch 结构性拿不到 code，跟随 302 与多策略全是猜形状。
+// 两流合一：等待/取消/超时/清理直接复用 runLoginFlow，QR 的 attempt 传进同一条流，state 就是 attempt.state。
 
-/** R36 的假宿主：开窗被记下来，结论由测试自己交付（模拟宿主那条覆盖整段登录的长轮询）。 */
+/** 假宿主：开窗被记下来，结论由测试自己交付（模拟覆盖整段登录的长轮询）。 */
 function qrWindowHost() {
   const windows = [];
   let settleWindow = null;
@@ -627,7 +602,7 @@ function qrWindowHost() {
           settleWindow = resolve;
         });
       },
-      /** 宿主关窗：Rust 把结论槽结算成 Cancelled（真机上浮动控件的「返回扫码登录」走的就是它）。 */
+      /** 宿主关窗：Rust 把结论槽结算成 Cancelled（浮动控件的「返回扫码登录」走的就是它）。 */
       cancelLogin() {
         cancels += 1;
         if (settleWindow !== null) settleWindow({ status: "cancelled" });
@@ -648,7 +623,7 @@ async function flush(rounds = 12) {
   for (let i = 0; i < rounds; i += 1) await Promise.resolve();
 }
 
-/** 真机那个形状（R35 日志）：https 的 loginCallback 收尾页，查询里**没有 `code`**。 */
+/** 真机那个形状：https 的 loginCallback 收尾页，查询里没有 code。 */
 const R36_CALLBACK_PAGE =
   "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback" +
   "?ticket=ST-1&siteID=1&flowID=FLOW-1&redirect_uri=hms%3A%2F%2Fredirect_uri&access_type=offline";
@@ -841,13 +816,8 @@ test("R36 状态行（渲染层零改动）：确认之后那一行是「已确�
   assert.equal(loginGateStatusLine(state), "已登录。");
 
   /**
-   * 对照（**如实登记，不改渲染层**）：网页登录那条路（渲染层自己按了入口，`path === "official"`）
-   * 在 busy 期间显示的是 R27 的「正在打开华为官方登录页…」——`loginOpeningIndicator` 与
-   * `loginGateStatusLine` 里那句「已在网页中打开登录。」判据完全相同（`busy && path === "official"`），
-   * 前者先命中，所以后者在当前渲染层是**不可达**的一句。
-   *
-   * 二维码这条路更不会走到那里：渲染层没按过任何入口，`path` 一直是 `qr`。所以本轮"webview 打开后
-   * 照常显示"的落点是**上面那句「已确认，正在完成登录…」**（见 task-36 报告的门禁状态行一节）。
+   * 对照（如实登记，不改渲染层）：网页登录那条路在 busy 期间显示「正在打开华为官方登录页…」。
+   * 二维码那条路渲染层没按过入口，落点是「已确认，正在完成登录…」。
    */
   let official = reduceGateState(initialGateState(), { type: LOGIN_GATE_EVENT.status, loggedIn: false, busy: false });
   official = reduceGateState(official, { type: LOGIN_GATE_EVENT.started });
@@ -860,10 +830,8 @@ test("R36 状态行（渲染层零改动）：确认之后那一行是「已确�
   );
 });
 
-// ---------------------------------------------------------------------------
-// R53：登录态一旦确立（任何来源）就停掉在跑的二维码轮询
-// ---------------------------------------------------------------------------
-// `announce()` 是所有来源的收口：restore 成功 / 扫码收尾成功 / 网页登录成功。
+// 登录态一旦确立（任何来源）就停掉在跑的二维码轮询。
+// announce() 是所有来源的收口：restore 成功 / 扫码收尾成功 / 网页登录成功。
 
 test("R53 登录态确立：恢复成功时停掉正在跑的二维码会话（不再有后续轮询）", async () => {
   let releaseVerify;

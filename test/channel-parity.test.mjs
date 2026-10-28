@@ -1,62 +1,9 @@
 /**
- * R3 桥 · 双份一致性钉死（防 Node 与 Rust 两侧频道清单/超时漂移）。
+ * 桥 · 双份一致性钉死（防 Node 与 Rust 两侧频道清单/超时漂移）。
  *
- * 做法：Node 侧直接 import 共享常量；Rust 侧按源码扫描提取字面量集合，两者必须相等。
- * 另有一条"反漂移"扫描：src/host、src/sidecar、src/renderer 内不得出现频道名字面量
- * （唯一真源只有 src/shared/*.ts，Rust 是刻意的镜像副本、由本文件钉住）。
- * 先写先看红。
- *
- * R7 的两处增补（走"增补进共享常量表 + 硬钉同步改"的既有流程，不另立清单）：
- * - 宿主要求频道加 `host:cancel-login`（渲染层取消登录 → core_call auth:cancel-login → 宿主要求）；
- * - 广播频道加 `auth:status`（登录状态变化：门禁与 R8 主界面靠它知道"该显示哪一层"）。
- *
- * R8 的一处增补（同一流程：唯一真源增补 → Rust 镜像增补 → 本文件硬钉同步改）：
- * - 请求频道加 `library:*` 七条（主界面六个库页面的数据通道）。R8 之前渲染层没有任何
- *   业务请求频道，若只改一侧，`core_call` 会在 Rust 准入处被拒（用户看到"未知请求频道"）。
- *
- * R9 的两处增补（同一流程）：
- * - 请求频道加 `playback:resolve-url`：拿**当次**播放地址。地址只作当次播放结果交给渲染层，
- *   不写日志、不持久化（队列持久化只存曲目标识 + 索引）；
- * - 广播频道加 `player:command`：大屏/托盘的播放控制**预登记**（托盘在 Rust 侧，R11 接线）。
- *   预登记的理由与 R8 一次补齐 library 相同：白名单缺一项 = 那条广播被 Rust 的 FramePolicy
- *   当作白名单外帧丢掉，托盘点了没反应，而错误只出现在日志里。
- *
- * R10 的一处增补（同一流程）：
- * - 请求频道加 `settings:test-proxy`：设置页"测试连接"那条路（core 侧用独立 ProxyAgent 发一次
- *   请求）。不并进 `settings:set` 的理由见 src/shared/request-channels.ts。
- *
- * R11 的两处增补（同一流程）：
- * - 广播频道加 `lyrics:toggle`：托盘"桌面歌词"勾选的目标态（歌词窗本体是 R12）；
- * - 广播频道加 `app:open-settings`：托盘"设置…"（渲染层收到后切到设置页）。
- *   两条都是 **Rust 侧发出**（托盘菜单在 Rust 里），所以白名单少一条的后果同样是"点了没反应"。
- *
- * R12 的四处增补（同一流程）：
- * - 请求频道加 `playback:lyrics`：歌词**文本**来源（渲染层用官方 `parseLrc` 解析）；
- * - 广播频道加 `lyrics:document` / `lyrics:progress` / `lyrics:state`：主窗→歌词窗的数据链
- *   （歌词窗只订阅事件、不调业务命令，所以这三条是它唯一的数据来源）。
- *
- * R19 的一处增补（同一流程）：
- * - 请求频道加 `auth:get-status`：渲染层**主动查**当前登录状态。`auth:status` 是广播，
- *   只在 sidecar 启动时播一次（经 Rust 的 NoticeQueue 冲刷），渲染层 reload/崩溃重启之后
- *   那一条已经冲刷过了 —— 门禁会永远停在 `checking`（"正在检查登录状态…"），既不自动发起
- *   二维码，也没有任何报错。这条频道把"现在的状态是什么"变成一次**有应答的确定性查询**
- *   （与托盘可用性查询同款模式：挂载时主动问一次）。少了它的后果与 R16 那条一样直白，
- *   只是表现成"门禁卡住"而不是"频道未知"。
- *
- * R25 的一处增补（同一流程）：
- * - 广播频道加 `theme:changed`：主题三态（浅色 / 深色 / 跟随系统）的**目标态**。发送方是
- *   Rust 侧（`theme::set_theme`，由浮动控件的专用命令 `core_login_chrome` 触发），
- *   消费方是三个 webview（主窗 + 两个浮动控件）。少了它，用户点了主题只在自己那个控件上生效，
- *   别的 webview 停在旧配色——而日志里什么都看不出来（广播被当白名单外帧丢掉）。
- *
- * R41 的一处增补（同一流程）：
- * - 请求频道加 `lyrics:*` 三条（**歌词体系**：本地导入 / 缓存占用 / 清缓存）。它们的载荷与
- *   应答形状见 `src/shared/request-channels.ts`；这里只钉"两侧一致"。三条的后果各不相同
- *   （导入悄悄失败 / 那张卡读不到数字 / "清除"按了没反应），但都落在"用户按了没反应"这一类上。
- *
- * R53 的一处增补（同一流程）：
- * - 请求频道加 `auth:cancel-qr`：门禁收场（切主界面 / 卸载）时停掉二维码轮询；
- *   sidecar 那一半由 `announce()` 收口，这条是渲染层那一半。
+ * 做法：Node 侧直接 import 共享常量，Rust 侧按源码扫描提取字面量集合，两者必须相等。
+ * 另有“反漂移”扫描：src/host、src/sidecar、src/renderer 内不得出现频道名字面量，
+ * 唯一真源只有 src/shared/*.ts（Rust 是刻意的镜像副本，由本文件钉住）。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -128,7 +75,7 @@ function sorted(values) {
   return [...values].sort();
 }
 
-/** R8 增补的库页面请求频道（硬钉：少一条 = 某个页面点了没反应，多一条 = 白名单悄悄放宽）。 */
+/** 库页面请求频道（硬钉：少一条 = 某个页面点了没反应，多一条 = 白名单悄悄放宽）。 */
 const LIBRARY_CHANNELS = [
   "library:album",
   "library:artist",
@@ -140,31 +87,23 @@ const LIBRARY_CHANNELS = [
 ];
 
 /**
- * R9 增补的播放请求频道（硬钉：多一条就等于白名单悄悄放宽了）。
- *
- * R12 增补 `playback:lyrics`：歌词**文本**来源（`{trackId}` → 原始 LRC 文本）。它与
- * `playback:resolve-url` 的分工是刻意的——地址是"当次播放结果"（不落任何痕迹），
- * 歌词文本则要交给渲染层用官方 `parseLrc` 解析，所以**返回文本而不是解析结果**。
+ * 播放请求频道（硬钉：多一条就等于白名单悄悄放宽了）。
+ * playback:lyrics 返回歌词文本而不是解析结果，地址则是当次播放结果，不落任何痕迹。
  */
 const PLAYBACK_CHANNELS = ["playback:lyrics", "playback:resolve-url"];
 
-/** R10 增补的设置请求频道（硬钉：设置页的"测试连接"唯一要用的那一条）。 */
+/** 设置请求频道（硬钉：设置页的“测试连接”唯一要用的那一条）。 */
 const SETTINGS_CHANNELS = ["settings:get", "settings:set", "settings:test-proxy"];
 
 /**
- * R41 增补的歌词请求频道（硬钉：三条各自对应一个用户动作，多一条 = 白名单悄悄放宽）。
- *
- * 与 `playback:lyrics` 的分工：那一条是**取词**（华为四档 + 第三方回退 + 磁盘缓存），
- * 这三条是**管理歌词的存放**（导入 / 看占用 / 清缓存）。分成两条路的理由很实在：
- * 取词是高频、只读、可以被缓存；这三条是低频、会写盘/删盘、要立刻看到结果。
+ * 歌词请求频道（硬钉：三条各自对应一个用户动作，多一条 = 白名单悄悄放宽）。
+ * 与 playback:lyrics 的分工：那条是取词（高频、只读、可缓存），
+ * 这三条是管理歌词的存放（低频、会写盘/删盘、要立刻看到结果）。
  */
 const LYRICS_CHANNELS = ["lyrics:cache-clear", "lyrics:cache-info", "lyrics:import"];
 
 /**
- * 广播频道硬钉内容（两侧一起写错也能过互比，所以内容必须钉死）。
- *
- * 按字典序写：下游断言走 `sorted(...)`（R11 加了 `lyrics:toggle` 与 `app:open-settings` 之后
- * 顺序不再与"增补先后"一致，这里就按排序后的样子写，免得两边各自排序再比较）。
+ * 广播频道硬钉内容（两侧一起写错也能过互比，所以内容必须钉死），按字典序写。
  */
 const BROADCAST_CHANNEL_NAMES = [
   "app:notice",
@@ -268,7 +207,7 @@ test("一致性：宿主要求频道（Node 共享常量 ↔ Rust commands.rs �
   assert.deepEqual(sorted(rust), sorted(HOST_REQUEST_CHANNELS));
   assert.deepEqual(sorted(HOST_REQUEST_CHANNELS), [
     "host:cancel-login",
-    // R65：本地曲目的歌词来源（Rust 读同名 .lrc/.txt 或内嵌标签，按 id 回原始字节）
+    // 本地曲目的歌词来源（Rust 读同名 .lrc/.txt 或内嵌标签，按 id 回原始字节）
     "host:local-lyrics-source",
     "host:notify",
     "host:open-login",
@@ -280,7 +219,7 @@ test("一致性：宿主要求频道（Node 共享常量 ↔ Rust commands.rs �
 test("一致性：广播频道白名单（Node 共享常量 ↔ Rust bridge.rs 字面量，且两侧都钉死内容）", () => {
   const rust = rustStringArray(rustSource("bridge.rs"), "BROADCAST_CHANNELS");
   assert.deepEqual(sorted(rust), sorted(BROADCAST_CHANNELS));
-  // 内容硬钉：只做两侧互比的话，"两侧一起为空/一起写错"也能过（这正是上一轮漏掉的）
+  // 内容硬钉：只做两侧互比的话，「两侧一起为空 / 一起写错」也能过。
   assert.deepEqual(sorted(rust), BROADCAST_CHANNEL_NAMES);
   assert.deepEqual(sorted(BROADCAST_CHANNELS), BROADCAST_CHANNEL_NAMES);
 });
@@ -359,8 +298,7 @@ test("反漂移：Node 运行期代码里不得出现频道名字面量（只有
   assert.ok(scanned.length >= 8, `扫描范围异常，只拿到 ${scanned.length} 个文件：${scanned.join(", ")}`);
 
   // 只认普通引号里的字面量：注释里用反引号写的频道名是说明文字，不是第二份清单
-  // R11：`lyrics:` 与 `app:` 也纳进来（托盘那两条广播同样是"渲染层只许认常量"）
-  // R25：`theme:` 同理（主题广播也是 Rust 侧发出的）
+  // 前缀覆盖 auth/settings/host/library/playback/player/lyrics/app/theme 各族频道
   const literal = /["']((?:auth|settings|host|library|playback|player|lyrics|app|theme):[a-z][a-z-]*)["']/g;
   const offenders = [];
   for (const relative of scanned) {

@@ -1,18 +1,5 @@
 /**
- * R9 播放运行时（`features/playback/player-runtime.ts`）与它的两个端口：
- * 音频元素（`audio-element.mjs`，**全应用唯一 new Audio() 的地方**）
- * 与媒体地址闸门（`media-url.mjs`，渲染层唯一的协议层引用）。
- *
- * 这个文件钉四件事：
- * 1. **单 Audio 实例**：源码扫描全渲染层只有一处 `new Audio(`，且事件/单位适配正确
- *    （DOM 的 currentTime 是秒，状态机与 AMLL 用毫秒——这里换算，别处不许再算）；
- * 2. **地址闸门**：`guardMediaUrl` 与协议层 `safeMediaUrl` 同结论（CSP media-src 同源），
- *    渲染层放行地址只走它；
- * 3. **装配**：取地址走 `playback:resolve-url`（通道名来自共享常量）、队列持久化只写
- *    `settings:set` 的 `patch.queue`（可含安全展示快照）、`player:command` 广播接到状态机上；
- * 4. **音频地址不外泄**：日志与持久化不含音频地址。
- *
- * 先写先看红。
+ * 播放运行时：全应用只有一处 new Audio()、地址闸门与 safeMediaUrl 同结论、队列持久化只写 patch.queue、音频地址不外泄。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

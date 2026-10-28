@@ -1,7 +1,6 @@
 /**
- * R65 本地曲库 · 渲染层的纯投影（`src/renderer/features/library/local-library.mjs`）。
- * 判据钉在"不可猜 / 不冒充"：id 形状不对的字符串不许当成本地曲目；协议地址只按 id 拼，
- * 不接受调用方塞进来的路径片段（目录穿越的入口）；读不到元数据就用占位，不编一个像真的标题。
+ * 本地曲库渲染层的纯投影，判据钉在「不可猜 / 不冒充」。
+ * id 形状不对的字符串不当成本地曲目；协议地址只按 id 拼；读不到元数据就用占位。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

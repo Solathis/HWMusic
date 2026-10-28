@@ -1,23 +1,6 @@
 /**
- * R25：登录体验四项改造 —— 浮动控件（返回 / 主题）与主题三态系统的契约。
- *
- * 用户四项里有两项落在这一层：
- * 2. 「返回扫码登录」**悬浮在网页左上角**（不独占一行、不挤压网页）；
- * 4. 登录页右上角有「黑白主题 + 系统默认」（浅色 / 深色 / 跟随系统），gate 视图与嵌入官方页
- *    打开时都要有。
- *
- * 实现形态（控制器裁决）：两个**小浮动 webview**（`login-return` / `login-theme`），
- * 与 gate 里的同类控件**同一个 React 组件**；主题状态归 Rust 持有，经 `theme:changed` 广播
- * 让每个 webview 应用 class。
- *
- * 这一层钉住的契约：
- * - 浮动控件加载的页面地址形状（`login-chrome.html?kind=…`）与两侧共用的 kind 字面量；
- * - 主题三态的唯一真源（档位、文案、class 映射、认不出不猜）；
- * - **强制浅色必须压过系统暗色**（CSS 结构：`.light` 的令牌块 + dark 变体的媒体分支排除它）；
- * - 切类只有一处（`features/theme/theme.mjs`），其余文件一律经它；
- * - 命令名 `core_login_chrome` 与广播频道 `theme:changed` 的接线（常量表 + Rust 镜像互钉）。
- *
- * 先写先看红。
+ * 返回与主题两个控件是小浮动 webview（login-return / login-theme），与 gate 里的同类控件同一个 React 组件。
+ * 钉住的契约：浮动页地址形状与共用 kind 字面量；主题三态的唯一真源、切类只有一处（theme.mjs）；强制浅色压过系统暗色；core_login_chrome 与 theme:changed 的接线。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -224,7 +207,7 @@ test("切类只有一处：只有 features/theme/theme.mjs 动 html 的 class", 
     "唯一的切类入口必须真的存在",
   );
 
-  // 唯一真源自己也不许存本地副本（R10 的裁决仍然成立：不引 next-themes、不写 localStorage）
+  // 唯一真源自己也不许存本地副本：不引 next-themes、不写 localStorage。
   const theme = stripComments(read("src/renderer/features/theme/theme.mjs"));
   assert.doesNotMatch(theme, /next-themes|localStorage/, "主题状态归 Rust 持有：渲染层不许有第二份存储");
 });
@@ -245,11 +228,7 @@ test("命令名：core_login_chrome 是跨语言契约（常量表 + 渲染层�
     "命令名一律从 src/shared/commands.ts 导入，不写字面量",
   );
 
-  // Rust 侧：定义 + 注册（只定义不注册 = 点了没反应，回一句 command not found）
-  //
-  // R44e：命令是 **async** 的。整笔主题事务（写盘 → 校验回执 → uncertain 处置 → 内存/原生/
-  // revision/广播）由 Rust 拥有的线程完成，这条命令等的是"事务有结论"而不是"这次调用返回了"；
-  // invoke 的等待者消失（WebView 导航/组件卸载）不会取消后半提交。
+  // Rust 侧命令既要定义也要注册，且是 async：整笔主题事务由 Rust 拥有的线程完成，invoke 等待者消失不取消后半提交。
   const commands = rustProduction("commands.rs");
   assert.match(commands, /pub async fn core_login_chrome/, "Rust 侧要有这条命令（R44e 起是 async：整笔事务由 Rust 拥有）");
   assert.doesNotMatch(commands, /pub fn core_login_chrome\(/, "同步签名会挡住「等整笔事务」这件事");
@@ -273,7 +252,7 @@ test("命令守卫：浮动控件的来源（main / login-return / login-theme�
 
 test("主题广播带单调 revision；原生标题栏接线仅作用主窗，不接官方登录页", () => {
   const theme = rustProduction("theme.rs");
-  // R44e：入口只负责"把整笔事务交给 Rust 拥有的线程"，事务本身在 run_theme_transaction 里
+  // 入口只负责把整笔事务交给 Rust 拥有的线程，事务本身在 run_theme_transaction 里。
   const setter = theme.slice(theme.indexOf("pub async fn set_theme<"));
   assert.ok(setter.length > 0, "set_theme 必须是 async（等整笔事务有结论）");
   assert.match(setter, /spawn_theme_transaction/, "整笔事务由 Rust 拥有的线程跑（invoke 等待者消失不取消）");
@@ -446,9 +425,7 @@ test("复用：gate 的主题控件与浮动控件是同一个 React 组件", ()
   );
 });
 
-// ---------------------------------------------------------------------------
-// R41b：三态只有一份接线（主窗左下角的循环按钮 + 设置页「外观」卡的 Select）
-// ---------------------------------------------------------------------------
+// 三态只有一份接线（主窗左下角的循环按钮 + 设置页「外观」卡的 Select）。
 
 test("R41b 循环顺序与文案：浅色 → 深色 → 跟随系统，认不出的档位从系统档起步", async () => {
   const { nextThemeChoice, themeLabel, themeToggleLabel, THEME_DEFAULT } = await import(
@@ -487,11 +464,8 @@ test("R41b 三态唯一接线：use-theme-choice 里读回/订阅/写回，三�
   assert.match(wiring, /action: "theme", theme: next/, "写回档位也走这条命令");
   assert.match(wiring, /applyTheme\(/, "落类只经 theme-sync → theme.mjs 的 applyThemeChoice");
   /**
-   * **不许用 `settings:set` 写主题**（brief 里那句"走 settings:set 持久化"与代码不符）：
-   * `mergeSettings` 会把未知键原样透传（`data.theme` 确实写得进去），但那条路
-   * **只写盘**——Rust 内存里的 `ThemeState` 与 `theme:changed` 广播都不会跟着动，
-   * 界面会亮、重启就变回去（而且两份真相从那一刻起就不一致了）。
-   * 主题的唯一写入口是 `core_login_chrome` 的 theme 动作（落盘 + 内存 + 广播在同一处）。
+   * 主题不许用 settings:set 写：那条路只写盘，不动 Rust 内存与 theme:changed 广播。
+   * 唯一写入口是 core_login_chrome 的 theme 动作（落盘 + 内存 + 广播在同一处）。
    */
   assert.doesNotMatch(wiring, /SETTINGS_SET|settings:set/, "主题不走 settings:set（它不更新 Rust 内存、不广播）");
 

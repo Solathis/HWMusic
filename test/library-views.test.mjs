@@ -1,13 +1,6 @@
 /**
- * R8 主界面 · View 模型与展示投影（纯逻辑，不碰 DOM）。
- *
- * 钉的是三件事：
- * 1. **导航只有一个真源**：侧边栏条目、可导航视图枚举、标题、常驻页判定都来自 views.mjs，
- *    UI 里不许再抄一份（抄一份的下场是"加了个页面但导航里没有"）；
- * 2. **不许白屏**：认不出的视图 id 回落到收藏页，而不是渲染空白；
- * 3. **会话字段名是未知的**：展示投影按候选字段兜底，且与协议层的 `trackIdOf` 对同一批
- *    夹具必须给出一致结论（跨层差分钉：两处各自演进就会让"能显示的 id"和"能去重的 id"分家）。
- * 先写先看红。
+ * 主界面 · View 模型与展示投影（纯逻辑，不碰 DOM）。
+ * 导航只有一个真源（views.mjs），UI 里不许再抄一份；认不出的视图 id 回落到收藏页，不许白屏。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -82,12 +75,7 @@ test("视图枚举：八个页面（含设置与 R65 的本地歌曲）都在枚
   for (const id of ["album", "artist", "playlist-detail"]) {
     assert.equal(seen.has(id), false, `${id} 是"从别处跳进来"的页面，不该占侧边栏`);
   }
-  /**
-   * R40 裁决（**改写**了 R8 那条"侧边栏要覆盖搜索"）：搜索入口从导航项换成侧栏顶部的常驻
-   * 输入框（`SidebarInput`），所以 `VIEW.search` **必须不再**占导航的一行——否则界面上会有
-   * 两个搜索入口（一个常驻框 + 一条导航项），点哪个都说不清。
-   * `VIEW.search` 仍是合法视图（内容区的结果页用它），只是不进 `SIDEBAR_VIEWS`。
-   */
+  /** 搜索入口是侧栏顶部的常驻输入框，所以 VIEW.search 仍是合法视图，但不进 SIDEBAR_VIEWS（否则界面上有两个搜索入口）。 */
   assert.equal(
     SIDEBAR_VIEWS.some((entry) => entry.id === VIEW.search),
     false,
@@ -95,7 +83,7 @@ test("视图枚举：八个页面（含设置与 R65 的本地歌曲）都在枚
   );
   assert.equal(isViewId(VIEW.search), true, "搜索仍是一个可用的视图（结果页要用它）");
   assert.equal(NAV_LIST_TESTID, "nav-list", "导航列表的测试锚点是契约（源码扫描也钉它）");
-  // R62：「我的歌单」不再是视图——列表长在侧栏里（sidebar-playlists.tsx），点进的是 playlist-detail
+  // 「我的歌单」不再是视图——列表长在侧栏里（sidebar-playlists.tsx），点进的是 playlist-detail。
   assert.equal(isViewId("playlists"), false, "「我的歌单」没有独立页面了");
   assert.equal(
     SIDEBAR_VIEWS.some((entry) => entry.label === "我的歌单"),

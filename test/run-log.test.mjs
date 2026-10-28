@@ -1,11 +1,6 @@
 /**
- * R56 · 设置页运行日志（级别 + 筛选 + 脱敏兜底）的渲染层纯逻辑。
- *
- * 数据来自两条路，形状在这一层归一：
- * 1. 宿主的日志文件（`core_read_run_log` → `{time, level, source, message}`，**已脱敏**）；
- * 2. `app:notice` 广播（`{id, text}`，没有级别 → 一律 info、来源「提示」）。
- *
- * 先写先看红。
+ * 设置页运行日志的渲染层纯逻辑：级别、筛选与脱敏兜底。
+ * 两路来源在此归一：日志文件已脱敏且带级别；`app:notice` 没有级别，一律 info、来源「提示」。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

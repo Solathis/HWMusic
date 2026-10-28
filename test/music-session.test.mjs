@@ -1,12 +1,6 @@
 /**
- * R17/C：音乐会话兑换（loginex）端口的形状与纪律。
- *
- * 这一层的证据分两级，测试也按这两级分开钉：
- * - **本机实测过**的：端点存在性（405/POST-only，对照路径 404）、无效 AT 回 200 + 业务码。
- *   这些体现在"端口真的会 POST 到那个 URL、并把业务码当结论"上；
- * - **只有公开证据**的：请求体 `{accessToken}`、Digest 头形状、成功响应字段。
- *   这些用假 fetch 钉形状——**不碰真网络**（真会话兑换要用户授权扫码）。
- *
+ * 音乐会话兑换（loginex）端口的形状与纪律。
+ * 本机实测过的那部分钉端点与业务码；只有公开证据的部分（请求体、Digest 头、成功字段）用假 fetch 钉形状。
  * 全程不碰网络、不碰时钟、不碰随机源：三样都是注入的。
  */
 import test from "node:test";
@@ -162,7 +156,7 @@ test("响应解析：成功码但 token 是空串 → invalid_response（空令�
   assert.equal(result.error.kind, MUSIC_SESSION_ERROR_KINDS.invalidResponse);
 });
 
-// —— 3.5 profile（R38：名字/头像/VIP 只收认得出的，认不出不显示） ----------------------
+// 3.5 profile：名字/头像/VIP 只收认得出的，认不出不显示。
 
 test("profile：名字/头像/VIP 都取到 → 进会话记录（头像必须过 CDN 白名单）", () => {
   const result = parseMusicSessionResponse({
@@ -259,7 +253,7 @@ test("诊断：顶层键名日志只给键名（排序、限量），值一个�
   assert.deepEqual(topLevelKeysOf(null), []);
 });
 
-// —— 3.6 profile 的第二来源（R40：loginex 一层容器 + id_token claims） -----------------
+// 3.6 profile 的第二来源：loginex 一层容器 + id_token claims。
 
 test("R40 诊断：loginex 两个容器的一层键名日志（只记键名，值一个都不出现）", async () => {
   const logged = [];
@@ -287,7 +281,7 @@ test("R40 诊断：loginex 两个容器的一层键名日志（只记键名，�
   assert.deepEqual(MUSIC_PROFILE_NESTED_CONTAINER_KEYS, ["queryAllSubInfoResp", "queryAppConfigDetailResp"], "容器名来自真机键名日志");
   assert.deepEqual(nestedContainerKeyNamesOf({ b: 1 }), [], "响应对不上就什么都不报（不抛）");
   assert.deepEqual(nestedContainerKeyNamesOf({ queryAllSubInfoResp: { z: 1, a: 2 } }), ["queryAllSubInfoResp: a, z"], "键名排序");
-  // R41：数组元素里的键名此前永远不进日志（"读得到却看不见"）——现在取首个对象元素记一行
+  // 数组元素里的键名也进日志：取首个对象元素记一行。
   assert.deepEqual(
     nestedContainerKeyNamesOf({ queryAllSubInfoResp: { items: ["纯标量", { b: 1, a: 2 }] } }),
     ["queryAllSubInfoResp: items", "queryAllSubInfoResp.items[0]: a, b"],

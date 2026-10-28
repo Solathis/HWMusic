@@ -1,20 +1,6 @@
 /**
- * R10 设置页 · 页面接线（源码扫描）。
- *
- * 令牌/自绘那两条硬约束在 R8 的两个扫描文件里（theme-tokens / no-self-visual），这里只管
- * **设置页特有**的接线，全是"看起来能用、其实在撒谎"的地方：
- *
- * 1. 读设置走 `settings:get` 一次（不是每次渲染都打一趟）；
- * 2. 保存走 `settings:set` 的 `{patch}`，且 patch 由纯函数造；恢复默认只回默认**代理**
- *    （`{patch:{proxy:null}}`，不是整份 reset——那会把关窗行为一起打回默认，用户没要求）；
- * 3. 测试连接走新频道 `settings:test-proxy`，载荷就是表单当前的草稿（不是已保存的旧值：
- *    用户点"测试连接"是想知道**刚填的**这组能不能通）；
- * 4. 失败文案来自 `settingsFailureText`（不是库页面的 `libraryFailureText`：设置失败要能说
- *    "没保存"，库页面那句是"加载失败"）；
- * 5. 队列**只读**：不出现任何队列管理动作（播放/清空/跳转），也不直接渲染 QueuePanel；
- * 6. 保存中按钮禁用（重复点击 = 写两次盘）。
- *
- * 先写先看红。
+ * 设置页特有的接线：读走 settings:get 一次，保存走 settings:set 的 {patch}（恢复默认只回默认代理），测试连接走 settings:test-proxy 且载荷是当前草稿。
+ * 失败文案来自 settingsFailureText；队列只读；保存中按钮禁用。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -59,8 +45,7 @@ test("频道：全部来自共享常量（不写字面量，channel-parity 已�
     assert.match(page, new RegExp(`\\b${constant}\\b`), `设置页要用共享常量 ${constant}`);
   }
   assert.match(page, /from\s+"\.\.\/shared\/request-channels\.ts"/, "频道常量从共享真源导入");
-  // R38：`AUTH_LOGOUT` **不再**出现在设置页——退出搬到左下角账号区（App 的 SidebarFooter），
-  // 唯一实现收在 host-api 的 `coreLogout`（那一份由 proxy-settings-form.test.mjs 钉住）。
+  // 设置页不再直接摸退出频道：退出搬到左下角账号区，唯一实现收在 host-api 的 coreLogout。
   assert.doesNotMatch(page, /AUTH_LOGOUT/, "设置页不再直接摸退出频道（那一块已删）");
 });
 
@@ -132,8 +117,7 @@ test("关窗行为下拉：受控值 + 自绘标签（radix 在内容没展开�
 test("设置 Select 调用点：popper/start/4 + SelectGroup，触发器响应式，不改选中语义", () => {
   const source = settingsPageSource();
   const contents = [...source.matchAll(/<SelectContent\b([^>]*)>([\s\S]*?)<\/SelectContent>/g)];
-  // R52（有意更改）：7 → 3。字号/颜色/方向/样式四个下拉搬进 R51 的桌面歌词外观弹出窗，
-  // 设置页只剩关窗行为、主题、窗口位置这三处。
+  // 设置页只剩关窗行为、主题、窗口位置三处（字号/颜色/方向/样式已搬进桌面歌词外观弹出窗）。
   assert.equal(contents.length, 3, "关窗、主题、歌词窗口位置三处");
   for (const [, props, body] of contents) {
     assert.match(props, /position="popper"/, "弹层不能 item-aligned 盖住 trigger");
@@ -153,9 +137,7 @@ test("保存中禁用：写盘期间按钮不可重复点（一次点击 = 一�
   assert.match(source, /saving|busy|pending/, "要有进行中的状态（否则用户只能靠再点一次判断）");
 });
 
-// ---------------------------------------------------------------------------
-// R41：歌词缓存卡（挂点，不是二级分类——那是第二波）
-// ---------------------------------------------------------------------------
+// 歌词缓存卡挂在设置页里，与「桌面歌词」卡同一个 lyrics 绑定（挂点，不是二级分类）。
 
 test("歌词缓存卡（R41）：挂在设置页里，且与「桌面歌词」卡同一个 lyrics 绑定", () => {
   const source = settingsPageSource();
@@ -163,9 +145,7 @@ test("歌词缓存卡（R41）：挂在设置页里，且与「桌面歌词」�
   assert.match(source, /<LyricsCacheCard lyrics=\{lyrics\}\s*\/>/, "挂点：把外壳交下来的 lyrics 绑定传进去");
 });
 
-// ---------------------------------------------------------------------------
-// R41b：二级分类（单页 Tabs，不新开视图）
-// ---------------------------------------------------------------------------
+// 二级分类是单页 Tabs，不新开视图。
 
 /** 取某个标签页那一段（从它的开头到下一个 `</TabsContent>`）。 */
 function paneSource(source, id) {

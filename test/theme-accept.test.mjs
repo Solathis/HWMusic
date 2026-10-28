@@ -1,10 +1,6 @@
 /**
- * R44e：主题回执的**单调 revision 合同**（跨 webview 的同一份规则）。
- *
- * 为什么需要它：主题有多个消费者（`theme-sync.ts` 的 `<html>` 类、`use-theme-choice.ts` 的控件高亮、
- * 歌词窗的主题订阅），每个都是"先订阅广播、再读回当前档位"。读回是异步的，**慢半拍的旧回执**
- * 会盖掉刚收到的新广播——界面就从新主题跳回旧主题（R43a 修过一次，R44e 把它收成共享纯函数，
- * 不让每个消费者各写一套不一致的规则）。
+ * 主题回执的单调 revision 合同，多个 webview 消费者共用这一份规则。
+ * 读回是异步的，慢半拍的旧回执会盖掉刚收到的新广播，界面就从新主题跳回旧主题。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

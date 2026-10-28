@@ -1,8 +1,6 @@
 /**
- * R3 sidecar 桥 · 帧协议与 pending 表。
- *
- * 覆盖简报点名的六类失败面：分帧 / 半帧 / EOF / pending 命中 / 同一 id 二次回调拒绝 / 超时（注入计时器）。
- * 本文件先于 src/host/bridge.mjs 存在而书写：实现缺席时必须失败（TDD RED）。
+ * sidecar 桥 · 帧协议与 pending 表。
+ * 覆盖六类失败面：分帧 / 半帧 / EOF / pending 命中 / 同一 id 二次回调拒绝 / 超时（注入计时器）。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

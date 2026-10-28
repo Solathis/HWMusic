@@ -1,21 +1,6 @@
 /**
- * R27（用户指令 2026-10-20，用户三项之 3）：**登录态持久化为什么不生效**一条日志看明白。
- *
- * 背景（真机现象）：用户感觉"每次重启都要重登"，而链路代码（R5 `session-store` 的 DPAPI 信封 +
- * `auth-manager.restore` + `auth:get-status`）单测全绿。R27 的排查清单里最可能的一条是
- * **数据根漂移**：
- *
- * ```
- *   控制器调试：HWMUSIC_DATA_DIR=.tmp/live-data   → 会话落在 .tmp/live-data/session.enc
- *   用户自跑：  npm run dev（不带该变量）          → 会话落在 %APPDATA%\<bundle>\
- * ```
- *
- * 两个根互不相通，于是"调试时登录过、用户那边还是未登录"。要一眼看穿这件事，启动日志里
- * 必须同时出现三样东西：**数据根是哪个路径**、**它是哪来的**（旋钮 / 宿主参数 / 都没有）、
- * **那个根里到底有没有 session.enc**——再加上**恢复走到的档位**（`no_session` / 解不开 / 已登录）。
- *
- * 本文件钉的就是这一行（以及"读不到 ≠ 不存在"这条诚实边界）。真正的修复动作（迁移会话、
- * 修 `%APPDATA%` 根的 WebView2 `ERROR_BUSY`）在控制器/用户那一侧，见报告。
+ * 启动日志一行看明白登录态持久化：数据根是哪个路径、它哪来的、根里有没有 session.enc，以及恢复走到的档位。
+ * 读不到 ≠ 不存在。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

@@ -1,35 +1,7 @@
 /**
- * R16 · B 部分：二维码登录协议与轮询状态机（`src/protocols/qr-login.mjs`）。
- *
- * 协议形状来自 R16 的实探（`scripts/probe-qr.mjs` 的可复现证据，登记在 docs/API_CONTRACT.md §1.7）：
- * 建单 `POST <getqrInfo>` 表单 `{appID, confirmFlag, version, reqClientType, loginChannel, appBrand}`
- * → `{content, qrToken, qrCode, sessionID, qrCodeCreateTime, expiredTime, version}`；
- * 轮询 `POST <asyncURL>&t=<随机>` 表单 `{qrToken}` → `{resultCode, errorDesc}`：
- * `0` = 已确认 / `103000202` = 已扫待确认 / `103000201` = 过期 / 其余（实探见 `103000200`）= 继续轮询。
- *
- * 三条硬要求（先写先看红）：
- * 1. **认不出的 resultCode 不许当成功**：一律按"继续轮询"处理并留痕（把陌生码当 confirmed
- *    就是拿一个没确认的会话去换令牌）；
- * 2. **状态变化才广播**：轮询 2 秒一次、扫码要几分钟，每次 tick 都广播会把通道刷成噪声；
- * 3. **过期只报不换**（R21 用户指令 **推翻** R16/R20 的"过期自己重建"）：过期是一条**终点**
- *    广播——停轮询、不建新单，换新只能由用户手动触发（渲染层再发一次 `auth:qr-start`，
- *    端口本来就是 restart 语义）。原来的理由是"渲染层什么都做不了"，但那样用户会看到码
- *    在眼皮底下自己换掉、却不知道自己该做什么；现在过期态明确停住并请用户点刷新。
- *
- * R22（用户真机反馈两项：① 倒计时到 0 后卡在「正在确认过期…」一直不过期；② 过期时间正确性）
- * 增补三组断言，都写在文件末尾：
- * 1. **TTL 无偏差换算**：两个服务端值相减（本地钟偏多少都不平移倒计时）、缺 `qrCodeCreateTime`
- *    才回退老公式（偏差风险已知）、字段不可信或两值矛盾 → `null`（不猜）；
- * 2. **熔断**：连续 5 个认不出的 `resultCode` → `failed`（`unknown_result_code`）+ 停轮询，
- *    中间认出一个码就重新计数；
- * 3. **本地到期兜底**：到期锚 + 宽限的**边界逐个钉**（锚前不触发 / 差 1ms 不触发 /
- *    到点触发 / 服务端先到或仍在说话时一律让位 / 没有可信 TTL 就不设锚），外加每轮诊断日志的脱敏。
- *
- * R26（用户真机反馈之 3：倒计时到 0 之后「正在确认过期…」要等很久才变过期）把兜底的**落点**
- * 换了：R22 挂在**轮询落地点**上（轮询间隔 2 秒、实探一次往返 ~8 秒 + 15 秒宽限 → 最长 ~25 秒），
- * R26 改成**建单/刷新时就挂一个一次性定时器**（到期锚 + 3 秒），到点即裁决；轮询落地点那条路
- * 保留成第二张网；**服务端一律优先**（它说过 expired/scanned/confirmed 时这张网让位）。文件末尾
- * 的 R26 段用"按延迟精确取用"的假计时器钉住它（与 `harness` 的"推进一步"语义分开，互不干扰）。
+ * 二维码登录协议与轮询状态机（`src/protocols/qr-login.mjs`）的测试。
+ * 认不出的 resultCode 不许当成功：一律按继续轮询处理并留痕。
+ * 状态变化才广播；过期只报不换，换新只能由用户手动触发。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -168,11 +140,8 @@ function harness({ createResponses, pollResponses, intervalMs = 2000 }) {
   };
   const clearTimer = (id) => timers.delete(id);
   /**
-   * 跑到**最早到点**的那个挂起计时器（一次只推进一步：状态机的每一步都单独可断言）。
-   *
-   * 按延迟排序而不是"谁先挂上谁先跑"（R26 改）：真实时间是这么走的，而 R26 起会话里同时挂着
-   * 轮询（2 秒）与本地到期兜底（TTL + 宽限，几分钟后）两张网——按插入顺序推会让"下一步"变成
-   * 那张远未来的网，每个用例的每一步都错位。
+   * 跑到**最早到点**的那个挂起计时器，一次只推进一步。
+   * 按延迟排序而不是插入顺序：会话里同时挂着轮询与本地到期兜底两张网。
    */
   const tick = async () => {
     let pick = null;
@@ -468,10 +437,8 @@ test("会话：start 之前的状态是 idle，重复 start 不会开出第二�
   assert.equal(session.isRunning(), true);
 });
 
-// ---------------------------------------------------------------------------
-// R20：活动会话期间重启（手动刷新）—— 迟到的旧会话事件一律不许广播
-// R21（用户指令）：过期不再自动换新，于是"换一张新码"这条路只剩手动一条
-// ---------------------------------------------------------------------------
+// 活动会话期间重启（手动刷新）：迟到的旧会话事件一律不许广播。
+// 过期不再自动换新，换一张新码只剩手动一条路。
 
 test("会话：取消之后才落地的轮询响应不再广播（迟到的「过期」不许顶掉新码）", async () => {
   const world = harness({ createResponses: [{ body: createPayload() }], pollResponses: [] });
@@ -545,18 +512,13 @@ test("会话：过期之后手动刷新，current() 报的是新那张（换码�
   assert.equal(session.current().qrCode, "R-NEW", "换新之后当前那张是新码：拿旧 qrCode 去换码只会换回一次失败");
 });
 
-// ---------------------------------------------------------------------------
-// R22（用户真机反馈两项）· A：TTL 无偏差换算
-//
-// 老公式 `expiredTime − 本地 now()` 把**两个时钟**相减，本地钟偏多少、倒计时就平移多少
-// （RED 实测：本地钟快 1 小时 → `expiresInMs` 直接 0，倒计时一上来就归零；慢 1 小时 →
-// 63 分钟）。R22 改成两个**都是服务端值**的字段相减：`expiredTime − qrCodeCreateTime`。
-// ---------------------------------------------------------------------------
+// TTL 无偏差换算：取两个服务端值之差 `expiredTime − qrCodeCreateTime`，本地钟偏多少都不平移。
+// 老公式 `expiredTime − 本地 now()` 把两个时钟相减，倒计时跟着钟偏一起错。
 
 test("R22 建单解析：有效期取两个服务端值之差——本地钟偏多少都不平移倒计时", () => {
   const server = 1_700_000_000_000;
   const payload = createPayload({ qrCodeCreateTime: server, expiredTime: server + 181_000 });
-  // 0 = 对表；±1 分钟 = 小偏差；±1 小时 / +1 天 = 真机上见得到的偏差档
+  // 对表；±1 分钟小幅偏差；±1 小时与 +1 天是真机上见得到的偏差档。
   for (const skew of [0, 60_000, -60_000, 3_600_000, -3_600_000, 86_400_000]) {
     const parsed = parseQrCreate(payload, { now: () => server + skew });
     assert.equal(parsed.ok, true);
@@ -594,12 +556,7 @@ test("R22 建单解析：字段不可信/互相矛盾一律 null（不猜一个 
   }
 });
 
-// ---------------------------------------------------------------------------
-// R22 · B1：未知 resultCode 熔断
-//
-// RED 实测：连着 5 个陌生码，会话仍在轮询（`isRunning: true`）。协议真要变了，
-// 这条会话会一直 2 秒一次打到总期限，用户全程看着一张不会变的界面。
-// ---------------------------------------------------------------------------
+// 未知 resultCode 熔断：连着 5 个陌生码不该 2 秒一次打到总期限。
 
 test("R22 熔断：连续 5 个不认识的 resultCode → failed 带 unknownResultCode 并停轮询", async () => {
   const world = harness({
@@ -700,18 +657,11 @@ test("R22 熔断：阈值可注入（时钟之外，判据本身也是注入的�
   assert.equal(session.status(), QR_LOGIN_STATUS.failed);
 });
 
-// ---------------------------------------------------------------------------
-// R22 · B2：本地到期权威兜底
-//
-// 用户那句"卡在正在确认过期…一直不过期"要有一个**必有**的出口：`expiredTime` 已过 +
-// 宽限 15 秒仍未收到服务端 `expired` → 主动转 `expired`（停轮询 + 广播）。
-// 边界全部注入时钟钉死：过期前不触发 / 过期 +14.999s 不触发 / +15s 触发 /
-// 服务端先到（或仍在说话：scanned/confirmed）以服务端为准。
-// ---------------------------------------------------------------------------
+// 本地到期兜底：`expiredTime` 已过 + 宽限仍未收到服务端 `expired` → 主动转 `expired`（停轮询 + 广播）。
+// 边界用注入时钟钉死；服务端先到或仍在说话时一律让位。
 
 /**
- * R22 兜底专用的假世界：**钟可以被推**（到期锚是一条时间线，跨过它才谈得上兜底），
- * 其余与 `harness` 同一套（手动计时器 + 编排好的轮询响应）。
+ * 兜底专用的假世界：钟可以被推，其余与 `harness` 同一套。
  *
  * @param {{pollResponses: Array<object|Error>, ttlMs?: number, startMs?: number,
  *          createOverrides?: object}} options
@@ -841,12 +791,7 @@ test("R22 兜底：网络断了又确实过了期 → 也走 expired 出口（�
   assert.equal(at.session.isRunning(), false);
 });
 
-// ---------------------------------------------------------------------------
-// R22 · B3：轮询诊断日志（脱敏）
-//
-// RED 实测：轮询里除了"陌生码"那一句，没有一行 resultCode。真机卡住时，日志上看不出
-// 是在轮询、还是轮询早就断了。R22 起**每轮记一行**：只有轮次与状态码。
-// ---------------------------------------------------------------------------
+// 轮询诊断：每轮记一行，只有轮次与状态码，没有 qrToken、没有二维码内容。
 
 test("R22 诊断：每轮 resultCode 进日志（只有轮次与状态码，没有 qrToken、没有二维码内容）", async () => {
   const world = harness({
@@ -943,21 +888,11 @@ test("R22 诊断：熔断那一刻留下一条说明（为什么停）", async (
   );
 });
 
-// ---------------------------------------------------------------------------
-// R26 · 用户真机反馈之 3：过期出口太慢（兜底改挂一次性定时器）
-//
-// RED（用户真机）：倒计时数到 0 之后「正在确认过期…」要等**很久**才变过期。根因是落点：
-// R22 的兜底只在**轮询落地**那一步检查（轮询间隔 2 秒、实探一次往返 ~8 秒），再叠 15 秒宽限
-// → 最长 ~25 秒。R26 改成"建单/刷新时就把那个时刻**排进计时器**"（到期锚 + 3 秒），到点即裁决，
-// 与轮询在不在飞、飞多久都无关；轮询落地点仍是第二张网；服务端一律优先。
-//
-// 为什么单独一套假计时器：`harness.tick()` 是"推进一步"的顺序语义（第一个挂上的先跑），
-// 多挂一个远未来的计时器会把既有用例的每一步都错位；R26 要断言的是**延迟本身**与
-// "到点那一刻发生了什么"，所以这里按延迟精确取用。
-// ---------------------------------------------------------------------------
+// 过期出口太慢：兜底改挂建单/刷新时的一次性定时器（到期锚 + 3 秒），到点即裁决。
+// 轮询落地点仍是第二张网，服务端一律优先。
 
 /**
- * R26 到期定时器专用假世界：`setTimer` 把 `(fn, 延迟)` 都记下来，测试可以按延迟精确触发。
+ * 到期定时器专用假世界：`setTimer` 把 `(fn, 延迟)` 都记下来，可按延迟精确触发。
  *
  * @param {{ttlMs?: number, startMs?: number, createOverrides?: object,
  *          pollResponses?: Array<object|Error>}} [options]
@@ -1047,7 +982,7 @@ test("R26 出口：时钟跨过 到期锚 + 宽限 之后，**不依赖任何轮
   const at = expiryTimerWorld();
   await at.session.start();
 
-  // 只推钟 + 让那张一次性到期计时器到点：一次轮询都不发生（真机上轮询可能有 8 秒往返在飞）
+  // 只推钟并让那张一次性到期计时器到点：一次轮询都不发生。
   at.at(at.anchor() + QR_LOCAL_EXPIRY_GRACE_MS);
   await at.fire(181_000 + QR_LOCAL_EXPIRY_GRACE_MS);
 
@@ -1126,19 +1061,13 @@ test("R26 收尾：cancel / 新建会话之后到期定时器不残留（不留�
   assert.deepEqual(at.timers(), [2_000, 181_000 + QR_LOCAL_EXPIRY_GRACE_MS]);
 });
 
-// ---------------------------------------------------------------------------
-// R29 诊断加强：真机扫码之后轮询仍停在"未扫"（103000200，服务端原话 "Please to login."）
-// 时，日志要能回答两个问题——① 我们建的这张码到底指向哪、带什么上下文参数；
-// ② 每一轮是什么时候发的、服务端除了状态码还说了什么。
-//
-// 两条纪律不变：**日志里不许出现 qrToken / qrCode / 整串 content**（它们是一次性凭据），
-// 而 errorDesc 是服务端的固定文案，它恰恰是"手机侧登没登录"的唯一线索，所以要记。
-// ---------------------------------------------------------------------------
+// 诊断加强：日志要能回答这张码指向哪、每轮何时发出、服务端除状态码还说了什么。
+// 纪律不变：日志里不许出现 qrToken / qrCode / 整串 content；errorDesc 要记。
 
 const R29_CONTENT =
   "https://id1.cloud.huawei.com/qrcode/login.jsp?qRCode=R29-SECRET-CODE&loginChannel=7000700&reqClientType=700&qrSiteID=1&appBrand=HUAWEI&familySharing=0";
 
-/** R29 的假世界：一个可手动推进的钟（轮询时刻要能算出来）+ 可编排的响应。 */
+/** 假世界：一个可手动推进的钟 + 可编排的响应。 */
 function r29World({ createOverrides = {}, pollResponses } = {}) {
   const world = harness({
     createResponses: [{ body: createPayload({ content: R29_CONTENT, qrCode: "R29-SECRET-CODE", ...createOverrides }) }],
@@ -1245,24 +1174,13 @@ test("R29 诊断：认不出的码那一行照样带时刻与 errorDesc（熔断
   assert.ok(round.includes('errorDesc="protocol changed"'));
 });
 
-// ---------------------------------------------------------------------------
-// R31 全保真：探针（headless Chromium 真开官方二维码页）实测到的请求形态逐项对齐
-//
-// 实测（`scripts/probe-qr-fidelity.mjs` → `.probe/r31-fidelity.json`）：
-// - 建单 **POST https://id1.cloud.huawei.com/DimensionalCode/getqrInfo**——**没有查询串**；
-//   表单 = 模板六参数 + `deviceID` + `deviceType=7`；
-// - 轮询 `POST …/DimensionalCode/async?version=40200&t=<随机>`，表单只有 `qrToken`；
-// - 两个请求都带 `accept: application/json, text/plain, */*` 与页面自己的 Referer；
-// - 两者都带 cookie（建单带 CAS 那些、轮询还带**建单响应自己设的** `qRCode`/`expiredTime`）。
-//
-// 本层只负责"我们发出去的那一串"对不对；cookie 罐、UA、设备标识从哪来，是端口层的事
-// （见 test/qr-port.test.mjs 的 R31 段）。
-// ---------------------------------------------------------------------------
+// 全保真：探针实测到的请求形态逐项对齐（建单无查询串、轮询只带 qrToken、头与 Referer）。
+// 本层只管我们发出去的那一串；cookie 罐、UA、设备标识归端口层。
 
-/** 那张画着二维码的页（探针实测：建单/轮询的 Referer 就是它）。 */
+/** 那张画着二维码的页（建单/轮询的 Referer 就是它）。 */
 const R31_REFERER = "https://id1.cloud.huawei.com/CAS/portal/loginAuth.html?x=1";
 
-/** R31 的假世界：把请求头也记下来（harness 只记 URL 与正文）。 */
+/** 假世界：把请求头也记下来（harness 只记 URL 与正文）。 */
 function r31SessionWorld({ pollResponses = [{ body: { resultCode: "103000200" } }] } = {}) {
   const world = harness({ createResponses: [{ body: createPayload() }], pollResponses });
   const calls = [];
@@ -1335,10 +1253,7 @@ test("R31 轮询请求：URL 带 &t=、表单只有 qrToken、请求头与建单
   }
 });
 
-// ---------------------------------------------------------------------------
-// R53：`cancel()` 之后一次新轮询都不许再发
-// ---------------------------------------------------------------------------
-// 谁调用 `cancel()` 由 test/auth-qr.test.mjs 的 R53 段钉，这里只钉"停了就真没请求"。
+// `cancel()` 之后一次新轮询都不许再发：停的是真轮询，不只是状态字符串。
 
 test("R53 停止轮询：cancel() 之后不再有新的轮询请求（停的是真轮询，不只是状态字符串）", async () => {
   const world = harness({

@@ -1,7 +1,6 @@
 /**
- * R65 本地曲目歌词（`src/main/local-lyrics.mjs`）：来源优先级、编码识别、字节上限、缓存。
- * 优先级是**用户意图优先**：手动导入的本地歌词（`lyrics-local/`）> 同名 `.lrc`/`.txt` > 内嵌标签；都没有就如实回"没有"。
- * 夹具全部现场生成字节（GBK 与 UTF-16 各一份），不读真实音乐文件。
+ * 本地曲目歌词：来源优先级、编码识别、字节上限与缓存。
+ * 优先级是用户意图优先：手动导入 > 同名 `.lrc`/`.txt` > 内嵌标签，都没有就如实回「没有」。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

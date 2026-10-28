@@ -1,13 +1,5 @@
 /**
- * R9 播放器文案（`features/playback/playback-state.mjs`）：**克制、不冒充、可执行**。
- *
- * 与 R8 的 `library-state.mjs` 同一条纪律，三类不能混：
- * 1. **接口没配**（`endpoint_unknown`）≠ "这首歌放不了"——后者听起来像歌的问题；
- * 2. **队列空** ≠ "播放失败"——前者要告诉用户下一步做什么；
- * 3. **还没有歌词来源** ≠ "这首歌没有歌词"——把前者说成后者，就是替没接上的接口撒谎。
- *
- * 另外两条硬约束：句长克制、禁画饼（"敬请期待/即将上线"这类词由本测试禁掉）。
- * 先写先看红。
+ * 播放器文案：接口没配、队列空、还没有歌词来源三类不能混，句长克制、禁画饼。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -95,8 +87,7 @@ test("艺人：取不到就「未知艺人」；没有曲目时给空串（不�
 });
 
 test("歌词占位：三档分开（没有来源 ≠ 这首歌没有歌词）", () => {
-  // R12 起频道已接上，所以"尚未接入"不再成立——端点是可能缺的那一环，文案改说"尚未配置"；
-  // 其他失败（网络/HTTP）另有一档，不许冒充成"没配置"。
+  // 频道已接上，「尚未接入」不再成立——端点可能缺的那一环改说「尚未配置」，网络/HTTP 失败另有一档。
   assert.match(LYRICS_NOTICE_TEXT.unavailable, /尚未配置/);
   assert.match(LYRICS_NOTICE_TEXT.empty, /没有歌词/);
   assert.match(LYRICS_NOTICE_TEXT.loading, /正在取|取歌词/);

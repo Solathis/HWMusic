@@ -1,21 +1,8 @@
 /**
- * R8 主界面 · 不自绘视觉（源码扫描）；R9 起覆盖播放器接通与歌词舞台。
+ * 主界面 · 不自绘视觉（源码扫描）：项目的 UI 约束只有一句——只组合 shadcn 原语 + Tailwind 工具类 + 设计令牌。
  *
- * 项目的 UI 约束只有一句：**只组合 shadcn 原语 + Tailwind 工具类 + 设计令牌**。
- * 这条扫描把它落到可执行的形式——本文件只管"有没有自己画"，颜色/内联样式由
- * test/theme-tokens.test.mjs 管，歌词组件的来源由 test/lyrics-panel.test.mjs 管。要点：
- *
- * 1. 界面文件必须真的组合 shadcn 原语（不是自己拿 div 拼一个表格/按钮）；
- * 2. 不许手写 `<svg>`/`<canvas>`/`dangerouslySetInnerHTML`（图形一律 lucide-react 图标）；
- * 3. 组件契约（TrackTable / PlayerBar / QueuePanel 的导出与关键接线）；
- * 4. 渲染层不 import 协议层（业务 HTTP 只在 sidecar；渲染层只走 host-api 的 core_call）；
- * 5. 播放器栏 R9 已接通状态机：`data-state` 由状态给，但**UI 层不持有音频、不碰 core**
- *    （地址与音频都在 features/playback 的运行时里；音频元素的唯一实例由
- *    test/playback-runtime.test.mjs 的扫描钉住）；
- * 6. R12：歌词窗宿主（LyricsWindow.tsx）与歌词窗入口也在网内——它只是第三个 AMLL 宿主，
- *    连 shadcn 原语都不掺（数据全靠广播进来）。
- *
- * 先写先看红。
+ * 本文件只管「有没有自己画」：颜色与内联样式归 theme-tokens.test.mjs，歌词组件来源归 lyrics-panel.test.mjs。
+ * AMLL 宿主与歌词窗是例外，同样不许自绘。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -25,39 +12,26 @@ import { fileURLToPath } from "node:url";
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 const read = (relative) => readFileSync(`${repoRoot}${relative}`, "utf8");
 
-/**
- * 组合 shadcn 原语的界面文件（简报 Files 一节 + R9 的舞台 + R39 补齐的三处）。
- *
- * R39 增补 `login-gate.tsx` / `login-chrome.tsx` / `theme-control.tsx`：它们是**早就存在**的
- * 主界面（引导页、两个浮动控件），却一直没进这份名单——扫描范围漏一个文件，那个文件里的
- * 自绘就永远扫不出来。补进来之后要交代的只有一处：门禁那块二维码 `<canvas>`
- * （库的渲染目标，见下面的 `CANVAS_EXCEPTION_FILES`）。
- */
+/** 组合 shadcn 原语的界面文件名单：扫描范围漏一个文件，那个文件里的自绘就永远扫不出来。 */
 const UI_FILES = [
   "src/renderer/App.tsx",
   "src/renderer/pages.tsx",
   "src/renderer/favorites-page.tsx",
   "src/renderer/components.tsx",
-  // R62：侧栏「我的歌单」这一组（原「我的歌单」页与 playlist-grid.tsx 一起删除）
+  // 侧栏「我的歌单」这一组（原「我的歌单」页与 playlist-grid.tsx 一起删除）
   "src/renderer/sidebar-playlists.tsx",
   "src/renderer/log-terminal.tsx",
   "src/renderer/playback-stage.tsx",
   "src/renderer/login-gate.tsx",
   "src/renderer/login-chrome.tsx",
   "src/renderer/theme-control.tsx",
-  // R41b：左下角那枚主题循环按钮（图标 + tooltip 都是 shadcn/lucide，没有自绘）
+  // 左下角那枚主题循环按钮（图标 + tooltip 都是 shadcn/lucide，没有自绘）
   "src/renderer/theme-toggle.tsx",
-  // R51：歌词设置弹出窗（菜单本体是官方 DropdownMenu，控件全是 shadcn 原语）
+  // 歌词设置弹出窗（菜单本体是官方 DropdownMenu，控件全是 shadcn 原语）
   "src/renderer/LyricsSettingsPopup.tsx",
 ];
 
-/**
- * AMLL 宿主组件是**例外**：它们的视觉全部来自官方包（`BackgroundRender` / `LyricPlayer`），
- * 宿主只提供定位容器——所以它们不"组合 shadcn 原语"，但同样不许自绘（见 lyrics-panel.test.mjs）。
- *
- * R12 的 `LyricsWindow.tsx` 是第三处宿主：歌词窗里的一切视觉仍然是官方 `LyricPlayer` 的，
- * 它只多了一件事——把广播来的歌词与进度喂给组件（数据来自主窗转发，见 lyrics-window.test.mjs）。
- */
+/** AMLL 宿主是例外：视觉全部来自官方包（BackgroundRender / LyricPlayer），宿主只提供定位容器，同样不许自绘。 */
 const AMLL_HOSTS = [
   "src/renderer/AmllBackground.tsx",
   "src/renderer/AmllLyricsPanel.tsx",
@@ -67,39 +41,10 @@ const AMLL_HOSTS = [
 /** 全部"要么组合原语、要么把视觉交给官方组件"的界面文件。 */
 const ALL_UI_FILES = [...UI_FILES, ...AMLL_HOSTS];
 
-/**
- * 手写 `<canvas>` 的唯一例外：登录门禁里那块二维码画布。
- *
- * 为什么它不算自绘：二维码没有 shadcn 原语，绘制必须由成熟库做——`qrcode`（MIT）的
- * `toCanvas` 拿到元素后自己编码、纠错、画静区，渲染层只转发内容与参数
- * （`features/auth/qr-canvas.mjs` 一处，像素由 `test/qr-render.test.mjs` 钉住）。
- * 这跟 AMLL 宿主把画布交给官方渲染器是同一类事。
- *
- * 之所以把它**写出来**而不是让扫描放行 `<canvas>`：例外是一个决定，得有名字、有边界，
- * 且下面有用例断言"全项目只有这一处"。
- */
+/** 手写 canvas 的唯一例外：登录门禁的二维码画布，绘制交给 qrcode 库；下面有用例断言全项目只有这一处。 */
 const CANVAS_EXCEPTION_FILES = ["src/renderer/login-gate.tsx"];
 
-/**
- * 自绘滚动容器的**例外集合**（R39 审计产物）：页面级滚动根，不是"面板"。
- *
- * 规则本身：该 `ScrollArea` 的地方（日志区、队列列表这类**面板**）不许拿 `overflow-y-auto`
- * 自己搭一个。下面三处是"整个页面/整个内容区滚不滚"的布局根，与 `ScrollArea` 的语义不同：
- *
- * - `App.tsx`：`SidebarInset` 的内容区（页面切换的落点）。换成 `ScrollArea` 会把每个页面
- *   塞进 radix 的 `display:table` 内容盒（`ScrollAreaContent`），页面里的百分比高度/`flex-1`
- *   全部失去参照——六个页面的布局要一起重验，超出本轮范围；
- * - `favorites-page.tsx`：收藏页的滚动根**必须**是它自己——`IntersectionObserver` 的 `root`
- *   与 `scrollTop` 位置记忆都要那个真实元素，而 radix 的 viewport 拿不到 ref
- *   （`components/ui/scroll-area.tsx` 是生成原语，不手改）。
- *
- * **R40 删掉了 `pages.tsx` 那一处**（R39 待裁决 ② 的落地）：它是搜索页里那层包住结果的
- * `overflow-y-auto`，而搜索页的输入框已经搬到侧栏——结果直接落在 `App.tsx` 那个页面级滚动根里，
- * 重复的一层随之消失（采集函数也真的量不到它自己的滚动，R39 已记）。所以例外集合现在是两处。
- *
- * 用例断言**计数逐文件相等**：新写一处自绘滚动容器会红；把某处改成 `ScrollArea` 也会红
- * （那时请连同这个集合一起改——它是一份决定记录，不是挡路的）。
- */
+/** 自绘滚动容器的例外集合：页面级滚动根（App 内容区、收藏页），不是面板；用例断言计数逐文件相等。 */
 const SCROLL_ROOT_EXCEPTIONS = {
   "src/renderer/App.tsx": 1,
   "src/renderer/favorites-page.tsx": 1,
@@ -203,13 +148,7 @@ test("组件契约：TrackTable / PlayerBar / QueuePanel 都在 components.tsx �
   assert.match(source, /onKeyDown=/, "键盘可达是简报要求的交互");
   assert.match(source, /aria-pressed=/, "收藏切换要有可读的按下状态（不是只有颜色）");
 
-  /**
-   * R40 第 5 项：曲目表**不许出现横向滚动**。
-   *
-   * 真机取证（`.tmp/r40-table-baseline.json`）说明默认的 `auto` 布局就是根因：列宽由内容决定，
-   * 表格在 1024 宽的内容区里长到 1361 px。所以这里钉三件事：
-   * ① table-fixed；② 标题/艺人百分比宽度只有一处真源，专辑吃余量；③ 固定小列不变、长内容截断。
-   */
+  /** 曲目表不许出现横向滚动：table-fixed、列宽配比只有一处真源、长内容截断。 */
   assert.match(source, /<Table className="table-fixed"/, "曲目表必须是 table-fixed（auto 布局会被 nowrap 内容撑破）");
   assert.match(source, /const TRACK_COLUMN_WIDTHS = \{/, "列宽配比要有名字（一处真源，不是散落的魔法值）");
   assert.match(source, /title: "w-\[32%\]"/, "标题固定为 32%（不再吃全部余量）");
@@ -227,16 +166,7 @@ test("组件契约：TrackTable / PlayerBar / QueuePanel 都在 components.tsx �
   );
   assert.match(source, /max-w-full truncate/, "列内内容要真截断（ellipsis），不是只靠列宽");
 
-  /**
-   * R41b 排版两项（brief 第 4 项），都落在**调用点**而不是生成的 `components/ui/table.tsx`：
-   *
-   * ① **页面级横向留白**：曲目表此前是贴边的（真机量：表格左边缘 256 = 内容区左边缘），
-   *    而歌单网格（`p-4`）、设置页（`m-4`）、空态（`px-4`）都在 16px 上——同一栏内容翻页时左边缘跳。
-   * ② **表头 sticky**：生成的 `Table` 外面套着一层 `overflow-x-auto` 容器，一个轴 auto 会让另一个轴
-   *    的 visible 也算成 auto，于是那层容器成了滚动容器，`sticky top-0` 只相对它定位（它自己从不
-   *    纵向滚动）——真机量的 `position: static`，表头照样滚走。这里在调用点把那层容器的 overflow
-   *    放开，让表头跟着页面那个滚动根走。
-   */
+  /** 表格在调用点吃 16px 页面留白，并放开生成容器的 overflow，让表头 sticky 跟着页面滚动根走。 */
   assert.match(
     stripComments(source),
     /className="px-4 \[&>\[data-slot=table-container\]\]:overflow-visible"/,
@@ -254,11 +184,7 @@ test("组件契约：TrackTable / PlayerBar / QueuePanel 都在 components.tsx �
     "components/ui/table.tsx 是生成物，不许手改",
   );
 
-  /**
-   * 骨架屏占的是"真实内容的位置"：曲目表真实行高 = `p-2` + `size-9` 封面 = 52~53px（真机量 53px），
-   * 而 `h-6`（24px）+ `gap-2` 只有 32px 一行——加载完的那一瞬间内容往下长一倍。
-   * 现在 44 + 8 = 52px/行，与真实行高对齐。
-   */
+  /** 骨架屏占的是真实内容的位置：行高 52px 与真实行高对齐，加载完不再往下长。 */
   assert.match(
     stripComments(source),
     /<Skeleton key=\{index\} className="h-11 w-full" \/>/,
@@ -314,7 +240,7 @@ test("外壳：侧边栏导航来自 views.mjs 的唯一真源，页面切换是
 });
 
 test("库页面的数据入口：一次一页地走 coreCall，频道名来自共享常量", () => {
-  // R62：取数实现在一处（页面与侧栏歌单共用），所以 coreCall 的断言跟着它走
+  // 取数实现在一处（页面与侧栏歌单共用），所以 coreCall 的断言跟着它走
   const hook = read("src/renderer/features/library/use-library-resource.ts");
   assert.match(hook, /coreCall\(/, "库数据只经 coreCall");
   assert.match(hook, /from\s+"\.\.\/\.\.\/host-api"/, "取数的唯一入口是 host-api");
@@ -341,13 +267,7 @@ test("库页面的数据入口：一次一页地走 coreCall，频道名来自�
   );
 });
 
-/**
- * R40 第 4 项：搜索入口只有一个——侧栏顶部那个常驻框。
- *
- * 这条扫描钉的是"delete-then-rewrite"真的发生了：入口在外壳（`SidebarInput` + 提交时切视图），
- * 页面只剩结果（**没有第二个输入框**，也不再自己存检索词）。留两个输入入口的下场是
- * 侧栏显示 A、内容区显示 B 的结果，用户不知道哪个算数。
- */
+/** 搜索入口只有一个：侧栏顶部那个常驻框，搜索页里没有第二个输入框。 */
 test("R40 搜索布局：入口只有侧栏那个常驻框，搜索页里没有第二个输入框", () => {
   const app = stripComments(read("src/renderer/App.tsx"));
   assert.match(app, /<SidebarHeader>/, "常驻搜索框放在侧栏顶部（shadcn 官方位置）");
@@ -367,8 +287,7 @@ test("R40 搜索布局：入口只有侧栏那个常驻框，搜索页里没有�
   assert.match(searchPage, /viewParam\(view, "keyword"\)/, "检索词从视图参数读（不自己存一份）");
   assert.match(searchPage, /libraryEmptyText\(view, \{ searched: true \}\)/, "「查无所获」那一档照旧");
 
-  // 歌单详情页（R40 第 2 项；R55 起两个动作作用于整张歌单）：
-  // 头部 + 两个动作 + 表格，说明"只加载了一部分"的那句文案已整条删除
+  // 歌单详情页：头部 + 两个动作 + 表格，说明「只加载了一部分」的文案已整条删除
   const detail = pages.slice(pages.indexOf("export function PlaylistDetailPage"), pages.indexOf("// 搜索：结果"));
   assert.match(detail, /PLAYLIST_PLAY_ALL_LABEL/, "「播放全部」的文案来自纯逻辑模块");
   assert.match(detail, /PLAYLIST_ENQUEUE_LABEL/, "「加入队列」同理");
@@ -386,18 +305,7 @@ test("R40 搜索布局：入口只有侧栏那个常驻框，搜索页里没有�
   assert.doesNotMatch(detail, /\bfetch\s*\(/, "封面仍然只能走 <img>/new Image（不 fetch）");
 });
 
-/**
- * R41b 第 1 项：侧栏收起 = **图标轨**，不是整块滑出。
- *
- * 根因是 shadcn sidebar 的默认 `collapsible = "offcanvas"`（收起时整块移到 `left: -16rem`），
- * 而 `<Sidebar>` 没传参数——"收起侧栏"于是与"关掉侧栏"在界面上完全一样，导航再也点不到。
- * 判据不是"看起来还在"（那要靠真机量），而是**结构上就是官方那一档**：
- * `collapsible="icon"` + 导航项的官方 `tooltip` + 窄轨里搜索的官方降级形态。
- *
- * 另外钉住 `TooltipProvider`：radix 的 `Tooltip` 没有 Provider 会**直接抛错**
- * （"must be used within TooltipProvider"），而全项目此前一处 tooltip 都没用上——
- * 少了这一层，整个主界面会白屏。
- */
+/** 侧栏收起 = 图标轨：collapsible=icon + 导航 tooltip + 窄轨里搜索降级成图标按钮；全项目必须有 TooltipProvider。 */
 test("R41b 侧栏：collapsible=icon + 导航 tooltip + 窄轨里搜索只剩一枚图标按钮", () => {
   const app = stripComments(read("src/renderer/App.tsx"));
 
@@ -414,18 +322,13 @@ test("R41b 侧栏：collapsible=icon + 导航 tooltip + 窄轨里搜索只剩一
   assert.match(app, /data-testid="sidebar-search-rail"/, "窄轨里必须留一枚搜索图标按钮（入口不能消失）");
   assert.match(app, /sidebar\.setOpen\(true\)/, "点它先展开侧栏（然后光标才落得到输入框上）");
   assert.match(app, /searchInputRef\.current\?\.focus\(\)/, "展开后把光标交给输入框（用户点的是「搜索」）");
-  // R57：窄轨里账号区**只留头像**（R41b 的"竖排三个图标"作废：48px 轨道里塞不下，也不再塞）
+  // 窄轨里账号区只留头像（48px 轨道塞不下三个图标）
   assert.match(app, /group-data-\[collapsible=icon\]:justify-center/, "窄轨里账号区居中放那一个头像");
   assert.match(app, /group-data-\[collapsible=icon\]:hidden/, "窄轨里名字/徽标/主题/退出隐藏");
   assert.doesNotMatch(app, /group-data-\[collapsible=icon\]:flex-col/, "不再把三个图标竖排进窄轨（R57 改成只剩头像）");
 });
 
-/**
- * R41b 第 3 项：左下角的主题按钮**在退出登录左边**，且是纯图标。
- *
- * 位置这件事只能靠源码顺序钉（DOM 顺序就是视觉顺序）：`<ThemeToggle>` 必须出现在那个
- * `AlertDialog`（退出登录）之前。图标本身是 lucide，颜色是令牌类（theme-tokens 扫）。
- */
+/** 左下角主题按钮必须在退出登录之前（DOM 顺序 = 视觉顺序），且是纯图标。 */
 test("R41b 左下角：主题图标按钮在退出登录左边（DOM 顺序 = 视觉顺序）", () => {
   const app = stripComments(read("src/renderer/App.tsx"));
   const footer = app.slice(app.indexOf("<SidebarFooter>"), app.indexOf("</SidebarFooter>"));

@@ -1,21 +1,8 @@
 /**
- * R11 托盘与关窗行为：跨语言契约 + 渲染层联动。
+ * 托盘与关窗行为：跨语言契约 + 渲染层联动。
  *
- * Rust 侧的内联单测（`src-tauri/src/tray.rs`、`close_behavior.rs`、`lib.rs`）钉的是**本模块的判定**；
- * 这里钉的是**跨语言那半边**——两边各写一份时最容易漂移、而漂移的后果只有用户能发现的东西：
- *
- * 1. **频道与命令名**：托盘发的是 `lyrics:toggle` / `app:open-settings` 两条新广播，
- *    问宿主的是 `core_get_tray_available`。名字写错一个字母的后果是"点了没反应"或
- *    "invoke 报 command not found"，都要到运行时才知道；
- * 2. **播放命令词**：Rust 托盘发出的 `toggle`/`previous`/`next` 必须是渲染层命令表里的词
- *    （R9 的执行器"认不出就拒绝"，不会猜——所以词表必须对上）；
- * 3. **托盘模块的纪律**：不发事件信封（唯一构造点 `commands::emit_core_event`）、
- *    装不上不 panic、图标走 `include_bytes!`；
- * 4. **关窗行为的退化方向**：形状不认识一律 `quit`（猜 `tray` 会让用户关一次窗就再也找不回）；
- * 5. **渲染层联动**：App 启动查一次可用性并交给设置页；托盘的"设置…"有人消费
- *    （没人订阅的广播 = 一个点了没反应的菜单项）。
- *
- * 先写先看红。
+ * Rust 侧内联单测钉本模块判定；这里钉跨语言那半边——频道与命令名、播放命令词、托盘模块纪律、
+ * 关窗行为的退化方向（形状不认识一律 quit）、渲染层联动（启动查一次可用性并交给设置页）。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -46,9 +33,7 @@ const HOST_API_FILE = "src/renderer/host-api.ts";
 const APP_FILE = "src/renderer/App.tsx";
 const PAGE_FILE = "src/renderer/pages.tsx";
 
-// ---------------------------------------------------------------------------
-// 1. 频道：R11 增补的两条广播
-// ---------------------------------------------------------------------------
+// 1. 频道：托盘的两条广播
 
 test("频道：托盘的两条广播在共享常量表里，值与 Rust 镜像逐字相等", () => {
   assert.equal(LYRICS_TOGGLE, "lyrics:toggle");
@@ -110,7 +95,7 @@ test("Rust 侧：命令挂主窗来源守卫，且用的是活的托盘事实（
   const start = commands.indexOf("pub fn core_get_tray_available");
   assert.ok(start !== -1);
   const body = commands.slice(start, start + 600);
-  // R23：守卫判的是 **webview label**（同窗之后窗口 label 恒为 main，按窗口判会被登录页绕过）
+  // 守卫判的是 webview label（同窗之后窗口 label 恒为 main，按窗口判会被登录页绕过）
   assert.match(
     body,
     /require_main_webview\(webview\.label\(\)\)/,
@@ -210,9 +195,8 @@ test("关窗行为（Rust 读盘）：schema 闸门与渲染层/core 枚举同�
 });
 
 test("关窗行为：设置里还没有这一项时，Rust 必须跟 core 的默认说同一句话", () => {
-  // 「文件不在」（用户还没选过）与「文件在但认不出」（有人动过盘）是两档：
-  // 前者要跟 core 的默认一致（设置页此刻显示的就是它），后者才保守落 quit。
-  // 混成一档的后果正是那种"界面说藏起来、关窗却退出了"的谎话。
+  // 「文件不在」要跟 core 的默认一致（设置页此刻显示的就是它），
+  // 「文件在但认不出」才保守落 quit；混成一档就会出现界面说藏起来、关窗却退出的谎话。
   assert.equal(
     closeBehaviorFromSettings(null),
     "tray",
@@ -239,7 +223,7 @@ test("可用性：只认 true，其余（false / 坏形状 / 没答）一律保�
       `认不出的回执按"不可用"处理（保守方向与 decide_close 的 fail-safe 一致）：${JSON.stringify(broken)}`,
     );
   }
-  // R10 那个写死的常量现在是**兜底值**：宿主还没答或答不上来时用它
+  // 写死的常量现在是兜底值：宿主还没答或答不上来时用它
   assert.equal(TRAY_AVAILABLE, false, "兜底值仍是 false（不许改成乐观的 true）");
 });
 

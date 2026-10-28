@@ -1,14 +1,9 @@
 /**
- * R38 · 左下角账号区（`auth:status` 载荷里的可选 `profile` → 能渲染的三项）。
+ * 左下角账号区：`auth:status` 载荷里的可选 `profile` 能渲染出的三项。
  *
- * 钉的是三条"不造假数据"的口径（它们全都会被界面直接暴露出来）：
- * 1. **旧载荷必须照旧能认**：`auth:status` 的老形状没有 `profile` 这一格（R38 之前登录的会话
- *    就是这样），解析必须回 `null`、**不抛**，界面走兜底（头像占位 + "已登录"）；
- * 2. **缺什么兜什么，绝不编**：没有名字 → "已登录"（不显示 userId：那不是给人看的东西）；
- *    没有头像 → `null`（`Avatar` 落到图标兜底）；VIP 只在 `vip === true` 时显示；
- * 3. **形状不认识就当没有**：载荷是别人的数据，多余键、坏类型一律忽略。
- *
- * 先写先看红。
+ * 三条不造假的口径：老载荷没有 `profile` 时解析回 `null` 且不抛，界面走兜底；
+ * 缺什么兜什么——没有名字显示「已登录」（不显示 userId）、没有头像回 `null`、VIP 只在 `vip === true` 时显示；
+ * 多余的键与坏类型一律忽略。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -45,7 +40,7 @@ test("载荷解析：带 profile 认（只认那三个键），不带/坏形状�
     "多余的键（userId 之类）不进投影",
   );
 
-  // R38 之前的老载荷：没有 profile 这一格
+  // 之前的老载荷：没有 profile 这一格。
   assert.equal(profileFromStatusPayload({ loggedIn: true, busy: false }), null);
   assert.equal(profileFromStatusPayload({ loggedIn: false, busy: false, message: "登录未完成" }), null);
   assert.equal(profileFromStatusPayload(null), null);
@@ -106,7 +101,7 @@ test("接线：资料与登录状态来自同一份载荷；账号区只用这�
   assert.match(app, /accountVipText/, "会员徽标由 accountVipText 的结论决定");
 });
 
-/* ------------------------------------------------------------------ R57 */
+/* 到期时间：只认「能显示成某一天」的形状，其余一律当没有。 */
 
 test("R57 到期时间：只认「能显示成某一天」的形状，其余一律当没有（不编日期）", () => {
   for (const [input, expected] of [

@@ -1,11 +1,5 @@
 /**
- * R41 · 歌词落盘的纯助手（src/main/lyrics-store.mjs）。
- *
- * 这一层是"盘上出现的东西"的唯一判据来源：文件名键、编码退化链、以及**读出后再校验**的形状。
- * 三条都得钉住，因为它们的失败都不响：
- * - 键不安全 → 目录穿越/静默覆盖（看起来像"缓存有时候不命中"）；
- * - 解码退化错 → 用户看到的是乱码，而他会以为是自己文件的问题；
- * - 校验太松 → 一份半截写入的 JSON 进了渲染层，歌词窗一片空白，没人会想到是缓存文件。
+ * 歌词落盘的纯助手：文件名键、编码退化链、读出后再校验——三者的失败都不响。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -49,7 +43,7 @@ test("歌词（R41）：编码退化链——BOM 声明优先，无 BOM 走 UTF-
   const utf16be = Buffer.concat([Buffer.from([0xfe, 0xff]), utf16beBody]);
   assert.equal(decodeLyricsBuffer(utf16be), text, "UTF-16BE BOM 先交换字节序再解");
 
-  // R41a：UTF-16BE 奇数长度（BOM 之后落单一个字节）——**截尾再交换**，绝不抛
+  // UTF-16BE 奇数长度（BOM 之后落单一个字节）：截尾再交换，绝不抛。
   const truncated = Buffer.concat([Buffer.from([0xfe, 0xff]), utf16beBody, Buffer.from([0x41])]);
   assert.doesNotThrow(() => decodeLyricsBuffer(truncated), "奇数长度不许抛（swap16 对奇数长度会抛）");
   assert.equal(decodeLyricsBuffer(truncated), text, "落单的那一个字节丢掉，前面完整的字照旧解出来");

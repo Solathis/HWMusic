@@ -1,10 +1,7 @@
 /**
- * R7 登录宿主端口（src/main/huawei.ts）：openLoginPage / cancelLogin / cleanup 的 payload 形状、
- * 宿主结论的解析（status 分支 + 未知结论不猜）、partition 的一次性随机隔离，以及
+ * 登录宿主端口：payload 形状、宿主结论解析、partition 一次性随机隔离。
  * `host:open-login` 的调用超时必须覆盖整段登录等待（默认 60 秒会把 10 分钟的扫码判成超时）。
- *
- * 为什么单独一个文件：这是 Node 与 Rust 之间**唯一的线上契约面**，形状错一点就是
- * "扫码成功却等超时"那类故障（C1）。宿主要求封装全部注入，测试不碰真窗口。
+ * 这是 Node 与 Rust 之间唯一的线上契约面，形状错一点就是「扫码成功却等超时」。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

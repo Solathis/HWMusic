@@ -1,14 +1,6 @@
 /**
- * R56 · 设置页「运行日志」：宿主日志文件 + `app:notice` 两路来源，级别标识与筛选。
- *
- * 钉住三件事：
- * 1. **数据来源**：日志文件走新命令（`readRunLog` → `core_read_run_log`），
- *    `app:notice` 仍由外壳订阅（广播没人接就丢了，见 `useNoticeLog`）；
- * 2. **展示**：编辑器样式（行号 gutter + 等宽正文 + 有界 ScrollArea），每行一个官方 `Badge`
- *    标级别，四档筛选 + 文本搜索 + 刷新（含自动刷新开关）；
- * 3. **克制**：不提供导出/复制（没有 dialog/fs/clipboard 权限），空态/筛空/读失败各有说法。
- *
- * 为什么用源码扫描钉展示：渲染层没有 DOM 测试环境（本仓既有做法），真实像素由浏览器守卫取证。
+ * 设置页「运行日志」：宿主日志文件 + `app:notice` 两路来源，级别标识与筛选。
+ * 渲染层没有 DOM 测试环境，展示靠源码扫描钉住，真实像素由浏览器守卫取证。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

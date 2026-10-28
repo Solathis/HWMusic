@@ -1,23 +1,6 @@
 /**
- * R37 会话验证器（`src/main/session-verifier.mjs`）：拿**收藏接口的最小页**判「这个音乐会话还有效吗」。
- *
- * 为什么是收藏接口：参考实现（`talongao/huawei-music-desktop`）的登录链本身就是
- * `openLogin → loginex → favorites(candidate)`——**它用收藏接口验收刚换到的会话**，
- * 而收藏是**需要音乐会话令牌 + 本人 snsUserID** 的最小业务调用（`start=0&limit=1`）。
- * 所以这一条既是「端点已确证」的（R32 §2.2）、又是「没会话就一定不通过」的。
- *
- * 档位矩阵（本文件逐条钉住）：
- *
- * | 服务端/环境 | 结论 | 谁承担后果 |
- * |---|---|---|
- * | HTTP 200 + `result.resultCode === "000000"` | **有效** | 登录落地 / 恢复为已登录已验 |
- * | 服务端明确拒绝（业务码非 000000、HTTP 4xx/5xx） | **失效**（`session_invalid`） | 踢回登录（文案带「请重新登录」） |
- * | 网络错误 / 端点被显式关闭 / 会话缺 SNS 标识 / 200 但没有业务码 | **没验成**（`verify_unavailable`） | 保守：**不判失效**（恢复时按「已登录未验证」继续） |
- *
- * 「没验成」那一档为什么这么宽：把网络抖动或端点没配读成「会话失效」，代价是把用户踢回登录页
- * （还得重扫一次码）。这与 `auth-manager` 那条不变的规矩同源——**宁可少报失效**。
- *
- * 先写先看红。
+ * 会话验证器（src/main/session-verifier.mjs）：拿收藏接口的最小页判「这个音乐会话还有效吗」。
+ * 三档结论——有效判通过；服务端明确拒绝判失效（踢回登录）；网络错误、端点没配或没验成的**不判失效**（宁可少报）。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -209,13 +192,8 @@ test("会话来源：没传会话时回落到来源函数（按调用时取，�
   assert.equal(JSON.parse(calls[1].init.body).targetSnsUserID, "U-2");
 });
 
-// ---------------------------------------------------------------------------
-// 5. 端到端（进程内）：注入真验证器之后，登录链真的能走完
-// ---------------------------------------------------------------------------
-//
-// 这一条钉的是**用户报的那个现象**本身：「登录走到会话验证一步就报『会话验证器尚未注入』」。
-// 这里除了宿主窗口与 HTTP 是替身，其余全是真的——真 auth-manager、真验证器、真 music-service
-// （端点表/Digest 头/会话映射都是生产那一份），所以"登录能走完"是被证明的，不是被假设的。
+// 5. 端到端（进程内）：注入真验证器之后，登录链真的能走完。
+// 除宿主窗口与 HTTP 是替身，其余全是真的（真 auth-manager、真验证器、真 music-service）。
 
 /** 假宿主：开窗那一刻把结论交回来（真窗的行为归 src-tauri 与 verify:live）。 */
 function fakeLoginHost(conclusion) {
@@ -267,7 +245,7 @@ function loginOver(handler, { status = "callback" } = {}) {
         loadMusicSession: async () => null,
         clearMusicSession: async () => true,
       },
-      // 账号令牌兑换按真形状给（PKCE 校验归 protocols/auth.mjs，这里不是本任务的落点）
+      // 账号令牌兑换按真形状给（PKCE 校验归 protocols/auth.mjs，不在这里核）。
       exchangeCode: async () => ({ ok: true, data: { accessToken: "AT-1" } }),
       // loginex 的产物形状（`parseMusicSessionResponse` 的产物：musicSession/userId/expireTime）
       exchangeMusicSession: async () => ({ ok: true, data: SESSION }),
@@ -362,14 +340,8 @@ test("装配：sidecar 给 createAuthManager 传的是**真验证器**（不是�
   assert.doesNotMatch(verifier, /console\./, "验证器不打印（凭据纪律：谁都不许把它写进日志）");
 });
 
-// ---------------------------------------------------------------------------
-// 7. 文档钉：`docs/KNOWN_LIMITATIONS.md` 里那条「刻意没注入」必须随 R37 一起改口
-// ---------------------------------------------------------------------------
-//
-// §6 钉的是 sidecar 的注释；文档是同一件事的第二处。那份文档的自我口径是
-// 「**任何没有实测证据的东西都写在这里**，一条不漏 …… 它不在别处被悄悄说成"已支持"」——
-// 而它现在那句写的是**行为**（"会话验证器刻意没注入"），R37 之后这句话已经不成立。
-// 留着它，下一个人（以及下一轮的真机验证）会以为缺口还在。
+// 7. 文档钉：docs/KNOWN_LIMITATIONS.md 里那条「刻意没注入」必须随之改口。
+// 留着它，下一个人会以为缺口还在。
 
 test("文档：KNOWN_LIMITATIONS 不再说「会话验证器刻意没注入」，且如实留下仍未实测的那一半", () => {
   const doc = read("docs/KNOWN_LIMITATIONS.md");

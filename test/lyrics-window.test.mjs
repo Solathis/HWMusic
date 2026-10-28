@@ -68,15 +68,7 @@ import { createMusicApi } from "../src/protocols/music.mjs";
 const flushBridge = () => new Promise((resolve) => setTimeout(resolve, 0));
 const deferredBridge = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 
-/**
- * 假 Rust 后端（**R44e 合同**：`settings.json` 的唯一写者是 sidecar，歌词保存由 Rust 拥有）。
- *
- * 这个夹具刻意把两件事分开：
- * - `callCommand` 模拟 `core_lyrics_configure` 的**权威回执**（接受补丁 → 推进 revision →
- *   回执里带 `dirty` / `saveError`）；
- * - 「保存任务」是后端**自己**的异步步骤（`persisted` / `saves`），与桥没有任何调用关系——
- *   桥一旦还想自己写盘，`settingsCalls` 就会记下来（并且那次调用会抛）。
- */
+/** 假 Rust 后端：settings.json 的唯一写者是 sidecar，歌词保存由 Rust 拥有。 */
 function revisionBridge({ disk = {}, configureGate = null, saveGate = null, saveFailure = null } = {}) {
   const listeners = new Map();
   const commands = [];
@@ -151,7 +143,7 @@ function revisionBridge({ disk = {}, configureGate = null, saveGate = null, save
     /** 后端（= Rust 保存任务）下一次保存失败/成功由它控制。 */
     setFailure: (next) => { failure = next; },
     stored: () => saved,
-    /** `writes` 只是 `persisted` 的旧名字：保留是为了让 R44d 那几条状态用例读起来不变。 */
+    // writes 只是 persisted 的旧名字，保留是为了既有的状态用例不必改写。
     get writes() { return persisted; },
   };
 }
@@ -531,7 +523,7 @@ test("命令名：歌词专命令共享真源、注册与最小 capability 一�
   assert.equal(CORE_LYRICS_CONTROL, "core_lyrics_control");
   assert.equal(CORE_LYRICS_DOCUMENT, "core_lyrics_document");
   assert.equal(CORE_LYRICS_PROGRESS, "core_lyrics_progress");
-  // R51：设置弹出窗的三条命令（打开 / 报尺寸 / 关闭自己）
+  // 设置弹出窗的三条命令：打开 / 报尺寸 / 关闭自己
   assert.equal(CORE_LYRICS_SETTINGS_OPEN, "core_lyrics_settings_open");
   assert.equal(CORE_LYRICS_SETTINGS_RESIZE, "core_lyrics_settings_resize");
   assert.equal(CORE_LYRICS_SETTINGS_CLOSE, "core_lyrics_settings_close");
@@ -545,11 +537,11 @@ test("命令名：歌词专命令共享真源、注册与最小 capability 一�
   assert.deepEqual(permission.windows, ["lyrics"]);
   assert.deepEqual(
     permission.permissions,
-    // R45B：右下角拖柄调官方 startResizeDragging ⇒ 只加这一条窗口权限（不放开 ACL，不提权）
+    // 右下角拖柄调官方 startResizeDragging ⇒ 只加这一条窗口权限（不放开 ACL，不提权）
     ["core:event:default", "core:window:allow-start-dragging", "core:window:allow-start-resize-dragging"],
   );
   assert.deepEqual(JSON.parse(read("src-tauri/capabilities/main.json")).windows, ["main"]);
-  // R51：设置弹出窗**没有任何 window 权限**（尺寸/位置/关闭都由 Rust 的专命令负责）
+  // 设置弹出窗没有任何 window 权限（尺寸/位置/关闭都由 Rust 的专命令负责）
   const popupPermission = JSON.parse(read("src-tauri/capabilities/lyrics-settings.json"));
   assert.deepEqual(popupPermission.windows, ["lyrics-settings"]);
   assert.deepEqual(popupPermission.permissions, ["core:event:default"]);
@@ -577,7 +569,7 @@ test("Rust：歌词专命令都 async、正确来源守卫且注册", () => {
     assert.ok(body.indexOf(guard) >= 0 && body.indexOf(guard) < 900);
     assert.match(lib, new RegExp(`lyrics_window::${name}\\b`));
   }
-  // R51：弹出窗的三条命令在 lyrics_settings.rs 里，注册在同一个 generate_handler!
+  // 弹出窗的三条命令在 lyrics_settings.rs 里，注册在同一个 generate_handler!
   const popup = rustProduction(rustSource("lyrics_settings.rs"));
   for (const [name, guard] of [
     ["core_lyrics_settings_open", "require_settings_open_source(webview.label())"],
@@ -605,7 +597,7 @@ test("Rust：建窗属性一次到位（无边框/透明/无阴影/置顶/不进
     [".shadow(false)", "无阴影"],
     [".always_on_top(desktop_topmost(config))", "仅桌面置顶"],
     [".skip_taskbar(true)", "不进任务栏"],
-    // R45B：缩放资格按配置算（未锁的桌面窗可拖大小；锁定/任务栏不可），最小尺寸 240×120
+    // 缩放资格按配置算（未锁的桌面窗可拖大小；锁定/任务栏不可），最小尺寸 240×120
     [".resizable(resizable_enabled(config))", "可缩放资格按配置算（锁定/任务栏不可）"],
     [".min_inner_size(MIN_WINDOW_WIDTH_DIP, MIN_WINDOW_HEIGHT_DIP)", "最小尺寸由窗口层兜住"],
     [".focused(false)", "不抢焦点"],
@@ -716,7 +708,7 @@ test("配置：字号档位 / 颜色令牌 / 上限在 TS 与 Rust 两侧逐条�
       `Rust 的字号档位表必须含 (${step.id}, ${step.px})（两侧一张表）`,
     );
   }
-  // R59：任务栏有自己的档位表（44px 高的槽位只放得下一行），两侧同样逐条相等
+  // 任务栏有自己的档位表（44px 高的槽位只放得下一行），两侧同样逐条相等
   for (const step of TASKBAR_FONT_STEPS) {
     assert.match(
       rust,
@@ -749,7 +741,7 @@ test("配置：字号档位 / 颜色令牌 / 上限在 TS 与 Rust 两侧逐条�
 
 test("配置：CSS 里每个档位都有字号规则，且 rem 值与 px 对得上", () => {
   const css = read("src/renderer/amll-theme.css");
-  // R59：桌面档位与任务栏档位各一套规则（id 不重叠，所以选择器也不需要模式限定）
+  // 桌面档位与任务栏档位各一套规则（id 不重叠，所以选择器不需要模式限定）
   for (const step of [...LYRICS_FONT_STEPS, ...TASKBAR_FONT_STEPS]) {
     const match = css.match(new RegExp(`\\[data-lyrics-size="${step.id}"\\][^{]*\\{[^}]*--amll-lp-font-size:\\s*([0-9.]+)rem`));
     assert.ok(match, `amll-theme.css 必须给档位 ${step.id} 一条 --amll-lp-font-size 规则（否则设置项点了没反应）`);
@@ -845,10 +837,7 @@ test("配置纯逻辑：认不出的值一律不猜（落回上一个合法值�
   assert.deepEqual(normalizeLyricsConfig(undefined, undefined), DEFAULT_LYRICS_CONFIG);
 });
 
-/**
- * R59 **有意替换** R44 的「任务栏模式把桌面档位压到 ≤20px」那一条：
- * 任务栏现在有自己的一列档位（`TASKBAR_FONT_STEPS`），桌面选的字号不再参与任务栏的渲染。
- */
+/** 任务栏模式读自己的档位表，桌面选的档位原样保留、不再参与任务栏渲染。 */
 test("配置纯逻辑：任务栏模式读任务栏档位（桌面档位原样保留，两边互不改写）", () => {
   const big = { ...DEFAULT_LYRICS_CONFIG, size: "xxl" };
   assert.equal(effectiveSizeId(big), "xxl", "桌面模式按用户选的档位");
@@ -871,7 +860,7 @@ test("配置纯逻辑：任务栏模式读任务栏档位（桌面档位原样�
 });
 
 test("配置纯逻辑：任务栏外观四字段（默认 / 坏值不猜 / 两模式各读各的）", () => {
-  // 默认值：逐字默认开（R58 修好的观感就是默认观感）
+  // 默认值：逐字高亮默认开。
   assert.equal(DEFAULT_LYRICS_CONFIG.taskbarSize, "txxl");
   assert.equal(DEFAULT_LYRICS_CONFIG.taskbarColor, "foreground");
   assert.equal(DEFAULT_LYRICS_CONFIG.taskbarCustomColor, "");
@@ -1049,14 +1038,8 @@ test("配置提示与档位标签可读", () => {
   for (const token of LYRICS_COLOR_TOKENS) assert.ok(colorTokenLabel(token.id).trim() !== "");
   for (const mode of LYRICS_MODES) assert.ok(modeLabel(mode).trim() !== "");
   assert.equal(fontStepLabel("nope"), fontStepLabel(DEFAULT_LYRICS_CONFIG.size), "认不出的档位按默认说");
-  /**
-   * R52（有意更改）：`LYRICS_SESSION_NOTICE` 那段"会话内说明"整段删除。
-   *
-   * 它是设置页卡片下的一整段解释性长文（重启恢复 / 锁定交互 / 点透 / 竖排 / 逐字推导 / 任务栏
-   * Beta 全在里面）。用户要求"界面提示词克制：不显示冗余说明段落"，必要的状态改成控件旁一行
-   * （任务栏 Beta 只有一枚 Badge + `taskbarStatusText` 一句，点透只有"开启后需在这里关闭"）。
-   * 这条用例改成**反向钉子**：这段文案不许再回来。
-   */
+  /** 界面提示词克制：不显示冗余说明段落，必要的状态改成控件旁一行。
+   * 这条用例是反向钉子——那段会话说明文案不许再回来。 */
   assert.equal(
     read("src/renderer/features/lyrics/lyrics-window.mjs").includes("LYRICS_SESSION_NOTICE"),
     false,
@@ -1124,8 +1107,8 @@ test("歌词窗入口：lyrics-main.tsx 挂载 LyricsWindow（双入口那一份
     "./amll-theme.css",
     "./styles.css",
   ];
-  // R51：弹出窗入口也用同一份样式表（菜单的视觉必须与歌词窗里那份逐像素一致）
-  // R61：歌词窗与它的设置面板多一份竖版组件样式（主窗不渲染竖版歌词，不引）
+  // 弹出窗入口用同一份样式表（菜单视觉必须与歌词窗里那份逐像素一致）
+  // 歌词窗与它的设置面板多一份竖版组件样式（主窗不渲染竖版歌词，不引）
   const expectedCssByFile = {
     "src/renderer/main.tsx": expectedCss,
     "src/renderer/lyrics-settings-main.tsx": [...expectedCss, "./vertical-lyrics.css"],
@@ -1161,8 +1144,8 @@ test("歌词窗主题（R41）：初值走查询串、变化走广播，且**不
 
 test("桌窗文档重发：保留 Rust 加载重发，不在 visible 翻转时盲推", () => {
   const hook = read("src/renderer/use-lyrics-window.ts");
-  // R41 曾在渲染层补推一次（visible false→true）；那一次**必然太早**（reload 是异步的，
-  // 主窗拿到回执时新页还在加载）；实际订阅就绪由新页握手确认。
+  // 渲染层不在窗口打开时重推（reload 是异步的，那一推必然太早）
+  // 实际订阅就绪由新页握手确认。
   assert.doesNotMatch(
     hook,
     /const opened = visible && !wasVisible\.current/,
@@ -1191,7 +1174,7 @@ test("桌窗文档重发：保留 Rust 加载重发，不在 visible 翻转时�
 });
 
 test("导入落地（R41a）：成功才动歌词；失败什么工具都不碰（失败的事实是歌词没变）", () => {
-  // 成功：行 + 状态 + 一句带文件名与行数的回执（文案与 R41 逐字一致）
+  // 成功：行 + 状态 + 一句带文件名与行数的回执
   const done = importPlanOf({ status: "ready", lines: [{ startTime: 0 }], source: "local", message: null, fileName: "我的.lrc", lineCount: 2 });
   assert.equal(done.ok, true);
   assert.deepEqual(done.lines, [{ startTime: 0 }]);
@@ -1413,13 +1396,7 @@ test("主窗接线：App 用 use-lyrics-window 的 hook，且设置页有桌面�
 
   const page = read("src/renderer/pages.tsx");
   const settings = page.slice(page.indexOf("export function SettingsPage("));
-  /**
-   * R52（有意更改）：设置页的「歌词」标签只剩**一张**桌面歌词卡。
-   *
-   * 字号/颜色/方向/样式/效果那些控件只在 R51 的弹出窗（`lyrics-settings`）里，而打开那扇窗的唯一
-   * 入口是歌词窗自己的齿轮（R52 收尾：设置页的「外观设置」按钮与该接线一起删除）。所以断言从
-   * "选项清单在页面里"改成"页面只认模式词表 + 不认那些控件 id"。
-   */
+  /** 设置页「歌词」标签只留一张桌面歌词卡：外观控件都在弹出窗里，故断言页面只认模式词表、不认那些控件 id。 */
   assert.match(settings, /桌面歌词/, "设置页要有桌面歌词一节");
   assert.match(settings, /LYRICS_MODES/, "窗口位置选项来自纯逻辑模块（不另抄一份清单）");
   for (const gone of ["LYRICS_FONT_STEPS", "LYRICS_COLOR_TOKENS", "fontStepLabel", "colorTokenLabel", "coreLyricsSettingsOpen"]) {
@@ -1438,7 +1415,7 @@ test("playback:lyrics 处理器：{trackId} → 协议层 getLyrics（文本只�
 
   const calls = [];
   const api = createMusicApi({
-    // R32：注入过独立歌词端点就直接打它（默认那条路是"从播放响应推导"）
+    // 注入过独立歌词端点就直接打它（默认那条路是从播放响应推导）。
     endpoints: { lyrics: "https://example.invalid/api/lyric" },
     session: { token: "MUSIC-TOKEN", snsUserID: "SNS-1" },
     fetchImpl: async (url, init = {}) => {
@@ -1452,7 +1429,7 @@ test("playback:lyrics 处理器：{trackId} → 协议层 getLyrics（文本只�
   const answer = await createPlaybackHandlers({ api })[PLAYBACK_LYRICS]({ payload: { trackId: " 1001 " } });
   assert.equal(answer.ok, true, `正常路径应当成功：${JSON.stringify(answer)}`);
   assert.equal(answer.data.text, "[00:01.00]一行");
-  // 独立歌词端点是 GET（形状未实测，按"读一条文本"的最小形状发起），参数在查询串里
+  // 独立歌词端点是 GET，参数在查询串里。
   assert.equal(new URL(calls[0].url).searchParams.get("contentID"), "1001", "trackId 去空白后作为请求参数");
 
   // 坏载荷在边界被拒（不透给协议层拼一个必然失败的请求）
@@ -1472,8 +1449,7 @@ test("playback:lyrics 处理器：{trackId} → 协议层 getLyrics（文本只�
   }
   assert.equal(called, 0);
 
-  // 端点未配置：结构化 endpoint_unknown（不冒充已实现、不猜 URL）
-  // R32：默认那条路是"从播放响应推导"，所以第一个缺的端点是 playback
+  // 端点未配置时返回结构化 endpoint_unknown；默认路径第一个缺的端点是 playback。
   const unconfigured = await createPlaybackHandlers({ api: createMusicApi({ endpoints: {} }) })[PLAYBACK_LYRICS]({
     payload: { trackId: "1" },
   });
@@ -1487,9 +1463,7 @@ test("playback:lyrics 处理器：{trackId} → 协议层 getLyrics（文本只�
   assert.doesNotMatch(source, /writeFile|node:fs/, "不许有任何持久化出口");
 });
 
-// ---------------------------------------------------------------------------
-// 10. R45B：歌词颜色 / 窗口尺寸 / 锁定交互 / 竖排 / 逐字
-// ---------------------------------------------------------------------------
+// 10. 歌词颜色 / 窗口尺寸 / 锁定交互 / 竖排 / 逐字
 
 test("R45B 配置：customColor 只认 #RRGGBB（其余一律落回上一个合法值）", () => {
   assert.equal(DEFAULT_LYRICS_CONFIG.customColor, "", "默认不用自定义色（走设计令牌）");
@@ -1554,7 +1528,7 @@ test("R52 设置页文案克制：不再有解释性长段落，只有控件旁�
   // 卡片描述一句话；控件旁提示各一行、且没有长段落（>80 字的说明文字一律不许）
   const paragraphs = [...lyricsPane.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/g)].map((found) => found[1].trim());
   assert.deepEqual(paragraphs, [], "歌词页里不许再有 <p> 说明段落");
-  // R52 收尾：设置页不再有「外观设置」入口；锁定与点透都不再是主窗的设置项，这里已无旁注提示
+  // 设置页不再有「外观设置」入口，锁定与点透也不是主窗设置项，这里已无旁注提示。
   for (const chatter of ["互不影响", "并非中文竖排", "重启后恢复", "推导", "敬请期待", "外观设置"]) {
     assert.equal(lyricsPane.includes(chatter), false, `解释性/画饼/外观入口文案不许回来：${chatter}`);
   }
@@ -1620,11 +1594,7 @@ test("R45B 歌词窗：Lock 图标表示已锁、悬停只留解锁、缩放拖�
 });
 
 test("R61 竖版改自渲染：只有桌面竖版走 VerticalLyricColumn，横版与任务栏仍是官方 LyricPlayer", () => {
-  /**
-   * 有意替换 R45B/R46/R45B-fix4 三条竖版用例（它们钉的是"给 AMLL 播放器打补丁"的写法）：
-   * 补丁规则连同 `lyricScrollbarHit` 一起删掉了，换成"竖版由哪个组件渲染"的接线契约。
-   * 竖版自己的行为（单列、字号随宽度、进度滚动、逐字）在 test/vertical-lyrics.test.mjs 与浏览器守卫里。
-   */
+  /** 竖版改由独立组件 VerticalLyricColumn 渲染，这里只钉接线契约；行为在 vertical-lyrics.test.mjs 与浏览器守卫里。 */
   const code = stripComments(read("src/renderer/LyricsWindow.tsx"));
   assert.match(code, /import \{ VerticalLyricColumn \} from "\.\/VerticalLyricColumn\.tsx"/, "竖版组件从独立文件导入");
   assert.match(code, /const vertical = config\.mode === "desktop" && config\.layout === "vertical"/,
@@ -1639,18 +1609,11 @@ test("R61 竖版改自渲染：只有桌面竖版走 VerticalLyricColumn，横�
 });
 
 
-/**
- * R52（**有意删除 R45B/R50 的设置页取色器用例**）：主窗设置页不再有任何颜色控件。
- *
- * 用户要求"沉浸式歌词禁止修改颜色"，而桌面歌词的颜色只在外观弹出窗里改（R51 搬过去的那一份，
- * 锚点 `lyrics-appearance-color` 由 `test/lyrics-settings-popup.test.mjs` 与浏览器守卫钉住）。
- * 这条改成反向钉子：三样东西一个都不许回到设置页——原生取色器、"恢复主题色"、`customColor` 字段。
- */
+/** 设置页没有任何颜色控件：沉浸式歌词禁止改色，桌面歌词颜色只在弹出窗里改（反向钉子）。 */
 test("R52 设置页没有颜色控件（沉浸页禁止改色，桌面歌词颜色只在弹出窗里改）", () => {
   const page = read("src/renderer/pages.tsx");
   const settings = page.slice(page.indexOf("export function SettingsPage("));
-  // R59：任务栏歌词的自定义颜色在独立组件 `taskbar-lyrics-card.tsx` 里——设置页**文件本身**
-  // 仍然不许出现桌面歌词那一套颜色控件（两件事的入口不同：桌面在弹出窗，任务栏在设置页卡）。
+  // 任务栏歌词颜色在 taskbar-lyrics-card.tsx 里，设置页文件本身仍不许出现桌面歌词那套颜色控件。
   for (const gone of ['type="color"', "恢复主题色", "customColor", "isCustomColor"]) {
     assert.equal(settings.includes(gone), false, `设置页不许再有 ${gone}`);
   }
@@ -1663,24 +1626,12 @@ test("R52 设置页没有颜色控件（沉浸页禁止改色，桌面歌词颜�
   assert.match(popup, /isCustomColor/, "合法 hex 判定仍来自纯逻辑模块");
 });
 
-/**
- * R51（brief 第二项之一）：桌面歌词的设置面**不再内嵌在歌词窗里**，而是另一扇独立小窗。
- *
- * 这条用例**有意替换 R50 的那一条**（`R50 桌面歌词设置面：齿轮 DropdownMenu（align=end/side=bottom）…`）：
- * 菜单内容一个字没改（仍是官方 `DropdownMenu` + 同一批锚点），只是搬到了 `LyricsSettingsPopup.tsx`
- * 里——所以内容的断言跟着搬到 `test/lyrics-settings-popup.test.mjs`，这里只钉两件事：
- *
- * 1. 歌词窗里**没有**菜单内容了（旧实现整段删掉，不留第二份）；
- * 2. 齿轮仍是那枚带 `lyrics-appearance` 锚点的按钮，但点它是把**自己客户区里的 DIP 矩形**
- *    交给宿主（`core_lyrics_settings_open`），位置/尺寸/关闭都不归歌词窗管。
- *
- * 为什么必须搬：800×128 的窗里 radix 只能把浮层压进窗口（可用高度就那么多），菜单只能滚。
- */
+/** 桌面歌词的设置面搬到独立小窗 LyricsSettingsPopup：歌词窗里没有菜单内容，齿轮把锚点矩形交给宿主。 */
 test("R51 歌词窗只剩齿轮：不再内嵌菜单内容，点它把锚点交给弹出窗", () => {
   const source = read("src/renderer/LyricsWindow.tsx");
   const code = stripComments(source);
 
-  // 内嵌菜单整段删掉（先删后写：旧实现不许留一半）
+  // 内嵌菜单整段删掉：旧实现不许留一半。
   assert.doesNotMatch(code, /components\/ui\/dropdown-menu/, "歌词窗不再引下拉菜单原语");
   assert.doesNotMatch(code, /<DropdownMenu/, "歌词窗里不再有 DropdownMenu");
   assert.doesNotMatch(code, /DropdownMenuContent|DropdownMenuRadioGroup|lyrics-style-clean|lyrics-appearance-color/, "菜单内容整段搬走");
@@ -1698,12 +1649,7 @@ test("R51 歌词窗只剩齿轮：不再内嵌菜单内容，点它把锚点交�
     "歌词窗不摆弹出窗（尺寸/位置/关闭全归宿主；拖动与缩放那两条官方调用不在此列）");
 });
 
-/**
- * R51（brief 第二项之二）：默认尺寸收紧成紧凑一档。
- *
- * 这条是**有意更改 R44 起的默认值**：横版 960×160 → 800×128、竖版 260×520 → 240×600。
- * 最小尺寸（240×120）与任务栏（1200×44）不变；用户保存过的自定义尺寸照旧优先。
- */
+/** 默认尺寸收紧成紧凑一档（横版 800×128、竖版 240×600），最小 / 任务栏 / 自定义尺寸不变。 */
 test("R51 默认尺寸紧凑：Rust 常量与几何入口都换了，最小/任务栏/自定义尺寸不动", () => {
   const rust = rustProduction(rustSource("lyrics_window.rs"));
   assert.match(rust, /pub const DESKTOP_SIZE: Size = Size \{\s*width: 800\.0,\s*height: 128\.0,/, "横版默认 800×128");
@@ -1716,16 +1662,7 @@ test("R51 默认尺寸紧凑：Rust 常量与几何入口都换了，最小/任�
   assert.doesNotMatch(geometry, /width: 320\.0/, "旧的 320×620 已删");
 });
 
-/**
- * R50（brief 第 3 项）：透明桌面歌词的**可读性衬底**。
- *
- * 桌面模式 + `style=clean` 时窗里没有任何衬底：深色主题的白字、近白图标浮在**白色桌面**上就看不清
- * （浅色主题的黑字浮在深色桌面上同理）。衬底必须是令牌（`bg-background/60`），
- * 不许写裸色值、不许自绘一层 div——所以它挂在根节点上，同时覆盖控件与歌词。
- *
- * `panel` 不加（Card 自带背景），`mode=taskbar` 不加（要透出系统任务栏）。
- * 根节点留 `data-lyrics-scrim` 给浏览器守卫当判据。
- */
+/** 桌面 clean 模式的可读性衬底：根节点挂令牌 bg-background/60 + data-lyrics-scrim，panel 与任务栏不加。 */
 test("R50 clean+desktop 的令牌衬底：bg-background/60 + data-lyrics-scrim，panel/任务栏不加", () => {
   const code = stripComments(read("src/renderer/LyricsWindow.tsx"));
   assert.match(code, /data-lyrics-scrim=/, "根节点要有衬底锚点（守卫按它判有没有衬底）");
@@ -1744,18 +1681,11 @@ test("R50 clean+desktop 的令牌衬底：bg-background/60 + data-lyrics-scrim�
   assert.match(rootTag, /data-testid="lyrics-window"/, "就是那个既有的根节点");
 });
 
-// ---------------------------------------------------------------------------
-// 7. R59：任务栏歌词的独立设置（颜色 / 逐字高亮 / 字号）
-// ---------------------------------------------------------------------------
+// 7. 任务栏歌词的独立设置（颜色 / 逐字高亮 / 字号）
 
 const TASKBAR_CARD = "src/renderer/taskbar-lyrics-card.tsx";
 
-/**
- * R59：歌词窗按**模式**读外观——任务栏只读任务栏那四个字段，桌面只读原字段。
- *
- * 逐字关闭不是"换一套渲染"：仍由官方 `LyricPlayer` 画，只是喂进去的行不经 `withKaraokeWords`
- * 推导（行级 ⇒ 官方按行渐变），所以这里钉的是"分流点在纯逻辑模块 + 组件只消费"。
- */
+/** 歌词窗按模式读外观：任务栏只读那四个字段，桌面读原字段；逐字关闭时行不经 withKaraokeWords 推导。 */
 test("R59 歌词窗：外观按模式分流，逐字关闭时不经 withKaraokeWords", () => {
   const source = read("src/renderer/LyricsWindow.tsx");
   const code = stripComments(source);
@@ -1777,7 +1707,7 @@ test("R59 设置页「任务栏歌词（Beta）」卡：令牌 Select + 自定�
   const card = read(TASKBAR_CARD);
   const code = stripComments(card);
 
-  // 只挂在设置页的歌词标签里，且是独立组件（设置页不再膨胀，R41 的缓存卡同一做法）
+  // 只挂在设置页的歌词标签里，且是独立组件。
   const pages = read("src/renderer/pages.tsx");
   assert.match(pages, /import \{ TaskbarLyricsCard \} from "\.\/taskbar-lyrics-card\.tsx"/, "卡片是独立组件");
   const pane = pages.slice(pages.indexOf('<TabsContent value="lyrics"'), pages.indexOf("</TabsContent>", pages.indexOf('<TabsContent value="lyrics"')));

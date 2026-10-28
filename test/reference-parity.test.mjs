@@ -1,20 +1,6 @@
 /**
- * R32 协议层差分测试：**以参考实现为契约**逐字段比对。
- *
- * 契约来源：公开仓库 `talongao/huawei-music-desktop`（克隆在 `.tmp/reference-repo/`，只读）——
- * 它的 `src/auth.mjs` / `src/music.mjs` / `src/main/{library,track-quality,lyric-resource}.mjs`
- * 是"授权 → 兑换 → 音乐会话 → 收藏/歌单/搜索/播放"这条链**实测走通过**的那一份。
- *
- * 两段断言，缺一不可：
- *
- * 1. **内嵌事实表**（永远跑）：把参考里那些**关键串**固化成期望值，逐条对我们代码里的常量。
- *    它不依赖 `.tmp/` 是否存在——所以 CI/别的机器上这段同样有效，而且**改动必须同步改这里**
- *    （"悄悄放宽协议"会立刻红）。
- * 2. **源码差分**（参考仓库在场时才跑）：直接读参考源码，把它的端点字面量、方法、参数名、
- *    响应容器名、Digest 头形状抽出来，与我们的一一比对。参考仓库不在时**如实跳过**
- *    （`t.skip` + 原因），不假装验过。
- *
- * 参考仓库是**只读**的：本文件只 `readFile`，一个字节都不写。
+ * 协议层差分测试：以参考实现（talongao/huawei-music-desktop）为契约逐字段比对。
+ * 内嵌事实表永远跑；源码差分只在参考仓库在场时跑，不在场就如实跳过。参考仓库只读。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -43,11 +29,7 @@ import {
   lyricAddressOf,
 } from "../src/protocols/music.mjs";
 
-/**
- * 参考实现里的关键事实（**逐字**）。
- * 出处：`.tmp/reference-repo/src/auth.mjs`、`src/music.mjs`、`src/main/library.mjs`、
- * `src/main/track-quality.mjs`、`src/main/lyric-resource.mjs`、`docs/API_CONTRACT.md`（2026-10-14 核验）。
- */
+/** 参考实现里的关键事实（逐字）：出处是 .tmp/reference-repo/ 下的各源码与 docs/API_CONTRACT.md。 */
 const REFERENCE = {
   authorize: "https://oauth-login.platform.hicloud.com/oauth2/v3/authorize",
   token: "https://oauth-login.cloud.huawei.com/oauth2/v3/token",
@@ -83,11 +65,7 @@ const REFERENCE = {
     "/music-userbehavior-service/v1/service/recentlyplayed/query",
     "/music-metacontent-service/v1/service/album/detail/byalbumcode",
   ],
-  /**
-   * 参考有、我们**故意没接**的路径（写操作与"每日推荐"）。
-   * 列出来是为了让"参考新增了一条路径而我们没跟上"能被这条差分抓住——
-   * 未列出的新路径会让测试红，而不是悄悄溜过去。
-   */
+  /** 参考有、我们故意没接的路径（写操作与「每日推荐」）：未列出的新路径会让差分测试红，而不是悄悄溜过去。 */
   notImplementedPaths: [
     "/music-userbehavior-service/v1/service/favorite/simple/exist",
     "/music-userbehavior-service/v1/service/favorite/create",

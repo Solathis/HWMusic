@@ -1,17 +1,5 @@
 /**
- * R9 歌词进度同步（`features/lyrics/lyric-sync.mjs`）：rAF 逐帧推送 + 200ms isSeeking 窗口。
- *
- * 宿主对 AMLL `LyricPlayer` 的责任只有两条（排版/滚动/动画全是官方组件的事，宿主不自绘）：
- * 1. **把进度逐帧推给它**（AMLL 内部按调用间隔与进度自行决定滚动，推得越快越准）；
- * 2. **告诉它"这一帧的进度变化是跳转造成的"**（`isSeeking`）——拖进度条时歌词不该自己飞，
- *    AMLL 收到 `isSeeking` 会强制重排一次，看起来就是"跟着手走"。
- *
- * 拖动的实现方式是"最后一次 seek 之后 200ms 内都算在拖"（旧的 2xx 毫秒结论）：
- * 连续拖动会不断续期，手一停窗口自然过期——不需要"拖动开始/结束"两个事件，
- * 而 DOM 的 pointerup 在拖到窗外松手时是不可靠的。
- *
- * 时钟、帧调度全部注入，所以这里没有一帧是真的等来的。
- * 先写先看红。
+ * 歌词进度同步：rAF 逐帧推给 AMLL，并用 200ms isSeeking 窗口告诉它进度跳转。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

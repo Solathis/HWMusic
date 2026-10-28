@@ -1,32 +1,8 @@
 /**
- * R18：引导页**渲染出来的标记**（真 SSR，不是源码扫描）。
- *
- * 为什么要这一层：用户这一轮提的五项里有四项是"页面上长什么样"——标题在不在二维码正上方、
- * 二维码有没有边框、提示文字是不是那一句且只说一次、次要入口是不是常驻。源码扫描只能说
- * "字符串在文件里"，说不清"渲染出来是什么样"（顺序、数量、同一条文案出现几次）。
- *
- * 做法：用 esbuild（devDependency，`scripts/test-browser.mjs` 同款）把**真组件**
- * `LoginGate` 打成一个 ESM 包，再用 `react-dom/server` 渲静态标记，然后在标记上断言。
- * 与真窗守卫（`npm run verify:live`，CDP 驱动 WebView2）分工：这里不依赖窗口、不依赖登录，
- * 是"门禁页结构"这一层的可复现证据；像素与真机行为仍归 verify:live。
- *
- * R20 增补三项（用户真机验收反馈）：header 里那句品牌已删（与窗口标题栏重复）、
- * 过期之后旧码必须从屏上消失、二维码容器本身可点刷新（有可达名字）、
- * 网页登录窗开着时入口变形为「返回扫码登录」并挪进那条唯一可见的 48px header。
- *
- * R21 增补（用户指令，**推翻自动换新**）：二维码下方多一行**过期倒计时**（秒级，
- * 只在"码在屏上等着被扫"那一档出现）；过期态是**不可扫**的——canvas 撤下、原位写
- * 「二维码已过期」，并多出一个显著的「刷新二维码」按钮（手动刷新是唯一的换码方式）。
- * R20 那句「二维码已刷新，请重新扫码。」随自动换新一起删除。
- *
- * R25 增补（用户四项之 1/2/4）：
- * 1. 过期占位**只有两行**——「二维码已过期」/「点击刷新」，R21 那个显著的「刷新二维码」按钮删掉
- *    （容器本身就是刷新控件，它一直可点）；
- * 2. 右上角多一个**主题控件**（浅色 / 深色 / 跟随系统，与浮动控件同一个 React 组件）；
- * 3. 「返回扫码登录」**不再由 gate 渲染**：官方页 R25 起铺满整窗，gate 整个在它底下，
- *    那个控件改由浮动 webview `login-return` 顶上（标记层面：gate 里根本不该有它）。
- *
- * 先写先看红。
+ * 用真 SSR（esbuild 打包真组件 LoginGate + react-dom/server）断言引导页渲染出来的标记，
+ * 不是源码扫描：顺序、数量、同一条文案出现几次都能看清。
+ * 覆盖：header 无品牌但有主题控件、过期态不可扫且只写两行、扫码后叠遮蔽层、
+ * 网页登录窗开着时 gate 不再渲染「返回扫码登录」、启动第一屏是中性启动态。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -84,9 +60,8 @@ function entriesSource() {
 import { LoginGate, StartupChecking } from "../../src/renderer/login-gate.tsx";
 
 /**
- * 把一份门禁状态渲染成静态标记。
- * 副作用（自动发起二维码、订阅广播、读主题档位）不会在 SSR 里跑：本文件只问"这份状态长什么样"。
- * R25：主题控件在 SSR 里显示的是默认档（跟随系统）——那正是它的初始高亮。
+ * 把一份门禁状态渲染成静态标记；副作用（自动发起二维码、订阅广播、读主题档位）不在 SSR 里跑。
+ * 主题控件因此显示默认档（跟随系统），那正是它的初始高亮。
  */
 export function renderGate(state) {
   return renderToStaticMarkup(
@@ -95,13 +70,8 @@ export function renderGate(state) {
 }
 
 /**
- * R45A1：**启动第一屏**（\`checking\` 那一档）渲染出来的标记。
- *
- * 它与 App 的第一帧是同一个东西：\`useAuthGate\` 的初值是 \`initialGateState()\`（checking），
- * effect 要到首帧之后才跑，所以"冷启动第一帧"就是"这份状态 + 这个组件"。
- *
- * 复审 R45A1 起它还要吃状态：查询失败那一档仍是这一屏，只是自己长出
- * 「重新检查登录状态」与网页登录入口。动作是桩（SSR 不跑回调），本文件只问"这张屏上有什么"。
+ * 启动第一屏（checking 那一档）的标记：useAuthGate 的初值就是 checking，effect 到首帧之后才跑。
+ * 查询失败那一档仍是这一屏，只多出「重新检查登录状态」与网页登录入口；动作是桩，SSR 不跑回调。
  */
 export function renderStartupChecking(state) {
   return renderToStaticMarkup(
@@ -118,7 +88,7 @@ let bundlePromise = null;
 /** 打一次包并 import（同一个进程里只做一次）。 */
 function gateRenderer() {
   bundlePromise ??= (async () => {
-    // 沙箱/CI 的 %TEMP% 可能指向不可写处（R17 §8 实测），esbuild 的临时文件留在仓内
+    // 沙箱/CI 的 %TEMP% 可能指向不可写处，esbuild 的临时文件留在仓内
     const temp = path.join(ROOT, ".tmp/temp");
     await mkdir(temp, { recursive: true });
     process.env.TEMP = temp;
@@ -163,12 +133,7 @@ function occurrences(html, text) {
   return visibleText(html).split(text).length - 1;
 }
 
-/**
- * 文案在标记里的下标。
- *
- * 提示文字里有 `>`（"「控制中心」>「扫一扫」"），React 会把它转义成 `&gt;`——
- * 所以位置类断言必须找**转义之后**的那串（否则"页面里找不到提示文字"）。
- */
+/** 文案在标记里的下标；提示文字里有 `>`，React 会转义成 `&gt;`，所以按转义后的串找。 */
 function indexOfText(html, text) {
   return html.indexOf(escaped(text));
 }
@@ -217,9 +182,7 @@ function openDivTagAt(html, at) {
   return openTagBefore(html, at, "<div");
 }
 
-/**
- * 二维码的**宿主元素**：R20 起它是包着 canvas/Skeleton 的那个 `<button>`（容器本身可点刷新）。
- */
+/** 二维码的宿主元素：包着 canvas/Skeleton 的那个 `<button>`（容器本身可点刷新）。 */
 function qrHostTag(html) {
   const canvasAt = html.indexOf("<canvas");
   if (canvasAt > -1) return openTagBefore(html, canvasAt, "<button");
@@ -230,12 +193,7 @@ function qrHostTag(html) {
   return openTagBefore(html, html.indexOf(">", expiredAt), "<button");
 }
 
-/**
- * 二维码容器**里**的内容（含自己的开标签）。
- *
- * R21 起过期态要在那个位置写「二维码已过期」——只看"页面上有没有这几个字"会被状态行里
- * 那句更长的文案命中，所以必须把容器自己的那一块抠出来看。
- */
+/** 二维码容器里的内容（含自己的开标签）；过期态要看容器那一块，不能用整页文案断言。 */
 function qrHostBlock(html) {
   const match = html.match(
     new RegExp(`<button[^>]*data-testid="${QR_REFRESH_TESTID}"[^>]*>[\\s\\S]*?</button>`),
@@ -251,11 +209,7 @@ function headerTag(html) {
   return match[0];
 }
 
-/**
- * 遮蔽层（R37）：开标签 + 可见文案。
- *
- * 标签名不写死（遮罩是 `<span>` 还是别的都行，契约是"绝对定位铺满 + 令牌背景 + 那句文案"）。
- */
+/** 遮蔽层：开标签 + 可见文案；标签名不写死，契约是绝对定位铺满、令牌背景加那句文案。 */
 function maskParts(html) {
   const at = html.indexOf(`data-testid="${QR_MASK_TESTID}"`);
   assert.ok(at > -1, `这一档没有遮蔽层：${visibleText(html).replaceAll("\u0001", "|")}`);
@@ -280,7 +234,7 @@ function preparingState() {
   return reduceGateState(loggedOut(), { type: LOGIN_GATE_EVENT.qrRequested });
 }
 
-/** R21：`at` = 事件发生时刻（钟由调用方注入），倒计时据此算出到期时刻。 */
+/** `at` 是事件发生时刻（钟由调用方注入），倒计时据此算出到期时刻。 */
 const QR_AT_MS = 1_000_000;
 
 function pendingState(content = "https://id1.cloud.huawei.com/qrcode/login.jsp?qRCode=OLD") {
@@ -297,12 +251,12 @@ function expiredState() {
   return reduceGateState(pendingState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.expired });
 }
 
-/** R37：手机上已经扫到了（等确认）。 */
+/** 手机上已经扫到了（等确认）。 */
 function scannedState() {
   return reduceGateState(pendingState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.scanned });
 }
 
-/** R37：手机上点了确认（正在换码收尾）。 */
+/** 手机上点了确认（正在换码收尾）。 */
 function confirmedState() {
   return reduceGateState(scannedState(), { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.confirmed });
 }
@@ -341,8 +295,7 @@ test("标记：标题在二维码正上方、居中，且全页只出现一次�
 });
 
 // ---------------------------------------------------------------------------
-// R20 要求 1：header 里那句品牌与窗口标题栏重复 → 删掉（几何契约仍在）
-// ---------------------------------------------------------------------------
+// header 里那句品牌与窗口标题栏重复 → 删掉，改放主题控件；48px 那条仍在
 
 test("标记：header 里不再有品牌（与窗口标题栏重复），改放主题控件——48px 那条仍在", async () => {
   const { renderGate } = await gateRenderer();
@@ -353,7 +306,7 @@ test("标记：header 里不再有品牌（与窗口标题栏重复），改放�
   assert.equal(occurrences(html, APP_BRAND_LABEL), 0, "同一句话全页不许出现（省得又变回两处）");
   assert.match(header, /style="height:48px"/, `高度仍来自共享常量：${header}`);
 
-  // R25（用户四项之 4）：gate 视图右上角也要有主题控件
+  // gate 视图右上角也要有主题控件
   assert.match(header, new RegExp(`data-testid="${THEME_CONTROL_TESTID}"`), `主题控件要在 header 里：${header}`);
   const labels = buttonSummaries(html)
     .filter((button) => THEME_CHOICES.some((choice) => themeOptionTestId(choice) === button.testid))
@@ -378,8 +331,7 @@ test("标记：二维码容器带边框（border + border-border + 圆角工具�
 });
 
 // ---------------------------------------------------------------------------
-// R20 要求 2 / R21 要求 1+2：过期码不留屏、过期态不可扫、倒计时在二维码下方
-// ---------------------------------------------------------------------------
+// 过期码不留屏、过期态不可扫、倒计时在二维码下方
 
 test("标记：过期态不可扫——canvas 撤下、二维码区域只写两行（已过期 / 点击刷新），没有多余的刷新按钮", async () => {
   const { renderGate } = await gateRenderer();
@@ -396,7 +348,7 @@ test("标记：过期态不可扫——canvas 撤下、二维码区域只写两�
     "R26：过期态**状态行不显示**——遮罩那两行已经是全部提示（同一句话说两遍只会挤掉用户的选择）",
   );
 
-  // R25（用户四项之 1）：过期占位**只有两行**，且删掉了 R21 那个显著的「刷新二维码」按钮
+  // 过期占位只有两行（已过期 / 点击刷新），没有那个显著的「刷新二维码」按钮
   assert.match(block, new RegExp(QR_EXPIRED_BOX_HINT), `第二行要说清"点哪儿"：${block}`);
   assert.equal(
     occurrences(block, QR_EXPIRED_BOX_TEXT) + occurrences(block, QR_EXPIRED_BOX_HINT),
@@ -499,7 +451,7 @@ test("标记：二维码容器本身可点刷新（真 <button> + 可达名字 +
   assert.ok(preparing, "加载态下容器仍在（尺寸不跳）");
   assert.equal(preparing.disabled, true, "已经有一次请求在飞：再点一次只是重复建单");
 
-  // R21：过期态容器照样可点（它是"再来一张"那条手动路的一部分）
+  // 过期态容器照样可点（它是「再来一张」那条手动路的一部分）
   const expired = buttonSummaries(renderGate(expiredState())).find(
     (button) => button.testid === QR_REFRESH_TESTID,
   );
@@ -516,7 +468,7 @@ test("标记：可操作元素集合 = 主题三档 + 刷新容器 + 常驻入�
     `正常路径只有这些可操作元素（主题三档在 header 里、排在最前）：${JSON.stringify(pending)}`,
   );
 
-  // R25 要求 1：过期态**不再**多一个刷新按钮（换码靠点容器；那一档与正常路径的可操作元素完全一样）
+  // 过期态不再多一个刷新按钮：换码靠点容器，可操作元素与正常路径完全一样
   const expired = buttonSummaries(renderGate(expiredState()));
   assert.deepEqual(
     expired.map((button) => button.testid || button.text),
@@ -533,12 +485,7 @@ test("标记：可操作元素集合 = 主题三档 + 刷新容器 + 常驻入�
 });
 
 // ---------------------------------------------------------------------------
-// R37（用户真机反馈之 2）：扫码之后**遮蔽**二维码——屏上那张码已经用过了，不许再让人扫
-// ---------------------------------------------------------------------------
-//
-// 两条一起才算修好：canvas 上叠一层（半透明令牌 + 那句状态文案）、容器同时不可点。
-// 文案从唯一真源来（`QR_SCANNED_TEXT` / `QR_CONFIRMED_TEXT`，与状态行同一份常量），
-// 所以"遮罩说 A、状态行说 B"这种漂移不可能发生。
+// 扫码之后遮蔽二维码：canvas 上叠一层（半透明令牌 + 状态文案），容器同时不可点
 
 test("标记：已扫/已确认档——canvas 上叠着遮蔽层（令牌背景 + 状态文案），容器不可点", async () => {
   const { renderGate } = await gateRenderer();
@@ -589,8 +536,7 @@ test("标记：已扫/已确认档——canvas 上叠着遮蔽层（令牌背景
 });
 
 // ---------------------------------------------------------------------------
-// R20 要求 3 / R25 要求 2：网页登录那条路开着时的「返回扫码登录」
-// ---------------------------------------------------------------------------
+// 网页登录那条路开着时的「返回扫码登录」
 
 /** 网页登录那条路正在跑（官方页铺满整窗，gate 整个在它底下）。 */
 function officialState() {
@@ -612,8 +558,7 @@ test("标记：R25 起「返回扫码登录」**不由 gate 渲染**（它浮在
   // 正文里那两种形态此刻都不该出现：官方页开着 = 不该再发起第二次登录（只会撞 login_in_progress），
   // 「返回」则由浮动控件负责（见上一条）。
   assert.doesNotMatch(html, new RegExp(`data-testid="${WEB_LOGIN_ENTRY_TESTID}"`), "开窗时不渲染「打开」形态");
-  // R27：这一刻官方页还在**屏外**加载（Rust 侧 `login::offscreen_rect`），一个字都没画出来
-  // ——状态行说的是「正在打开…」而不是「已打开」，而且旁边真的有一个转圈（见下一条用例）。
+  // 官方页还在屏外加载，一个字都没画出来：状态行说「正在打开…」，旁边真的有一个转圈
   assert.equal(statusTextOf(html), LOGIN_OPENING_TEXT, "状态行说清此刻在等什么（不是「已打开，就是白的」）");
   assert.match(html, /animate-spin/, "同一个状态区里有一个转圈动画");
 
@@ -625,7 +570,7 @@ test("标记：R25 起「返回扫码登录」**不由 gate 渲染**（它浮在
 
 test("标记：渲染层 reload 之后（path 丢了、只剩 busy:true）形态判定仍是 back（只是落点在浮动控件）", async () => {
   const { renderGate } = await gateRenderer();
-  // R19 的场景：门禁状态靠 auth:get-status 应答重建，`path` 是 null，只有 sidecar 的 busy
+  // 门禁状态靠 auth:get-status 应答重建，`path` 是 null，只有 sidecar 的 busy
   const afterReload = { ...loggedOut(), busy: true };
   assert.equal(afterReload.path, null, "这份夹具要的正是「没有本地 path」那一档");
 
@@ -748,16 +693,7 @@ test("标记：加载态给同尺寸占位（不是空白也不是跳一下）",
 });
 
 // ---------------------------------------------------------------------------
-// R45A1（用户第 10 项）：启动第一屏是中性启动态，**不是**登录页
-// ---------------------------------------------------------------------------
-//
-// 为什么必须在这一层（真 SSR，而不是源码扫描）：用户看见的是**渲染出来的东西**。
-// 源码里"有 `StartupChecking` 这个名字"证明不了那一屏上没有二维码、没有标题、没有按钮。
-//
-// 已登录的会话冷启动时，首帧状态就是 `initialGateState()`（`checking`）：`useAuthGate` 的
-// `useState` 初值，effect 要到首帧之后才跑。所以这里渲出来的就是**那一帧**，
-// 而它必须是安静的启动屏——不是门禁（旧版在 `phase !== loggedIn` 时直接渲 `LoginGate`，
-// 这就是"已登录启动先闪登录页"的原始写法）。
+// 启动第一屏是中性启动态，不是登录页：首帧状态是 checking，已登录冷启动不该先闪登录页
 
 test("R45A1 启动第一屏：checking 渲的是中性启动态（无二维码、无标题、无入口、无按钮）", async () => {
   const { renderStartupChecking } = await gateRenderer();
@@ -768,7 +704,7 @@ test("R45A1 启动第一屏：checking 渲的是中性启动态（无二维码�
   assert.match(html, /aria-busy="true"/, "告诉辅助技术：还在启动");
   assert.match(html, new RegExp(`aria-label="${STARTUP_CHECKING_LABEL}"`), "可达名字来自唯一真源");
 
-  // 安静：整屏没有一句可见文案（用户要求「安静中性」，不允许文案堆叠）
+  // 安静：整屏没有一句可见文案（不允许文案堆叠）
   assert.equal(
     visibleText(html).replaceAll("\u0001", "").trim(),
     "",
@@ -807,13 +743,7 @@ test("R45A1 启动第一屏：确定未登录之后才换成登录页（两屏�
   assert.notEqual(renderStartupChecking(initialGateState()), gate);
 });
 
-/**
- * 复审 R45A1（Important）：**查询失败那一档仍是中性启动屏**。
- *
- * 上一版把这一档画成了 LoginGate——合同写的是 checking **绝不**渲染 LoginGate/二维码。
- * 但是"不许画成登录页"与"必须可操作"要同时成立，所以这一屏自己长出三件东西：
- * 一句原因、一个真的重发 `auth:get-status` 的动作、一个网页登录入口。
- */
+/** 查询失败那一档仍是中性启动屏（checking 绝不渲染 LoginGate/二维码），但原因与两个动作都在。 */
 test("R45A1 查询失败：仍是中性启动屏（无二维码/无登录页文案），但原因与两个动作都在", async () => {
   const { renderStartupChecking } = await gateRenderer();
   const failed = reduceGateState(initialGateState(), {

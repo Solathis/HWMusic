@@ -1,17 +1,5 @@
 /**
- * R9 Media Session 对接（`features/playback/media-session.mjs`）。
- *
- * 这是**浏览层能力**（不涉新权限、不起新窗口）：系统媒体控件/耳机按键/SMTC 通过
- * `navigator.mediaSession` 把"播放/暂停/上一首/下一首/跳到某一秒"交给我们。
- *
- * 三条纪律：
- * 1. **没有这个 API 就静默降级**（Linux webview 与部分环境没有它）：不抛、不报错、
- *    只回"没接上"，播放本身照常；
- * 2. **不支持的动作要跳过但留痕**：`setActionHandler` 对未知动作会抛（规范如此），
- *    一个动作失败不该让其余动作一起失效；
- * 3. **元数据封面过闸门**：只用真实安全 coverUrl，没有封面与专辑时不编值。
- *
- * 先写先看红。
+ * Media Session 对接：没有该 API 就静默降级、不支持的动作跳过但留痕、元数据封面过闸门。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

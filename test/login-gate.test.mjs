@@ -1,60 +1,7 @@
 /**
- * R16/R18 渲染层登录门禁（引导页）：判定纯函数 + 外壳骨架的**顺序**契约 + 视觉原语约束。
- *
- * R16 起引导页的形态（用户指令）：**只展示二维码和提示文字**——进页面自动发起二维码
- * （`auth:qr-start`），扫码状态经 `auth:qr` 广播回来；只有出错才出现"重试"。
- *
- * R18（用户指令 2026-10-20）在这一页上改了五件事，本文件钉住其中的**判定与源码结构**：
- * 1. 提示文案换成"手机「控制中心」…"（`QR_HINT_TEXT` 唯一真源，且状态行**不再复述**它）；
- * 2. 二维码容器带边框（令牌 + 工具类，零自定义 CSS）；
- * 3. 过期自动换新（判定层：过期不自己发起、新内容直接换；像素级重画见 test/qr-render.test.mjs）；
- * 4. "在网页中打开登录"**常驻**次要入口 + 与二维码**互斥**（停轮询、窗关回二维码态）；
- * 5. 标题移到二维码正上方（`LOGIN_GATE_TITLE` 唯一真源，全页只出现一次）。
- *
- * 渲染出来的**标记**（顺序/边框/数量）由 `test/login-gate-markup.test.mjs` 用真 SSR 钉——
- * 源码扫描只能说"字符串在里面"，说不清"渲染出来是什么样"。
- *
- * R19 增补（本文件 §10）：门禁挂载时**主动查一次** `auth:get-status`——`auth:status` 只在
- * sidecar 启动时广播一次，渲染层 reload/崩溃重启之后那一条已经冲刷过了，门禁会永久停在
- * `checking`。查询应答喂**同一条** status 事件（共用 `statusEventOf` 映射），
- * 所以"查询来的状态"与"广播来的状态"不可能各有一套解释。
- *
- * R20 增补（本文件 §11，用户真机验收反馈三项）：
- * 1. header 里那句品牌与窗口标题栏重复 → 删掉（header 只剩 48px 几何占位）；
- * 2. 二维码过期：expired 到达**当场撤掉旧码**（不可扫的码不许留在屏上）、
- *    容器本身可点手动刷新（`canRefreshQr` + `aria-label`）；
- * 3. 网页登录窗铺满内容区（顶部只留 48px）时，次要入口**变形为「返回扫码登录」并挪进那条
- *    可见的 header**——它是那一刻唯一可达的控件，点击走 `auth:cancel-login`（关窗）→
- *    那条路的收场广播 → `returnToQr`（R18 已有，本文件 §4 钉住）。
- *
- * R21 增补（本文件 §12，用户指令 2026-10-20，**推翻 R16/R20 的"过期自动换新"**）：
- * 1. 过期**倒计时**：`expiresInMs` 由建单应答/广播带过来，渲染层本地按秒递减
- *    （`qrCountdownText`，钟在这一侧）；本地到 0 只是「正在确认过期…」，
- *    **过期判定仍以服务端 `expired` 广播为权威**；
- * 2. 过期态**不可扫**：expired 到达 → 撤掉旧码 + 「二维码已过期」占位（R20 要求 2 的
- *    "死码不留屏"继续成立）；
- * 3. **只能手动刷新**：过期不再自动重发 `auth:qr-start`（`shouldAutoStartQr` 在这一档为假），
- *    刷新由用户点击二维码容器或过期态那个显著的「刷新二维码」按钮触发。
- *    R20 的 `qrNotice` / `QR_REFRESH_NOTICE`（"已刷新，请重新扫码"）随之删除——
- *    不再自动换新，就不存在"刚换过"这一刻。
- *
- * R26 增补（用户真机反馈之 4）：**过期态的状态行不再显示「二维码已过期，点击刷新。」**——
- * 二维码遮罩上已经是「二维码已过期」/「点击刷新」两行，状态行再复述一遍等于同一句话说两次。
- * 于是 `loginGateStatusLine` 在 `expired` 这一档返回 `null`（**隐藏那一行**，不是显示一句空话），
- * 遮罩成为过期态的**唯一提示载体**；`QR_EXPIRED_NOTICE` 随之删除（没有第二个读者）。
- *
- * 五条硬要求里的前四条仍是源码扫描（R16 起）：
- * 1. 未登录**绝不渲染 app-shell**：门禁分支必须在 App() 里排在 app-shell 之前；
- * 2. 正常路径**只有一个可操作元素**（常驻的网页入口）；"重试"只在失败态出现；
- * 3. 顶部内缩不许出现第二份字面量：高度来自 src/shared/login-inset.mjs，且不许写 `h-12`；
- * 4. 二维码必须由**成熟库**（`qrcode`，MIT）渲染：不手写二维码组件、不自绘编码逻辑。
- * 先写先看红。
- *
- * R45A1 增补（用户第 10 项：已登录冷启动不许先闪登录页）：第 1 条**判据收紧**——
- * "门禁分支在 shell 之前"变成"**三态**判定在 shell 之前"。`checking`（还不知道）不再画成
- * 登录页，而是中性启动屏；登录页只在**确定未登录**之后出现（判定：`features/auth/startup-view.mjs`
- * 的 `startupViewOf`；纯决定与竞态序列由 `test/startup-view.test.mjs` 钉，渲染标记由
- * `test/login-gate-markup.test.mjs` 的 R45A1 段钉）。
+ * 渲染层登录门禁（引导页）：判定纯函数 + 外壳骨架的顺序契约 + 视觉原语约束。
+ * 未登录绝不渲染 app-shell；正常路径只有一个可操作元素，二维码必须由成熟库渲染。
+ * checking（还不知道）画中性启动屏，只有确定未登录才出现登录页。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -129,10 +76,8 @@ function stripComments(source) {
 const gateSource = () => stripComments(read("src/renderer/login-gate.tsx"));
 
 /**
- * 门禁**渲染出来的那块 JSX**（从 `export function LoginGate(` 到文件尾）。
- *
- * 位置类断言必须用它：文件上半部分还有 `QrCanvas`（`<canvas` 在那里）与 import 名单，
- * 拿整份源码找下标会把它们算进来（"标题在二维码之前"这种断言会因此变得毫无意义）。
+ * 门禁渲染出来的那块 JSX（从 `export function LoginGate(` 到文件尾）。
+ * 位置类断言必须用它，否则会把 QrCanvas 与 import 名单一起算进来。
  */
 function gateJsx() {
   const source = gateSource();
@@ -146,15 +91,8 @@ function loggedOut(extra = {}) {
   return reduceGateState(initialGateState(), { type: LOGIN_GATE_EVENT.status, loggedIn: false, ...extra });
 }
 
-// ---------------------------------------------------------------------------
-// 1. 门禁判定：未登录（含"还不知道"）都不许渲染 app-shell
-// ---------------------------------------------------------------------------
-//
-// R45A1 起要把两件事分开说（用户第 10 项：已登录冷启动不许先闪登录页）：
-// - **能不能渲染 app-shell**：仍是本文件的 `shouldShowLoginGate`（只有「已登录」为假）；
-// - **渲染哪一个非 shell 界面**：`checking` 是中性启动屏、`loggedOut` 才是 LoginGate
-//   （`features/auth/startup-view.mjs` 的 `startupViewOf`，由 `test/startup-view.test.mjs` 钉）。
-// 所以在「还不知道」这一档，"不放行主界面"照旧成立，但它显示的**不是**登录页。
+// 1. 门禁判定：未登录（含「还不知道」）都不许渲染 app-shell
+// `checking` 落中性启动屏，只有 `loggedOut` 才是 LoginGate。
 
 test("门禁判定：只有「已登录」才放行 app-shell（检查中与未登录都不放行）", () => {
   assert.equal(shouldShowLoginGate({ phase: LOGIN_GATE_PHASE.checking, busy: false }), true);
@@ -309,9 +247,7 @@ test("状态机：失败带原文案，后续事件不得把它静默吞掉；�
   assert.equal(JSON.stringify(before), snapshot);
 });
 
-// ---------------------------------------------------------------------------
-// 4. R18 要求 4：常驻的「在网页中打开登录」+ 与二维码互斥（停了才开窗，窗关回二维码）
-// ---------------------------------------------------------------------------
+// 4. 常驻的「在网页中打开登录」+ 与二维码互斥（停了才开窗，窗关回二维码）
 
 test("互斥：发起网页登录时状态行说的是「正在打开华为官方登录页…」，不再复述二维码那条失败", () => {
   let state = loggedOut();
@@ -324,8 +260,7 @@ test("互斥：发起网页登录时状态行说的是「正在打开华为官�
   state = reduceGateState(state, { type: LOGIN_GATE_EVENT.started });
   assert.equal(state.path, "official");
   assert.equal(state.busy, true);
-  // R27：这一刻官方页还在**屏外**加载（Rust 侧 `login::offscreen_rect`），一个字都没画出来
-  // ——说"已在网页中打开登录"等于把"还在加载"描述成"就是白的"（用户报的正是那个现象）。
+  // 这一刻官方页还在屏外加载，状态行说的是「正在打开华为官方登录页…」。
   assert.equal(loginGateStatusLine(state), LOGIN_OPENING_TEXT);
   assert.equal(canStartLogin(state), false, "窗已经开了：入口先禁用（不然就是并排第二次）");
 
@@ -386,14 +321,8 @@ test("常驻入口：任何「还没登录」的非 busy 档位下它都是「�
   }
 });
 
-// ---------------------------------------------------------------------------
-// 5. 外壳顺序：门禁判定必须在 app-shell 之前
-// ---------------------------------------------------------------------------
-//
-// R45A1（用户第 10 项）改了这一段的**判据**，没有放宽它：
-// 原来只问"门禁分支在 shell 之前"，现在要问"**三态**判定在 shell 之前，且两个非 shell 落点
-// 各自只有一个位置"。`checking` 落在中性启动屏、`logged_out` 才落在 LoginGate——
-// 写成 `phase !== loggedIn ? <LoginGate/> : shell` 就是已登录冷启动那一闪的原始写法。
+// 5. 外壳顺序：三态判定必须在 app-shell 之前
+// `checking` 落中性启动屏、`logged_out` 才落 LoginGate。
 
 test("外壳顺序：App() 里三态判定排在 app-shell 之前（未登录绝不渲染主界面）", () => {
   const source = read("src/renderer/App.tsx");
@@ -516,7 +445,7 @@ test("二维码：用成熟库 qrcode 渲染到 canvas（不手写二维码组�
 test("二维码边框（要求 2 / R20）：宿主容器用令牌工具类，不写自定义 CSS、不硬编码颜色", () => {
   const source = gateSource();
   const jsx = gateJsx();
-  // 二维码宿主 = LoginGate 里包着 QrCanvas / Skeleton 的那个 <Button>（R20 起它可点刷新）
+  // 二维码宿主 = LoginGate 里包着 QrCanvas / Skeleton 的那个 <Button>，可点刷新。
   const qrHostAt = jsx.indexOf("<QrCanvas");
   assert.ok(qrHostAt > -1, "LoginGate 里要挂 QrCanvas");
   const containerAt = jsx.lastIndexOf("<Button", qrHostAt);
@@ -539,8 +468,7 @@ test("标题（要求 5 / R20 要求 1）：文案来自唯一真源，全页只
     0,
     "源码里不许再写一份标题字面量（包括 header 里那份）",
   );
-  // header（几何契约）那条里不许有品牌：R20 起它与**窗口标题栏**重复的那句已删，
-  // header 只剩"48px 的几何占位"（走网页入口时子窗正好落在那条下面）。
+  // header 里不许有品牌：它与窗口标题栏重复，只留 48px 的几何占位。
   const headerAt = jsx.indexOf("<header");
   assert.ok(headerAt > -1, "顶部 header 结构必须保留（LOGIN_VIEW_TOP_INSET 的对位契约）");
   const headerTag = jsx.slice(headerAt, jsx.indexOf(">", headerAt) + 1);
@@ -565,7 +493,7 @@ test("常驻入口（要求 4 / R20 要求 3）：那个 <Button> 不被错误�
   assert.match(jsx, /\{entry\.text\}/, "入口文案来自逻辑模块的唯一真源");
   assert.match(jsx, /data-testid=\{entry\.testid\}/, "入口要有测试锚点（真窗守据点名它）");
   assert.match(jsx, /disabled=\{entry\.disabled\}/, "可用性也由逻辑模块裁决（外壳不自己算）");
-  // R25：正文里只剩 open 形态（back 形态的落点搬到了浮动 webview，见 login-chrome.tsx）
+  // 正文里只剩 open 形态；back 形态的落点搬到了浮动 webview。
   assert.match(jsx, /\{entry\.form === "open" \? entryButton : null\}/, "只有 open 形态由 gate 渲染");
   assert.doesNotMatch(source, /\{entry\.form === "back"/, "gate 里不该再有 back 形态的落点");
   assert.equal(
@@ -588,8 +516,7 @@ test("接线：门禁经 coreCall 调 auth:qr-start（自动/刷新）与 auth:l
   assert.match(gate, /AUTH_STATUS/, "会话状态来自 auth:status 广播");
   assert.match(gate, /AUTH_QR/, "二维码状态来自 auth:qr 广播");
   assert.match(gate, /AUTH_LOGIN/, "常驻入口仍走 auth:login");
-  // R25：「返回扫码登录」搬出了门禁——它浮在官方页之上（浮动 webview），走专用命令。
-  // 门禁这一层不再有第二条取消路径（也就不会再 import AUTH_CANCEL_LOGIN）。
+  // 「返回扫码登录」浮在官方页之上，走专用命令；门禁不再有第二条取消路径。
   assert.doesNotMatch(
     stripComments(gate),
     /AUTH_CANCEL_LOGIN/,
@@ -623,14 +550,8 @@ test("提示文案（要求 1）：换成手机控制中心/设置两条路径�
   assert.match(loginGateStatusLine(state), /扫码/);
 });
 
-// ---------------------------------------------------------------------------
-// 10. R19：挂载时**主动查**一次登录状态（reload/崩溃重启不再卡 checking）
-// ---------------------------------------------------------------------------
-//
-// 缺口：`auth:status` 只在 sidecar 启动时广播一次（经 Rust 的 NoticeQueue 冲刷）；
-// 渲染层 reload/崩溃重启之后那一条已经冲刷过了 → 门禁永远停在 `checking`、
-// 二维码不发起、页面上只有"正在检查登录状态…"。
-// 修法：订阅就位之后 `core_call('auth:get-status')`，应答喂**同一条** status 事件。
+// 10. 挂载时主动查一次登录状态（reload/崩溃重启不再卡 checking）
+// 订阅就位后调用 `auth:get-status`，应答喂同一条 status 事件。
 
 test("重查（R19）：查询应答喂的是同一条 status 事件——未登录 → 确定未登录，自动发起照样武装", () => {
   const state = reduceGateState(initialGateState(), {
@@ -698,8 +619,7 @@ test("重查（R19）：挂载 effect 里**订阅之后**先报就绪、再查�
     /import\s*\{[^}]*AUTH_GET_STATUS[^}]*\}\s*from\s*"\.\.\/shared\/request-channels\.ts"/,
     "AUTH_GET_STATUS 必须从 src/shared/request-channels.ts 导入（唯一真源）",
   );
-  // 复审 R45A1：查询只有**一处实现**——挂载时那一次与启动屏上的「重新检查」共用它。
-  // 两处各写一份 `coreCall(AUTH_GET_STATUS)` 的下场是"重试发的是另一条请求"，而按钮看起来一样。
+  // 查询只有一处实现：挂载时那一次与启动屏上的「重新检查」共用它。
   assert.equal(
     (gate.match(/coreCall<AuthStatusPayload>\(AUTH_GET_STATUS/g) ?? []).length,
     1,
@@ -723,10 +643,8 @@ test("重查（R19）：挂载 effect 里**订阅之后**先报就绪、再查�
   assert.ok(qrAt < queryAt, "二维码那条订阅同理");
   assert.ok(readyAt < queryAt, "先冲刷排队的那条广播、再查：查询的应答一定不比排队的旧");
 
-  // 广播与查询共用同一份映射（各写一份 = 早晚漂移）
-  //
-  // R53：映射住在纯函数模块的 `statusEventOf` 里——「恢复中」这一档要靠真单测钉，
-  // 源码扫描只能说"字符串在里面"。规矩不变：全仓只有这一份。
+  // 广播与查询共用同一份映射（各写一份 = 早晚漂移）。
+  // 映射住在纯函数模块的 `statusEventOf` 里，全仓只有这一份。
   const mapping = gate.match(/function statusEventOf\(/g) ?? [];
   assert.equal(mapping.length, 0, "映射只许有一份（现在住在 login-gate-logic.mjs 里，不许在这里再写一个）");
   assert.match(
@@ -739,8 +657,7 @@ test("重查（R19）：挂载 effect 里**订阅之后**先报就绪、再查�
     /const applyStatusPayload = [\s\S]*?reduceGateState\(current, statusEventOf\(payload\)\)/,
     "只有**一个** apply：广播回调与查询应答都经它进状态机（statusEventOf 只在那里被调用）",
   );
-  // R38：账号资料与登录状态**来自同一份载荷、同一处解析**（另起一处订阅就会让
-  // "状态说已登录、资料说没登录"有地方长出来）
+  // 账号资料与登录状态来自同一份载荷、同一处解析。
   assert.match(
     gate,
     /const applyStatusPayload = [\s\S]*?setProfile\(profileFromStatusPayload\(payload\)\)/,
@@ -763,15 +680,8 @@ test("重查（R19）：挂载 effect 里**订阅之后**先报就绪、再查�
   );
 });
 
-// ---------------------------------------------------------------------------
-// 11. R20：真机验收的三项修复（第 2 项的"自动换新"部分已由 R21 用户指令推翻，见 §12）
-// ---------------------------------------------------------------------------
-//
-// 诊断先行（可复现证据 `.probe/qr-expiry-diag.json`，`node scripts/probe-qr.mjs --until-expired`）：
-// 服务端**会**给出过期档位——建单 TTL 181s，轮询到 t+177.4s 时 `103000200` → `103000201`。
-// 所以"过期没有任何变化"不是 poll 静默挂，而是**渲染层**（旧码留在屏上）。
-// R20 的修法是"sidecar 自动换新 + 渲染层撤旧码"；**R21 按用户指令改成"过期停住、等用户点刷新"**，
-// 于是 §12 起 `expired` 是一条终止档，`qrNotice`（"已刷新，请重新扫码"）**整条链删除**。
+// 扫码过期：服务端会广播 expired，渲染层据此收口并撤下旧码。
+// 过期后不再自动换新码，只能由用户手动刷新。
 
 /** 走到"已经拿到一张码"的状态。 */
 function pendingState(content = "OLD") {
@@ -791,7 +701,7 @@ test("R20 过期：expired 到达当场撤掉旧码（不可扫的过期码绝�
   assert.equal(qrContentOf(expired), null, "画面必须回到占位：留着旧码就是让用户去扫一张死码");
   assert.equal(expired.qr.expiresInMs, null, "有效期一起清掉（它已经是过去时）");
 
-  // 新码只会在**用户点了刷新**之后到（R21：没有自动换新那一跳）
+  // 新码只在用户点了刷新之后到达，没有自动换新那一跳。
   const renewed = reduceGateState(
     reduceGateState(expired, { type: LOGIN_GATE_EVENT.qrRequested }),
     { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.pending, content: "NEW" },
@@ -811,7 +721,7 @@ test("R21 状态行：过期**不再**说一句话（R26），失败说的是为
   const rearmed = reduceGateState(expired, { type: LOGIN_GATE_EVENT.qrRequested });
   assert.match(loginGateStatusLine(rearmed), /正在准备二维码/);
 
-  // 从网页那条路退回来（R18 的 returnToQr）：说的是**刚发生的另一件事**，不许与过期串台
+  // 从网页登录退回说的是刚发生的另一件事，不许与过期串台。
   const back = reduceGateState(
     reduceGateState(loggedOut(), { type: LOGIN_GATE_EVENT.started }),
     { type: LOGIN_GATE_EVENT.status, loggedIn: false, busy: false, message: "已取消登录" },
@@ -870,7 +780,7 @@ test("R20 手动刷新：文案与锚点是唯一真源，点击走 startQr（�
   assert.match(block, /onClick=\{startQr\}/, `刷新要绑 startQr：${block}`);
   assert.match(block, /onClick=\{startQr\}[\s\S]*QR_REFRESH_TESTID|QR_REFRESH_TESTID[\s\S]*onClick=\{startQr\}/, "同一个元素上");
 
-  // R25 要求 1：过期占位只有两行，「刷新二维码」按钮删掉——源码里不该再出现它
+  // 过期占位只有两行，源码里不该再出现「刷新二维码」按钮。
   assert.equal(
     jsx.split("QR_REFRESH_LABEL").length - 1,
     1,
@@ -904,15 +814,14 @@ test("R25 返回扫码登录：形态判定仍在逻辑层，落点搬到浮动 
 });
 
 test("R25 返回扫码登录：形态判据仍是 busy（不是本地那个 path）——渲染层 reload 之后照样有回去的路", () => {
-  // R19 的场景：reload 之后门禁靠 auth:get-status 重建状态，那时 `path` 是 null，
-  // 只有 sidecar 的 `busy:true` 说明"窗还开着"。若按 path 判形态，入口会退回"打开"形态
-  // ——而它此刻点不动（官方页盖着正文），用户就没有任何回去的路。
+  // reload 之后 path 为 null，只有 busy:true 说明窗还开着。
+  // 若按 path 判形态，入口会退回「打开」，而它此刻点不动。
   const afterReload = { ...initialGateState(), phase: LOGIN_GATE_PHASE.loggedOut, busy: true };
   const entry = webLoginEntry(afterReload);
   assert.equal(entry.form, "back", "窗还开着：此刻该存在的是「返回扫码登录」");
   assert.equal(entry.disabled, false);
 
-  // 两种形态永远可点（R17 的教训：最需要它的场景里它不许是灰的）
+  // 两种形态永远可点：最需要它的场景里它不许是灰的。
   for (const state of [
     initialGateState(),
     loggedOut(),
@@ -940,28 +849,17 @@ test("R20 返回扫码登录：点击走 auth:cancel-login，那条路收场后�
   assert.match(loginGateStatusLine(returned), /取消/, "先说清那条路怎么了");
   assert.equal(webLoginEntry(returned).form, "open", "入口变回「在网页中打开登录」");
 
-  // 同一条规矩也管本地的 `cancelled` 事件：留在 official 上而 busy 已落，
-  // 入口会变回"打开"形态——窗若还开着就又没人可点（R20 自审修的那一处）
+  // 本地 cancelled 事件同理：留在 official 会让入口变回「打开」形态。
   const localCancel = reduceGateState(official, { type: LOGIN_GATE_EVENT.cancelled });
   assert.equal(localCancel.path, "qr");
   assert.equal(shouldAutoStartQr(localCancel), true);
   assert.equal(webLoginEntry(localCancel).form, "open");
 });
 
-// ---------------------------------------------------------------------------
-// 12. R21（用户指令 2026-10-20）：过期倒计时 + 过期态不可扫 + **只能手动刷新**
-// ---------------------------------------------------------------------------
-//
-// 这一轮**推翻了 R16/R20 的"过期自动换新"裁决**：sidecar 在 `expired` 上只广播 + 停轮询
-// （协议层钉在 `test/qr-login.test.mjs`），于是"再来一张"只剩用户手动这一条路。
-// 渲染层因此多两件事：把"还剩多久"显示出来、把过期态做成"停住 + 请用户点刷新"。
-//
-// **权威归属**：本地倒计时只是显示；过期判定以服务端 `expired` 广播为准
-// （实测：TTL 181s、t+177.4s 收到 `103000201`，见契约 §1.8 的 R20 段）。
-// 本地到 0 时**不**自行改档、也**不**撤下二维码——那一刻只是"该过期了"，
-// 它显示「正在确认过期…」，等那条广播来收口（服务端提前于本地归零到达，这一档是罕见的兜底）。
+// 过期态：显示剩余时间、过期不可扫、只能手动刷新。
+// 本地倒计时只是显示，过期判定以服务端 expired 广播为准。
 
-/** R21 夹具：一张"还剩 `expiresInMs`"的码（`at` = 事件发生时刻，钟由调用方注入）。 */
+/** 夹具：一张「还剩 `expiresInMs`」的码。 */
 function liveState({ expiresInMs = 181_000, at = 1_000_000, content = "QR" } = {}) {
   const waiting = reduceGateState(loggedOut(), { type: LOGIN_GATE_EVENT.qrRequested });
   return reduceGateState(waiting, {
@@ -1040,30 +938,8 @@ test("R21 倒计时：钟在渲染层——门禁源码要真的开表与停表�
   );
 });
 
-// ---------------------------------------------------------------------------
-// 13. R27（用户指令 2026-10-20）：切「在网页中打开登录」之后的**加载动画**
-// ---------------------------------------------------------------------------
-//
-// 现象：点完入口之后官方页要好几秒才画出来，那几秒里用户看到的是一片白——因为登录 webview
-// 一建出来就铺满了整个内容区。R27 的修法是**两层配合**：
-//
-// - Rust 侧把登录页先摆在**屏外**（`login::offscreen_rect`，客户区左沿之外），**静默窗走完**
-//   （每次加载 `Finished` 之后 1.5 秒内没有新导航）或 30 秒首载期限到才 `set_position` 摆进
-//   内容区（R28 改判据：R27 那一版是"首载 Finished 就摆"，而首载多半只是 authorize 中间页）；
-// - 渲染层这一侧于是在屏外那一段时间里**仍然看得见**，它要显示的是加载动画
-//   （`loginOpeningIndicator`），而不是让用户盯着一个看起来"已经打开、就是白的"页面。
-//
-// 文案从 R20 那句「已在网页中打开登录。」改成「正在打开华为官方登录页…」，理由是**诚实**：
-// `busy` 为真只说明那条路在跑，此刻官方页一个字都还没画出来（它还在屏外加载）。
-// 说"已打开"把"还在加载"描述成了"就是白的"——那正是用户报的那个现象。
-//
-// 两条边界**不改**：
-// 1. 渲染层 reload 之后（`path` 丢了、只剩 `busy:true`，R19 那个场景）**不**说"正在打开"
-//    ——那一刻页面多半早就画出来了，我们没有理由说它在加载（见下面第二条用例）；
-// 2. 这条链的收场仍由宿主广播判定（`busy` 落下来 + 带一句话）→ 立刻停转。
-//
-// 转圈与文案在**同一行**（同一个 `role="status"` 区域）：读屏用户听到的就是他看到的那一句，
-// 不会出现"看见在转、读屏却被告知已打开"。
+// 切「在网页中打开登录」后要显示加载动画：官方页还在屏外加载，不许是一片白。
+// 收场仍由宿主广播判定，转圈与文案在同一行。
 
 test("R27 加载动画：官方页还没画出来时说的是「正在打开华为官方登录页…」，收场就停", () => {
   // 还没点入口：没有"正在打开"这回事
@@ -1125,21 +1001,8 @@ test("R27 加载动画：门禁源码真的画出来（Loader2 转圈 + 那一�
   assert.match(gate, /role="status"/, "加载动画与状态行是同一个状态区：读屏听到的就是看到的");
 });
 
-// ---------------------------------------------------------------------------
-// 13. R37：扫码之后**遮蔽**二维码（用户真机反馈）
-// ---------------------------------------------------------------------------
-//
-// 用户报的现象：手机上已经扫了码（甚至已经点了确认），屏上那张码还是原样——**还能扫**。
-// 再扫一次会发生什么没人知道（至少是白白重开一次 round trip），而用户完全看不出"这码已经用过了"。
-//
-// 处置（两条一起才成立）：
-// 1. **遮蔽层**：`scanned`/`confirmed` 两档在 canvas 上叠一层（半透明令牌背景 + 文案），
-//    底下那张码还在画布上，但用户看到的是"这块地方已经用过了"；
-// 2. **容器不可点**：这两档 `canRefreshQr` 为假（R20 起容器是刷新控件）——扫到一半换一张新码
-//    只会把这次扫码作废。
-//
-// 文案**不是一个新真源**：遮罩上那句就是状态行那句（`QR_SCANNED_TEXT` / `QR_CONFIRMED_TEXT`
-// 同时被遮罩与状态行读），所以不可能出现"遮罩说 A、状态行说 B"。
+// 扫码后遮蔽二维码：已扫/已确认两档叠遮罩，且容器不可点。
+// 遮罩文案与状态行同源，不会各说一句。
 
 test("R37 遮蔽：只有已扫/已确认两档给遮蔽文案，其余档都没有（文案与状态行同源）", () => {
   assert.equal(QR_SCANNED_TEXT, "已扫码，请在手机上确认。");
@@ -1187,16 +1050,14 @@ test("R37 遮蔽：门禁源码真的把遮蔽层画在 canvas 之上（绝对�
 test("R37 文档：遮蔽这一项按 B22 登记（真机观感 untested），且编号计数与表里的行数对得上", () => {
   const doc = read("docs/KNOWN_LIMITATIONS.md");
 
-  // 这一处改动**只有** SSR 标记 + 纯函数 + 源码扫描三种证据，"真窗上看起来怎么样"没有证据
-  // （本环境起不了真窗）——按那份文档自己的口径（任何没实测的都要写进去、一条不漏）必须登记。
+  // 这处改动只有 SSR 标记、纯函数与源码扫描三种证据，真窗观感未测，必须登记。
   const row = doc.split("\n").find((line) => line.startsWith("| B22 |"));
   assert.ok(row, "B22 是 R37 新增的那一条（真窗观感 untested）：没有它就是漏登");
   assert.match(row, /遮[蔽罩]/, "这一行说的就是「扫到之后把二维码遮住」");
   assert.match(row, /untested/, "缺的正是真窗上那一眼");
   assert.match(row, /login-gate-markup|login-gate\.test/, "要说清机制侧由哪些测试钉住");
 
-  // 那份文档自称「从本轮起**以行数为准**」：最后一次计数更正里那个数必须等于实际行长
-  // （R37 加了这一行，所以旧数字会当场红——这正是它想防的漂移）
+  // 文档以行数为准：最后一次计数更正的数必须等于实际行数。
   const rows = doc.match(/^\| [A-G][0-9A-Za-z-]* \|/gm) ?? [];
   const totals = [...doc.matchAll(/全文 \*\*(\d+) 条\*\*/g)];
   assert.ok(totals.length > 0, "计数行读不出来（格式变了就同步改这条）");
@@ -1207,10 +1068,7 @@ test("R37 文档：遮蔽这一项按 B22 登记（真机观感 untested），�
   );
 });
 
-// ---------------------------------------------------------------------------
-// R53：恢复期间那一问的应答「恢复中」 → 仍是中性启动屏（绝不画登录页、绝不建码）
-// ---------------------------------------------------------------------------
-// sidecar 恢复期间答 `{restoring:true}`，映射层翻成 `restoring` 事件，reducer 保持 `checking`。
+// 恢复期间答「恢复中」：仍是中性启动屏，绝不画登录页、绝不建码。
 
 test("R53 恢复中：快照带 restoring 时映射成 restoring 事件（不许当成「未登录」这条结论）", () => {
   const event = statusEventOf({ loggedIn: false, busy: false, restoring: true });

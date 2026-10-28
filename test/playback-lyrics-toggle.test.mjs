@@ -1,20 +1,6 @@
 /**
- * R45C：播放栏 / 沉浸页的「桌面歌词 / 任务栏歌词」快捷开关，以及沉浸页顶部中央的收起按钮。
- *
- * 钉的五件事（简报 C 节 + fix1）：
- * 1. 语义只有一份（`lyricsToggleView`）：状态取自 `requestedVisible ?? visible`，标签随
- *    **当前模式**说"显示/隐藏桌面歌词"或"显示/隐藏任务栏歌词"；
- * 2. **待定意图只有一个主人**（`features/lyrics/lyrics-toggle-intent.mjs`）：第一次点击到
- *    宿主回执之间的那段时间里，第二次点击必须**取反**（不是把同一个 `true` 再发一次），
- *    回执/失败才会清掉它；
- * 3. 失败要在**发起面**给一句可操作的话（原因 + 下一步），有重试/关掉两条路，原始错误只进日志；
- * 4. 没有 `lyrics` binding 时**不渲染**（不出现"点了没反应"的死按钮）；
- * 5. 沉浸页的关闭从右上角叉号改成**顶部中央的 ChevronDown**，ESC 照旧。
- *
- * 真点击（延迟 IPC 下的快速双击、被拒绝后重试、两种模式、无 binding、菜单层级）由
- * `scripts/test-browser.mjs` 的完整组合回归验证。
- *
- * 先写先看红。
+ * 播放栏 / 沉浸页的「桌面歌词 / 任务栏歌词」快捷开关，以及沉浸页顶部中央的收起按钮。
+ * 语义只有一份（lyricsToggleView）；待定意图只有一个主人，第二次点击必须取反；失败在发起面给可操作的话；没有 binding 时不渲染。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -201,14 +187,7 @@ test("R46 播放栏：传输组回到 模式→上一首→播放→下一首，
   assert.match(toggle, /aria-pressed="true"/, "开着的状态要可读（不是只有颜色）");
   assert.match(desktop, /lucide-captions/, "图标是 lucide 的 Captions（不自绘）");
 
-  /**
-   * R46（有意更改 R45C 的这条断言）：传输组恢复常规顺序 —— 模式 → 上一首 → 播放 → 下一首，
-   * 歌词开关**不在**传输组里，而是尾部工具区（`player-bar-trailing`）。
-   *
-   * 为什么改：R45C 把它塞在播放与下一首之间（实测顺序 mode, previous, play, lyrics, next），
-   * 传控件被一枚非传输按钮劈成两半；用户按"播放→下一首"的肌肉记忆会点错。
-   * 开关的语义/状态/一次点击一条命令一个字都没变，变的只是它挂在哪一段。
-   */
+  /** 传输组恢复常规顺序 —— 模式 → 上一首 → 播放 → 下一首；歌词开关挪到尾部工具区（player-bar-trailing），不再劈开传输控件。 */
   const transportAt = desktop.indexOf('data-testid="player-controls"');
   const trailingAt = desktop.indexOf('data-testid="player-bar-trailing"');
   const toggleAt = desktop.indexOf('data-testid="player-lyrics-toggle"');
@@ -305,16 +284,7 @@ test("R45C 播放栏/沉浸页：一次点击只发一次 toggle，且不自建�
   assert.match(hook, /toggleVisible/, "取反由意图机决定，不由渲染快照决定");
 });
 
-/**
- * R50（brief 第 1 项）：沉浸页的传输组**只放传输控件**。
- *
- * R45C 把歌词开关塞在"播放"与"下一首"之间（`size-10` / 图标 `size-5`），把
- * `上一首 → 播放 → 下一首` 的肌肉记忆劈成两半；播放栏 R46 已经搬走，沉浸页漏了这一处。
- * 现在开关与音量/静音/播放模式同档（`MediaButton size-8` + 图标 `size-4`），挂在下方工具行尾部。
- *
- * 这里只钉**源码顺序与尺寸**；几何（中心 y 在传输行下方、外接尺寸约 32px、play/next 相邻）
- * 由 `scripts/test-browser.mjs` 在真浏览器里量。
- */
+/** 沉浸页的传输组只放传输控件：歌词开关与音量/静音/播放模式同档（MediaButton size-8、图标 size-4），挂在下方工具行尾部。 */
 test("R50 沉浸页：传输组只剩 上一首→播放→下一首，歌词开关移到工具行（size-8 / 图标 size-4）", () => {
   const stage = stripComments(read(STAGE));
   const TRANSPORT = 'className="flex items-center justify-evenly"';

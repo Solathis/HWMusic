@@ -1,10 +1,6 @@
 /**
- * R4 协议原型层 · 歌词解析（src/protocols/lyrics.mjs）。
- *
- * 只做 AMLL 官方 `parseLrc` 的封装：真实 LRC 样本 → AMLL `LyricLine[]`；
- * 空/畸形/非字符串输入返回空结果且**绝不抛**（歌词拉不到时播放器要能继续放歌）。
- * 另有一条"禁止自绘解析"的源码扫描：本模块必须 import 官方解析器，不得自带时间戳正则。
- * 先写先看红。
+ * 歌词解析层只做 AMLL 官方 parseLrc 的封装：空/畸形/非字符串输入返回空结果且绝不抛。
+ * 另有源码扫描钉住本模块必须 import 官方解析器，不得自带时间戳正则。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -12,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { parseLyrics, parseLyricsOrEmpty } from "../src/protocols/lyrics.mjs";
-// R41a：判据住在 sidecar（`src/main/lyrics-store.mjs`），这里用**真实解析器**与它对照
+// 判据住在 sidecar（src/main/lyrics-store.mjs），这里用真实解析器与它对照。
 import { hasTimedLyricLine, sanitizeLyricsDoc } from "../src/main/lyrics-store.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -115,10 +111,7 @@ test("parseLyricsOrEmpty：任何异常都降级为空数组（播放器不因�
 });
 
 test("等价（R41a）：hasTimedLyricLine 与真实 parseLrc 在边界矩阵上给出同一个答案", () => {
-  // 为什么这条必须"用真实解析器对照"：判据住在 sidecar（进不了 AMLL 解析器，见
-  // `src/main/lyrics-store.mjs` 的说明），而它的正当性只有一句话——"与 parseLrc 等价"。
-  // 这句话靠读正则读不出来：R41a 就是这么发现原判据在两处说错了话的
-  //（`[00:01.0000]词`：官方认、判据不认；`[00:01.00]`：判据认、官方给 0 行）。
+  // 判据的正当性只有一句「与 parseLrc 等价」，靠读正则读不出来，只能用真实解析器对照。
   const agree = [
     // 时间戳形状
     "[00:01.00]词",
@@ -181,14 +174,10 @@ test("等价（R41a）：hasTimedLyricLine 与真实 parseLrc 在边界矩阵上
 
   // 已知的**刻意不等价**（三处，都有理由；钉住它们是为了不让正则悄悄漂移）：
   const knownDivergences = [
-    // 时间戳后面跟一个"不是时间戳的方括号"：官方把它当一行（词就是那个方括号里的东西），
-    // 判据说"没有词"。方向是**宁可不落盘**（把这种行当歌词缓存下来，用户看到的仍是方括号，
-    // 而那份缓存 90 天挡着真正的歌词）。
+    // 时间戳后跟一个非时间戳方括号时官方算一行、判据不算：方向是宁可不落盘，免得缓存盖住真正的歌词。
     { text: "[00:01.00][Chorus]", amll: 1, timed: false },
     { text: "[00:01.00][]", amll: 1, timed: false },
-    // 行首 BOM：官方解析器自己会剥（`parseLyrics` 的既有用例钉着），判据不剥——
-    // 但它**到不了**判据：唯一的调用点在 `sanitizeLyricsDoc` 里，那里第一步就是剥 BOM
-    //（下面一条断言钉住"那条路会剥"，所以这一处分歧在真实链路上不可达）。
+    // 行首 BOM：判据不剥，但唯一的调用点 sanitizeLyricsDoc 第一步就剥，这条路不可达。
     { text: "\uFEFF[00:01.00]词", amll: 1, timed: false },
   ];
   for (const { text, amll, timed } of knownDivergences) {

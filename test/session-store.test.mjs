@@ -1,10 +1,6 @@
 /**
- * R5 会话持久化 · 注入式单测。
- *
- * 真 DPAPI 在 Rust 侧（`src-tauri/src/secure_store.rs`，cargo test 钉住），这里注入假编解码器，
- * 只钉 Node 侧真正负责的那几件事：原子替换、0600 尽力而为、失败不覆盖旧会话、错误不吞不回显。
- * 临时文件写在仓库内 `.tmp/`（已 gitignore）：本机沙箱拒绝工作区外的写入。
- * 先写先看红。
+ * 会话持久化 · 注入式单测：真 DPAPI 在 Rust 侧，这里注入假编解码器。
+ * 只钉 Node 侧职责：原子替换、0600 尽力而为、失败不覆盖旧会话、错误不吞不回显。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

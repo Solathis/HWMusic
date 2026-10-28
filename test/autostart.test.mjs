@@ -1,23 +1,9 @@
 /**
- * R10 设置页 · 开机自启（`core_set_autostart` / `core_get_autostart`）。
+ * 设置页 · 开机自启（`core_set_autostart` / `core_get_autostart`）。
  *
- * 为什么绕开插件自带的 `plugin:autostart|enable` 而自己写两条命令（裁决）：插件命令要走
- * capabilities 的 `autostart:allow-*` 权限，等于**为渲染层开一个直接改系统自启的入口**；
- * 自己写命令则把它收在主窗来源守卫（`require_main_webview`，R23 起判 webview label）后面，
- * 与 `core_call` 同一个门。
- *
- * 要钉住的五件事：
- * 1. **命令名一份真源**：`src/shared/commands.ts` 导出、`host-api.ts` 只用常量
- *    （写错一个字母的后果是 invoke 报 "command not found"，而那要到运行时才知道）；
- * 2. **Rust 侧真的注册了**：命令在 `commands.rs` 里、且进 `generate_handler!` 白名单
- *    （只定义不注册 = 渲染层点了没反应）；
- * 3. **报的是观测到的状态**：`apply_autostart` 先 enable/disable 再 `is_enabled`，
- *    开关跟着**观测值**走（把请求回显成成功，就是让界面替系统撒谎）；
- * 4. **权限前置条件**：本应用没有 app 级 ACL manifest → 自定义命令不走 ACL（Tauri 2.12 语义，
- *    证据见 src-tauri/src/commands.rs 的注释）；这条把前置条件本身钉住；
- * 5. **JS 侧纯逻辑**：状态文案三档（开/关/**没取到**）不许互相冒充，失败文案要带原因。
- *
- * 先写先看红。
+ * 绕开插件自带的命令，是为了把它收在主窗来源守卫后面，与 `core_call` 同一个门。
+ * 要钉的：命令名只有一份真源、Rust 侧真注册进 `generate_handler!`、开关跟着观测值走，
+ * 以及状态文案三档（开/关/没取到）不许互相冒充。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -213,12 +199,7 @@ test("失败文案：改不动时带上 core 给的原因，且说清开关显�
   assert.ok(!/敬请期待|即将上线/.test(bare));
 });
 
-/**
- * R56：读失败只说**一句**可操作的话，且不把 core 的技术原文糊到界面上。
- *
- * 原文（守卫里就是命令名 `core_get_autostart`）进运行日志——设置页的日志标签能看到它，
- * 界面那句只回答"现在能不能用、下一步做什么"。
- */
+/** 读失败只说一句可操作的话，core 的技术原文进运行日志，不糊到界面上。 */
 test("失败文案：读不到状态只有一句（原因 + 下一步），core 原文不进界面", () => {
   const read = autostartStatusFailureText();
   assert.equal(typeof read, "string");

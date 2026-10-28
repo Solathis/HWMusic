@@ -1,8 +1,5 @@
 /**
- * R63：应用内专属右键菜单——**默认网页菜单的屏蔽判定**（纯逻辑 + 入口接线契约）。
- *
- * 两种目标放行：行自己的菜单触发器（radix 自己会 preventDefault 再弹菜单）、可编辑元素
- * （input / textarea / contenteditable 且非只读，保留原生剪切/复制/粘贴/全选）。其余一律拦掉。
+ * 默认网页菜单的屏蔽判定：行自己的菜单触发器与可编辑元素放行，其余一律拦掉。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

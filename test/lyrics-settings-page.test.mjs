@@ -1,16 +1,6 @@
 /**
- * R52：重构设置「歌词」页 + 沉浸式歌词禁止改色。
- *
- * 这里钉的是"跨层的那几件事"——真交互在浏览器守卫（`scripts/test-browser.mjs` 的
- * `checkSettingsPageLyricsCard` / `checkImmersiveLyricsColorIsFixed`），本文件管：
- *
- * 1. 设置页「歌词」标签：桌面歌词卡（显示 / 窗口位置）与 R59 的任务栏歌词卡
- *    （独立组件 `taskbar-lyrics-card.tsx`）。
- *    桌面歌词样式/方向/字号/效果/颜色的控件 id 一个都不许留在页面里（它们只在 R51 弹出窗里），
- *    也**没有**「外观设置」按钮——桌面歌词外观只在歌词窗自己的齿轮菜单里改（R52 收尾还原）；
- * 2. 沉浸式歌词禁止改色：`AmllLyricsPanel` 没有颜色 prop、不写 `data-lyrics-color`、不调
- *    `applyCustomColor`；外壳不再挂 `usePlayerLyrics`；R50 那三个文件已删除；
- * 3. `LYRICS_SESSION_NOTICE` 那段解释性长文整段删除（文案克制）。
+ * 设置页「歌词」标签 + 沉浸式歌词禁止改色。
+ * 这里钉的是跨层的那几件事，真交互在浏览器守卫里跑。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -52,10 +42,10 @@ test("R52 设置页「歌词」：只留一张桌面歌词卡（没有外观入�
   for (const gone of ["lyrics-locked", "lyrics-click-through", "锁定位置", "鼠标穿透"]) {
     assert.equal(pane.includes(gone), false, `歌词页不再有 ${gone}（锁定与点透归歌词窗）`);
   }
-  // 只剩一张桌面歌词卡 + R59 的任务栏卡（**独立组件**，标题不在这一页的源码里）+ 缓存卡
+  // 只剩一张桌面歌词卡 + 任务栏卡（**独立组件**，标题不在这一页的源码里）+ 缓存卡
   const titles = [...pane.matchAll(/<CardTitle>([^<]+)<\/CardTitle>/g)].map((found) => found[1]);
   assert.deepEqual(titles, ["桌面歌词"], "页面里写的卡片标题只有桌面歌词（任务栏卡在自己的组件里）");
-  // R59（有意更改）：任务栏歌词的外观只在设置页这张卡里改，与桌面歌词的弹出窗不共用
+  // 任务栏歌词的外观只在设置页这张卡里改，与桌面歌词的弹出窗不共用
   assert.ok(pane.includes("<TaskbarLyricsCard lyrics={lyrics} />"), "任务栏歌词卡挂在这一页");
   assert.ok(pane.includes("<LyricsCacheCard lyrics={lyrics} />"), "缓存卡保持不动（R41 的挂点）");
 
@@ -75,11 +65,8 @@ test("R52 设置页「歌词」：只留一张桌面歌词卡（没有外观入�
 });
 
 /**
- * R52 收尾（用户新要求）：**桌面歌词的外观只在歌词窗自己的设置里改**。
- *
- * 上一轮曾在设置页放了一枚「外观设置」按钮（调 `core_lyrics_settings_open`，锚点取按钮矩形）。
- * 用户明确要求任务栏歌词的设置不与桌面歌词共用、桌面歌词外观只归歌词窗，所以那枚按钮与它的
- * 整条接线（`coreLyricsSettingsOpen` 的导入与处理函数）一起删掉，这里做反向钉子防回潮。
+ * **桌面歌词的外观只在歌词窗自己的设置里改**。
+ * 设置页那枚「外观设置」按钮与它的整条接线一起删掉，这里做反向钉子防回潮。
  */
 test("R52 设置页没有「外观设置」按钮：桌面歌词外观只在歌词窗自己的菜单里改", () => {
   const pane = lyricsPane();
@@ -88,7 +75,7 @@ test("R52 设置页没有「外观设置」按钮：桌面歌词外观只在歌�
     assert.equal(pane.includes(gone), false, `歌词页不许再有 ${gone}`);
     assert.equal(page.includes(gone), false, `设置页源码不许再有 ${gone}（整条接线已删）`);
   }
-  // 弹出窗本身还在（R51 的能力不跟着删）：唯一入口是歌词窗的齿轮
+  // 弹出窗本身还在：唯一入口是歌词窗的齿轮
   const window_ = read("src/renderer/LyricsWindow.tsx");
   assert.match(window_, /coreLyricsSettingsOpen\(/, "歌词窗齿轮仍是弹出窗的入口");
   assert.match(window_, /data-testid="lyrics-appearance"/, "齿轮按钮还在");
@@ -179,19 +166,9 @@ test("R52 颜色只剩桌面歌词窗一个使用者（AmllLyricsPanel 落到主
   assert.match(window_, /applyCustomColor\(/, "桌面歌词窗仍支持自定义颜色（本任务不动它）");
 });
 
-// ---------------------------------------------------------------------------
-// 3. Rust：主窗入口撤回后回到 R51 的关闭路径（本任务不动 Rust）
-// ---------------------------------------------------------------------------
+// 3. Rust：主窗没有弹出窗入口，Rust 侧不留专用改动，只剩关闭路径。
 
-/**
- * R52 收尾：Rust 侧**不保留**上一轮为主窗打开路径加的改动（`caller` 记录 /
- * `close_for_lyrics_lifecycle` / `closes_after_config_change`）。
- *
- * 为什么可以整段撤回：R51 的"当前是锁定/任务栏就收菜单"只在**从主窗打开、且当前已处于**
- * 这两种状态时才会误收；而「外观」入口回到只有歌词窗齿轮之后，齿轮本身只在
- * `mode === "desktop" && !locked` 时渲染（`LyricsWindow.tsx` 的 `controls`），那两种状态下
- * 根本打不开这个窗——误收的前提不存在了。锁定的那一刻仍由同一判定收窗，语义与 R51 一致。
- */
+/** 齿轮只在 `mode === "desktop" && !locked` 时渲染，其余状态打不开弹出窗，所以 Rust 侧不需要主窗入口的专用改动。 */
 test("R52 Rust 回到 R51：主窗入口的专用改动不许留在树里", () => {
   const settings = read("src-tauri/src/lyrics_settings.rs");
   const window_ = read("src-tauri/src/lyrics_window.rs");
@@ -200,7 +177,7 @@ test("R52 Rust 回到 R51：主窗入口的专用改动不许留在树里", () =
     assert.equal(window_.includes(gone), false, `lyrics_window.rs 不许再有 ${gone}`);
   }
   assert.equal(settings.includes("state.caller"), false, "弹出窗不再记录发起者（只有齿轮一个入口）");
-  // R51 的四条关闭路径仍在（这是本任务不该碰的那部分）
+  // 四条关闭路径仍在：歌词窗隐藏、销毁、锁定 / 切任务栏、退出各一条。
   assert.match(window_, /crate::lyrics_settings::close\(app\)/, "歌词窗隐藏时收弹出窗");
   assert.match(window_, /crate::lyrics_settings::close\(&events\)/, "歌词窗销毁时收弹出窗");
   assert.match(window_, /crate::lyrics_settings::close\(&app\)/, "锁定 / 切任务栏后收弹出窗");

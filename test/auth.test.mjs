@@ -1,9 +1,5 @@
 /**
- * R4 协议原型层 · OAuth/PKCE（src/protocols/auth.mjs）。
- *
- * 关键断言：RFC 7636 附录 B 向量逐位相等、attempt 充分随机、端点 URL 一律注入（不硬编码猜测）、
- * 兑换/刷新的成功与失败路径都返回结构化结果且**错误文本绝不含 code/verifier/token**。
- * 先写先看红。
+ * OAuth/PKCE：RFC 7636 附录 B 向量逐位相等、端点 URL 一律注入、错误文本不含 code/verifier/token。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -300,11 +296,7 @@ test("过期判定：过期/临界/未知一律算过期（宁多刷一次），
   assert.equal(isTokenExpired(null, { now }), true);
 });
 
-// —— R40：id_token（OIDC JWT）的 claims 解码 -------------------------------------------------
-//
-// 为什么要它：token 响应里有 `id_token`（真机 15:52 的键名日志），而 loginex 响应**顶层**
-// 没有名字/头像——claims 是账号资料最可能的载体。解码只做"能不能读出对象"这件事：
-// **不验签**（JWKS 是另一个端点，本轮不发明）、坏形状回 null、**任何情况都不抛**。
+// id_token 的 claims 解码只做「能不能读出对象」：不验签、坏形状回 null、任何情况都不抛。
 
 /** 造一个真实形状的 JWT（三段 base64url；签名段是占位，因为这里只解码不验签）。 */
 const jwtOf = (claims, header = { alg: "RS256", typ: "JWT" }) =>

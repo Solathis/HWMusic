@@ -1,13 +1,6 @@
 /**
- * R6 设置 · settings.json 单一真源。
- *
- * 钉住的是"磁盘形状与清洗规则"，不是实现细节：
- * - 坏形状一律"当没配"，绝不猜（端口字符串、非对象 proxy、schemaVersion≠1）；
- * - 凭据原样保留但**绝不出现在日志/错误文案里**；
- * - 写盘原子（临时文件 + rename），未知顶层键原样保留（R10/R11 各自加字段不互相删）；
- * - 认不出的 schemaVersion 不覆盖（宁可不写，也不砸掉新版写的文件）。
- * 临时文件写在仓库内 `.tmp/`（已 gitignore）：本机沙箱拒绝工作区外的写入。
- * 先写先看红。
+ * 设置 · settings.json 单一真源：钉住磁盘形状与清洗规则，不钉实现细节。
+ * 坏形状当没配；凭据不进日志；写盘原子且保留未知顶层键；认不出的 schemaVersion 不覆盖。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -459,9 +452,7 @@ test("凭据卫生：0600 尽力而为——收不紧记一条日志，但不判
   assert.equal(lines.length, 1, `chmod 失败要记一条：${JSON.stringify(lines)}`);
 });
 
-// ---------------------------------------------------------------------------
-// R44e：单一写者 + 读排空屏障
-// ---------------------------------------------------------------------------
+// 单一写者 + 读排空屏障：已受理的写落定之后才读盘。
 
 test("R44e 读是排空屏障：已受理的写落定之后才读盘，读回的是新值而非旧盘", async (t) => {
   const dir = await tempDir("read-barrier");
@@ -552,22 +543,9 @@ test("R44e 同一 chunk 内的 set/set/get：get 排在两笔已发送的 set �
   assert.equal(slow, 2, "两笔 set 各写盘一次，get 不写");
 });
 
-// ---------------------------------------------------------------------------
-// R50：读也排进同一条队列 + rename 对瞬时占用有限重试
-// ---------------------------------------------------------------------------
+// 读也排进同一条队列 + rename 对瞬时占用有限重试。
 
-/**
- * R50（brief 第 4 项）的现场证据是真实日志 `.tmp/run/app-20261025-160445.log:19`：
- *
- * ```
- * 歌词配置保存失败：设置落盘失败（EPERM: operation not permitted, rename '…settings.json.5712.4.tmp' -> '…settings.json'）
- * ```
- *
- * 两个原因叠在一起：①`read()` 只 `await` 调用时拿到的旧 `writeTail`，让出事件循环之后
- * `save()` 可以带着**新的读 + 写**插进来——Node 的读句柄在 Windows 上会阻止 `MoveFileEx`
- * 替换目标，rename 于是 EPERM；②Windows 上这种占用常常只持续几毫秒，一次失败就放弃太早。
- * 下面四条分别钉住这两个修复点。
- */
+/** Windows 上读句柄会挡住 rename（EPERM）：读要排在写队列里，rename 遇到瞬时占用要有限重试。 */
 test("R50 读与写共用同一条队列：读已开始、save 随后插入也不会并发读写", async (t) => {
   const dir = await tempDir("r50-read-queued");
   t.after(() => rm(dir, { recursive: true, force: true }));

@@ -1,16 +1,7 @@
 /**
  * 协议层 · 华为业务接口（src/protocols/music.mjs）。
- *
- * R32 换血后，本文件断言的是**参考实测的线上形状**：
- * - POST 用 JSON 体（不是查询串）、GET 用查询串；
- * - 分页是 `start`/`limit`（通道那边仍然是"页号"，换算在协议层）；
- * - 业务成功 = `result.resultCode === "000000"`；
- * - 线上字段（`contentID`/`contentName`…）**归一化**成内部形状（`id`/`name`…）；
- * - 收藏/歌单发现要音乐会话的 `snsUserID`；其余带凭据的调用要 `token`。
- *
- * 而且守住三条业务语义（旧仓踩过的坑）：
- * 收藏无直报总数、playback 顶层 fileURL 才是音频、auditionTime 不能单独判试听。
- * 先写先看红。
+ * POST 用 JSON 体、GET 用查询串；分页是 start/limit；resultCode === "000000" 才算业务成功。
+ * 线上字段归一化成内部形状（id/name…）；收藏/歌单发现要 snsUserID，其余带凭据的调用要 token。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -94,12 +85,7 @@ function sequenceFetch(replies) {
   });
 }
 
-/**
- * 手动收发的注入 fetch（R45A3 fix3）：每次调用的响应先挂起，由用例决定**何时、以什么内容**回。
- *
- * 为什么非要有它：`scriptedFetch`/`sequenceFetch` 都是"调用即回"，复现不了"第一页的 HTTP 在途时
- * 会话换了 / 又开了一次第一页"这种竞态——而那正是复审点名的洞（迟到的旧响应写回缓存）。
- */
+/** 手动收发的注入 fetch：每次调用的响应先挂起，由用例决定何时、以什么内容回，用来复现旧响应迟到写回缓存的竞态。 */
 function deferredFetch() {
   const calls = [];
   const fetchImpl = (url, init = {}) =>
@@ -243,24 +229,7 @@ const videoResources = {
 };
 const durationTrack = (extra) => normalizeTrack(wireSong("duration", { duration: undefined, ...extra }));
 
-/**
- * 2026-10-23 只读取证的**线上资源形状**（已登录会话，歌单详情一页 1623 条；只记类型，不记曲名）。
- *
- * - 条目键：`albumID/albumName/artistID/artistName/category/contentExInfo/contentID/contentName/
- *   contentType/cpID/createTime/deviceType/extendInfo/keyName/picture/quality/status/subTitle/times`
- *   ——**没有顶层 `duration`，也没有 `songInfo`**；`quality` 是字符串（"0"/"1"/"2"/"3"）。
- * - `contentExInfo` 是 **JSON 字符串**；这一页里**没有 `completeFileInfos`**，时长只在
- *   `fileInfos[]`（数组）里，元素形如
- *   `{quality:"1", format:"MP3", fileType:"1", duration:"240", bitRate, fileSize, drm, sampleRate, streaming}`。
- * - `duration` 一律是**秒的数字串**；`fileType` 是数字档位（"1"/"17"），**不是编码名**；
- *   `mediaFileType` 这一页不存在。
- * - 同一首的各档（1/2/3/5/6/7、以及只有 "0" 档的老歌）`duration` **完全相同**（383/383 一致）；
- *   但**取哪一档是合同问题**（口径按 R45A2 fix1 用户裁定，见本文件后面的时长用例与
- *   `docs/API_CONTRACT.md` §2.3.1）：**显式且一致的 MP3 是硬条件**、档位必须显式声明，
- *   标准档 `quality="1"` 排第一顺位、其余显式档兜底——所以只有 "0" 档的老歌现在**也有**秒数，
- *   真正显示「—」的是那一批"没有任何一档显式声明 MP3"的条目（M4A/FLAC/空 `format`）。
- *   视频档是 MKV（15/17），永远排除。
- */
+/** 线上资源形状（只读取证）：条目无顶层 duration、无 songInfo；contentExInfo 是 JSON 字符串，时长只在 fileInfos[] 里，是秒的数字串。 */
 const realFileInfo = (quality, format, duration) => ({
   quality,
   format,
@@ -292,9 +261,9 @@ test("列表时长：真实条目没有顶层 duration/songInfo，秒数只在 c
     240,
   );
   assert.equal(realEntry([realFileInfo("1", "MP3", "195")]).duration, 195);
-  // R45A2 fix1（用户裁定）：**任意显式档位**的 MP3 都能给秒数（真机 167 条只有 quality "0" 的老歌属于这一档）
+  // 任意显式档位的 MP3 都能给秒数（真机上只有 quality 0 档的老歌属于这一档）
   assert.equal(realEntry([realFileInfo("0", "MP3", "202")]).duration, 202);
-  // M4A / FLAC / 未声明编码：不是显式 MP3，不猜（真机 87 条 format 为空）
+  // M4A / FLAC / 未声明编码不是显式 MP3，不猜；MKV 视频档永远不当时长
   assert.equal(realEntry([realFileInfo("3", "M4A", "203"), realFileInfo("7", "M4A", "203")]).duration, undefined);
   assert.equal(realEntry([realFileInfo("3", "FLAC", "203")]).duration, undefined);
   assert.equal(realEntry([{ quality: "1", format: "", duration: "203" }]).duration, undefined);
@@ -316,7 +285,7 @@ test("列表时长：quality 数字 1 与字符串 \"1\" 等价；completeFileIn
   // completeFileInfos 的 key 就是音质档（对象形态）：资源自己没写 quality 时按 key 读
   assert.equal(viaExtra({ completeFileInfos: { "1": { format: "MP3", duration: "195" } } }), 195);
   assert.equal(viaExtra({ completeFileInfos: { "0": { format: "MP3", duration: "195" } } }), 195, "对象 key 是显式档位，非标准档也可兜底");
-  // 只声明 mediaFileType（早期真机样本两个字段都有）也认
+  // 只声明 mediaFileType 也认；两个编码字段都在时必须都读作 MP3
   assert.equal(viaExtra({ fileInfos: [{ quality: "1", mediaFileType: "mp3", duration: "240" }] }), 240);
   // 两个编码字段都存在时必须都读作 MP3（互相矛盾的资源不认）
   assert.equal(viaExtra({ fileInfos: [{ quality: "1", format: "MP3", mediaFileType: "FLAC", duration: "240" }] }), undefined);
@@ -325,17 +294,7 @@ test("列表时长：quality 数字 1 与字符串 \"1\" 等价；completeFileIn
   assert.equal(viaExtra({ completeFileInfos: [standardResource("203", { quality: undefined, qualityType: "1" })] }), undefined);
 });
 
-/**
- * R45A2 fix1（用户裁定，2026-10-23 记录在 progress.md）：**"所有歌曲时长"是原需求**，
- * 而只认标准档 `quality="1"` 会让真机约 167 条只有 `quality:"0"` 的老歌永远显示「—」。
- * 用户明确授权把选源放宽到"**任意明确声明 MP3 的音质档**"，仍然是秒数、仍然排除 M4A/FLAC/MKV/
- * 未声明编码/矛盾格式，`times` 仍然一个字节都不读。
- *
- * 两条纪律（放宽不等于乱猜）：
- * 1. **标准档仍是第一顺位**：它在的时候先用它（真机各档同值，这条只防"哪天不同值"）；
- * 2. **档位必须显式存在且形如华为的音质标识**（数字或数字串）：数组形态里没有 quality 的资源
- *    仍然不算——那是"没声明档位"，不是"某个未知档位"。
- */
+/** 时长选源放宽到任意明确声明 MP3 的音质档（所有歌曲都要有时长）：标准档 quality="1" 仍是第一顺位，档位必须显式存在且形如华为的音质标识。 */
 test("列表时长（用户裁定）：任意显式档位 + 显式一致 MP3 都给秒数，标准档优先", () => {
   const viaFileInfos = (fileInfos) => durationTrack({ contentExInfo: JSON.stringify({ fileInfos }) }).duration;
 
@@ -355,7 +314,7 @@ test("列表时长（用户裁定）：任意显式档位 + 显式一致 MP3 都
     241,
     "兜底档 quality 2 → 241",
   );
-  // 数字形态与字符串形态是同一档（华为真机给的是字符串，早期样本有数字）
+  // 数字形态与字符串形态是同一档；未知但显式的档位只要编码明确就收下
   assert.equal(viaFileInfos([{ quality: 2, format: "MP3", duration: 241 }]), 241);
   // 未知但显式的数字档位：按"明确声明 MP3"收下（档位本身不是我们认识的那个，但编码是明确的）
   assert.equal(viaFileInfos([{ quality: "9", format: "MP3", duration: "201" }]), 201);
@@ -437,7 +396,7 @@ test("列表时长：秒数严格为有限正数字/数字串且小于 24h；坏
   for (const duration of [0, "0", -1, "-1", 86400, "86400", 86401, Infinity, NaN, null, true, false, "", " ", "bad", [], [203], {}]) {
     assert.equal(durationTrack({ duration }).duration, undefined, String(duration));
     assert.equal(durationTrack({ contentExInfo: { fileInfos: [realFileInfo("1", "MP3", duration)] } }).duration, undefined, String(duration));
-    // R45A2 fix1：坏的标准档退到别的显式 MP3 档（放宽的是档位，不是秒数）
+    // 坏的标准档退到别的显式 MP3 档（放宽的是档位，不是秒数）
     assert.equal(
       durationTrack({ contentExInfo: { fileInfos: [realFileInfo("1", "MP3", duration), realFileInfo("2", "MP3", "195")] } }).duration,
       195,
@@ -455,17 +414,7 @@ test("列表时长：秒数严格为有限正数字/数字串且小于 24h；坏
   }
 });
 
-/**
- * 复审 R45A2 与 **R45A2 fix1（用户裁定）** 的关系（读这两组时必须一起看）：
- *
- * - 上一版（复审）把口径收回到合同原文"只认显式标准档 `quality="1"` 的 MP3"，因为选源代码
- *   不该单方面放宽合同；那是对的**程序**，代价是真机约 167 条只有 `quality:"0"` 的老歌
- *   继续显示「—」。
- * - 本版（fix1）用户已经明确授权放宽到"任意**明确声明 MP3** 的音质档"（记录在 progress.md）。
- *   所以下面这一组从"非标准档一律不取"改成"非标准档可以取，但必须有显式档位 + 显式一致 MP3"。
- * - 仍然**不可**妥协的部分：M4A/FLAC/MKV/缺 format/矛盾 format 一律不取；`times` 永不读；
- *   秒数有限正数 < 24h；栏位缺失（没有 quality）不猜。
- */
+/** 选源口径：非标准档可作兜底，但必须有显式档位 + 显式一致 MP3；M4A/FLAC/MKV/缺或矛盾 format 一律不取，times 永不读。 */
 test("复审 R45A2 + fix1：标准档优先，非标准档只作为显式 MP3 的兜底", () => {
   const viaExtra = (contentExInfo) => durationTrack({ contentExInfo }).duration;
   const viaFileInfos = (fileInfos) => viaExtra({ fileInfos });
@@ -495,22 +444,13 @@ test("复审 R45A2 + fix1：标准档优先，非标准档只作为显式 MP3 �
   // ④ 档位缺失不猜：数组形态没有 key 可当档位
   assert.equal(viaFileInfos([{ format: "MP3", mediaFileType: "MP3", duration: "240" }]), undefined);
 
-  // ⑤ 标准档编码不符、兜底档正常 → 取兜底档（这是 fix1 与复审版的唯一行为差异）
+  // 标准档编码不符、兜底档正常 → 取兜底档；兜底档也不合格时仍然没有时长
   assert.equal(viaFileInfos([{ quality: "1", format: "M4A", duration: "240" }, { quality: "0", format: "MP3", duration: "202" }]), 202);
   // ⑥ 但"兜底档也不合格"时仍然没有时长（不退成任何编码）
   assert.equal(viaFileInfos([{ quality: "1", format: "FLAC", duration: "240" }, { quality: "3", format: "M4A", duration: "240" }]), undefined);
 });
 
-/**
- * 复审 R45A2（Important）：合同 §2.3.1 与 KNOWN_LIMITATIONS A5 曾只认**显式标准档 `quality="1"` 的
- * MP3**。上一版把"任意档的显式 MP3"都收下，等于拿非标准音质的资源冒充标准档的证据；
- * 复审把口径钉回合同是对的**程序**。
- *
- * **R45A2 fix1（用户裁定）**：用户已明确授权放宽到"任意**明确声明 MP3** 的音质档"
- * （记录在 progress.md），理由是原需求就是"所有歌曲都要有播放时长"，而真机约 167 条
- * 只有 `quality:"0"` 的老歌在旧口径下永远显示「—」。所以本组断言编码的是**新口径**：
- * 放宽档位、不放宽编码证据（M4A/FLAC/MKV/缺 format/矛盾 format 仍然一个都不收）。
- */
+/** 选源口径：显式 MP3 的任意档位都算，标准档仍排第一，编码证据不放宽。 */
 test("复审 R45A2 + fix1（用户裁定）：显式 MP3 的任意档位都算，标准档仍排第一", () => {
   const viaFileInfos = (fileInfos) => durationTrack({ contentExInfo: JSON.stringify({ fileInfos }) }).duration;
 
@@ -664,7 +604,7 @@ test("收藏分页：中途失败保留已加载内容并如实报错；页数�
 test("歌单列表：翻页扫完整列表，跳过歌曲条目、按 contentType:id 去重（不把「首页全是歌」当成「没有歌单」）", async () => {
   const { calls, fetchImpl } = scriptedFetch((_url, _init, all) => {
     if (all.length === 1) {
-      // 首页整页都是新歌：**不算"没有进展"**，必须继续翻（这正是 R32 前会显示"还没有歌单"的坑）
+      // 首页整页都是新歌不算「没有进展」，必须继续翻
       return jsonResponse(okBody({ favoriteInfos: [wireSong("s1"), wireSong("s2")] }));
     }
     return jsonResponse(okBody({ favoriteInfos: [wirePlaylist("p1", "5"), wirePlaylist("p2", "4")] }));
@@ -780,19 +720,7 @@ test("歌单曲目：自建走 GET playlist/detail/all（playListID/start/limit�
   assert.equal(refused.error.kind, MUSIC_ERROR_KINDS.endpointUnknown);
 });
 
-/**
- * R45A3 fix1（复审 Important）：歌单详情是**整表响应**端点——2026-10-23 真机一页
- * `pageSize=50` 拿回 **1623 条**，而旧实现把这 1623 条整份交给渲染层、`hasMore` 说是"还有"，
- * 于是"触底加载"变成一次全量渲染 + 一个永远为真的 hasMore。浏览器夹具当时还自己按页切片，
- * 把这条路径整个遮住了。
- *
- * 复审后的契约（协议层唯一真源）：
- * - **整份只取一次网络**：第一页的响应（无论服务端给了多少）进**实例内存缓存**（键 = 端点 kind + 歌单 id，
- *   不落盘、不进设置、不进日志）；
- * - 后续页是**本地切片** `[(page-1)*pageSize, page*pageSize)`，重复读同一页不再发请求；
- * - `hasMore` 由缓存里的剩余条数决定（`end < total`），`pageSource` 如实说是本地切片还是服务端分页；
- * - **第一页的歌单元信息**在后续页保留（它不是"这一页"的属性，是整张歌单的身份）。
- */
+/** 歌单详情是整表响应端点：整份只取一次网络并进实例内存缓存，后续页是本地切片，hasMore 由剩余条数决定。 */
 test("歌单详情（整表响应）：整份只取一次网络，page/pageSize 本地切片 50/50/20", async () => {
   const items = Array.from({ length: 120 }, (_value, index) =>
     wireSong(`t${index + 1}`, { contentExInfo: JSON.stringify({ fileInfos: [{ quality: "1", format: "MP3", duration: "180" }] }) }),
@@ -804,7 +732,7 @@ test("歌单详情（整表响应）：整份只取一次网络，page/pageSize 
         playListSongInfoList: items,
       },
     });
-  // 假上游**忽略 start/limit**：每次都回整张 120 首（真接口的实测行为）
+  // 假上游忽略 start/limit：每次都回整张 120 首（真接口的实测行为）
   const { calls, fetchImpl } = scriptedFetch(() => jsonResponse(fullBody()));
   const api = apiOf({ fetchImpl });
 
@@ -888,8 +816,7 @@ test("歌单详情：缓存键含端点 kind 与歌单 id（互不串味），�
   const ownedPage = await api.getPlaylistDetail("P-1", { kind: "owned", page: 1, pageSize: 2 });
   const collectedPage = await api.getPlaylistDetail("P-1", { kind: "collected", page: 1, pageSize: 2 });
   assert.equal(ownedPage.data.available, 3);
-  // R45A3 fix2：这张歌单的缓存条目**只留最近一次解析**（上一次第一页那份 owned 随之失效），
-  // 但两条端点的第一页本身仍是各自去问（次数见 fixed-order 那一组用例）
+  // 这张歌单的缓存条目只留最近一次解析；两条端点的第一页仍各自去问
   assert.equal(collectedPage.data.available, 4, "两条端点各问各的，第一页不走缓存");
 
   // 换一个歌单 id：不复用别的歌单的缓存
@@ -911,22 +838,7 @@ test("歌单详情：缓存键含端点 kind 与歌单 id（互不串味），�
   assert.equal(secondPage2.data.available, 1, "另一个实例的第 2 页自己取了那一份响应那（没有沾到上面那张 3 首的缓存）");
 });
 
-/**
- * R45A3 fix2（复审 Important）：**整表缓存不许跨解析路径 / 跨会话残留**。
- *
- * 这一档为什么危险：`kind='auto'` 是"先自建（owned）、再公开（collected）"，而同一份
- * `playlistId` 在两条端点上的曲目**可以完全不同**。旧实现的第一页只失效"这一轮解析到的
- * 那个 kind"的条目，于是：
- * - 第一轮 owned 回整份（进了缓存）→ 路由/会话变了，第一页这次由 collected 解析 →
- *   缓存里 owned 那份**还在** → 第 2 页按固定顺序 `["owned","collected"]` 一撞就撞到
- *   上一轮的 owned 列表：同一张歌单的页 1 与页 2 来自两条不同路由。
- * - 换账号/换 token 之后同理：上一轮那份是**别人的**歌单内容。
- *
- * 契约（本轮修法，行为级验证——调真的 `createMusicApi`，不是扫源码）：
- * 1. 第一页（不论解析到哪条 kind、也不论形状）先把这张歌单**所有** kind 的条目一起失效；
- * 2. 后续页只认"这张歌单最近一次解析到的那条 kind"，两条都在时也不按固定顺序撞运气；
- * 3. 会话身份（`token`/`snsUserID`）变了 → 整张缓存先清掉再查。
- */
+/** 整表缓存不许跨解析路径或跨会话残留：第一页先失效该歌单所有 kind 的条目，后续页只认最近一次解析到的 kind，会话身份一变整张先清掉。 */
 
 /** 一张歌单的"整份响应"（服务端忽略 start/limit：一次给全）。 */
 const wholePlaylistBody = (fakeId, tag, count) =>
@@ -950,7 +862,7 @@ test("R45A3 fix2：解析路径从 owned 换成 collected 之后，第 2 页不�
   let ownedResolves = true;
   const { calls, fetchImpl } = scriptedFetch((url) => {
     if (url.includes("/playlist/detail")) {
-      // 不回歌单时就是真机上那条"空壳"响应（没有 playListInfoEx）——自动改走公开端点
+      // 不回歌单时就是真机的「空壳」响应（没有 playListInfoEx），自动改走公开端点
       return jsonResponse(ownedResolves ? wholePlaylistBody("P-1", "owned", 3) : okBody({}));
     }
     return jsonResponse(wholeCollectedBody("P-1", "collected", 4));
@@ -1020,7 +932,7 @@ test("R45A3 fix2：会话换了（token / snsUserID）→ 上一轮的整表缓�
       playListSongInfoList: Array.from({ length: 2 }, (_value, index) => wireSong(`B-${start + index + 1}`)),
     } }));
   });
-  // `session` 传函数：装配时它多半还是 null，运行期才会变（真机就是这条路）
+  // session 传函数：装配时它多半还是 null，运行期才会变
   const api = apiOf({ fetchImpl, session: () => session });
 
   const page1 = await api.getPlaylistDetail("P-1", { page: 1, pageSize: 2 });
@@ -1072,26 +984,7 @@ test("R45A3 fix2：整表缓存仍然**有上限**——第 5 张歌单把最旧
   assert.equal(calls.length, 6, "最新放进去的那张仍是本地切片");
 });
 
-/**
- * R45A3 fix3（复审 Important + Minor）：**在途 / 失败 / 空 / 恰好一整页**这四档。
- *
- * 复审说得很具体：
- * 1. 会话 A 的第一页在途时切到会话 B；B 的第一页先回来并建好缓存；A 的旧响应**迟到**后
- *    把缓存改写成 A 的列表（而 `playlistCacheSession` 记的已经是 B）→ B 的第 2 页从 A 那份
- *    列表里切出来。根因：指纹只在**请求入口**对一次，`await` 之后什么都没复查。
- * 2. 第一页**失败或回空**时提前 `return`，上一轮的整表缓存**没有**失效 → 第 2 页照旧切片。
- * 3. "响应条数 == pageSize"这一档分不清"服务端真分页"与"服务端忽略窗口、每次回同一份"：
- *    后者会让触底加载反复取同一页，永远滚不完。
- *
- * 修法（下面每条用例都直接调真的 `createMusicApi`，不是扫源码）：
- * - 每次请求记下"开始时的会话指纹 + 这张歌单第一页的代次"，`await` 回来后两者都要对得上；
- *   对不上就**整条作废**（结构化 `stale_response`），既不写缓存、也不交回调用方；
- * - 第一页一开（早于网络）就把这张歌单**所有** kind 的旧条目失效，失败/空响应同样算；
- * - 恰好一整页的响应记住归一化 ID 序列；下一份整页序列**完全相同**（窗口起点不同）就收敛成
- *   "没有更多"（`pageSource: "server-repeat"`），不猜总数。
- *
- * 指纹只做**内存内的不透明比较**（FNV-1a 散列）：不进缓存数据、不进日志、不进设置、不落盘。
- */
+/** 在途 / 失败 / 空 / 恰好一整页四档：await 回来后会话指纹或歌单代次对不上就整条作废（stale_response），整页序列重复就收敛成「没有更多」。 */
 test("R45A3 fix3：会话在途切换——旧会话迟到的第一页响应作废，不得写进新会话的缓存", async () => {
   let session = { token: "TOKEN-A", snsUserID: "SNS-A" };
   const deferred = deferredFetch();
@@ -1714,7 +1607,7 @@ test("歌词（R38）：已加载的曲目条目自带 lyricAddress → 直接�
   );
 });
 
-// —— R40：第 4 档「按专辑补条目索引」（重启后直接播恢复出来的队列那一档） -----------------
+// 第 4 档：索引里没有时按专辑补条目索引（重启后直接播恢复出来的队列）
 
 test("歌词（R40）：索引里没有 + 播放响应给了 albumID → 用既有专辑端点补一次条目索引，取到歌词", async () => {
   const { calls, fetchImpl } = scriptedFetch((url) => {
@@ -1725,7 +1618,7 @@ test("歌词（R40）：索引里没有 + 播放响应给了 albumID → 用既�
     if (url.includes("/api/album")) {
       const query = new URL(url).searchParams;
       if (query.get("albumCode") !== "A9") throw new Error(`专辑 id 不对：${url}`);
-      // 专辑响应里的条目自带 lyricAddress（真机实测：albumInfoEx.songSimpleInfos[] 3/3 都有）
+      // 专辑响应里的条目自带 lyricAddress
       return jsonResponse(
         okBody({ albumInfoEx: { albumInfo: { contentID: "A9", contentName: "专辑" }, songSimpleInfos: [wireSong("s9", { albumID: "A9", lyricAddress: "https://cdn.dbankcdn.cn/s9.lrc" })] } }),
       );
@@ -2010,7 +1903,7 @@ test("music.mjs 只登记路径形状，不含任何域名与凭据字面量", a
   assert.doesNotMatch(source, /dbankcdn|tingmall|kuke/i, "CDN 白名单只许出现在 safe-media-url.mjs");
 });
 
-// —— R41：歌词的六跳编排（本地 → 内存 → 磁盘 → 华为四档 → 第三方 → invalid_response） ---------
+// 歌词的六跳编排：本地 → 内存 → 磁盘 → 华为四档 → 第三方 → invalid_response
 
 const CACHED_TEXT = "[00:01.00]磁盘缓存里的词\n";
 const LOCAL_TEXT = "[00:01.00]我自己导入的词";
@@ -2218,7 +2111,7 @@ test("歌词（R41）：第三方端口抛错不影响这条链（静默回华�
       },
     },
   });
-  // 带上艺人：这一条钉的是"端口抛错"（R41a 之后，只有标题+无可用时长的曲目根本不会问端口）
+  // 带上艺人：这一条钉的是端口抛错（只有标题、无可用时长的曲目根本不会问端口）
   const lyrics = await api.getLyrics({ trackId: "s9", title: "歌", artist: "艺人" });
   assert.equal(lyrics.ok, false);
   assert.equal(lyrics.error.kind, MUSIC_ERROR_KINDS.invalidResponse);

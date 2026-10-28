@@ -1,9 +1,8 @@
 /**
- * R16 · B 部分：二维码端口（`src/main/qr-login.mjs`）的**离线**全链测试。
- *
- * 拿一份注入的假 fetch 把整条链跑完：建单 → 轮询 → 已确认 → getLoginWay → CAS 302 →
- * 移动登录页 → getPageInfo → codeRemoteLogin → callbackURL。
- * 真实扫码那一步（手机确认）不可能在测试里发生，所以它是 untested，已如实登记在报告与契约文件里。
+ * 二维码端口（`src/main/qr-login.mjs`）的**离线**全链测试。
+ * 用注入的假 fetch 跑完建单 → 轮询 → 已确认 → getLoginWay → CAS 302 → 移动登录页 →
+ * getPageInfo → codeRemoteLogin → callbackURL 整条链。
+ * 真实扫码那一步不可能在测试里发生，它在报告与契约文件里如实登记为 untested。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -125,9 +124,7 @@ function timers() {
     clearTimer: (id) => pending.delete(id),
     /**
      * 跑到**最早到点**的那个挂起计时器。
-     *
-     * R26 起会话里同时挂着轮询（2 秒）与本地到期兜底（TTL + 宽限）两张网，按"谁先挂上谁先跑"
-     * 推会让"下一次轮询"变成那张远未来的网——真实时间是按到点先后走的，这里跟着它走。
+     * 会话里同时挂着轮询与本地到期兜底两张网，这里跟着真实时间的到点先后走。
      */
     async tick() {
       let pick = null;
@@ -182,9 +179,8 @@ test("端口：建单打的是无状态的二维码端点（URL 无查询串、�
 
   const create = world.calls.find((call) => call.url.includes("getqrInfo"));
   /**
-   * R31 改了断言（行为也随之改了，理由在 `docs/API_CONTRACT.md` §1.8 的 R31 段）：
    * **请求上不再挂模板查询串**——探针实测页面发的是 `getqrContent.split("?")[0]`。
-   * 端点常量本身仍然带查询串，因为它是六个参数的唯一真源（`buildQrCreateBody` 从它取）。
+   * 端点常量本身仍然带查询串，因为它是六个参数的唯一真源。
    */
   assert.equal(create.url, "https://id1.cloud.huawei.com/DimensionalCode/getqrInfo");
   const body = new URLSearchParams(create.body);
@@ -329,10 +325,8 @@ test("端口：CAS 跳到白名单外的域 → 明确报出来（导航白名�
   assert.match(failure.message, /evil\.example\.com/);
 });
 
-// ---------------------------------------------------------------------------
-// R20：活动会话期间重启（手动刷新）——迟到的旧会话事件按身份丢弃
-// R21（用户指令）：过期不再自动换新，"换一张新码"只剩手动这一条路
-// ---------------------------------------------------------------------------
+// 活动会话期间重启（手动刷新）：迟到的旧会话事件按身份丢弃。
+// 过期不再自动换新，"换一张新码"只剩手动这一条路。
 
 /** 建单响应里带一个可区分的 qrCode/qrToken（用来证明"换码带的是当前这张"）。 */
 const createPayloadFor = (round) => ({
@@ -434,7 +428,7 @@ test("端口：过期不再自动换新（只播 expired、停轮询）；用户
     }
     if (target.includes("DimensionalCode/async")) {
       polls += 1;
-      // 第一张过期（R21：端口只报不换）→ 用户手动刷新出第二张，第二张被扫确认
+      // 第一张过期（端口只报不换）→ 用户手动刷新出第二张，第二张被扫确认。
       return polls === 1
         ? answer(200, { resultCode: "103000201" })
         : answer(200, { resultCode: "0", userAccount: "u", code: "c", userID: "1", siteID: "1", accountType: "1", opType: "4" });
@@ -502,9 +496,7 @@ test("端口：过期不再自动换新（只播 expired、停轮询）；用户
   );
 });
 
-// ---------------------------------------------------------------------------
-// R22（用户真机反馈两项）：端口这一层要证明"渲染层拿到的那个数是对的"
-// ---------------------------------------------------------------------------
+// 端口这一层要证明"渲染层拿到的那个数是对的"。
 
 test("端口（R22）：本地钟快 1 小时，交回渲染层的 expiresInMs 仍是服务端 TTL（倒计时不被平移）", async () => {
   // 建单响应给的是服务端纪元：建单 1_700_000_000_000、到期 +181s（两个字段都在）
@@ -547,29 +539,13 @@ test("端口（R22）：轮询诊断日志经端口落到注入的 log（stderr�
   assert.equal(logs.join("\n").includes(CREATE_PAYLOAD.qrToken), false, "日志不带 qrToken（会话令牌只在进程内用）");
 });
 
-// ---------------------------------------------------------------------------
-// R31 全保真：建单/轮询的**上下文**补齐（探针实测的三处缺口）
-//
-// `scripts/probe-qr-fidelity.mjs` 用 headless Chromium 真开了官方二维码页（桌面门户
-// `/CAS/portal/loginAuth.html`），抓到页面自己发的三个请求：
-//
-// 1. **建单**：`POST /DimensionalCode/getqrInfo`（**无查询串**）、表单 = 模板六参数
-//    **+ deviceID + deviceType=7**、带 cookie（CAS 会话那串）、Referer 就是门户页；
-// 2. **轮询**：`POST /DimensionalCode/async?version=40200&t=<随机>`、表单只有 qrToken、
-//    带 cookie（**连建单响应自己设的 `qRCode`/`expiredTime`/`qrCodeCreateTime` 都带上了**）；
-// 3. **设备指纹**：`POST /CAS/IDM_W/ajaxHandler/dev`，正文 `{pageToken, pageTokenKey, …, fp}`，
-//    响应 `{isSuccess:1, sid:"<84 位 hex>"}`——**deviceID 就是这颗 sid**（页面写进
-//    `localStorage.hwid_cas_sid` 与同名 cookie）。
-//
-// 于是端口层多两件事：① 建单前先把"会话上下文"拿到（CAS 链 → 门户页 → getPageInfo → dev），
-// ② 让建单/轮询走**同一个 cookie 罐**（并带上页面 UA / Referer）。**失败一律降级**：
-// 链走不通就照旧建单显示二维码——界面不能因为"保真"而变脆（R31 的硬约束：界面不变）。
-// ---------------------------------------------------------------------------
+// 建单/轮询的**上下文**补齐：建单前先拿到会话上下文，二者共用同一个 cookie 罐并带上页面 UA / Referer。
+// **失败一律降级**：链走不通就照旧建单显示二维码，界面不能因为"保真"而变脆。
 
-/** 探针实测：页面的 deviceID 是服务端下发的一颗 84 位 hex（这里用假世界编一颗同形状的）。 */
+/** 页面的 deviceID 是服务端下发的一颗 84 位 hex（这里用假世界编一颗同形状的）。 */
 const R31_SID = "a".repeat(84);
 
-/** R31 的假世界：门户链 + 指纹 + 建单/轮询（每一步都能断言到请求头）。 */
+/** 假世界：门户链 + 指纹 + 建单/轮询（每一步都能断言到请求头）。 */
 function makeR31World({ deviceSid = R31_SID, portalFails = false, sidEmpty = false } = {}) {
   const calls = [];
   const cookieJar = [];
@@ -610,7 +586,7 @@ function makeR31World({ deviceSid = R31_SID, portalFails = false, sidEmpty = fal
       return answer(200, { isSuccess: 1, sid: sidEmpty ? "" : deviceSid });
     }
     if (target.includes("/DimensionalCode/getqrInfo")) {
-      // 建单响应自己会设 cookie（探针实测：轮询把它们带回去了）
+      // 建单响应自己会设 cookie（轮询把它们带回去了）。
       return answer(200, CREATE_PAYLOAD, { "set-cookie-list": ["qRCode=R1; Path=/", "expiredTime=1; Path=/"] });
     }
     if (target.includes("/DimensionalCode/async")) return answer(200, { resultCode: "103000200" });
@@ -738,44 +714,23 @@ test("R31 不猜：dev 回了空 sid（服务端不认这份指纹）→ 建单�
   port.cancel();
 });
 
-// ---------------------------------------------------------------------------
-// R36（用户真机诊断定案 2026-10-21）：确认链的最后一跳**改走 webview**，端口不再解析 callbackURL
-//
-// R35 的诊断日志把真实形状钉死了，R33/R34 那三条策略全部落空：
-// - `loginCallback` 页的查询里**没有 `code`**（带的是 ticket/siteID/flowID 一类的 OAuth 票据参数）；
-// - 那份 200 的 14KB HTML 里**没有 `hms` 字样**（跳转目标是页面自己的 JS 现拼的）。
-// ⇒ **服务端 fetch 结构性地拿不到 code**：参数直构 / 302 跟随 / 响应体提取都是在猜形状，整条路线证伪。
-//
-// 定案依据是**同一个应用里的对照组**：账号密码网页登录实证走通，走的正是
-// "登录 webview 里加载官方页 → 页面自己的 JS 执行 → 跳 `hms://` → 被宿主导航拦截器接住"。
-// 所以二维码这条链的最后一跳也交给**登录 webview**：宿主加载 `codeRemoteLogin` 交回的那份
-// `callbackURL`，页面 JS 跑完跳 `hms://`，既有拦截器接住并把原样 URL 交回 →
-// `consumeCallback → exchangeCode → loginex`（**同一条兑换链**，与网页登录那条路的两流合一）。
-//
-// 这一节钉的是**端口的职责边界**（R36 起它只是"搬运"）：`callbackURL` **原样**交给登录链路——
-// 一个多余请求都不发（不 fetch 那份收尾页）、一个形状判断都不做。
-// 判真伪是 `isCallback`/`parseCallback` 的唯一职责（`login-callback.mjs`），
-// 能不能开窗是宿主白名单的职责（Rust `login.rs` 的 `parse_config`）。
-// ---------------------------------------------------------------------------
+// 确认链的最后一跳**改走 webview**：端口不再解析 callbackURL，只把它原样交给登录链路。
+// 一个多余请求都不发、一个形状判断都不做；判真伪归 `login-callback.mjs`，能否开窗归宿主白名单。
 
-/** 真机那个形状（R35 日志）：https 的 loginCallback 收尾页，查询里**没有 `code`**。 */
+/** 真机那个形状：https 的 loginCallback 收尾页，查询里**没有 `code`**。 */
 const R36_CALLBACK_PAGE =
   "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback" +
   "?ticket=ST-1&siteID=1&flowID=FLOW-1&redirect_uri=hms%3A%2F%2Fredirect_uri&access_type=offline";
 
-/** 已经是回调的形状（R33 那条直通仍然成立：原样交回，既有链零改动——见 auth-manager）。 */
+/** 已经是回调的形状（原样交回，既有链零改动——见 auth-manager）。 */
 const R36_HMS_CALLBACK = "hms://redirect_uri?code=CODE&state=STATE";
 
-/** 两个哑值：它们**绝不许**出现在日志里（R35 立的凭据纪律在 R36 照样成立）。 */
+/** 两个哑值：它们**绝不许**出现在日志里（凭据纪律）。 */
 const R36_DUMMY_TICKET = "TICKET-VALUE-DO-NOT-LOG";
 const R36_DUMMY_CODE = "CODE-VALUE-DO-NOT-LOG";
 
 /**
- * R36 的假世界：`codeRemoteLogin` 交回一份 `callbackURL`，**没有任何"跟随"路由**。
- *
- * 与 R33/R34 那两个假世界的关键差别：这里**没有 `/loginCallback` 这条路由**——它一旦被请求就
- * 抛错（"假 fetch 不认识这个地址"）。于是"端口有没有偷偷去 fetch 那份收尾页"由测试自己钉住，
- * 而不是靠断言一个计数器。
+ * 假世界：`codeRemoteLogin` 交回一份 `callbackURL`，**没有任何"跟随"路由**。
  *
  * @param {{callbackURL?: string}} [config]
  */
@@ -830,7 +785,7 @@ function makeR36World({ callbackURL = R36_CALLBACK_PAGE } = {}) {
     if (target.includes("/login/getPageInfo")) return answer(200, PAGE_INFO);
     if (target.includes("/codeRemoteLogin")) return answer(200, { isSuccess: "1", callbackURL });
 
-    // R36：**没有** `loginCallback` 这条路由——端口多打一个请求都会在这里响亮地炸掉
+    // 端口没有 /loginCallback 这条路由——多打一个请求就会在这里响亮地炸掉。
     throw new Error(`假 fetch 不认识这个地址（R36 起端口不许自己解析收尾页）：${target}`);
   };
   return { fetchImpl, calls, callbackRequests: () => calls.filter((call) => call.url.includes("/loginCallback")) };
@@ -884,8 +839,8 @@ test("R36：确认之后把 callbackURL **原样**交给登录链路（收尾页
 });
 
 test("R36：收尾页的查询里没有 code（真机形状）也照样原样交回——端口不再猜形状", async () => {
-  // 真机 R35 日志里那条链：`codeRemoteLogin` 回的地址查询里只有票据类参数。
-  // R33/R34 会在这一步开始"想办法拿到 code"（直构 / 跟随 / 提体），R36 起**原样交出去**。
+  // 真机日志里 `codeRemoteLogin` 回的地址查询只有票据类参数。
+  // 端口原样交出去，不自己想办法拿 code（不直构、不跟随、不提体）。
   const page =
     "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback" +
     `?ticket=${R36_DUMMY_TICKET}&redirect_uri=hms%3A%2F%2Fredirect_uri`;
@@ -908,8 +863,8 @@ test("R36：callbackURL 本来就是 hms:// 回调 → 同样原样交回（既�
 });
 
 test("R36 不猜形状：连不是 https 的 callbackURL 也原样交回——判真伪/能不能开窗各有唯一真源", async () => {
-  // 端口**不做**任何形状裁决：`isCallback`（login-callback.mjs）判真伪，Rust 白名单判能不能开窗。
-  // 在这里"顺手拦一下"就等于长出第二份判据——R33/R34 的教训正是"多一份判据 = 多一次猜"。
+  // 端口不做任何形状裁决：`isCallback` 判真伪，Rust 白名单判能不能开窗。
+  // 在这里顺手拦一下就等于长出第二份判据。
   const odd = "http://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback?code=CODE";
   const { port, confirmations } = await runR36({ callbackURL: odd });
 
@@ -919,9 +874,8 @@ test("R36 不猜形状：连不是 https 的 callbackURL 也原样交回——�
 });
 
 test("R36 退役：服务端解析那条路线（三策略 + R35 诊断）整体删除，代码里不许再出现", () => {
-  // 为什么值得一条源码扫描：这四条路线每一轮都被真机否定一次（R33 跟随 / R34 三策略 / R35 诊断）。
-  // 留着任何一段，下一个人都会以为它还有用；而它的存在本身就是"服务端 fetch 能拿到 code"这个
-  // 已被证伪的假设。**注释里提历史可以**，所以扫的是去掉注释之后的代码。
+  // 这几条取码路线每一轮都被真机否定，留着会让人以为它还有用。
+  // 注释里提历史可以，所以先去掉注释，再扫代码里是否还残留。
   const source = readFileSync(new URL("../src/main/qr-login.mjs", import.meta.url), "utf8");
   const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
@@ -959,38 +913,17 @@ test("R31 上下文只拿一次：start 不会为了建单打两遍 CAS 链（�
 });
 
 
-// ---------------------------------------------------------------------------
-// R36 state 接线（R34 立、R36 在 webview 那条链上复核）
-//
-// 问题：QR 链的 state 与 OAuth attempt 的 state 是不是**同一个**？不是同一个的话，
-// webview 里跳出来的那条回调会被 `consumeCallback(expectedState: attempt.state)` 拒掉。
-//
-// 证据（真机探针存档，两条都点名了 state）：
-// - `.tmp/getLoginWay.json`：CAS 跳转里的 `service` 已经嵌着**我们那张授权页查询串**，
-//   包括 `state=probe-state`（probe 自己传的值）——CAS 侧是**原样回带**，不是自己另生成一个；
-// - `.tmp/cas-getPageInfo-mobile.json`：移动登录页下发回来的 `localInfo.service` 同样带着
-//   `state=probe-state`，而这一串就是换码请求里 `service` 字段的来源。
-//
-// 代码路径（一处都没换过 state）：`attempt.authorizeUrl`（含 attempt.state）
-//   → `walkToCasPortal` 把整串查询当表单正文 POST 给 getLoginWay
-//   → 门户页/移动页 URL（同一串参数）→ `getPageInfo` 表单 → `localInfo.service`
-//   → `codeRemoteLogin` 的 `service` → `callbackURL`（R36：**原样**交给登录链路，端口不解析）
-//   → 宿主登录 webview 加载它、页面 JS 跳 `hms://` → 拦截器交回那条回调
-//   → `consumeCallback` 比对（**同一个 attempt**，所以这条链天然成立）。
-//
-// 结论：**已经是同一个 state，不需要改接线**。下面这条用例把它钉住：
-// 假世界照真机那样**从我们发出去的那串参数里取 state 回带**，最后交给**真的** consumeCallback 判
-// （判的是 webview 那条结论 URL，也就是 R36 真正收场的那条）。
-// ---------------------------------------------------------------------------
+// state 接线：QR 链与 OAuth attempt 用的是**同一个** state，全程从未替换。
+// 结论是无需改接线；下面的用例从我们发出的参数里取 state 回带，交给**真的** `consumeCallback` 判。
 
 /** CAS 门户域（`HUAWEI_QR_ENDPOINTS.casOrigin` 的字面量；白名单校验认的就是它的 origin）。 */
 const CAS_ORIGIN = "https://id1.cloud.huawei.com";
 
-/** R36 state 接线用的假世界：CAS 侧从 getLoginWay 的正文里取 state，一路原样回带（探针实测的形状）。 */
+/** state 接线用的假世界：CAS 从 getLoginWay 的正文里取 state，一路原样回带。 */
 function makeR36StateWorld() {
   const calls = [];
   const loginCallbackBase = "https://oauth-login1.cloud.huawei.com/oauth2/v3/loginCallback";
-  /** 服务端"记住"的那份授权上下文（真机上 CAS 就是这么把它嵌进 service 的）。 */
+  /** 服务端"记住"的那份授权上下文（真机上 CAS 就是这样把它嵌进 service 的）。 */
   let state = "";
   let polls = 0;
   /** `codeRemoteLogin` 交回的那份收尾页地址（原样交回的比对基准）。 */
@@ -1017,7 +950,7 @@ function makeR36StateWorld() {
     });
 
     if (target.includes("/oauth2/ajax/getLoginWay")) {
-      // 真机实测（.tmp/getLoginWay.json）：CAS 跳转的 service 里嵌着**我们发出去的那串参数**
+      // 真机实测：CAS 跳转的 service 里嵌着**我们发出去的那串参数**
       state = new URLSearchParams(String(init.body ?? "")).get("state") ?? "";
       const service =
         `${loginCallbackBase}?state=${encodeURIComponent(state)}` +
@@ -1049,7 +982,7 @@ function makeR36StateWorld() {
         pageToken: PAGE_INFO.pageToken,
         pageTokenKey: PAGE_INFO.pageTokenKey,
         localInfo: {
-          // 真机实测（.tmp/cas-getPageInfo-mobile.json）：这一串**带本次 state**
+          // 真机实测：这一串**带本次 state**
           service,
           state: form.get("state") ?? "",
           loginUrl: `${CAS_ORIGIN}:443/CAS/portal/loginAuth.html`,
@@ -1078,12 +1011,12 @@ function makeR36StateWorld() {
     if (target.includes("/codeRemoteLogin")) {
       const service = new URLSearchParams(String(init.body ?? "")).get("service") ?? "";
       const echoed = new URL(service).searchParams.get("state") ?? "";
-      // 真机那个形状：这是一张 https 收尾页（查询里带 state 与 redirect_uri）——
-      // R36 起端口**原样**把它交出去，最后一跳由登录 webview 完成。
+      // 真机那个形状：一张 https 收尾页，查询里带 state 与 redirect_uri。
+      // 端口**原样**把它交出去，最后一跳由登录 webview 完成。
       returned = `${loginCallbackBase}?state=${encodeURIComponent(echoed)}&code=CODE&redirect_uri=${encodeURIComponent("hms://redirect_uri")}&access_type=offline`;
       return answer(200, { isSuccess: "1", callbackURL: returned });
     }
-    // 注意：这里**没有** `/loginCallback` 这条路由——R36 起端口不许自己去 fetch 那份收尾页
+    // 这里**没有** `/loginCallback` 这条路由——端口不许自己去 fetch 那份收尾页
     throw new Error(`假 fetch 不认识这个地址：${target}`);
   };
   /** 这一轮 `codeRemoteLogin` 交回的地址（"原样交回"那条断言按它比对，而不是按测试里手抄的一份）。 */
@@ -1135,12 +1068,12 @@ test("R36 state 接线：交回的收尾页 URL 原样带 attempt.state；webvie
     assert.equal(new URLSearchParams(call.body).get("state"), attempt.state, "state 只有一个真源：attempt.state");
   }
 
-  // ③ 换码请求的 `service` 里也带着它（真机上它就是 localInfo.service 那一串）
+  // ③ 换码请求的 `service` 里也带着它（真机上就是 `localInfo.service` 那一串）
   const confirm = world.calls.find((call) => call.url.includes("/codeRemoteLogin"));
   const service = new URLSearchParams(confirm.body).get("service");
   assert.equal(new URL(service).searchParams.get("state"), attempt.state);
 
-  // ④ R36：交出去的**就是** `codeRemoteLogin` 交回的那一份（原样、逐字节），端口不解析也不跟随
+  // ④ 交出去的**就是** `codeRemoteLogin` 交回的那一份（原样），端口不解析也不跟随
   assert.equal(confirmations[0].callbackUrl, world.returnedCallbackURL());
   assert.equal(new URL(confirmations[0].callbackUrl).searchParams.get("state"), attempt.state);
   assert.equal(
@@ -1149,11 +1082,7 @@ test("R36 state 接线：交回的收尾页 URL 原样带 attempt.state；webvie
     "收尾页由登录 webview 加载：端口一个请求都不许发",
   );
 
-  /**
-   * ⑤ 最后一跳的**结论**（宿主登录 webview 里页面 JS 跳出来的那条 `hms://`）交给**真的**
-   * `consumeCallback`（auth-manager 的 `finishQrLogin` 用的就是它）——必须通过。
-   * 这正是 R36 的接线：同一个 attempt 的 state，所以这条链天然成立。
-   */
+  /** ⑤ 最后一跳的结论交给**真的** `consumeCallback`，必须通过——同一个 attempt 的 state。 */
   const conclusion = `hms://redirect_uri?code=CODE&state=${attempt.state}`;
   const consumed = consumeCallback(conclusion, {
     expectedState: attempt.state,
@@ -1172,8 +1101,8 @@ test("R36 state 接线：交回的收尾页 URL 原样带 attempt.state；webvie
   assert.equal(foreign.ok, false);
   assert.equal(foreign.error.kind, LOGIN_ERROR_KINDS.stateMismatch);
 
-  // ⑥ 收尾页 URL 自己**不是**回调（parseCallback 判 not_callback）——这正是 R33/R34 要去"解析"它的原因，
-  //    也是 R36 不再解析、改交给 webview 的原因（页面 JS 跑完才会跳那条真回调）
+  // ⑥ 收尾页 URL 自己**不是**回调（`parseCallback` 判 not_callback）。
+  // 所以不解析它，交给 webview：页面 JS 跑完才会跳那条真回调。
   const parsed = parseCallback(confirmations[0].callbackUrl);
   assert.equal(parsed.ok, false);
   assert.equal(parsed.error.kind, LOGIN_ERROR_KINDS.notCallback);

@@ -1,21 +1,9 @@
 /**
- * 设置页 · 关窗行为（tray / quit，精确旧 minimize 读迁移 tray）。
+ * 设置页 · 关窗行为（tray / quit，旧的 minimize 迁移成 tray）。
  *
- * 与 `test/proxy-settings-form.test.mjs` 第 6 节的分工：那边钉**纯函数**的文案与形状，
- * 这里钉**这条链真的接得上**——UI 造的载荷经 core 的 merge 落到文档里，且落下去的就是
- * 用户选的那一项（不是"看起来对"的另一项）。
- *
- * 四条兜底：
- * 1. **枚举只有一份**：UI 的 `CLOSE_BEHAVIORS` 与 core 的 `CLOSE_BEHAVIORS` 逐条相等
- *    （各写一份的后果是"界面上有的选项 core 不认"，报错只在保存时才出现）；
- * 2. **越界值不静默写盘**：UI 侧回落到 `quit`（能真正退出的那一个），core 侧对越界值
- *    结构化报错——两边都不许"尽力猜一个"；
- * 3. **托盘可用性如实**：可用性的真值来自宿主（R11 的 `core_get_tray_available`），
- *    渲染层的 `TRAY_AVAILABLE = false` 只是**兜底**（宿主没答上来时用）；
- *    选了托盘要当场说清"会回退成退出"；
- * 4. **页面不自己拼载荷**：`{closeBehavior: ...}` 这个键只在 `closeBehaviorPatch` 里出现一次。
- *
- * 先写先看红。
+ * 这里钉这条链真的接得上：UI 造的载荷经 core 的 merge 落盘，落下去的就是用户选的那一项。
+ * 四条兜底：枚举只有一份、越界值不静默写盘、托盘可用性如实（渲染层常量只是兜底）、
+ * 页面不自己拼载荷。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -101,8 +89,8 @@ test("越界值：UI 回落到 quit（能退出的那个），core 结构化报�
 });
 
 test("托盘可用性：宿主没答/答不上来时落保守兜底 false，且选了托盘当场说清会回退成退出", () => {
-  // R11 起可用性的真值来自 core_get_tray_available（页面测试见 test/tray.test.mjs）；
-  // 这个常量退化成"还没取到 / 取不到"时的回退——方向必须是保守的那一个。
+  // 可用性的真值来自 `core_get_tray_available`；这个常量只是还没取到／取不到时的兜底，
+  // 方向必须是保守的那一个。
   assert.equal(
     TRAY_AVAILABLE,
     false,

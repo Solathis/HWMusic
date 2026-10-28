@@ -1,7 +1,6 @@
 /**
- * R65 本地曲目在播放队列里的持久化与恢复（`src/renderer/features/playback/queue.mjs`）。
- * 恢复时多一道闸：文件已经不在的那几首跳过（并给一句提示），不给用户一个永远播不出来的位置。
- * 判据：非本地条目的顺序、当前曲目、进度一律不许被这道闸改动。
+ * 本地曲目在播放队列里的持久化与恢复。
+ * 恢复时跳过文件已不在的曲目并给一句提示；非本地条目的顺序、当前曲目、进度不受影响。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

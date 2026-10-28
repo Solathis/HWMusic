@@ -1,17 +1,7 @@
 /**
- * R4 单一真源互钉：登录顶部内缩（LOGIN_VIEW_TOP_INSET）、10 分钟登录超时、登录域名白名单、回调识别。
- *
- * 做法与 R3 的 channel-parity 一致：Node 侧直接 import 常量并**硬钉内容**（只做两侧互比，
- * "两侧一起写错"也能过），再按源码扫描反漂移——字面量只许出现在唯一真源文件里。
- * Rust 侧 login.rs 归 R7：这里写成"存在即互钉"的前置钉子，R7 落地当天自动生效。
- *
- * R25（用户四项之 2/3）：**登录页不再让出顶部那一条**——官方页铺满整窗，"返回扫码登录"改成浮在
- * 网页之上的浮动控件（`login-chrome.html?kind=return`）。于是：
- * - `host:open-login` 的载荷里**没有** `topInset` 了（Rust 的 `LoginConfig` 也没有这个字段）；
- * - `LOGIN_VIEW_TOP_INSET`（48）仍然存在，但它**只服务门禁自己那条 header**
- *   （`src/renderer/login-gate.tsx`），不再是"给子窗让位"的几何契约——所以
- *   "Rust 必须镜像这个常量"那条钉子**反转**成"Rust 不许再镜像它"。
- * 先写先看红。
+ * 单一真源互钉：登录顶部内缩、10 分钟超时、登录域名白名单、回调识别。
+ * 做法：Node 侧硬钉常量内容，再按源码扫描反漂移（字面量只许出现在唯一真源文件里）。
+ * 登录页铺满整窗，`LOGIN_VIEW_TOP_INSET` 只服务门禁自己的 header，Rust 不许再镜像它。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -164,13 +154,11 @@ test("回调识别：hms:// 协议字面量只在 login-callback.mjs，redirect_
 });
 
 test("登录域名白名单：条目硬钉（改动必须同步改测试，避免悄悄放宽）", () => {
-  // R32：条目 = 参考实现实测走通的那五个域（授权域与令牌域是两个不同主机；
-  // 授权入口换成 oauth-login.platform.hicloud.com 之后整条跳转链的域跟着换）
+  // 条目 = 参考实现实测走通的五个域（授权域与令牌域是两个不同主机）。
   assert.deepEqual(LOGIN_ALLOWED_ORIGINS, [
     "https://oauth-login.platform.hicloud.com",
     "https://oauth-login.cloud.huawei.com",
-    // R16 增补、R32 保留：实探证明授权页把浏览器跳到 id1.cloud.huawei.com 的 CAS 门户页；
-    // 少了它，那条导航被拦下、窗里停在授权页的空壳上（真机"登录窗空白"的根因）
+    // id1.cloud.huawei.com 是授权页跳转到的 CAS 门户页；少了它登录窗会停在空壳上。
     "https://id1.cloud.huawei.com",
     "https://account.huawei.com",
     "https://consumer.huawei.com",
@@ -197,9 +185,7 @@ test("登录域名白名单：R7 的 Rust 导航白名单一旦落地，必须�
   assert.doesNotMatch(code, /oauth-login2/, "Rust 侧同样不得默认放行 oauth-login2");
 });
 
-// ---------------------------------------------------------------------------
-// R7 增补：宿主结论的线上契约（Rust login.rs ↔ Node huawei.ts）
-// ---------------------------------------------------------------------------
+// 宿主结论的线上契约：Rust login.rs 与 Node huawei.ts 的 status 词表两侧互钉。
 
 test("R7：宿主结论的 status 词表两侧互钉（Rust 交付 ↔ Node 解析）", () => {
   const code = stripComments(read("src-tauri/src/login.rs"));

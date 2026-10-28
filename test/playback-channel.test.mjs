@@ -1,14 +1,8 @@
 /**
- * R9 播放地址通道（`playback:resolve-url`）：边界、结构化错误、**地址不外泄**。
+ * 播放地址通道（`playback:resolve-url`）：边界、结构化错误、地址不外泄。
  *
- * 这个频道与库页面的频道有一处关键不同：它的**正常结果里就带播放地址**（那是它的全部意义）。
- * 所以这里的钉不是"地址不许出现"，而是四条更细的：
- * 1. 地址只出现在**当次应答**里：处理器不写日志（不落任何一处痕迹）、不碰设置/磁盘（不持久化）；
- * 2. 失败路径**不回显整段地址**（协议层的错误文案只带域名）；
- * 3. 坏载荷在边界被拒（不把坏参数透给协议层拼一个必然失败的请求）；
- * 4. 端点未配置 = 结构化 `endpoint_unknown`（不冒充已实现，也不打到一个瞎猜的地址上）。
- *
- * 先写先看红。
+ * 与库页面频道不同，它的正常结果里本就带播放地址，所以要钉的是：地址只出现在当次应答里
+ * （不写日志、不持久化）、失败路径不回显整段地址、坏载荷在边界被拒、端点未配置返回结构化 `endpoint_unknown`。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -38,7 +32,7 @@ function scriptedApi(payload, { endpoints = { playback: "https://example.invalid
   const calls = [];
   const api = createMusicApi({
     endpoints,
-    // R32：播放地址是**带凭据**的调用（真接口要求音乐会话），所以这里注入一个假会话
+    // 播放地址是带凭据的调用（真接口要求音乐会话），所以注入一个假会话。
     session: { token: "MUSIC-TOKEN", snsUserID: "SNS-1" },
     fetchImpl: async (url, init = {}) => {
       calls.push({ url, init, body: init.body === undefined ? null : JSON.parse(init.body) });
@@ -72,7 +66,7 @@ test("正常路径：{trackId} → 协议层 getPlayback，当次应答里带着
   assert.equal(answer.data.url, SAFE_URL, "地址只作当次播放结果交给渲染层");
   assert.equal(answer.data.duration, 215);
   assert.equal(calls.length, 1, "只打一次播放端点");
-  // R32：参数进 JSON 体（真接口的 POST 形状），不再是查询串
+  // 参数进 JSON 体（真接口的 POST 形状），不再是查询串。
   assert.deepEqual(calls[0].body, { contentCode: "101", contentType: "1", qualityType: "1" }, "trackId 去空白后作为 contentCode");
 });
 

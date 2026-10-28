@@ -1,9 +1,7 @@
 /**
- * R3 sidecar 桥 · 真进程端到端（node src/sidecar/main.mjs + NDJSON stdio）。
- *
- * 断言的是"接线真的通"：请求帧 → 未实现的结构化错误帧；stdin EOF → sidecar 以 0 退出（双向收尸）；
+ * sidecar 桥 · 真进程端到端（node src/sidecar/main.mjs + NDJSON stdio）。
+ * 断言的是"接线真的通"：请求帧 → 未实现的结构化错误帧；stdin EOF → sidecar 以 0 退出。
  * stdout 只允许出现合法 JSON 帧（日志一律走 stderr，否则会污染协议）。
- * 先写先看红。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -21,10 +19,7 @@ const sidecarEntry = `${repoRoot}src/sidecar/main.mjs`;
 
 /**
  * 真进程的数据目录：里面写一份"全部业务端点显式关闭"的设置。
- *
- * R32 起默认端点表是**满的**（参考实测值），不关掉的话这些端到端用例会真的去请求华为的接口——
- * 测试既不该依赖外网，也不该拿别人的服务当夹具。显式关闭（`musicEndpoints: {key: null}`）
- * 给出的正是"确定性不可用"那一档，`endpoint_unknown` 的断言因此仍然成立。
+ * 默认端点表是满的，显式关闭（`musicEndpoints: {key: null}`）给出的正是"确定性不可用"那一档。
  */
 function makeDataDir() {
   const dir = mkdtempSync(join(tmpdir(), "hwmusic-e2e-"));
@@ -148,8 +143,7 @@ test("端到端：auth:login 立刻回「已受理」，结论经 auth:status �
   assert.match(status.payload.message, /取消/, "失败原因要能显示给用户");
 
   // 宿主要求的形状：官方授权页 + 一次性 partition（Rust 侧还会再校验一遍）。
-  // R25 起载荷里**没有** topInset：官方登录页铺满整个主窗（用户四项之 3），
-  // 顶部不再让出那一条，"返回扫码登录"改成浮在网页之上的浮动控件。
+  // 载荷里**没有** topInset：官方登录页铺满整个主窗。
   const open = sidecar.hostRequests.find((request) => request.channel === "host:open-login");
   assert.ok(open, `sidecar 没有发出 host:open-login：${JSON.stringify(sidecar.hostRequests)}`);
   assert.match(open.payload.url, /^https:\/\/oauth-login\.platform\.hicloud\.com\/oauth2\/v3\/authorize\?/);
@@ -226,7 +220,7 @@ test("端到端：auth:cancel-qr 真的挂了处理器（R53：门禁收场时�
   const sidecar = startSidecar();
   t.after(() => sidecar.cleanup());
 
-  // 等启动期恢复的结论落定：恢复期间快照带 `restoring`（R53），那之后才是普通快照
+  // 等启动期恢复的结论落定：恢复期间快照带 `restoring`，那之后才是普通快照
   await sidecar.waitForBroadcast((frame) => frame.channel === "auth:status");
 
   const cancelled = await sidecar.bridge.call("auth:cancel-qr", {});
@@ -237,7 +231,7 @@ test("端到端：auth:cancel-qr 真的挂了处理器（R53：门禁收场时�
   );
   assert.equal(cancelled.data.cancelled, true, "没有会话也回「已停」（用户的意图已经满足，不是错误）");
 
-  // R53 的第一半：恢复结束之后快照不再带 restoring 这一格（真未登录照旧答未登录，门禁照常发码）
+  // 恢复结束之后快照不再带 restoring 这一格
   const snapshot = await sidecar.bridge.call("auth:get-status", {});
   assert.equal(snapshot.ok, true);
   assert.equal(snapshot.data.loggedIn, false);
@@ -284,7 +278,7 @@ test("端到端：playback:lyrics 频道真的注册了；端点被关闭时回�
   const sidecar = startSidecar();
   t.after(() => sidecar.cleanup());
 
-  // R32 起歌词**从播放响应推导**（参考实现里没有独立歌词端点）：所以这条路上第一个缺的端点是 playback
+  // 歌词**从播放响应推导**：这条路上第一个缺的端点就是 playback
   const lyrics = await sidecar.bridge.call("playback:lyrics", { trackId: "1001" });
   assert.equal(lyrics.ok, false, `端点未配置不许"成功"：${JSON.stringify(lyrics)}`);
   assert.equal(lyrics.error.kind, "endpoint_unknown");
@@ -383,10 +377,8 @@ test("端到端：半帧后 stdin EOF 同样干净退出（残余有确定结论
 });
 
 /**
- * R56：stderr 每一行都要带级别标记——宿主按它把 sidecar 的日志分档写进同一个日志文件。
- *
- * 标记就是契约：`[hwmusic-core][info|warn|error|debug] 正文`（Rust 侧 `run_log::stderr_line`
- * 认这一种形状；没有标记的行按 info，但**不许**把级别写在没有前缀的格式里）。
+ * stderr 每一行都要带级别标记——宿主按它把 sidecar 的日志分档写进同一个日志文件。
+ * 标记就是契约：`[hwmusic-core][info|warn|error|debug] 正文`。
  */
 test("端到端：stderr 每行都带 [hwmusic-core][级别] 标记，启动行是 info", async (t) => {
   const sidecar = startSidecar();

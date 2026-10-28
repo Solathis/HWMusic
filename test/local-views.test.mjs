@@ -1,7 +1,6 @@
 /**
- * R65 本地歌曲的入口与页面：侧栏「音乐库」组里那一行、视图枚举、空态文案，
- * 以及页面本身必须复用曲目表（`TrackTable`）而不是自己画一张表。
- * 页面结构靠源码扫描钉住：本仓库没有 DOM 渲染测试环境（真正的渲染与播放由 `npm run test:browser` 覆盖）。
+ * 本地歌曲的入口与页面：侧栏那一行、视图枚举、空态文案，页面须复用 `TrackTable`。
+ * 页面结构靠源码扫描钉住，真正的渲染与播放由 `npm run test:browser` 覆盖。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

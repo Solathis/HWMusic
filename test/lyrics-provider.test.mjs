@@ -1,11 +1,5 @@
 /**
- * R41 · 第三方歌词的匹配器（src/main/lyrics-provider.mjs）。
- *
- * 这一层的每一条规则都对应一个**具体的错词场景**——"显示错歌的词比没有词更糟"不是一句口号：
- * - `安静下来` vs `安静`（包含关系）：标题不精确 → 必须有时长佐证，否则拒绝；
- * - 同名不同人（翻唱/同名单曲）：艺人硬错配 → 直接拒绝；
- * - 30 秒的试听片段/铃声：那个时长不构成佐证；
- * - 分数门槛：三条信号凑不够两条半 → 不显示。
+ * 第三方歌词匹配器：显示错歌的词比没有词更糟——标题不精确需时长佐证、艺人错配直接拒绝、试听片段不算佐证。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -154,8 +148,7 @@ test("匹配器（R41）：lrclib 候选取舍——纯音乐与没有同步歌�
     { trackName: "安静", artistName: "周杰伦", duration: 327, syncedLyrics: "[00:01.00]词", plainLyrics: "词" },
     { trackName: "纯音乐", artistName: "周杰伦", duration: 200, instrumental: true, syncedLyrics: "[00:01.00]x" },
     { trackName: "没歌词", artistName: "周杰伦", duration: 200 },
-    // R41a：只有纯文本歌词（没有 syncedLyrics）→ 丢掉。这条路在落盘判据那一层必然被判空
-    //（`hasTimedLyricLine` 要求时间戳行），所以是**非同步歌词暂不支持**，不是"退一步用纯文本"。
+    // 没有 syncedLyrics 的纯文本歌词直接丢掉：非同步歌词暂不支持，不是「退一步用纯文本」。
     { trackName: "只有纯文本", artistName: "周杰伦", duration: 200, syncedLyrics: null, plainLyrics: "词\n没有时间戳" },
   ]);
   assert.equal(candidates.length, 1);

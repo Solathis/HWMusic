@@ -1,17 +1,8 @@
 /**
- * R8 主界面 · 设计令牌硬约束（源码扫描）。
+ * 主界面 · 设计令牌硬约束（源码扫描）。
  *
- * 为什么用扫描而不是 review：这些都是"一眼看不出、但一旦破口就再也收不回来"的事——
- * 一个 `text-zinc-400` 进来，下一个人就会觉得"那我也可以"；一个内联 `style={{color}}`
- * 进来，主题切换（暗色）就出现了永远跟不上的角落。项目只有一套令牌，扫出来才是真的。
- *
- * 钉住四条：
- * 1. 渲染层不得出现非令牌的调色板类（zinc-/amber-/red- 之类）与裸色值（#fff、rgb()、oklch()）；
- * 2. 不得写 `<style>`；内联 `style={{}}` 只允许 R7 那处几何契约（高度 = 共享常量）；
- * 3. AMLL 变量（`--amll-*`）只许出现在 amll-theme.css（歌词主题的唯一接线点）；
- * 4. 令牌定义只在 styles.css；不得挂载 next-themes 的 ThemeProvider（CSP 会拦它的内联脚本）。
- *
- * 先写先看红。
+ * 钉住四条：渲染层不得出现非令牌的调色板类与裸色值；不得写 <style>，内联 style 只允许几何契约；
+ * AMLL 变量只许出现在 amll-theme.css；令牌定义只在 styles.css，不挂 next-themes 的 ThemeProvider。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -39,9 +30,7 @@ function rendererCodeFiles(root = "src/renderer") {
 }
 
 /**
- * shadcn 生成物目录：R1 的约束是**不手改生成原语**，所以颜色/内联样式的规则对它们不适用
- * （例：sheet.tsx 的遮罩用 `bg-black/10`、sidebar.tsx 用内联 `--sidebar-width`，都是上游写法）。
- * 豁免范围就是这一个目录，且下面有用例钉住它不许被悄悄放大。
+ * shadcn 生成物目录不手改，颜色/内联样式的规则对它们不适用（豁免范围仅此一个目录）。
  */
 const GENERATED_UI_PREFIX = "src/renderer/components/ui/";
 
@@ -93,7 +82,7 @@ test("令牌扫描范围：自己写的渲染层代码都在网内（含 R8 的�
     "src/renderer/playback-stage.tsx",
     "src/renderer/AmllBackground.tsx",
     "src/renderer/AmllLyricsPanel.tsx",
-    // R12：桌面歌词窗宿主（字号/颜色档位经 data 属性交给 amll-theme.css，不走内联样式）
+    // 桌面歌词窗宿主（字号/颜色档位经 data 属性交给 amll-theme.css，不走内联样式）
     "src/renderer/LyricsWindow.tsx",
     "src/renderer/lyrics-main.tsx",
   ]) {
@@ -121,16 +110,15 @@ test("禁止硬编码色：不出现非令牌调色板类、纯黑白工具类�
 });
 
 /**
- * AMLL 宿主的 100% 尺寸例外（R9）：AMLL 的渲染器按容器尺寸建画布，官方文档要求的
- * 就是给组件一个显式尺寸的盒子。除此之外**没有第三个例外**——例外集合写死在这里，
- * 且下面有用例断言"全项目只有这两处"。
+ * AMLL 宿主的 100% 尺寸例外：渲染器按容器尺寸建画布，官方要求给组件一个显式尺寸的盒子，
+ * 全项目只有这两处，没有第三个例外。
  */
 const AMLL_SIZE_STYLE_FILES = ["src/renderer/AmllBackground.tsx", "src/renderer/AmllLyricsPanel.tsx"];
 const AMLL_SIZE_STYLE = 'style={{ width: "100%", height: "100%" }}';
 
 /**
- * 几何契约的内联样式（R60）：气泡面板的隐形触发点位置是**运行时算出来的锚点坐标**，没有任何
- * Tailwind 类能表达。例外写死成"这一个函数调用 + 这一个文件"，与 R7 的高度常量同一条理由。
+ * 几何契约的内联样式：气泡面板的锚点坐标是运行时算出来的，没有 Tailwind 类能表达，
+ * 例外写死成“这一个函数调用 + 这一个文件”。
  */
 const GEOMETRY_STYLE_FILES = ["src/renderer/LyricsSettingsPopup.tsx"];
 const GEOMETRY_STYLE = "style={bubbleAnchorBox({ side: geometry.side, arrow: geometry.arrow, panelHeight: panel.height, pad: geometry.pad })}";
@@ -171,7 +159,7 @@ test("禁止 <style> 与内联视觉样式：内联 style 只允许几何契约�
     );
   }
 
-  // 例外只有两处（旧仓同款）：一处给背景、一处给歌词组件，多一处就是规则被悄悄放宽
+  // 例外只有两处：一处给背景、一处给歌词组件，多一处就是规则被悄悄放宽
   assert.deepEqual(
     amllStyles.sort(),
     [...AMLL_SIZE_STYLE_FILES].sort(),
@@ -181,11 +169,8 @@ test("禁止 <style> 与内联视觉样式：内联 style 只允许几何契约�
 });
 
 /**
- * AMLL 变量只许出现在这两处：
- * - `amll-theme.css`：设计令牌 → AMLL 变量的**唯一**映射表（档位/颜色都在那里）；
- * - `features/lyrics/amll-adapter.ts`：用户自定义歌词颜色那一次 **scoped 覆盖**（R45B）。
- *   覆盖必须写在代码里（值来自用户），但写的是同一个变量、只写到歌词窗的那一个容器上，
- *   且合法性只认六位 hex（`isCustomColor`）。组件层仍然一个变量名都不许出现。
+ * AMLL 变量只许出现在两处：amll-theme.css（令牌到变量的唯一映射表），
+ * 以及 amll-adapter.ts 里用户自定义歌词颜色那一次 scoped 覆盖（合法性只认六位 hex）。
  */
 const AMLL_VARIABLE_FILES = ["src/renderer/amll-theme.css", "src/renderer/features/lyrics/amll-adapter.ts"];
 
@@ -248,13 +233,9 @@ test("控制台只剩错误路径：渲染层不得有 console.log/info/debug", 
 });
 
 /**
- * R10 裁决：**主题只跟系统**（`prefers-color-scheme`），不做手动切换。R25 按用户指令**推翻了一半**：
- * 三态（浅色 / 深色 / 跟随系统）有了手动档，但那条 R10 的**技术**理由仍然成立——
- * 不引 next-themes（它的防闪烁内联脚本会被 CSP 拦），状态的唯一归属是 Rust 侧
- * （`settings.json` 的 `theme` 键 + `theme:changed` 广播），渲染层只把类落到 `<html>` 上。
- *
- * 令牌仍然只有两份（`.dark` 与媒体查询），且必须逐条一致；R25 只多了一条"强制浅色"的排除规则
- *（媒体查询的选择器是 `:root:not(.light)`，见 test/login-chrome.test.mjs）。
+ * 主题三态（浅色 / 深色 / 跟随系统），技术约束不变：不引 next-themes（内联脚本会被 CSP 拦），
+ * 状态归 Rust（settings.json + theme:changed 广播），渲染层只把类落到 <html> 上；
+ * 令牌仍然只有两份（.dark 与媒体查询）且必须逐条一致。
  */
 
 /** 取 `from` 之后第一个 `{...}` 块的内容（按大括号配对，能处理嵌套）。 */
@@ -290,7 +271,7 @@ test("主题跟随系统：prefers-color-scheme 的 :root 令牌与 .dark 逐条
   const mediaBlock = blockAfter(styles, mediaMatch.index);
   const rootAt = mediaBlock.indexOf(":root");
   assert.ok(rootAt !== -1, "系统暗色要改的是 :root 上的令牌（不是挑个别组件改颜色）");
-  // R25：选择器是 `:root:not(.light)`（强制浅色时整块不生效），令牌本身照旧
+  // 系统暗色的选择器是 :root:not(.light)（强制浅色时整块不生效），令牌本身照旧
   assert.match(
     mediaBlock.slice(0, mediaBlock.indexOf("{")),
     /:root:not\(\.light\)/,
@@ -327,12 +308,8 @@ test("主题跟随系统：dark: 变体也认系统偏好（上游原语的暗�
 });
 
 /**
- * R25（用户指令）：三态主题有了**手动档**，但切类只许有**一处**——
- * `src/renderer/features/theme/theme.mjs` 的 `applyThemeChoice`。
- *
- * 各写一份的后果不是风格问题：两个 webview（主窗 + 浮动控件）各切一次，
- * 迟早出现"主窗跟着新档位、浮动控件还停在旧档位"，而两边看起来都"没错"。
- * 同时**不许**出现第二份存储（R10 那条技术理由仍在：状态归 Rust，经 `theme:changed` 广播下来）。
+ * 三态主题有了手动档，但切类只许有一处：features/theme/theme.mjs 的 applyThemeChoice。
+ * 各写一份迟早让两个 webview 配色对不上；同时不许出现第二份存储。
  */
 test("手动切换只许一处：只有 features/theme/theme.mjs 动 html 的 class，且没有第二份存储", () => {
   const offenders = [];

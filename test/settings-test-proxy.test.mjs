@@ -1,15 +1,5 @@
 /**
- * R10 设置页 · `settings:test-proxy` 频道（把 R6 的 `testProxyConnection` 接到界面）。
- *
- * 要钉住的四件事：
- * 1. **频道只有一份清单**：新频道必须进 `src/shared/request-channels.ts`（Rust 镜像由
- *    test/channel-parity.test.mjs 钉住；少一侧的后果是界面点"测试连接"拿到 `unknown_channel`）；
- * 2. **坏载荷在边界被拒**，且**不去打扰网络**（测试器一次都不该被调用）；
- * 3. **凭据必须原样到达测试器**（不然测的是另一个代理），但**绝不出现在任何答复文案里**；
- * 4. 测试目标 URL 是**固定常量**：不猜业务端点、也不接受调用方指定（那是把一个开放代理
- *    塞进渲染层手里）。
- *
- * 先写先看红。
+ * settings:test-proxy 频道：频道只进 shared 清单、坏载荷在边界被拒且不碰网络、凭据原样到达测试器但不出现在文案里、目标 URL 是固定常量。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

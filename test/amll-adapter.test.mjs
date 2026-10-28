@@ -1,16 +1,7 @@
 /**
- * R9 歌词适配（`features/lyrics/amll-adapter.ts`）：AMLL 官方 `parseLrc` → `LyricLine[]`，
- * 外加两处**补偿**（R4 遗留）。
- *
- * R4 实测登记的两条 AMLL 行为：
- * 1. `[offset:±ms]` 元数据被忽略（不参与时间平移）——这里补上；
- * 2. 同一时间戳的多行（译文/音译）**不会**合并进 `translatedLyric`，而是各自成行——
- *    这里按"同时间戳的第一行是正文、第二行是译文、第三行是音译"合并；再多出来的
- *    **保留为独立行**（宁可多显示一行，也不能把歌词静默吃掉）。
- *
- * 解析、时间轴、词级切分仍然是官方 `parseLrc` 的事——本文件里没有一行时间戳正则，
- * 也没有任何"自己画歌词"的东西（渲染是 AMLL 组件的职责，R9 的面板只做宿主）。
- * 先写先看红。
+ * 歌词适配（features/lyrics/amll-adapter.ts）：AMLL 官方 parseLrc → LyricLine[]，外加两处补偿。
+ * 补上被忽略的 [offset:±ms]；同一时间戳的多行按正文/译文/音译合并，多出来的保留为独立行。
+ * 解析、时间轴、词级切分仍归官方 parseLrc。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -173,12 +164,8 @@ test("纯函数：shift 与合并都在纯函数里（面板不做这类加工�
   assert.equal(merged.lines[0].translatedLyric, "甲");
 });
 
-// ---------------------------------------------------------------------------
-// R45B：逐字高亮（`withKaraokeWords`）
-//
-// 口径（简报 B6）：**词级源原样使用；行级 LRC 的逐字时间是按行时长线性推导的**，
-// 不是服务端精确卡拉 OK。所以这一组测试钉的是"推导怎么分"，不是"唱得准不准"。
-// ---------------------------------------------------------------------------
+// 逐字高亮（withKaraokeWords）：词级源原样使用，行级 LRC 的逐字时间按行时长线性推导。
+// 这一组钉的是「推导怎么分」，不是「唱得准不准」。
 
 /** 把「词」列成 `[文本, 起, 止]` 三元组，断言读起来就是一张表。 */
 const wordTable = (line) => line.words.map((word) => [word.word, word.startTime, word.endTime]);
@@ -313,13 +300,7 @@ test("禁止自绘解析：必须复用 AMLL 官方 parseLrc，不得自带时�
   assert.doesNotMatch(code, /<span|<div|className/, "适配层不产生任何标记（渲染是组件的事）");
 });
 
-/**
- * R46：自定义颜色的 scoped 覆盖是**两面共用**的同一个函数。
- *
- * 桌面歌词窗与主窗沉浸页都要用 `applyCustomColor` 覆盖官方歌词变量（唯一接线点在适配层），
- * 所以这个函数必须：只写那一个变量、只写已验证的 `#RRGGBB`、空值就把覆盖撤掉（回设计令牌）。
- * 用最小的假元素断言，不依赖 DOM（node:test 里没有浏览器）。
- */
+/** 自定义颜色的 scoped 覆盖两面共用同一个函数：只写 AMLL 那一个变量、只写已验证的 #RRGGBB、空值就撤掉覆盖。 */
 test("R46 applyCustomColor：只写 AMLL 变量、只写已验证 hex、空值撤回覆盖", async () => {
   const { AMLL_COLOR_VAR, applyCustomColor } = await import("../src/renderer/features/lyrics/amll-adapter.ts");
   assert.equal(AMLL_COLOR_VAR, "--amll-lp-color", "变量名仍只有适配层这一处真源");

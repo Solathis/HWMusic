@@ -1,34 +1,6 @@
 /**
- * R45A1 · 启动第一屏的三态（**纯决定** + 外壳源码守卫）。
- *
- * 现象（用户第 10 项）：**已经登录的会话冷启动时会先闪一下登录页**。
- *
- * 根因不在二维码、也不在登录状态本身：`useAuthGate` 的初始 phase 是 `checking`
- * （「还不知道」——这个诚实是对的，不能猜），而旧的外壳把这个档位**当成未登录**，
- * 于是第一帧渲染的是整个 `LoginGate`（标题、二维码占位、提示、「正在检查登录状态…」）。
- * `auth:get-status` 的应答 / 启动期那条广播要等一次 IPC 往返才到，快照落地之后外壳才翻成
- * app-shell——那一帧的登录页就是用户看见的「闪」。
- *
- * 修法不是把登录页晚一点画（`setTimeout` / `display:none` 都只是把同一个错误藏起来），
- * 而是**让 `checking` 有自己的界面**——中性启动视图（`StartupChecking`）：
- *
- * | phase | 界面 | 二维码 |
- * |---|---|---|
- * | `checking`（还不知道） | 中性启动屏（无二维码、无标题、无任何可点元素） | 不发起 |
- * | `logged_out`（确定未登录） | `LoginGate`（原来那一页） | 此刻才自动发起 |
- * | `logged_in` | app-shell | 不发起 |
- *
- * 三件事一起才成立：
- * 1. 判定只有一处（`features/auth/startup-view.mjs` 的 `startupViewOf`），外壳不再自己猜；
- * 2. `checking` 与 `logged_out` 是两个**不同**的界面——快照到达之前屏上没有任何登录页的东西；
- * 3. 二维码仍然只在**确定未登录**之后才发起（`shouldAutoStartQr` 的四条件不变）：
- *    检查期间建单 = 覆盖已有登录态，而且那一单会换掉用户正在扫的码。
- *
- * `startup-view.mjs` 只是 `login-gate-logic.mjs` 之上的一层投影：**「能不能渲染 app-shell」
- * 仍然是 `shouldShowLoginGate` 那一条**（`startupViewOf` 直接调它），所以两个模块不会各说一套。
- *
- * 真 DOM（渲染出来的标记）由 `test/login-gate-markup.test.mjs` 的 R45A1 段钉；
- * 本文件钉纯决定、竞态序列与外壳源码顺序。先写先看红。
+ * 启动第一屏三态：checking 渲染中性启动屏（无二维码、无可点元素），logged_out 才渲染 LoginGate 并自动发起二维码，logged_in 渲染 app-shell。
+ * 判定只有一处（startup-view.mjs 的 startupViewOf 直接调用 shouldShowLoginGate），外壳不再自己猜。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -74,10 +46,7 @@ function loggedIn() {
 }
 
 /**
- * 一次冷启动里，门禁钩子依次会产生的状态（R19 的既有顺序：订阅 → `rendererReady()` → 查询）。
- *
- * 第一帧**永远**是 `initialGateState()`（`useState` 的初值，effect 还没跑）；
- * 之后才是启动期那条广播 / `auth:get-status` 的应答落进来的那一帧。
+ * 一次冷启动里门禁钩子依次产生的状态：第一帧永远是 initialGateState()，之后才是广播 / auth:get-status 应答落进来的那一帧。
  */
 function coldStartFrames({ loggedIn: session }) {
   const first = initialGateState();
@@ -170,7 +139,7 @@ test("R45A1 竞态：未登录冷启动先安静，快照落地之后才出现�
   const frames = coldStartFrames({ loggedIn: false });
   assert.deepEqual(frames.map(startupViewOf), [STARTUP_VIEW.checking, STARTUP_VIEW.loginGate]);
 
-  // 重复喂同向的快照（广播与查询都答同一件事）不改变档位（R19：两处共用一条事件）
+  // 重复喂同向的快照（广播与查询都答同一件事）不改变档位。
   const repeatedOut = reduceGateState(frames[1], { type: LOGIN_GATE_EVENT.status, loggedIn: false, busy: false });
   assert.equal(startupViewOf(repeatedOut), STARTUP_VIEW.loginGate);
 
@@ -181,19 +150,9 @@ test("R45A1 竞态：未登录冷启动先安静，快照落地之后才出现�
   assert.equal(startupViewOf(repeatedIn), STARTUP_VIEW.appShell, "已登录之后再喂一条已登录仍是 app-shell");
 });
 
-// ---------------------------------------------------------------------------
-// 4. 查询失败那一档：**仍是中性启动屏**，但必须可操作（复审 R45A1 Important）
-// ---------------------------------------------------------------------------
-//
-// 上一版把「checking + 一句人话」判成了 LoginGate（理由：网页登录那条出路口长在门禁页上）。
-// 那是**违反复审合同**的：合同写的是 checking **绝不**渲染 LoginGate/二维码。失败不是"已确定
-// 未登录"，把它画成登录页等于用一张可能不需要的二维码盖住一个还没查完的会话。
-//
-// 复审后的形态：`checking` 恒为中性启动屏；失败时这一屏**自己长出**三件东西——
-// 一句原因、一个「重新检查登录状态」（真的重发 `auth:get-status`）、一个网页登录入口。
-// 于是"不误判"与"不困在空转屏上"两件事同时成立。
+// 查询失败那一档仍是中性启动屏，不渲染 LoginGate 或二维码；失败时这一屏自己长出原因、重新检查按钮与网页登录入口。
 
-/** 「查询失败」那一档（R19 的 failed 事件：phase 仍是 checking）。 */
+/** 「查询失败」那一档（phase 仍是 checking）。 */
 function failedCheck() {
   return reduceGateState(initialGateState(), {
     type: LOGIN_GATE_EVENT.failed,
@@ -238,9 +197,7 @@ test("R45A1 查询失败：中性启动屏给出原因 + 重新检查 + 网页�
 });
 
 test("R45A1 网页登录那条路：checking 期间按下入口 → 仍是中性启动屏，并如实说「正在打开…」", () => {
-  // 失败档上的那个网页登录入口按下去之后：`started` 清掉上一条失败说明、path 转 official。
-  // 那一刻 phase 仍是 checking（从没确定过未登录）——所以界面仍是中性启动屏，只是多一句
-  // 「正在打开华为官方登录页…」（官方页此刻还在屏外加载）。
+  // 失败档上的网页登录入口按下后：清掉失败说明、path 转 official，phase 仍是 checking，所以界面仍是中性启动屏。
   const opening = reduceGateState(failedCheck(), { type: LOGIN_GATE_EVENT.started });
   assert.equal(opening.phase, LOGIN_GATE_PHASE.checking, "这条路上从没确定过未登录");
   assert.equal(opening.path, "official");

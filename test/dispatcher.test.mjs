@@ -1,9 +1,6 @@
 /**
- * R3 sidecar 桥 · 频道白名单路由（dispatcher）、RPC 契约层（rpc）与宿主要求封装（host-services）。
- *
- * 关键断言：白名单是唯一真源（与共享常量同集合）、未知频道与处理器异常都变成结构化错误、
- * 宿主要求的 unimplemented 原样回传（不 panic、不静默）。
- * 先写先看红。
+ * 频道白名单路由（dispatcher）、RPC 契约层（rpc）与宿主要求封装（host-services）。
+ * 白名单是唯一真源；未知频道与处理器异常变成结构化错误；unimplemented 原样回传。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -215,9 +212,7 @@ test("rpc.shutdown：收尸后出向调用立刻失败、入帧不再处理", as
   assert.equal(written.length, before, "收尸后不再写帧");
 });
 
-/* ---------------------------------------------------------------------------
- * R8：library:* 七条频道的路由（注入 music 模块桩——协议层真身由 test/music.test.mjs 钉）
- * ------------------------------------------------------------------------- */
+/* library:* 七条频道的路由（注入 music 模块桩，协议层真身由 test/music.test.mjs 钉）。 */
 
 /** music.mjs 的桩：记录调用、按脚本答复。 */
 function stubMusicApi(answers = {}) {
@@ -319,8 +314,7 @@ test("dispatcher：library 的坏载荷在边界就被拒（invalid_payload）�
 });
 
 test("dispatcher：端点被显式关闭时 library:* 回结构化 endpoint_unknown（不是空列表、不是假成功）", async () => {
-  // R32 起默认端点表是**满的**（参考实测值）。要一个"确定性不可用"的状态，就在设置里显式关闭
-  // （`musicEndpoints: {key: null}`）——这比"假装默认表是空的"更接近真实存在的那一档。
+  // 默认端点表是满的：要「确定性不可用」就在设置里显式关闭（`musicEndpoints: {key: null}`）。
   const closed = Object.fromEntries(MUSIC_ENDPOINT_KEYS.map((key) => [key, null]));
   const service = createMusicService({
     settingsData: { musicEndpoints: closed },
@@ -372,7 +366,7 @@ test("音乐端点：默认值 = 参考实测端点；设置只收已知键，�
     "只收 MUSIC_ENDPOINT_KEYS 里的键：非空字符串 = 覆盖，null = 显式关闭",
   );
 
-  // 默认表：每个有路径的键都在，且都指向参考实测的业务域
+  // 默认表：每个有路径的键都在，且都指向参考实测的业务域。
   const defaults = createMusicService({ settingsData: {}, fetchImpl: async () => assert.fail("不该发请求") }).endpoints;
   for (const key of MUSIC_ENDPOINT_KEYS) {
     if (key === "lyrics") {
@@ -417,7 +411,7 @@ test("host-services：登录三频道 + secure-* + 本地歌词来源的频道�
   const cancel = await services.cancelLogin({});
   const enc = await services.secureEncrypt({ plaintext: "x" });
   const dec = await services.secureDecrypt({ ciphertext: "y" });
-  // R65：本地曲目的歌词原始字节（只发 id，不发路径——路径只存在 Rust 的索引里）
+  // 本地曲目的歌词原始字节：只发 id，不发路径——路径只存在 Rust 的索引里。
   const lyrics = await services.localLyricsSource({ trackId: "local:0123456789abcdef0123456789abcdef" });
 
   for (const result of [login, cancel, enc, dec, lyrics]) {

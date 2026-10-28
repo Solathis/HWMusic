@@ -1,17 +1,8 @@
 /**
- * R9 歌词面板与播放器接通 · 源码扫描（简报第一条：**逐行滚动必须来自 AMLL 官方组件**）。
- *
- * 项目的 UI 约束（R8 的 no-self-visual 是同一套）在这里落到歌词与播放器上：
- * 1. `LyricPlayer` / `BackgroundRender` **只能**来自 `@applemusic-like-lyrics/react`；
- *    渲染层任何地方不得自己实现同名组件（禁自绘）；
- * 2. 宿主的职责只有三件：定位容器、rAF 逐帧推 `currentTime`、标注 `isSeeking`
- *    ——所以宿主里不许出现歌词文本渲染（`words.map` 之类）、时间戳正则、`<canvas>`；
- * 3. 进度同步必须走 `features/lyrics/lyric-sync.mjs`（rAF + 200ms 窗口的唯一实现），
- *    不许在组件里另写一份窗口逻辑（`200` 这个数字只该出现在那个模块里）；
- * 4. 播放器栏从"占位禁用"翻成"接通状态机"：`data-state` 由状态给、有进度/音量/模式，
- *    但**不持有音频元素、也不碰 core**（地址与音频都在 features/playback 的运行时里）。
- *
- * 先写先看红。
+ * 歌词面板与播放器接通 · 源码扫描（**逐行滚动必须来自 AMLL 官方组件**）。
+ * `LyricPlayer` / `BackgroundRender` **只能**来自 `@applemusic-like-lyrics/react`，禁自绘。
+ * 宿主的职责只有三件：定位容器、rAF 逐帧推 `currentTime`、标注 `isSeeking`，不渲染歌词文本。
+ * 进度同步走 `features/lyrics/lyric-sync.mjs`；播放器栏接通状态机但不持有音频元素、不碰 core。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -43,7 +34,7 @@ function rendererFiles() {
 const AMLL_HOSTS = [
   "src/renderer/AmllBackground.tsx",
   "src/renderer/AmllLyricsPanel.tsx",
-  // R12：桌面歌词窗也是 AMLL 宿主（进度来自广播而不是本地音频，见 lyrics-window.test.mjs）
+  // 桌面歌词窗也是 AMLL 宿主（进度来自广播而不是本地音频）
   "src/renderer/LyricsWindow.tsx",
 ];
 const STAGE = "src/renderer/playback-stage.tsx";
@@ -143,18 +134,14 @@ test("播放器栏接通：data-state 由状态机给（不再是 placeholder）
   assert.match(components, /playerStatusText/, "状态文案来自 playback-state.mjs");
   assert.match(components, /player\.seek\(/, "拖动要真的 seek（跳转信号由状态机递增，歌词面板据此标 isSeeking）");
 
-  // 双击播放的承诺（R8 的 aria-label）在 R9 必须成立：onActivate 要带上下标
+  // 双击播放的承诺必须成立：onActivate 要带上下标
   assert.match(components, /onDoubleClick=\{\(\)\s*=>\s*onActivate\?\.\(song,\s*index\)\}/, "双击要把行下标一起给出去");
   assert.match(components, /onActivate\?\.\(song,\s*index\)/, "键盘激活同理（回车/空格）");
 });
 
 /**
- * R40 第 6 项（用户要求「控件居中，不随左侧内容宽度漂移」）。
- *
- * 判据不是"看起来在中间"，而是**结构上就是中间**：控件组用绝对定位钉在 50% 上
- * （`left-1/2 -translate-x-1/2`）。等分（`flex-1 basis-0`）做不到这件事——两侧内容天然不等宽，
- * 等分只能让剩余空间相等，控件的实际中点仍会漂。真机实测偏差 0px（`.tmp/r40-player-bar.json`：
- * 栏中点 768、控件组中点 768，侧栏收起后仍是 768）。
+ * 控件居中，不随左侧内容宽度漂移。
+ * 判据是**结构上就是中间**：控件组用绝对定位钉在 50% 上（`left-1/2 -translate-x-1/2`）。
  */
 test("R40 播放器栏三区：控件组绝对居中 + 封面/曲目信息是「进入播放页」的入口", () => {
   const components = stripComments(read("src/renderer/components.tsx"));
@@ -184,9 +171,7 @@ test("R40 播放器栏三区：控件组绝对居中 + 封面/曲目信息是「
   assert.doesNotMatch(background, /\bfetch\s*\(/, "**不是 fetch**（CSP connect-src 只有 self/ipc，会被拦）");
   assert.match(background, /addEventListener\(\s*"error"/, "加载失败要回退（不留碎图、不抛）");
   /**
-   * `crossOrigin` 必须在 `src` 之前设（R40 真机取证：没带 CORS 的跨域图会把画布 taint，
-   * AMLL 采样时 `getImageData` 抛 SecurityError；带了就既不 taint 也照常加载）。
-   * 顺序写错等于没设——所以这里同时钉"设了"和"设在 src 前面"。
+   * `crossOrigin` 必须在 `src` 之前设。设晚了这张跨域图会把画布 taint，AMLL 采样时抛 SecurityError。
    */
   assert.match(background, /image\.crossOrigin = "anonymous"/, "跨域封面必须带 crossOrigin=anonymous（否则 AMLL 采样会抛 SecurityError）");
   assert.ok(
@@ -209,11 +194,7 @@ test("外壳：App 挂载运行时、队列面板真实数据、歌词开关与�
 });
 
 /**
- * R46 的逐字着色保留，颜色那条**在 R52 被有意删除**（见下面第二条用例）。
- *
- * R45B 只把逐字推导接到了桌面歌词窗：主窗 `AmllLyricsPanel` 送进去的是行级 `lines`
- * （每行 1 个词），官方 `LyricPlayer` 因此只做整行渐变——同一首歌在两个面上看起来差一代。
- * R46 把逐字接线搬到适配层那一份实现上（`withKaraokeWords`），组件不自己造第二份。
+ * 逐字着色保留：主窗面板把行级 LRC 推导成逐字词（`withKaraokeWords`），组件不自己造第二份。
  */
 test("R46 主窗面板：withKaraokeWords 逐字（组件不自己渲染歌词文本）", () => {
   const panel = stripComments(read("src/renderer/AmllLyricsPanel.tsx"));
@@ -227,12 +208,8 @@ test("R46 主窗面板：withKaraokeWords 逐字（组件不自己渲染歌词�
 });
 
 /**
- * R52：**沉浸式歌词禁止改色**（有意删除 R50 的 `playerLyrics` 那一整套）。
- *
- * 用户要求："沉浸式歌词禁止修改颜色。" 所以这一面一个颜色入口都不留：
- * - 面板不收颜色 prop、不写 `data-lyrics-color`、不调 `applyCustomColor`；
- * - 沉浸页不读任何配置就为了拿颜色（R50 那条 `playerLyrics` 接线整段删除）；
- * - 颜色恒为 `amll-theme.css` 里 `.amll-lyrics-stage` 的令牌基线（`--foreground`）与 AMLL 官方默认。
+ * **沉浸式歌词禁止改色**：面板不收颜色 prop、不写 `data-lyrics-color`、不调 `applyCustomColor`。
+ * 颜色恒为 `amll-theme.css` 里 `.amll-lyrics-stage` 的令牌基线与 AMLL 官方默认。
  */
 test("R52 沉浸式歌词不改色：面板没有颜色 prop / data-lyrics-color / applyCustomColor", () => {
   const panel = stripComments(read("src/renderer/AmllLyricsPanel.tsx"));

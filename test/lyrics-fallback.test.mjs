@@ -1,12 +1,5 @@
 /**
- * R41 · 第三方歌词回退的网络层（src/main/lyrics-fallback.mjs）。
- *
- * 用**注入的 fetch** 打桩（不真发请求）：这一层要钉的不是"Kugou 有没有改接口"，
- * 而是四条纪律——它们每一条都对应一次真实的坏体验：
- * 1. **匹配严格**：候选是别的歌 → 回 null（宁可不显示）；
- * 2. **失败静默**：超时/5xx/坏 JSON/抛错 → 回 null，绝不抛到播放链上；
- * 3. **不缓存失败**：这一层根本不碰磁盘（写盘是协议层编排的事）——所以"这次没有"不会被记住；
- * 4. **UA 克制**：请求头里只有一句"这是什么客户端"，**没有任何本项目凭据**。
+ * 第三方歌词回退的网络层：匹配严格、失败静默、不缓存失败、UA 只说明客户端且不带凭据。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -100,9 +93,7 @@ test("回退（R41）：酷狗命中不了就在 lrclib 上再试一次（两个
 });
 
 test("回退（R41a）：lrclib 只有**纯文本**歌词（没有 syncedLyrics）→ 跳过（非同步歌词暂不支持）", async () => {
-  // 这条夹具 R41a 改诚实了：R41 的版本断言"退到 plainLyrics"，但那条路在落盘判据那一层
-  // 必然被判空（`hasTimedLyricLine` 要求至少一行带时间戳）——断言一个不可能发生的结果，
-  // 等于把死路当成活的。现在钉的是"它确实不被采用"。
+  // 纯文本歌词在落盘判据那一层必然判空，所以钉的是「确实不被采用」，而不是「退一步用纯文本」。
   const plainOnly = scriptedFetch((url) => {
     if (url.includes("kugou")) return jsonResponse({});
     return jsonResponse([{ trackName: "安静", artistName: "周杰伦", duration: 327, syncedLyrics: null, plainLyrics: "安静\n没有时间戳" }]);

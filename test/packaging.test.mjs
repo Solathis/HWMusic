@@ -1,17 +1,6 @@
 /**
- * R14 打包链 · 契约测试（先写先看红）。
- *
- * 本文件只钉**打包链自己的**正确性，不重复 R3–R13 的功能断言：
- *
- * 1. `dist:win` 的编排顺序与 **mtime 新鲜度检查**——`beforeBuildCommand` 是空串，
- *    绕过编排直接 `tauri build` 会把旧界面嵌进 exe 且退出码 0（旧仓实际故障），
- *    所以"渲染层产物比 exe 新"必须**判失败**，这里用真实文件 mtime 造一次；
- * 2. `check:nsis` 的静态校验骨架：PE 头、三元组命名、剥后缀的暂存名、
- *    bundle 配置输入与暂存目录里不许出现 `.local`/`research`（凭据纪律）；
- * 3. `test:browser` 的 PASS/SKIP/FAIL 口径：SKIP 不算成功；
- * 4. `.github/workflows/windows-nsis.yml`：每步显式查 `$LASTEXITCODE`、不串 `&&`、
- *    SKIP 0 / fail 0 断言、v* 标签才 Release、四句免责声明；
- * 5. `tauri.conf.json` 加回 R2 裁决遗留的 `bundle.externalBin`。
+ * 打包链契约测试：只钉打包链自己的正确性，不重复功能断言。
+ * 覆盖 dist:win 编排与 mtime 新鲜度、check:nsis 静态校验、test:browser 口径与 CI 工作流。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -48,9 +37,7 @@ test("scripts：打包链的八个入口都在，且都是直接路径风格（�
   assert.doesNotMatch(scripts["dist:win"], /&&/, "编排在 dist-win.mjs 里做，不靠 shell 串命令");
 });
 
-// ---------------------------------------------------------------------------
-// 2. tauri.conf.json：R2 裁决遗留的 externalBin 加回
-// ---------------------------------------------------------------------------
+// 2. tauri.conf.json：externalBin 只声明 sidecar 一项，beforeBuildCommand 仍是空串（编排归 dist 脚本）。
 
 test("tauri.conf.json：externalBin 按 R2 裁决加回，且 beforeBuildCommand 仍是空串（编排归 dist 脚本）", () => {
   const conf = readJson("src-tauri/tauri.conf.json");
@@ -282,9 +269,7 @@ test("R44d native 写扫描只允许以 ensure_own 包裹的显式受核 HWND，
     assert.equal(taskbarWriteViolations(`${fn}(self::ensure_own(token)?, None);`).length, 0, `${fn} 显式 own guard 可通过`);
   }
 
-  // I-1：**前缀不是凭证**。只截到第一个逗号的写法会把 `ensure_own(policy` 当成合法守卫，
-  // 于是守卫之后又接了一个"兜底/改写"的表达式也能过——那正是"写目标没被当场复核"的另一条路。
-  // 每条都必须恰好点名 1 次（既不能放行，也不能把小片段重复计数）。
+  // 前缀不是凭证：每条绕过都必须恰好点名 1 次，既不放大也不重复计数。
   const bypasses = [
     ["SetWindowLongPtrW(ensure_own(policy, own).unwrap_or(hwnd(foreign)), index, value)", "`.unwrap_or(foreign)` 兜底"],
     ["ShowWindow(ensure_own(policy, own).unwrap_or_else(|_| hwnd(foreign)), SW_HIDE)", "`.unwrap_or_else(foreign)` 兜底"],
@@ -326,14 +311,8 @@ test("R44d native 写扫描只允许以 ensure_own 包裹的显式受核 HWND，
     "守卫实参里的字符串括号不能把嵌套数算错（算错就会误报或误放行）",
   );
 
-  // I-1 raw-string 补丁：Rust raw 字面量（`r#"…"#`、`r##"…"##`、`br#"…"#`、`rb"…"`）里
-  // 的 `"`、`(`、`)`、`,` 全是**内容**，不是结构；raw 内部的反斜杠也不是转义，
-  // 只有「同样多个 `#` 的引号」才收尾。旧实现把 raw 里的第一个 `"` 当普通字符串引号，
-  // 于是实参解析被截断/判成"未闭合"，合法调用被误报、或干脆整段被抹掉。
-  //
-  // brief 第一段那条表达式逐字节不变、照原样断言（必须点名）：它自己括号不平衡
-  // （rustc 报 mismatched closing delimiter，证据 `.tmp/r44d-i1-raw-fixture.log`），
-  // 所以这里只钉"必须被点名"，而把"raw 真的被解析完"钉在下面补平衡的同形表达式上。
+  // Rust raw 字面量里的引号、括号、逗号都是内容，只有同 hash 数的引号才收尾。
+  // 下面断言 brief 那条表达式必须被点名，补平衡的同形表达式钉 raw 解析完整。
   assert.equal(
     taskbarWriteViolations('ShowWindow(ensure_own(policy, make_own(r#"" )?, hwnd(foreign))"#).unwrap_or(hwnd(foreign)), SW_HIDE)').length,
     1,
@@ -404,9 +383,7 @@ test("R44d native 写扫描只允许以 ensure_own 包裹的显式受核 HWND，
 test("R44d I-1 follow-up 2：Rust 普通字符串可以跨行，字面量里的 // 与 /* 不是注释，未闭合必须 fail closed", async () => {
   const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
 
-  // 控制器实跑确认的那条绕过：Rust **普通字符串允许裸 LF**，所以下面这段是合法 Rust
-  // （`.tmp/r44d-i1-multiline-repro-before.log`）。旧实现见到 LF 就判"字符串没结束"，
-  // 于是串里那行 `//` 被当成注释起点，把同一行的**真实**外来写整行剥掉 → 0 违规。
+  // 普通字符串允许裸 LF，串里的 `//` 不是注释起点，同一行的真实外来写必须被点名。
   const controllerRepro = [
     "unsafe fn g(h: HWND) {",
     '    let _s = "abc',
@@ -422,8 +399,7 @@ test("R44d I-1 follow-up 2：Rust 普通字符串可以跨行，字面量里的 
     '多行普通串必须真的被解析完（靠"未闭合"碰巧拦住不算理解多行串，换个位置就放行）',
   );
 
-  // 同一条洞的 `/*` 面：旧实现在串里撞见 `/*` 就去找 `*/`，找不到就把**余下整个文件**吃掉，
-  // 后面的真实外来写一起消失（修前实测 0 违规）。
+  // 串里的 `/*` 是内容，不能吞掉后面的真实外来写。
   const blockCommentBypass = [
     "unsafe fn g(h: HWND) {",
     '    let _s = "abc',
@@ -435,7 +411,7 @@ test("R44d I-1 follow-up 2：Rust 普通字符串可以跨行，字面量里的 
   assert.match(blockViolations[0], /hwnd\(foreign\)/, "被吃掉的是串外那段真实写，实参要完整出现");
   assert.doesNotMatch(blockViolations[0], /调用未闭合/, "`/*` 面同样是\"多行串必须被解析完\"，不能靠未闭合拦住");
 
-  // 反向：**合法**的跨行守卫调用不许误报（修前实测 1 条 `(调用未闭合)`）。
+  // 反向：合法的跨行守卫调用不许误报。
   const guardedMultiline = ["ShowWindow(self::ensure_own(policy,", '"line one', 'line two")?, SW_HIDE)'].join("\n");
   assert.deepEqual(taskbarWriteViolations(guardedMultiline), [], "跨行的精确 `self::ensure_own(...)?` 守卫必须继续放行");
 
@@ -483,20 +459,11 @@ test("R44d I-1 follow-up 2：Rust 普通字符串可以跨行，字面量里的 
   );
 });
 
-// ---------------------------------------------------------------------------
-// R44d scanner 收紧：独立审查 agent106 的四个 Important 绕过（先写先看红）
-//
-// 四个都是**可编译**的 Rust 形态，修前扫描器对它们返回 0 违规：
-// F1 `cr#""` C 字符串前缀不认 → 串里的 `//` 把同一行的真实写剥掉；
-// F2 块注释可以嵌套 → 停在第一个 `*/`，后面的 `//` 再把真实写剥掉；
-// F3 本地闭包 shadow 守卫名 → 文本前缀检查认的是名字不是绑定；
-// F4 写 API 的函数指针别名 / `use … as` → 只按字面 callee 名匹配就找不到。
-// ---------------------------------------------------------------------------
+// scanner 收紧：C 串前缀、嵌套块注释、闭包 shadow 守卫名、函数指针别名四种可编译绕过都要点名。
 
 test("R44d scanner F1：cr/C 字符串 raw 前缀与多 hash 收尾必须被识别（raw 里的 // 不能抹掉同一行的真实写）", async () => {
   const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
-  // `cr#"…"#` 是 Rust 1.77+ 的 C 字符串 raw 前缀。修前 `cr` 不被认成 raw 开头，
-  // 于是串里那句 `// ` 被当成注释起点，把同一行的真实外来写整行抹掉 → 0 违规。
+  // `cr#"…"#` 是 Rust 1.77+ 的 C 字符串 raw 前缀：`cr` 必须认成 raw 开头，否则串里的 `// ` 会把同一行的真实外来写整行抹掉。
   const bypass = 'let _s = cr#"quote " // "#; unsafe { ShowWindow(hwnd(foreign), SW_HIDE); }';
   const violations = taskbarWriteViolations(bypass);
   assert.equal(violations.length, 1, `cr#"" 里的 // 不能抹掉真实写：${JSON.stringify(violations)}`);
@@ -529,13 +496,13 @@ test("R44d scanner F1：cr/C 字符串 raw 前缀与多 hash 收尾必须被识�
 
 test("R44d scanner F2：Rust 块注释可以嵌套（深度计数；整段注释里的假写不算命中）", async () => {
   const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
-  // 修前停在第一个 `*/`，于是 ` // ignored */` 被当成行注释，把后面的真实写整行吃掉 → 0 违规。
+  // 嵌套块注释要剥到最外层 `*/`；停在第一个 `*/` 会让 ` // ignored */` 把后面的真实写整行吃掉。
   const bypass = "/* outer /* inner */ // ignored */ unsafe { ShowWindow(hwnd(foreign), SW_HIDE); }";
   const violations = taskbarWriteViolations(bypass);
   assert.equal(violations.length, 1, `嵌套块注释里的 // 不能抹掉真实写：${JSON.stringify(violations)}`);
   assert.match(violations[0], /ShowWindow: hwnd\(foreign\)/, "被抹掉的那次写要完整点名");
 
-  // 反方向：整段（含嵌套）注释里的假写必须被忽略；修前停得太早会把它当成真实写→误报。
+  // 反向：整段（含嵌套）注释里的假写必须被忽略，剥不到底就会误报。
   assert.deepEqual(
     taskbarWriteViolations("/* outer /* inner */ ShowWindow(hwnd(foreign), SW_HIDE); */ let x = 1;"),
     [],
@@ -732,14 +699,7 @@ test("R44d fix：写目标必须是当场复核的表达式，先校验再绑局
   }
 });
 
-// ---------------------------------------------------------------------------
-// R44d final review（agent108）Important 1：注释必须替换成**分隔空白**
-//
-// `stripRustComments` 旧行为是"把注释删掉、不吐任何字符"，于是**合法** Rust
-// `use …::SetParent/**/as reparent;` 被拼成 `…::SetParentas`——别名名字层与调用层
-// 双双看不见，扫描器对着货真价实的外来写返回 `[]`（审查自己 rustc 编译复现过）。
-// 判据本身不放宽，只把"注释分隔"这件事在词法上恢复成空白。
-// ---------------------------------------------------------------------------
+// 注释要替换成分隔空白，`SetParent/**/as reparent` 不许拼成一个标识符。
 
 test("R44d final 1：注释要换成分隔空白，`SetParent/**/as reparent` 不许拼成一个标识符", async () => {
   const { taskbarWriteViolations, stripComments } = await import("../scripts/acceptance.mjs");
@@ -784,14 +744,8 @@ test("R44d final 1：注释要换成分隔空白，`SetParent/**/as reparent` �
   assert.deepEqual(taskbarWriteViolations("/* SetParent(/**/hwnd(foreign), None); */"), [], "注释里的东西仍然是注释");
 });
 
-// ---------------------------------------------------------------------------
-// R44d final review Important 3：精确调用清单不全
-//
-// brief §39 禁的是"对**外来** HWND 做尺寸/样式/销毁/消息写"；只扫六个 API 时
-// `MoveWindow(hwnd(foreign), …)` 这类直接改写返回 `[]`（审查复现）。这里把审查点名的
-// 六个常见 HWND 直接改写 API 并进同一份清单，判据（第一实参必须是 `self::ensure_own(...)?`）
-// 与别名规则一条不改松紧，也不新增任何"按参数名/变量名放行"的形态。
-// ---------------------------------------------------------------------------
+// 精确调用清单补齐 MoveWindow/SetWindowLongW/A/DestroyWindow/SendMessageW/A。
+// 判据与别名规则不变，不新增按参数名或变量名放行的形态。
 
 test("R44d final 3：MoveWindow/SetWindowLongW/A/DestroyWindow/SendMessageW/A 也必须在受核调用清单里", async () => {
   const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");
@@ -874,18 +828,8 @@ test("R44d final 3：MoveWindow/SetWindowLongW/A/DestroyWindow/SendMessageW/A �
   );
 });
 
-// ---------------------------------------------------------------------------
-// R44d follow-up：守卫**实现体**的不变量（扫描器只核调用形态，不核 `ensure_own` 的函数体）
-//
-// 独立复审指出：`taskbarWriteViolations` 证明的是"写目标的实参恰好是
-// `self::ensure_own(...)?`"，它**不证明** `fn ensure_own` 自己还在核
-// 存活 / 代次 / owner 线程 / 自进程。把函数体改成直接 `Ok(handle)`，
-// acceptance 依旧全绿。所以这条用例钉的是实现体本身。
-//
-// 下面的读取器（剥注释 / 平衡花括号取函数体 / 守卫判定）是**测试本地**的：
-// 不进 `scripts/acceptance.mjs`、不新增任何写目标的放行形态，
-// 也不把"守卫实现体不变量"改成扫描器里的白名单。
-// ---------------------------------------------------------------------------
+// 守卫实现体不变量：扫描器只核调用形态，不核 `ensure_own` 的函数体。
+// 下面的读取器是测试本地的，不进 acceptance、不新增放行形态。
 
 /**
  * 测试本地的 Rust 字面量跳过：`start` 处是字面量起点就返回其后的位置，否则 `-1`。
@@ -919,11 +863,9 @@ function literalEnd(text, start) {
   return -1;
 }
 
-/** 测试本地的 Rust 注释屏蔽：注释（含嵌套块注释）换成**等长空白**（换行保留），字面量整段照抄。
- *
- *  与 `scripts/acceptance.mjs` 里的 `stripRustComments` 的差别只有一个：那个把注释折叠成一个
- *  分隔空格（够用，因为它不要求偏移对回原文），这里必须**长度不变**——守卫体提取之后还要用
- *  索引切花括号，注释一折叠偏移就歪了（I2）。
+/**
+ * 测试本地的 Rust 注释屏蔽：注释换成等长空白（换行保留），字面量整段照抄。
+ * 必须长度不变，因为守卫体提取后还要用索引切花括号。
  */
 function blankRustComments(source) {
   let out = "";
@@ -972,17 +914,9 @@ function blankRustLiterals(code) {
   return out;
 }
 
-/** 先剥注释、再屏蔽字面量（两步都**等长**、换行保留），按**平衡花括号**切出 `fn ensure_own` 的
- *  函数体（含花括号）；切不出来返回 `null`。
- *
- *  顺序是判据的一部分（I2）：旧实现只在"找花括号"时跳过字面量、返回的仍是**原始字节**，于是
- *  一段字符串里的 `fn ensure_own(…) { … }` 能被当成真定义（或把唯一性挤成两份而提取失败）。
- *  现在定义与花括号都在"只剩代码"的视图上定位：
- *  - 字符串 / raw 串 / 字符 / 注释里的 `fn ensure_own` 既不算定义，也不会把偏移算歪；
- *  - 返回的函数体本身也不含字面量内容（内容已换成空格），`ensureOwnGuardMisses` /
- *    `ensureOwnProvenanceMisses` 因此不会把"串里的检查文本"读成检查；
- *  - 定义必须**唯一**：0 处（含只有 raw 定义 `fn r#ensure_own`）或 ≥2 处都返回 `null`，
- *    调用方必须按失败记账（fail closed），不许拿"提取失败"当通过。
+/**
+ * 先剥注释再屏蔽字面量（两步等长、换行保留），按平衡花括号切出 `fn ensure_own` 的函数体。
+ * 定义必须唯一，切不出来返回 `null`，调用方按失败记账。
  */
 function ensureOwnBody(source) {
   const code = blankRustLiterals(blankRustComments(source));
@@ -1039,9 +973,7 @@ test("R44d follow-up：真实 ensure_own 的函数体自己核 存活/代次/own
     `注释里写一遍检查不算检查：${JSON.stringify(commentedMisses)}`,
   );
 
-  // 3) 变异自查（**内存源码**，测试本地）：判定必须不是"永远为真"——
-  //    同一份函数体重组一遍（正控）要通过；删掉任一项检查必须失败；
-  //    把检查挪到 `Ok(handle)` 之后也必须失败。
+  // 变异自查：删掉任一项检查、或把检查挪到 `Ok(handle)` 之后，判定都必须失败。
   const wrap = (bodyText) => `mod native {\n    fn ensure_own(policy: &EmbedState, own: OwnWindow) -> Result<HWND, Reason> ${bodyText}\n}\n`;
   assert.deepEqual(
     ensureOwnGuardMisses(ensureOwnBody(wrap(body))),
@@ -1069,9 +1001,7 @@ test("R44d follow-up：真实 ensure_own 的函数体自己核 存活/代次/own
     `检查必须出现在 Ok(handle) 之前：挪到成功后必须点名：${JSON.stringify(lateMisses)}`,
   );
 
-  // 4) 负控：**字面量里的检查文本不是检查**。把四项检查的文本原样塞进普通串 / raw 串，
-  //    可执行代码里一项都没有——判定必须点名四项缺失。否则"删掉四项检查、把它们的文本
-  //    放进一个字符串再 `Ok(handle)`"这种回退依旧全绿（正则直接扫原文的假阳性）。
+  // 负控：字面量里的检查文本不算检查，判定必须点名四项缺失。
   const guardText =
     "!IsWindow(Some(handle)).as_bool() || !policy.may_write(own, pid, thread) " +
     "|| thread != GetCurrentThreadId() || pid != std::process::id()";
@@ -1123,20 +1053,8 @@ test("R44d follow-up：真实 ensure_own 的函数体自己核 存活/代次/own
   );
 });
 
-// ---------------------------------------------------------------------------
-// R44d final review Important 2：守卫的**来源**必须可证（handle / PID / 线程同一来源）
-//
-// 上一轮的判定只核"四项检查的文本都在 `Ok(handle)` 之前"，**不核** `handle` 是谁、
-// `pid`/`thread` 从哪来。于是把 `handle` 换成 `GetShellWindow()`、或让 pid/thread 抄
-// `own.pid/own.thread`，四条关键字照样全中、判定照样绿，外来 HWND 从守卫里流出去。
-// 本轮把来源本身写成判据（仍是测试本地、仍只认 canonical 写法）。
-//
-// 口径照实说：这是**词法 + 局部结构**的判据，不证明任意 Rust 控制流。它只认
-// `fn ensure_own` 的这一种写法：`let handle = hwnd(own.handle);` + `let mut pid = 0;
-// let thread = GetWindowThreadProcessId(handle, Some(&mut pid));` + 四项检查在**同一个**
-// `if` 里（该分支 `return Err`）→ `Ok(handle)` 收尾。真实源码一旦重构成别的形状，
-// 判定会 fail closed（红），而不是悄悄放行。
-// ---------------------------------------------------------------------------
+// 守卫的来源必须可证：handle 与 pid/thread 同一来源，四项检查挡在成功出口前。
+// 判据是词法 + 局部结构，源码形状一变就 fail closed，不认“等价写法”。
 
 /** `code` 里名字作为**赋值目标**出现的位置（`=` 的下标；排除 `==` / `=>` / `own.pid`）。 */
 function assignmentSites(code, name) {
@@ -1179,13 +1097,7 @@ function matchDelimiter(code, open) {
   return -1;
 }
 
-/**
- * 拒绝条件的 canonical 形状：四个**拒绝谓词**按固定顺序用 `||` 连起来——任何一项不成立就拒绝。
- *
- * 判据只容忍**空白**差异（`self ::`、`Some ( handle )` 这种），不容忍：连接符（`&&`）、
- * 短路常量（`false && (…)` / `true || (…)`）、整体括号或取反（`(…)` / `!(…)`）、
- * 子句多一个 / 少一个 / 换序。形状变了就是 fail closed（红），不是"等价写法"。
- */
+/** 拒绝条件必须是四条拒绝谓词按固定顺序以 `||` 连接，只容忍空白差异，形状一变即 fail closed。 */
 const ENSURE_OWN_REJECT_CLAUSES = [
   /^!\s*IsWindow\s*\(\s*Some\s*\(\s*handle\s*\)\s*\)\s*\.\s*as_bool\s*\(\s*\)$/,
   /^!\s*policy\s*\.\s*may_write\s*\(\s*own\s*,\s*pid\s*,\s*thread\s*\)$/,
@@ -1219,16 +1131,7 @@ function exactRejectCondition(condition) {
   return ENSURE_OWN_REJECT_CLAUSES.every((pattern, index) => pattern.test(clauses[index]));
 }
 
-/**
- * 找出"拒绝条件恰好是 canonical 析取式、该分支 `return Err`、且没有 `else`"的那个 `if`。
- *
- * 返回 `{ found, nearMiss, condStart, condEnd, blockEnd }`：`found === false` 时调用方必须按缺失
- * 记账（fail closed）。`nearMiss === true` 表示"有 `if` 且分支 `return Err`，但条件形状不可证"
- * ——诊断上要明确说"拒绝条件不可弱化"，不能笼统说"检查不在 if 里"。
- *
- * 这是**词法 + 局部结构**判据，不是 Rust 表达式求值：它证明不了任意控制流，只证明"挡住
- * `Ok(handle)` 的那个 `if` 的条件形状就是支持的那一种"。形状一变就红，不猜。
- */
+/** 定位“拒绝条件恰为 canonical 析取式、分支 `return Err`、无 `else`”的 `if`，找不到即按缺失记账。 */
 function guardingIf(code) {
   let nearMiss = false;
   for (const hit of code.matchAll(/\bif\b/g)) {
@@ -1256,22 +1159,7 @@ function guardingIf(code) {
   return { found: false, nearMiss, condStart: -1, condEnd: -1, blockEnd: -1 };
 }
 
-/**
- * 守卫体的 **canonical token 形状**（agent109 Important 1/2）：`{ unsafe { … } }` 外壳，
- * `let handle = hwnd(own.handle);` 一次、`let mut pid = 0;` 与
- * `let thread = GetWindowThreadProcessId(handle, Some(&mut pid));` 一次、四项拒绝条件恰好是
- * 那条 `||` 析取式、`if` 分支**直接** `return Err(Reason::Stale);`、之后只有唯一的 `Ok(handle)`。
- *
- * 判据按 **token** 比较，所以空白与注释可以随便变（注释在提取时已等长屏蔽）；但绑定、分支、
- * 连接符、成功出口一个都不许换：
- * - `if` 分支里放闭包（`let _swallow = || { return Err(…); };`）会把拒绝 `return` 吞进闭包，
- *   `Ok(handle)` 变成无条件成功——token 形状一变即红；
- * - `match GetShellWindow() { handle => Ok(handle) }` 里的 `handle` 是 pattern 影子绑定，
- *   不是被检查过的那个 `handle`——成功出口不是 `Ok(handle)` 单独收尾即红；
- * - `else` / 额外绑定 / 成功后加代码同理。
- *
- * 这是**fail closed** 的 canonical 判据，不是 Rust 解析器：形状变了就红，绝不猜"等价"。
- */
+/** 守卫体的 canonical token 形状：一次 `let handle`、一次 pid/thread 绑定、四条拒绝谓词、唯一 `Ok(handle)` 收尾。 */
 const CANONICAL_GUARD_BODY = [
   "{ unsafe {",
   "let handle = hwnd(own.handle);",
@@ -1311,9 +1199,7 @@ const ENSURE_OWN_HANDLE_SOURCE = /^\s*(?:self\s*::\s*)?hwnd\s*\(\s*own\s*\.\s*ha
 const ENSURE_OWN_IDENTITY =
   /let\s+mut\s+pid\s*(?::\s*u32\s*)?=\s*0\s*;\s*let\s+thread\s*(?::\s*u32\s*)?=\s*GetWindowThreadProcessId\s*\(\s*handle\s*,\s*Some\s*\(\s*&\s*mut\s+pid\s*\)\s*\)\s*;/;
 
-/** provenance 版四项检查：判据与 `ENSURE_OWN_CHECKS` 相同，但名字必须指向**局部值**。
- *  差别只在 `pid`/`thread` 前的负向后行断言：`own.pid != std::process::id()` 不是"拿查出来的
- *  pid 去比对"，而是抄 `own` 里的值自证——外来句柄会顺着它流出去。 */
+/** provenance 版四项检查：判据同 `ENSURE_OWN_CHECKS`，但 `pid`/`thread` 必须指向局部值，而非抄 `own` 自证。 */
 const ENSURE_OWN_PROVENANCE_CHECKS = [
   {
     label: "!IsWindow(Some(handle)).as_bool()（句柄存活）",
@@ -1327,9 +1213,7 @@ const ENSURE_OWN_PROVENANCE_CHECKS = [
   { label: "pid != std::process::id()（自进程）", pattern: /(?<![A-Za-z0-9_.])pid\s*!=\s*std\s*::\s*process\s*::\s*id\s*\(\s*\)/ },
 ];
 
-/** 返回守卫实现体的**来源**问题清单（空数组 = handle/pid/thread 同一来源，且四项检查挡在成功出口前）。
- *  先用 `blankRustLiterals` 屏蔽字面量：串里的"来源"不是来源。判据只认 canonical 写法，
- *  真实源码一旦换成别的形状就 fail closed（红），而不是默默放行。 */
+/** 返回守卫实现体的来源问题清单：空数组 = handle/pid/thread 同一来源且四项检查挡在成功出口前。 */
 function ensureOwnProvenanceMisses(body) {
   const misses = ensureOwnGuardMisses(body);
   if (typeof body !== "string" || body.trim() === "") return misses; // 空体已由上面点名
@@ -1379,9 +1263,7 @@ function ensureOwnProvenanceMisses(body) {
     misses.push("Ok(handle)：必须是函数体最后一条表达式（之后不许再有代码）");
   }
 
-  // ⑤ 支配关系：拒绝条件必须**恰好**是那条四项 `||` 析取式、该分支 return Err，且整段排在
-  //    `Ok(handle)` 之前。条件被弱化（`&&` / `false && (…)` / `true || (…)` / 多、少、换序）
-  //    时这里必须点名——只核"四项文本都出现过"是挡不住"逻辑上被短路"的（I3）。
+  // 支配关系：拒绝条件必须恰为那条四项 `||` 析取式、分支 return Err，且整段排在 `Ok(handle)` 之前。
   const guarded = guardingIf(code);
   if (!guarded.found) {
     misses.push(
@@ -1401,9 +1283,7 @@ function ensureOwnProvenanceMisses(body) {
     }
   }
 
-  // ⑥ canonical token 控制流：绑定 / 拒绝分支 / 成功出口必须逐 token 对得上（空白、注释可变）。
-  //    ①–⑤ 是"来源 + 条件形状 + 次序"的判据，抓不到"if 分支里用闭包吞掉 return"与
-  //    "match 的 pattern 影子绑定冒充成功出口"（agent109 Important 1/2）——所以这里再钉一条结构判据。
+  // canonical token 控制流：绑定 / 拒绝分支 / 成功出口必须逐 token 对得上（空白与注释可变），否则 fail closed。
   const mismatch = canonicalGuardMismatch(guardTokens(blankRustLiterals(blankRustComments(body))));
   if (mismatch !== null) misses.push(mismatch);
   return misses;
@@ -1423,8 +1303,8 @@ test("R44d final 2：真实 ensure_own 的 handle/pid/thread 来源必须可证�
   // 正控：真实函数体在内存里重组后照样通过（否则下面那些"必须红"没有意义）。
   assert.deepEqual(ensureOwnProvenanceMisses(ensureOwnBody(wrap(body))), [], "内存里重组真实函数体后判定仍要通过");
 
-  // 恶意体：句柄/身份来源被换掉，但四项关键字与 `Ok(handle)` 一个不缺——**修前口径**会全部接受，
-  // 这就是本轮的 RED（这一组对照断言在修复后仍然成立，用来钉住"来源判据真的管用"）。
+  // 恶意体：句柄/身份来源被换掉，但四项关键字与 `Ok(handle)` 一个不缺——只核关键字的判据会全部接受。
+  // 这组对照用来钉住「来源判据真的管用」。
   const guardTail =
     "if !IsWindow(Some(handle)).as_bool() || !policy.may_write(own, pid, thread) " +
     "|| thread != GetCurrentThreadId() || pid != std::process::id() { return Err(Reason::Stale); }";
@@ -1466,7 +1346,7 @@ test("R44d final 2：真实 ensure_own 的 handle/pid/thread 来源必须可证�
     assert.ok(maliciousBody !== null, `${why}：仍应能切出函数体（这是判定的事，不是提取的事）`);
     assert.deepEqual(ensureOwnGuardMisses(maliciousBody), [], `${why}：修前口径（只核四项关键字）确实会接受它`);
     const misses = ensureOwnProvenanceMisses(maliciousBody);
-    // 判定为"通过"的恶意体收集起来一次点名（RED 时这一行会把六条全列出来）。
+    // 被判为「通过」的恶意体收进 accepted 一次点名；判据管用时它是空的。
     if (misses.length === 0) { accepted.push(why); continue; }
     assert.ok(
       misses.join("\n").includes(keyword),
@@ -1516,25 +1396,10 @@ test("R44d final 2：真实 ensure_own 的 handle/pid/thread 来源必须可证�
   );
 });
 
-// ---------------------------------------------------------------------------
-// R44d final findings：本轮独立复审留下的四个 Important
-//
-// I1 raw identifier 的守卫定义（`fn r#ensure_own`）也是定义，唯一性必须管得到；
-// I2 守卫体提取必须**先剥注释 + 屏蔽字面量**再定位唯一一份真实定义（串里伪造的 `fn ensure_own` 不算）；
-// I3 四项拒绝条件必须恰好是那条 `||` 析取式（`&&` / `false && (…)` / `true || (…)` / 多/少/换序都不行）；
-// I4 写 API 清单必须覆盖审查点名的全部直接改写入口，批量/多窗口写（`DeferWindowPos` /
-//    `EndDeferWindowPos` / `LockWindowUpdate`）在本模块里一律禁用。
-//
-// 四条都只往严的方向走：没有新增参数名/变量名/模块白名单，也没有放宽任何既有形态。
-// ---------------------------------------------------------------------------
+// 四条判据：raw identifier 定义、守卫体先剥注释与字面量、拒绝条件形状、写 API 清单全覆盖。
+// 四条都只往严的方向走，没有放宽任何既有形态。
 
-/** I4 的 first-HWND 直接改写清单（既有十二条 + 复审点名的十七条）。第二项是"除 HWND 外的实参"，
- *  按各 API 的真实参数表写全（`SendMessageTimeoutW/A` 是 Msg, wParam, lParam, flags, timeout, result）。
- *  这份表就是"清单只许扩、不许缩"的可审计版本：新增 API 必须同时进扫描器与本表。
- *
- *  写**共享窗口类**的入口（`SetClassLongPtrW/A`、`SetClassLongW/A`、`SetClassWord`）**不在**这张表里：
- *  它们改的不是"这一个 HWND"，自窗守卫证明不了类级效果只影响自窗——所以它们在
- *  `BLANKET_FORBIDDEN_APIS` 一侧（出现即拒绝，canonical 首参也不行）。 */
+/** first-HWND 直接改写清单：第二项是“除 HWND 外的实参”，清单只许扩、不许缩。 */
 const MUTATION_SIGNATURES = [
   ["SetParent", "None"],
   ["SetWindowPos", "None, 0, 0, 1, 1, flags"],
@@ -1633,9 +1498,7 @@ test("R44d findings 2：守卫体提取必须先剥注释/屏蔽字面量，串�
     assert.ok(body !== null, `${shape}里的伪造定义不算定义，真实定义必须仍能被切出来`);
     assert.doesNotMatch(body, /fn\s+ensure_own/, `${shape}里的定义文本必须被屏蔽，不能进"函数体"`);
     assert.doesNotMatch(body, /hwnd\s*\(\s*9\s*\)/, `${shape}里伪造体的内容不能冒充真实守卫体`);
-    // 串只是内容：四项真检查与真实来源都还在（弱基线 + 来源判据都不该被串里的文本顶替）。
-    // 但注入本身给函数体加了一条前置语句，**canonical 控制流判据因此 fail closed**（多报一侧）：
-    // 它只许点名"控制流"，不许栽赃 handle/pid/thread 来源。
+    // 串只是内容：真检查与真实来源都还在，但注入多出一条前置语句，canonical 控制流判据因此 fail closed（多报一侧）。
     assert.deepEqual(ensureOwnGuardMisses(body), [], `${shape}里的注入不改变四项真检查`);
     const provenance = ensureOwnProvenanceMisses(body);
     assert.ok(provenance.length >= 1, `${shape}：注入后的形状不是 canonical，必须 fail closed（不静默放行）`);
@@ -1803,8 +1666,8 @@ test("R44d findings 4：完整写 API 清单（first-HWND 受核 + 批量/多窗
       [],
       `${api} 的全路径受核调用必须放行`,
     );
-    // 字符串 / 注释里的名字不是代码（**调用形态**的字符串是既有的、已钉住的假阳性，见 F4 用例，
-    // 这里只用非调用形态，避免把那条"多报一侧"的已知行为混进来）。
+    // 字符串 / 注释里的名字不是代码（**调用形态**的字符串是既有的、已钉住的假阳性，见六个写 API 别名引用那条用例，
+    // 这里只用非调用形态，避免把那条「多报一侧」的已知行为混进来）。
     assert.deepEqual(taskbarWriteViolations(`let doc = "${api} 是 Win32 的直接改写入口";`), [], `${api}：字符串里的名字不算命中`);
   }
 
@@ -1834,21 +1697,8 @@ test("R44d findings 4：完整写 API 清单（first-HWND 受核 + 批量/多窗
   );
 });
 
-// ---------------------------------------------------------------------------
-// R44d fix2（final review round 2，agent109）：
-// A1 守卫体判据只核"四项文本 + 次序"，**不核控制流**——`if` 分支里放一个闭包
-//    `let _swallow = || { return Err(Reason::Stale); };` 就把拒绝 `return` 吞进闭包，
-//    `Ok(handle)` 变成无条件成功，旧判据照样全绿；
-// A2 成功出口只按"`Ok(handle)` 出现在最后"判，`match GetShellWindow() { handle => Ok(handle) }`
-//    里的 `handle` 是 **pattern 影子绑定**，旧判据认的还是同一个名字；
-// A3 `SetClassLongPtrW/A` 改的是共享**窗口类**，不是"这一个 HWND"，自窗首参守卫证明不了
-//    类级效果只波及自窗——它们必须进"出现即拒绝"的清单，而不是普通首参受核清单；
-// A4 `SendMessageTimeoutW/A` 的夹具少了真实的 `timeout` 实参；
-// A5 `RemoveWindowSubclass` 的唯一调用在 `WM_NCDESTROY` 里撤自己的子类，扫描器看不见——
-//    要么给出窄的"只有当前子类回调能到达"证明，要么 fail closed。
-//
-// 本轮判定一律只收紧：canonical token 形状不匹配就 fail closed（红），不放行任何"等价写法"。
-// ---------------------------------------------------------------------------
+// 守卫判据必须核控制流与成功出口真身（闭包吞 return、match 影子绑定都会骗过只核关键字的判据），类级写 API 一律禁用。
+// 判定一律只收紧：canonical token 形状不匹配即 fail closed。
 
 /** 与真实 `fn ensure_own` 逐 token 相同的 canonical 形状（含 `unsafe {}` 外壳）。
  *  负控都在它上面改**一处**，这样"红了"只能归因于那处控制流/来源，而不是别的形状差异。 */
@@ -1884,7 +1734,7 @@ test("R44d fix2 1：守卫体必须是 canonical token 控制流（闭包吞 ret
     "函数体里插注释不算控制流变化（注释是空白）",
   );
 
-  // A1/A2：两条**旧判据会接受**的绕过，必须被新控制流判据点名。
+  // 两条只核关键字的判据会接受的绕过，控制流判据必须点名。
   const slips = [
     [
       "if 分支里用闭包吞掉 return（Ok(handle) 变成无条件成功）",
@@ -1898,7 +1748,7 @@ test("R44d fix2 1：守卫体必须是 canonical token 控制流（闭包吞 ret
       `${FIX2_PREFIX}match GetShellWindow() { handle => Ok(handle) } } }`,
     ],
   ];
-  // 两条**旧判据会接受**的绕过：收集起来一次点名（RED 时这一行会把两条都列出来）。
+  // 两条只核关键字的判据会接受的绕过，收集起来一次点名。
   const accepted = [];
   for (const [why, text] of slips) {
     const body = ensureOwnBody(wrap(text));
@@ -2056,16 +1906,8 @@ test("R44d fix2 4：RemoveWindowSubclass 只允许当前子类回调对内层自
   );
 });
 
-// ---------------------------------------------------------------------------
-// R44d fix3（class-wide API follow-up）：
-// `SetClassLongPtrW/A` 已经在"一律禁用"一侧，理由是它们改的是**共享窗口类**（第一实参
-// 只用来"选哪个类"，自窗首参守卫证明不了类级效果只波及自窗）。同样的语义完全适用于
-// `SetClassLongW`、`SetClassLongA`、`SetClassWord`——但它们此前**根本不在扫描器里**
-// （源码扫描覆盖遗漏，不是 native 调用点变化；真实模块一个都没用到）。
-// 因此这三条也必须走 `BLANKET_FORBIDDEN_APIS`：出现即拒绝，canonical 首参不是放行凭证。
-// 下面用行为钉住"在 blanket 一侧而不是普通首参受核一侧"：同一段 canonical 首参调用，
-// 普通受核 API 放行、这三条必须点名，且诊断词是"一律禁用"。
-// ---------------------------------------------------------------------------
+// `SetClassLongW/A`、`SetClassWord` 与 `SetClassLongPtrW/A` 同为类级写，走 `BLANKET_FORBIDDEN_APIS`。
+// 同一段 canonical 首参调用，普通受核 API 放行，这三条必须点名“一律禁用”。
 
 test("R44d fix3：SetClassLongW/A、SetClassWord 是类级写，任何出现都拒绝（canonical 首参也不行）", async () => {
   const { taskbarWriteViolations } = await import("../scripts/acceptance.mjs");

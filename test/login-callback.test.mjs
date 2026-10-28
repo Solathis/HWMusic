@@ -1,9 +1,6 @@
 /**
- * R4 协议原型层 · 登录回调与登录流程编排（src/protocols/login-callback.mjs）。
- *
- * 关键断言：回调识别精确（hms://redirect_uri）、state 常量时间比较、一次性消费、10 分钟过期、
- * 四收场（callback/cancelled/closed/timed_out）各自只结算一次，且**任何收场都必然清理**。
- * 计时器与宿主全部注入，测试不碰真实时钟/真实窗口。先写先看红。
+ * 协议原型层 · 登录回调与登录流程编排（src/protocols/login-callback.mjs）。
+ * 回调识别精确、state 常量时间比较、一次性消费、10 分钟过期；四收场各自只结算一次且必然清理。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -201,7 +198,7 @@ test("createCallbackConsumer：先看已消费、再看格式、最后比 state�
 });
 
 test("isAllowedLoginUrl：华为登录域放行、精确例外放行；oauth-login2 与同形钓鱼域不放行", () => {
-  // R32：白名单 = 参考实现实测走通的那五个域（授权域与令牌域是两个不同主机）
+  // 白名单 = 参考实现实测走通的那五个域（授权域与令牌域是两个不同主机）。
   assert.equal(isAllowedLoginUrl("https://oauth-login.platform.hicloud.com/oauth2/v3/authorize?client_id=1"), true);
   assert.equal(isAllowedLoginUrl("https://oauth-login.cloud.huawei.com/oauth2/v3/token"), true);
   assert.equal(isAllowedLoginUrl("https://id1.cloud.huawei.com:443/CAS/remoteLogin?x=1"), true, "CAS 门户域（默认端口不写进 origin）");
@@ -277,14 +274,7 @@ test("runLoginFlow：超时时长可注入，默认取 LOGIN_TIMEOUT_MS（10 分
   await defaults.flow.settled;
 });
 
-/**
- * R36：`createdAt` 让消费者按**尝试**的寿命算过期，而不是按"窗开了多久"。
- *
- * 为什么需要它：二维码那条路的最后一跳是"确认之后才开窗"——attempt 建立在前（扫码也是它换来的），
- * 窗却开在后。若消费者的起点取"开窗那一刻"，一次 9 分钟才确认的扫码会换来一扇可以再等 10 分钟的窗，
- * 于是**已经作废的 PKCE 对**会被送去兑换（服务端只会回一个 invalid_grant，用户看到的是一句莫名其妙的
- * 兑换失败）。按 attempt 的建立时刻算，"过期"这条判断仍然只说一件事：这次尝试的寿命到了。
- */
+/** `createdAt` 让过期按尝试的寿命算，而非「窗开了多久」：晚确认的扫码换不出更长的寿命。 */
 test("runLoginFlow：createdAt 把过期锚定在 attempt 上（窗开得晚，寿命不会因此变长）", async () => {
   const attemptCreatedAt = 1_000;
   const lateNow = () => attemptCreatedAt + LOGIN_TIMEOUT_MS + 1;
@@ -413,13 +403,7 @@ test("runLoginFlow：宿主缺少必需方法 → 构造期就抛（不静默跑
   assert.throws(() => runLoginFlow({ authorizeUrl: "https://example.invalid/a", expectedState: "", host: fakeHost() }), TypeError);
 });
 
-/**
- * R7 增补的两条收场入口：宿主（Rust 登录窗）自己定夺的结论要能落到流程上。
- *
- * 为什么必须是流程内部的方法：`timedOut` 与 `failed` 是 R4 已有的两个内部收场（计时器到点、
- * 开窗失败），但宿主报来同一个结论时，外部**没有**办法让流程按这两个状态结算——只能伪装成
- * cancel/close，那就把「扫码超时」谎报成「窗口被关」，上层再也分不清该劝用户重试还是重扫。
- */
+/** 宿主定夺的结论（timedOut/fail）走流程内部方法，避免把「扫码超时」谎报成「窗口被关」。 */
 test("runLoginFlow：宿主结论驱动 —— timedOut() 与 fail() 各自结算一次并清理（不伪装成 cancel/close）", async () => {
   const hostTimedOut = flowOf();
   assert.equal(hostTimedOut.flow.timedOut().ok, true);

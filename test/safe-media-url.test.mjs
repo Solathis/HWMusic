@@ -1,9 +1,9 @@
 /**
- * R4 协议原型层 · 媒体 URL 安全（src/protocols/safe-media-url.mjs）。
+ * 媒体 URL 安全（`src/protocols/safe-media-url.mjs`）。
  *
- * 渲染层 img/audio 只吃这个模块放行的 URL：https + CDN 后缀白名单（与 tauri.conf.json CSP 同源）。
- * 任何解析不了、host 对不上、带凭据/端口的输入一律返回 null——**绝不抛异常**（渲染层不能因为一张封面炸掉）。
- * CSP ↔ 常量一致性由本文件从 tauri.conf.json 解析 CSP 行来钉，先写先看红。
+ * 渲染层的 img/audio 只吃这个模块放行的 URL：https + CDN 后缀白名单（与 tauri.conf.json CSP 同源）。
+ * 解析不了、host 不符、带凭据或端口的输入一律返回 null，绝不抛异常；
+ * CSP 与常量的一致性由本文件解析 tauri.conf.json 的 CSP 行来钉。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -130,9 +130,8 @@ test("CSP 一致性：常量后缀与 tauri.conf.json 的 img-src/media-src 白�
   assert.deepEqual([...cspMediaHosts].sort(), [...MEDIA_URL_HOST_SUFFIXES].sort(), "CSP 与 safe-media-url 白名单必须同源");
   assert.deepEqual(directive("connect-src"), ["'self'", "ipc:", "http://ipc.localhost"], "渲染层不得有对外直连通道");
 
-  // R65：本地曲库的自定义协议只加在 media-src / img-src 两个指令上（音频 + 封面），
-  // default-src / connect-src 一个字都不许动——AMLL 背景那侧是靠 `new Image()` 预载，
-  // 不走 fetch，所以放宽 connect-src 没有任何理由。
+  // 本地曲库的自定义协议只加在 img-src / media-src 两个指令上；
+  // default-src / connect-src 一个字都不许动（AMLL 背景靠 `new Image()` 预载，不走 fetch）。
   for (const name of ["img-src", "media-src"]) {
     const sources = directive(name);
     assert.ok(sources.includes("http://hwlocal.localhost"), `${name} 必须放行 Windows 形态的本地协议`);
@@ -184,14 +183,8 @@ test("R65：本地曲库协议按 id 形状放行（Windows 与 mac/Linux 两种
 });
 
 test("广播频道：R16 起是 app:notice + auth:status + auth:qr + player:command + 托盘那两条 + 歌词窗那四条 + 主题那条（每个新增都在共享常量表里，不另立清单）", () => {
-  // R4 落地时这里钉的是"只有 app:notice"；R7 增补 auth:status（登录状态）、
-  // R9 预登记 player:command（R11 托盘的播放控制）、R11 增补 lyrics:toggle / app:open-settings
-  // （托盘"桌面歌词"与"设置…"）、R12 增补 lyrics:document / lyrics:progress / lyrics:state
-  // （主窗转发给歌词窗的歌词、进度与配置）、R16 增补 auth:qr（引导页二维码的生命周期）、
-  // R25 增补 theme:changed（主题三态：浅色/深色/跟随系统）、桌面歌词锁定后的指针进出
-  // lyrics:pointer 后
-  // 同步改这一行——硬钉的意义是"每次放宽都得有人签字"，
-  // 不是"永远不许加"。
+  // 广播频道是硬钉的白名单：每次放宽都得同步改这一行——意义是「有人签字」，
+  // 不是「永远不许加」。
   assert.deepEqual([...BROADCAST_CHANNELS], [
     "app:notice",
     "auth:status",

@@ -1,14 +1,6 @@
 /**
- * R31 · 设备指纹编码器（`src/protocols/device-fingerprint.mjs`）的离线测试。
- *
- * 为什么单独立一个模块：`deviceID` 不是页面自己编的，而是页面拿一份**浏览器指纹**去
- * `POST /CAS/IDM_W/ajaxHandler/dev` 换回来的 `sid`（探针实测，见
- * `docs/API_CONTRACT.md` §1.8 的 R31 段）。那份指纹在页面上是 `k=v&…&cs=<校验>` 的字符串，
- * 先像 MD5 那样滚动混淆、再 base64——要"复刻页面的生成逻辑"，就得把这段编码器**逐字节**抄对，
- * 所以它单独成模块、单独钉测试。
- *
- * **钉住"逐字节一致"的那条用例**用的是探针真抓到的那份 fp（`test/fixtures/r31-page-fingerprint.json`，
- * 探针自己浏览器的匿名指纹，不含账号信息）：解回来再编回去，必须与页面发出去的一模一样。
+ * 设备指纹编码器（src/protocols/device-fingerprint.mjs）的离线测试。
+ * deviceID 是页面拿浏览器指纹去 POST /CAS/IDM_W/ajaxHandler/dev 换回的 sid，编码器必须逐字节复刻页面逻辑。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -78,7 +70,7 @@ test("指纹解码：认不出来的一律 null（不抛、不猜半份）", () 
   assert.equal(decodeFingerprint("").ok, false);
   assert.equal(decodeFingerprint(null).ok, false);
   assert.equal(decodeFingerprint("不是 base64 的形状！！！").ok, false);
-  // 有内容但没有 cs：也当认不出（服务端不认这种，探针实测：sid 为空串）
+  // 有内容但没有 cs：也当认不出（服务端不认这种）。
   assert.equal(decodeFingerprint(Buffer.from("a=1", "binary").toString("base64")).ok, false);
 });
 
@@ -132,8 +124,7 @@ test("字段表：能真取到的就真取（语言/时区/时刻），取不到
   assert.equal(fields.ett, "1700000000000", "ett = 采集时刻（注入的 now）");
   assert.equal(fields.etz, String(-new Date(1_700_000_000_000).getTimezoneOffset()));
   assert.equal(fields.nlg, "zh-cn");
-  // canvas/webgl/fonts/ep 是页面用真浏览器算出来的哈希；sidecar 没有浏览器引擎，
-  // 只能给**同形状**（40 位 hex）的固定值——服务端按形状收（探针实测：换个 canvas 值照样发 sid）。
+  // canvas/webgl/fonts/ep 是页面用真浏览器算出来的哈希；sidecar 只能给同形状（40 位 hex）的固定值，服务端按形状收。
   for (const name of ["canvas", "webgl", "fonts", "ep"]) {
     assert.match(fields[name], /^[0-9a-f]{40}$/, `${name} 必须是 40 位 hex（与服务端收下的形状一致）`);
   }

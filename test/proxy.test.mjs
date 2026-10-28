@@ -1,12 +1,9 @@
 /**
- * R6 统一代理 · sidecar 侧装配与 Rust 侧接线。
+ * 统一代理 · sidecar 侧装配与 Rust 侧接线。
  *
- * 钉住四件事：
- * 1. 判定与清洗：enabled=false 字段再全也不算配；host/port 坏形状绝不猜（夹具与 Rust 共用）；
- * 2. 凭据卫生：**只进 undici 的 auth（proxy-authorization）**，不进 uri、不进日志、不进 notice、不回显；
- * 3. 装配顺序：main.mjs 里代理装配先于桥/调度器（源码顺序扫描，见用例注释）；
- * 4. 接线：主窗必须 `proxy_url`（旧仓审计出的缺陷 K6），装配走 `webview_proxy::resolve_for_webview`。
- * 本地假代理 + 本地直连服务器，全程不碰外网。先写先看红。
+ * 钉四件事：判定与清洗（`enabled=false` 字段再全也不算配，坏形状绝不猜）；凭据只进 undici 的 auth；
+ * 装配顺序先于桥与调度器；主窗必须带 `proxy_url` 并走 `webview_proxy::resolve_for_webview`。
+ * 全程只用本地假代理与本地服务器，不碰外网。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

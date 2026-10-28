@@ -1,13 +1,7 @@
 /**
- * R7 认证状态机（src/main/auth-manager.ts）：login / restore / logout 三条路径 + sessionEpoch 过渡。
- *
- * 全部外部依赖注入（宿主、令牌兑换、音乐会话兑换、会话存储、验证、广播），测试不碰真实时钟、
- * 真实网络与真实磁盘。重点钉住的是**失败路径的诚实性**：
- * - 四收场（callback/cancelled/closed/timed_out）各自映射成面向用户的 kind 与文案；
- * - 首载超时（打不开官方页）与总超时是两条不同的结论、两句不同的话；
- * - loginex 端点未知 → 结构化「待联调」错误，绝不猜 URL、绝不发请求；
- * - 保存失败但有旧会话 → 保留旧会话并如实报错（R5 语义）；
- * - restore 的失效与「无法验证」必须分开报（网络抖动不等于会话失效）。
+ * 认证状态机（src/main/auth-manager.ts）：login / restore / logout 三条路径 + sessionEpoch 过渡。
+ * 全部外部依赖注入，不碰真实时钟、网络与磁盘；重点钉住失败路径的诚实性：四收场各有 kind 与文案，
+ * 首载超时与总超时分开报，loginex 未知端点不猜 URL，保存失败保留旧会话，restore 的失效与无法验证分开报。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -26,23 +20,13 @@ const AUTHORIZE_URL = `${HUAWEI_OAUTH_ENDPOINTS.authorize}?client_id=101444301&s
 const MUSIC_SESSION = { musicSession: "user$abc", userId: "42" };
 const ACCOUNT_TOKENS = { accessToken: "AT-1", refreshToken: "RT-1", expiresAt: 1_700_000_000_000 };
 
-/**
- * 造一个"真回调"URL：state 必须是**本次 attempt** 的 state。
- *
- * 这条 helper 本身就是契约的体现：宿主交回的是官方页跳到的那个 URL，state 由 attempt 生成，
- * 测试要是自己编一个 state，测的就是"state 不匹配"那条路（也值得测，但别混进成功链）。
- */
+/** 造一个真回调 URL：state 必须取自本次 attempt（自编 state 测的是不匹配那条路）。 */
 function callbackUrl(host, code = "CODE-1") {
   const state = new URL(host.opened[0].url).searchParams.get("state");
   return `hms://redirect_uri?code=${code}&state=${state}`;
 }
 
-/**
- * 假宿主：`openLoginPage` 的结论由测试用 resolve 显式交付（模拟 Rust 窗关闭后答复）。
- *
- * 交付的是**已经解析好的宿主结论**（`{status, url?, message?}`）：线上形状的解析归
- * `src/main/huawei.ts`，由 test/huawei.test.mjs 单独钉住；auth-manager 只面对端口形状。
- */
+/** 假宿主：openLoginPage 的结论由测试用 resolve 显式交付（端口形状已解析，线上形状归 huawei.ts）。 */
 function fakeHost() {
   const opened = [];
   let settle;
@@ -109,18 +93,13 @@ function managerOf(overrides = {}) {
       notices.push(text);
       return { ok: true, data: null };
     },
-    // R40：日志收进数组（只记键名的那几条诊断要靠它断言"值一个都没出现"）
+    // 日志收进数组，供「值一个都没出现」那几条诊断断言。
     log: overrides.log ?? ((message) => logs.push(message)),
   });
   return { auth, host, store, broadcasts, notices, logs };
 }
 
-/**
- * 起一个登录并交付指定结论。
- *
- * `conclusion` 可以是结论对象，也可以是 `(host) => 结论`——回调类结论必须从开窗参数里取
- * 本次 attempt 的 state（见 `callbackUrl`）。
- */
+/** 起一个登录并交付指定结论；结论也可以是 (host) => 结论，回调类要从开窗参数取 state。 */
 async function loginWith(conclusion, overrides = {}) {
   const context = managerOf(overrides);
   const pending = context.auth.login();
@@ -153,7 +132,7 @@ test("login 成功链：createAttempt → 开窗 → 回调 → 换 AT → 换�
 
   // 开窗参数：官方授权页 + 一次性的 partition + 顶部内缩（Rust 侧再校验一遍）
   assert.equal(host.opened.length, 1);
-  // R32：授权入口换成参考实现实测的 `oauth-login.platform.hicloud.com`（不是 oauth-login1）
+  // 授权入口是参考实现实测的 oauth-login.platform.hicloud.com（不是 oauth-login1）。
   assert.match(host.opened[0].url, /^https:\/\/oauth-login\.platform\.hicloud\.com\/oauth2\/v3\/authorize\?/);
   assert.match(host.opened[0].url, /code_challenge_method=S256/);
   assert.equal(typeof host.opened[0].partition, "undefined");
@@ -163,7 +142,7 @@ test("login 成功链：createAttempt → 开窗 → 回调 → 换 AT → 换�
     "分区与顶部内缩由 huawei.ts 统一填（auth-manager 不写第二份）",
   );
 
-  // 兑换用的是 R4 已确认的 token 端点与本次 attempt 的 code_verifier（PKCE 不许串台）
+  // 兑换用已确认的 token 端点与本次 attempt 的 code_verifier（PKCE 不许串台）。
   assert.equal(exchanged.length, 1);
   assert.equal(exchanged[0].endpoint, HUAWEI_OAUTH_ENDPOINTS.token);
   assert.equal(exchanged[0].code, "CODE-1");
@@ -181,7 +160,7 @@ test("login 成功链：createAttempt → 开窗 → 回调 → 换 AT → 换�
   );
 });
 
-// —— R40：id_token 的 claims 补进账号资料（登录链上只做一次，不落盘 token） ---------------
+// id_token 的 claims 补进账号资料：登录链上只做一次，不落盘 token。
 
 /** 造一个真实形状的 JWT（三段 base64url；只解码不验签，所以签名段是占位）。 */
 const jwtOf = (claims) =>
@@ -301,12 +280,8 @@ test("login：令牌兑换失败 / loginex 端点被显式关掉 / 会话验证�
   assert.equal(exchangeFailed.result.error.kind, "http_error");
   assert.deepEqual(exchangeFailed.store.calls, [], "兑换失败不得落盘");
 
-  // loginex：端点被**显式注入 null** → 结构化「待联调」，且**一次请求都不发**。
-  //
-  // R17 之前这条测的是"没注入时的默认行为"（那时默认值就是 null）。R17 把默认值换成
-  // R17 确认过的真端点之后，"不猜 URL、不发请求"这条不变式就搬到了**显式关掉**这一档：
-  // 这里注入 `endpoints: { loginex: null }`，并注入一个**一旦被调用就失败**的兑换端口——
-  // 于是"没发请求"不再靠"默认实现恰好什么都不做"来保证，而是被直接钉住。
+  // loginex 端点被显式注入 null → 结构化「待联调」，且一次请求都不发。
+  // 兑换端口注入成一旦被调用就失败，于是「没发请求」被直接钉住，不靠默认实现恰好什么都不做。
   const host = fakeHost();
   const store = fakeSessionStore();
   let exchanged = 0;
@@ -548,7 +523,7 @@ test("端点真源：默认端点就是 docs/API_CONTRACT.md 登记的值（含 
   );
   assert.ok(contract.includes(HUAWEI_OAUTH_ENDPOINTS.authorize), "authorize 端点必须是契约里登记的那一条");
   assert.ok(contract.includes(HUAWEI_OAUTH_ENDPOINTS.token), "token 端点必须是契约里登记的那一条");
-  // R17：loginex 从「待联调」升到"有确认值"——默认值必须在契约里逐字出现（文档与代码不许各说各话）
+  // loginex 已是确认值：默认端点必须在契约里逐字出现，文档与代码不许各说各话。
   assert.ok(
     contract.includes(HUAWEI_OAUTH_ENDPOINTS.loginex),
     "loginex 端点必须是契约 §1.5 里登记的那一条（R17 确认值）",
@@ -577,13 +552,8 @@ test("端点真源：默认端点就是 docs/API_CONTRACT.md 登记的值（含 
   assert.equal(closed.endpoints().loginex, null, "显式注入 null 必须是「关掉」，不许被默认值顶掉");
 });
 
-// ---------------------------------------------------------------------------
-// R19：状态快照（`auth:get-status` 的应答体）—— 与 `auth:status` 广播**同形状**
-// ---------------------------------------------------------------------------
-//
-// 为什么需要它：`auth:status` 只在 sidecar 启动时广播一次（渲染层没就绪时由 Rust 排队），
-// 渲染层 reload/崩溃重启之后那一条**已经冲刷过了**，门禁于是永远停在 `checking`。
-// 这三条钉住"查询拿到的就是当前事实"：未登录 / 已登录 / 开窗那条路正在跑（busy）。
+// 状态快照（auth:get-status 的应答体）与 auth:status 广播同形状。
+// auth:status 只在启动时播一次，渲染层 reload 后门禁会卡住，快照让查询拿到的就是当前事实。
 
 test("状态快照（R19）：没有会话时如实说未登录 + 空闲（不猜、也不带编出来的文案）", () => {
   const { auth } = managerOf();
@@ -623,10 +593,8 @@ test("状态快照（R19）：开窗那条路正在跑时 busy 为真，且与�
   assert.deepEqual(context.auth.statusSnapshot(), { loggedIn: true, busy: false });
 });
 
-// ---------------------------------------------------------------------------
-// R53：会话恢复还没落定时，快照与广播都带 restoring，渲染层保持中性启动屏
-// ---------------------------------------------------------------------------
-// 恢复期间的快照不许答「未登录」（那会被当成结论：画登录页 + 自动建码）。
+// 会话恢复还没落定时，快照与广播都带 restoring，渲染层保持中性启动屏。
+// 恢复期间不许答「未登录」，那会被当成结论：画登录页 + 自动建码。
 
 /** 手动控制的 promise（"恢复卡在网络验证上"就是靠它造出来的）。 */
 function deferred() {

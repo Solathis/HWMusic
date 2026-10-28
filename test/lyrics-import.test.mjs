@@ -1,16 +1,8 @@
 /**
- * R41 · 本地歌词导入（`src/renderer/features/lyrics/lyrics-import.mjs` + `lyrics-bridge.mjs`
- * 的导入链 + `src/host/lyrics-handlers.mjs` 的边界校验）。
+ * 本地歌词导入：渲染层的解码与校验 + 桥的导入链 + core 的频道边界校验。
  *
- * 三条链路一起测，因为它们是一条链上的三段：
- * 1. **渲染层**：选文件 → 字节 → 文本（BOM/UTF-8/GBK）→ 官方解析判"有没有歌词行"；
- * 2. **桥**：把**文本**（不是路径）交给 core，成功之后立刻推给面板与歌词窗；
- * 3. **core 边界**：坏载荷在频道边界被拒（缺 trackId / text 不是字符串 / 文本过大）。
- *
- * 钉住的关键判断：
- * - 解码退化链（中文 .lrc 大量是 GBK，用户不知道自己的文件是什么编码）；
- * - **空文件/空白/没有时间戳的纯文本歌词都要被拒**，而且文案要说清原因与下一步；
- * - 520 KB 的文件在**渲染层**就被拦下（不把一份大字符串递给磁盘模块再指望它报错）。
+ * 三段是一条链：选文件 → 字节 → 文本（BOM/UTF-8/GBK）→ 官方解析判有无歌词行；桥只把文本交给 core。
+ * 空文件、纯空白、没有时间戳的纯文本歌词都要被拒且说清原因，520 KB 的文件在渲染层就被拦下。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -105,7 +97,7 @@ test("导入（R41）：占用/清除文案——三种状态分得开、两处�
   const ok = { available: true, entries: 12, bytes: 3 * 1024 * 1024, localEntries: 2, localBytes: 1024 };
   assert.match(lyricsCacheSizeText(ok), /在线缓存 12 条 \/ 3\.00 MB/);
   assert.match(lyricsCacheSizeText(ok), /本地导入 2 条/);
-  // 三种"没有数字"的状态**不许互相冒充**（R41 自查修掉的一处会撒谎的文案）
+  // 三种「没有数字」的状态不许互相冒充：还没问到 ≠ 读不到 ≠ 没有数据目录。
   assert.match(lyricsCacheSizeText(null), /正在读取/, "还没问到 ≠ 读不到 ≠ 没有数据目录");
   assert.match(lyricsCacheSizeText(null, { failed: true }), /读不到缓存占用/, "调用失败要说失败");
   assert.doesNotMatch(lyricsCacheSizeText(null, { failed: true }), /数据目录/, "失败时不许编一个原因");
@@ -203,7 +195,7 @@ test("导入（R41）：桥——取词时把曲目元信息带上（第三方�
   await bridge.loadLyrics({ trackId: "s10", title: "", artist: null, durationSeconds: 0 });
   assert.deepEqual(calls[1].payload, { trackId: "s10" });
 
-  // 旧的字符串入参兼容（R40 的形状）
+  // 旧的字符串入参形态仍然兼容。
   await bridge.loadLyrics("s11");
   assert.deepEqual(calls[2].payload, { trackId: "s11" });
 });

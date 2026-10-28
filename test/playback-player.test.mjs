@@ -1,15 +1,6 @@
 /**
- * R9 播放状态机（`features/playback/player.mjs`）：单 Audio 实例的全部路径。
- *
- * 这个模块刻意**不碰 DOM、不碰 React、不碰 core_call**：音频端口（audio）、取地址（resolveUrl）、
- * 地址闸门（guardUrl）、持久化（persistQueue/loadQueue）全部注入，所以每条路径都能在 node 里跑完。
- * 四条最要紧的钉：
- * 1. **地址闸门是强制的**（构造时缺 guardUrl 直接 TypeError）：不放行的地址永远不会被装载；
- * 2. **地址不进状态、不进日志**：快照里没有 url（UI 也拿不到），日志里没有域名之外的痕迹；
- * 3. **双击不打架**：两次连点取地址是竞态的，先发后到的结果必须被丢掉（旧仓的经典 bug）；
- * 4. **播完按模式走**：顺序（播完即停）/ 列表循环 / 单曲循环 / 随机，四种各自的下一首不同。
- *
- * 先写先看红。
+ * 播放状态机（`features/playback/player.mjs`）：单 Audio 实例的全部路径，端口全部注入，node 里可跑完。
+ * 地址闸门强制、地址不进状态与日志、双击取地址先发后到丢弃、播完按四种模式走。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -611,7 +602,7 @@ test("playTracks/playQueue：双击列表里的某一首 = 用整个列表当队
   assert.equal(state.track.name, "歌2");
 });
 
-// —— R40：加入队列（歌单详情页的「加入队列」） -----------------------------------------
+// —— 加入队列：追加到队尾，不动正在播的那一首（与整队替换是两件事） ——
 
 test("R40 enqueue：追加到队尾、**不动正在播的那一首**（与整队替换是两件事）", async () => {
   const { player, fake, resolved, persisted } = makePlayer();
@@ -676,7 +667,7 @@ test("R40 enqueue：同一首歌可以出现两次（不去重、不排序——
   assert.deepEqual(player.snapshot().entries.map((entry) => entry.id), ["1000", "1000"]);
 });
 
-// —— R63：下一首播放（行菜单的「下一首播放」= 插到当前曲目之后） ---------------------
+// —— 下一首播放：插到当前曲目之后（索引与正在播的那一首都不动） ——
 
 test("R63 playNext：插到当前曲目之后，索引与正在播的那一首都不动", async () => {
   const { player, fake, resolved, persisted } = makePlayer();
@@ -813,12 +804,7 @@ test("播放代次隔离旧交互：同 id 重复条目、重播、自动循环�
   assert.ok(player.snapshot().playbackGeneration > replaced, "清空队列作废旧交互");
 });
 
-/**
- * R54：底栏总时长不再显示「—」。
- *
- * 音频报不出来（流媒体 preload=metadata 常报 Infinity/NaN，或还没加载就说 0）不是"没有时长"：
- * 队列条目自己带秒数（`trackDurationOf`）。有效总时长 = 音频有限正值 → 曲目元数据 → 0。
- */
+/** 总时长不显示「—」：音频报 Infinity/NaN/0 时退到曲目元数据，再退到 0。 */
 test("总时长：音频报 Infinity/NaN/0 时用曲目元数据（秒 → 毫秒）", async () => {
   const { player, fake } = makePlayer();
   player.setQueue([{ id: "2101", name: "元数据曲目", singer: "歌手", duration: 184 }], 0);
@@ -888,7 +874,7 @@ test("总时长：换到没有元数据的曲目时，上一首的时长不残�
   assert.equal(player.snapshot().durationMs, 0, "新曲目一没元数据二没读数：回到未知，不显示上一首的时长");
 });
 
-// —— R64 播放进度的保存与恢复 —— //
+// —— 播放进度的保存与恢复 ——
 
 /** 带位置的记录（index 与 positionTrackId 必须对上，sanitize 才肯收）。 */
 function resumeRecord(positionMs, { duration = 200, ids = ["3001", "3002"], index = 0 } = {}) {
