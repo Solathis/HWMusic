@@ -1,19 +1,7 @@
 /**
- * AMLL 歌词面板（R9）：AMLL 官方 `LyricPlayer` 的**宿主**。
- *
- * **逐行滚动、逐字渐变、弹簧动画、模糊——全部由官方组件负责**。宿主只做两件事：
- * 1. **定位容器**：给 LyricPlayer 一个 100% 尺寸的盒子（它按容器尺寸排版）；
- * 2. **rAF 逐帧推进度**：`LyricPlayer` 是受控组件，自己不读音频，宿主每帧把
- *    `currentTime`（整数毫秒）推给它，并在跳转时标注 `isSeeking`
- *    ——窗口逻辑在 `features/lyrics/lyric-sync.mjs`（唯一真源），这里只接线。
- *
- * 为什么 `seekGeneration` 来自状态机而不是"比较这一帧与上一帧的进度差"：差值判跳转
- * 会把"卡了一下"也当成拖动（歌词被重排一次，看起来像抽了一下）。seek 是**动作**，
- * 让发起动作的那一层标出来最准。
- *
- * R52：**沉浸式歌词禁止改色**。这一面不再收任何颜色 prop，也不再写 `data-lyrics-color`：
- * 颜色恒为 AMLL 官方默认变量 + `amll-theme.css` 里 `.amll-lyrics-stage` 的令牌基线（`--foreground`），
- * 歌曲主题色仍由背景渲染（`AmllBackground`）负责。改色能力只留给桌面歌词窗。
+ * AMLL 歌词面板：官方 `LyricPlayer` 的宿主，逐行滚动、逐字渐变、弹簧动画、模糊全由官方组件负责。
+ * 宿主只做两件事：给一个 100% 尺寸的定位容器；每帧把 `currentTime`（整数毫秒）推给它，并在跳转时标注 `isSeeking`。
+ * 沉浸式歌词禁止改色：颜色恒为官方默认变量 + `amll-theme.css` 的令牌基线，改色能力只留给桌面歌词窗。
  */
 import { LyricPlayer } from "@applemusic-like-lyrics/react"
 import type { LyricLine } from "@applemusic-like-lyrics/lyric"
@@ -62,13 +50,7 @@ export function AmllLyricsPanel({ runtime, lines, playing, seekGeneration }: Aml
     syncRef.current?.notifySeek()
   }, [seekGeneration])
 
-  /**
-   * R46：行级 LRC → 逐字词（与桌面歌词窗**同一个**纯函数）。
-   *
-   * 官方 `LyricPlayer` 只在 `words.length > 1` 且词时间不同时才逐字着色；行级 LRC 在官方解析里
-   * 只有 1 个词，所以 R45B 之后主窗面板一直只有整行渐变。推导结果按 `lines` 记忆：每帧新建数组
-   * 会让官方反复重排（AMLL 的铁律是传进去的数组内容不得再改）。
-   */
+  /** 行级 LRC → 逐字词（与桌面歌词窗同一个纯函数）；结果按 `lines` 记忆，每帧新建数组会让官方反复重排。 */
   const playerLines = useMemo(() => withKaraokeWords(lines), [lines])
 
   return (

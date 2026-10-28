@@ -1,8 +1,6 @@
 /**
- * 歌单条目的展示投影（R8）：与歌曲一样，字段名待联调确认，取不到就如实回占位。
- *
- * 单独一个文件而不是塞进 track-fields：歌单与歌曲是两种资源，
- * 混在一起早晚会出现"给歌单读 songId"这种串味的兜底。
+ * 歌单条目的展示投影：字段名待联调确认，取不到就如实回占位。
+ * 歌单与歌曲是两种资源，单列一个文件避免串味的兜底。
  */
 
 function isObject(value) {
@@ -45,13 +43,7 @@ export function playlistSongCountOf(playlist) {
 }
 
 /**
- * 封面地址：交给侧栏歌单条目（`sidebar-playlists.mjs` 的 `sidebarPlaylistItems`）与歌单详情页头部
- * （`pages.tsx` 的 `CoverArt` 与 AMLL 底景）显示。
- *
- * 协议层 `normalizePlaylist` 只在 CDN 白名单内才带 `coverUrl`（白名单外的地址在那边就被丢掉），
- * 所以这里读到的要么是白名单内的地址，要么是 null。渲染层只把它交给 `<img src>`——
- * **绝不 fetch**（CSP `connect-src` 只有 self/ipc；图片走 `img-src`，见 §2.4）。
- * 取不到回 null，由调用方决定占位（界面上不留碎图）。
+ * 封面地址：只读协议层白名单内的 `coverUrl`，交给 `<img src>`，**绝不 fetch**；取不到回 null。
  */
 export function playlistCoverUrlOf(playlist) {
   if (!isObject(playlist)) return null;
@@ -63,12 +55,9 @@ export function playlistCoverUrlOf(playlist) {
 }
 
 // ---------------------------------------------------------------------------
-// 歌单详情页头部（R40）：标题、元信息与两个动作的文案
+// 歌单详情页头部：标题、元信息与两个动作的文案
 // ---------------------------------------------------------------------------
-//
-// 为什么要单列这几条纯函数：头部会显示"共几首 / 已加载几首"，而那两个数字来自两处
-// （接口上报的总数、页面已加载的条数）。写进组件里就只能靠人眼核对——而"把已加载 50 首
-// 说成共 50 首"正是这类页面最容易撒的谎（歌单可能有 1623 首）。
+// 「共几首」与「已加载几首」来自两处数据，纯函数化才便于断言。
 
 /** 「播放全部」按钮文案（唯一出处：组件不再抄一份）。 */
 export const PLAYLIST_PLAY_ALL_LABEL = "播放全部";
@@ -78,11 +67,9 @@ export const PLAYLIST_ENQUEUE_LABEL = "加入队列";
 export const PLAYLIST_FALLBACK_NAME = "未命名歌单";
 
 /**
- * 头部标题：优先用接口给的歌单名，没有歌单对象时回落到视图参数里的名字（从歌单卡带过来的）。
- * 两个都没有才是兜底文案——**不显示空标题**。
- *
- * @param {unknown} playlist 协议层归一化过的歌单对象（可能是 null/坏形状）
- * @param {string|null} [fallbackName] 视图参数里的名字（歌单卡带过来的）
+ * 头部标题：接口给的歌单名优先，其次视图参数里的名字，都没有才兜底——**不显示空标题**。
+ * @param {unknown} playlist 协议层归一化过的歌单对象
+ * @param {string|null} [fallbackName] 视图参数里的名字
  * @returns {string}
  */
 export function playlistDetailTitleOf(playlist, fallbackName = null) {
@@ -96,12 +83,7 @@ export function playlistDetailTitleOf(playlist, fallbackName = null) {
 }
 
 /**
- * 头部那行元信息。
- *
- * - 接口上报了总数 → "共 N 首"；**只在真的分页没走完时**再补一句"已加载 M 首"
- *   （分页走完时两个数字必然相等，写两遍只是噪音）；
- * - 没有总数 → 就说已加载多少（"已加载 M 首"），不说"共"。
- *
+ * 头部那行元信息：有总数说「共 N 首」，分页没走完再补「已加载 M 首」；没有总数只说已加载。
  * @param {unknown} playlist 协议层归一化过的歌单对象
  * @param {number} loadedCount 页面已加载的曲目条数
  * @param {boolean} [hasMore] 协议层是否明说还有下一页

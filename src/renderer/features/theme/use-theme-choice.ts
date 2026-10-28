@@ -1,25 +1,6 @@
 /**
- * 主题档位的**唯一接线**（R41b）：读回当前档位、跟着 `theme:changed` 走、把一次选择写回去。
- *
- * 为什么要有这一层：R41b 之后"改主题"有三个形态的入口——门禁/浮动控件的三态平铺（R25）、
- * 主窗左下角那枚循环图标按钮、设置页「外观」卡里的 Select。它们必须**读同一份状态、写同一条路**。
- * 各写一遍 `listen` + `invoke` 的后果不是风格问题：一处订阅了广播、另一处没订阅，界面上就会出现
- * "设置页写着深色、左下角还画着太阳"这种自相矛盾的两份真相。
- *
- * 三条纪律（与 R25 的 `theme-control.tsx` 逐字一致，这里只是把它从组件里提出来共用）：
- *
- * 1. **先订阅、再读回**（顺序是硬要求）：反过来的话，两步之间发生的一次改动就丢了，
- *    界面会一直显示旧档位；
- * 2. 写走 `coreLoginChrome` 的 `theme` 动作——那是 Rust 侧**唯一**的主题写入口，
- *    落盘 `settings.json`（经 sidecar 的单一写者）、更新内存里的档位、广播 `theme:changed`
- *    三件事在同一笔事务里完成。**不走 `settings:set`**（R44e 起那条路也明确拒保留键 `theme`：
- *    它不更新 Rust 内存、不广播，界面会亮、重启就变回去）；
- * 3. 高亮跟着回执与宿主广播走，不做乐观切换；写盘失败保持原样，原生部分失败保留已保存主题并报告错误。
- *
- * R44e：广播与读回都带 `revision`，落地经共享的 [`createThemeAcceptor`]（单调）——异步读回的
- * 旧回执不许盖掉刚收到的新广播。**写回的回执也走同一个接受器**（fix1 / review finding 3）：
- * 快速连点两下时，第一笔的 invoke 回执可能晚于第二笔的广播到达，直接 `setChoice(回执)` 会把
- * 页面与被选中的控件一起拉回旧档位。
+ * 主题档位的**唯一接线**：读回当前档位、跟着 `theme:changed` 走、把一次选择写回去。
+ * 先订阅再读回；写只走 `coreLoginChrome` 的 `theme` 动作；高亮跟回执与广播走，不做乐观切换。
  */
 import { useCallback, useEffect, useRef, useState } from "react"
 
@@ -46,12 +27,7 @@ export interface ThemeChoiceTracker {
   accept(payload: unknown): boolean
 }
 
-/**
- * 建一份接受器：`apply` 收到"被接受的那一档"，只由它推界面副作用。
- *
- * 单调规则本身**只写一遍**（[`acceptThemePayload`]，经 `theme-accept.mjs` 的
- * `createThemeAcceptor`）；这里加的是"当前档位"这一格，好让控件高亮与页面类共用同一个答案。
- */
+/** 建一份接受器：`apply` 收到「被接受的那一档」，只由它推界面副作用；单调规则只写一遍。 */
 export function createThemeChoiceTracker(apply: (choice: string) => void): ThemeChoiceTracker {
   let choice = THEME_DEFAULT
   const acceptor = createThemeAcceptor((next: string) => {

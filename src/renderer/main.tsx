@@ -22,8 +22,8 @@ installContextMenuGuard()
 // （`rendererReady()` 由 useAuthGate 在**订阅之后**调用：Rust 侧的启动期广播是排队等冲刷的。）
 installDesktopBridge()
 
-// 主题（R25）：主题档位存在 Rust 侧，这里挂上"订阅 theme:changed + 应用一次当前档位"。
-// 不 await：第一帧按系统档画（R10 起的既有行为），拿到回执后立刻补上强制档位。
+// 主题档位存在 Rust 侧，这里挂上「订阅 theme:changed + 应用一次当前档位」。
+// 不 await：第一帧按系统档画，拿到回执后立刻补上强制档位。
 void installThemeSync()
 
 const container = document.getElementById("root")

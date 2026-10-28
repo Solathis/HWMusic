@@ -13,13 +13,7 @@ import { installContextMenuGuard } from "./features/shell/context-menu-guard.mjs
 import { applyThemeChoice } from "./features/theme/theme.mjs"
 import { LyricsSettingsPopup } from "./LyricsSettingsPopup.tsx"
 
-/**
- * 歌词设置弹出窗的主题初值（R51）：与歌词窗同一条路——建窗时由 Rust 拼进查询串
- * （`lyrics_settings::popup_url`），之后的变化由 `theme:changed` 广播补上。
- *
- * 这扇窗只有 `core:event:default` 权限（不读主题那条命令、不碰任何窗口属性），所以查询串
- * 与广播就是它仅有的两个输入。不 await 任何东西：主题类要在第一帧之前落地。
- */
+/** 歌词设置弹出窗的主题初值：建窗时由 Rust 拼进查询串，之后的变化由 theme:changed 广播补上；不 await，主题类要在第一帧之前落地。 */
 applyThemeChoice(document.documentElement, themeFromSearch(window.location.search))
 
 // 右键：吃掉网页默认菜单（弹出窗里没有输入框，等于一律拦掉）

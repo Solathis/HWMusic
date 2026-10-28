@@ -1,27 +1,7 @@
 /**
- * 主窗外壳（R7 搭骨架，R8 接主界面，R11 接托盘联动）。
+ * 主窗外壳：三态判定在最前，未登录（含「还不知道」）绝不渲染 app-shell。
  *
- * **顺序是契约**：界面三态判定在最前，未登录（含"还不知道"）绝不渲染 app-shell——
- * `test/login-gate.test.mjs` 扫源码钉住这个顺序（顺序反了就是把没登录的用户放进主界面，
- * 然后每个请求都失败，用户只会看到一堆报错）。
- *
- * R45A1（用户第 10 项）：**"还不知道"有自己的界面**。`checking` 不等于未登录——
- * 它是"core 还没答上来"（首帧状态，等一次 IPC 往返）。旧版把这一档也画成 `LoginGate`，
- * 于是已登录的会话冷启动时第一帧就是整张登录页，快照落地才翻成主界面 → 用户看见"闪一下
- * 登录页"。现在三态各有一个落点（判定唯一真源：`features/auth/startup-view.mjs`）：
- *
- * ```
- *   checking     → 中性启动屏（StartupChecking：一枚转圈，无二维码、无文案、无可点元素）
- *   logged_out   → LoginGate（原来那一页；二维码到这一刻才自动发起）
- *   logged_in    → app-shell
- * ```
- *
- * 主界面本身（`LibraryShell`）**必须晚于三态判定挂载**：它一挂载就开始取库数据，
- * 未登录时那些请求只会全部失败。判定放行才渲染，是从结构上保证这件事，而不是靠判断。
- *
- * 页面切换没有路由库：视图就是一个 `useState` + `renderPage()` 的 switch
- * （页面只有七个，路由库在这里只有依赖和"浏览器历史语义不适用"的麻烦）。
- * 唯一的例外是收藏页：它常驻挂载（切页不卸载），所以挂在 switch 之外、用 active 控制显隐。
+ * checking → 中性启动屏；logged_out → LoginGate；logged_in → app-shell（LibraryShell 必须晚于判定挂载）。
  */
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
@@ -126,20 +106,8 @@ import { TRAY_AVAILABLE, trayAvailabilityFromAnswer } from "./features/settings/
 export function App() {
   const gate = useAuthGate()
   /**
-   * R45A1（用户第 10 项）：**三态**，不是两态。
-   *
-   * `checking`（还不知道：等 `auth:status` / `auth:get-status` 的应答）**不是**未登录，
-   * 它有自己的界面（`StartupChecking` 那块安静的骨架）。旧代码在这里只问"能不能渲染
-   * app-shell"，把 `checking` 一并画成 `LoginGate`——已登录的会话冷启动时，那第一帧就是
-   * 用户看见的"闪一下登录页"（快照要等一次 IPC 往返才到）。
-   *
-   * 判定只有一处（`features/auth/startup-view.mjs`，纯函数）：
-   * - 检查中不建二维码订单（`shouldAutoStartQr` 只认**确定未登录**）；
-   * - app-shell 仍然只在**已登录**时渲染（"能不能渲染 shell"仍由 `shouldShowLoginGate` 判，
-   *   `startupViewOf` 直接读它，两个模块不可能各说一套）；
-   * - **复审 R45A1**：`checking` 恒为中性启动屏——包括状态查询真的失败那一档。失败时那屏
-   *   自己长出「重新检查登录状态」（真的重发 `auth:get-status`）与网页登录入口，
-   *   所以"不许画成登录页"与"不许困在空转的屏上"同时成立（见 `startupCheckingStatusOf`）。
+   * 三态判定只有一处（features/auth/startup-view.mjs 的纯函数）：app-shell 只在已登录时渲染。
+   * checking（含状态查询失败）恒为中性启动屏，失败时那屏自带重新检查与网页登录两条出路。
    */
   const view = startupViewOf(gate.state)
 
@@ -148,32 +116,21 @@ export function App() {
     return view === STARTUP_VIEW.loginGate ? <LoginGate gate={gate} /> : <StartupChecking gate={gate} />
   }
 
-  // app-shell：登录之后才存在的那一块（R7 的测试锚点，R8 保留）
+  // app-shell：登录之后才存在的那一块。
   return (
-    /*
-      R41b：`TooltipProvider` 包在最外层——侧栏收起成图标轨之后，导航项只剩图标，
-      shadcn sidebar 的官方做法是 `SidebarMenuButton` 的 `tooltip` 参数（rack 里悬停给标签）。
-      radix 的 `Tooltip` 没有 Provider 会直接抛错（"must be used within TooltipProvider"），
-      而全项目此前一处 tooltip 都没用上，所以这一层是新加的、也是唯一的一层。
-    */
+    /* TooltipProvider 包在最外层：侧栏收起成图标轨后导航项只剩图标，radix Tooltip 没有 Provider 会直接抛错。 */
     <TooltipProvider>
       <div className="h-full w-full" data-shell="app-shell">
         <LibraryShell profile={gate.profile} />
       </div>
-      {/* 一句话提示的唯一出口（R65：队列恢复时跳过本地曲目要能说出来）。
-          shadcn 的 Toaster 原语，样式全走主题变量——不在这里写任何裸色值。 */}
+      {/* 一句话提示的唯一出口：shadcn 的 Toaster，样式全走主题变量。 */}
       <Toaster position="bottom-center" />
     </TooltipProvider>
   )
 }
 
 /**
- * 侧边栏图标的唯一映射表。
- *
- * 这里**只有图标**：导航条目、标签、顺序全部来自 views.mjs 的 SIDEBAR_VIEWS——
- * 再抄一份条目列表，就会出现"导航里有个页面上没有的入口"这种漂移。
- *
- * R40：`VIEW.search` 没有图标了（它不是导航项），搜索入口是侧栏顶部那个常驻输入框。
+ * 侧边栏图标的唯一映射表，这里只有图标；条目、标签、顺序都来自 views.mjs 的 SIDEBAR_VIEWS。
  */
 const NAV_ICONS = {
   [VIEW.favorites]: HeartIcon,
@@ -183,20 +140,8 @@ const NAV_ICONS = {
 }
 
 /**
- * 侧栏顶部的常驻搜索入口（R40 取代了原来那条「搜索」导航项；R41b 补上窄轨形态）。
- *
- * **它必须是一个在 `SidebarProvider` 之内的组件**：`useSidebar()` 只在这个上下文里拿得到
- * 收起态，而外壳 `LibraryShell` 在 Provider **之外**（Provider 是它自己渲染的）——
- * 在外壳里调 `useSidebar()` 会当场抛 "must be used within a SidebarProvider"（真机上撞过）。
- *
- * 两种形态（同一个入口，不是一个东西两处实现）：
- * - 展开（或移动端）：`SidebarInput` + 提交按钮，回车提交（关键字交回外壳的 `onSubmit`）；
- * - 窄轨（`collapsible="icon"`，48px）：输入框与按钮在那个宽度里没有可用形态，
- *   官方做法就是收起时不渲染它——只留一枚图标按钮，点它先**展开侧栏**，再把光标交给输入框
- *   （用户点的是"搜索"，落点就该是能打字的地方）。
- *
- * 关键字**不进这里**：它在 `onSubmit` 里被放进 `VIEW.search` 的视图参数（见 LibraryShell 的注释），
- * 这一层只负责"输入框里显示什么"与"什么时候提交"。
+ * 侧栏顶部的常驻搜索入口，必须是一个在 SidebarProvider 之内的组件（useSidebar 只在那里可用）。
+ * 窄轨形态只留一枚图标按钮：点它先展开侧栏，再把光标交给输入框。
  */
 function SidebarSearch({
   keyword,
@@ -264,11 +209,7 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
   const [view, setView] = useState(() => createView(VIEW.favorites))
   const [stageOpen, setStageOpen] = useState(false)
   /**
-   * 侧栏搜索框里的文字（R40）。
-   *
-   * 它**只活在输入框里**：真正的检索词随视图走（`VIEW.search` 的 `keyword` 参数），
-   * 这样"搜过什么"与"内容区正在显示什么"永远是同一条数据。输入框保留最后一次提交的文字，
-   * 用户抬眼就能看见自己在搜什么（清空输入框不会把结果清掉——那是两件事）。
+   * 侧栏搜索框里的文字，只活在输入框里；真正的检索词随 VIEW.search 的视图参数走。
    */
   const [keyword, setKeyword] = useState("")
   /** 退出登录失败那一句（用户主动点的动作，失败必须看得见；成功时界面由 auth:status 广播接管） */
@@ -276,18 +217,13 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
   // 托盘可用性：null = **还没取到**（不是"不可用"，也不是"可用"）
   const [trayAvailable, setTrayAvailable] = useState<boolean | null>(null)
   /**
-   * 运行日志（R39 展示在设置页那张卡里）。
-   *
-   * 订阅**留在这里**而不是挪进设置页：`app:notice` 是广播，没人订阅的那一刻提示就没了，
-   * 而设置页只在用户切到设置时才挂载——那样"打开设置页之前的日志"会全丢。
-   * 与 `trayAvailable`/`lyrics` 同一条纪律：外壳收，页面只渲染。
+   * 运行日志：订阅留在这里（设置页只在切到设置时挂载），外壳收、页面只渲染。
    */
   const notices = useNoticeLog()
   // 播放运行时是模块级单例（音频/媒体会话/广播都只能有一份），hook 只负责订阅状态
   const { runtime, state: playback } = usePlayer()
   /**
-   * 桌面歌词窗的接线（R12）：托盘勾选 → 建/显/隐窗口、歌词文本 → 地面歌词窗，
-   * 以及进度推送。数据链与主窗里的歌词面板**共用同一份行**（`player.setLyrics`）。
+   * 桌面歌词窗的接线：托盘勾选 → 建/显/隐窗口，歌词文本与进度推送共用 player.setLyrics。
    */
   const lyrics = useLyricsWindow(runtime, playback)
 
@@ -296,11 +232,7 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
   }, [])
 
   /**
-   * 提交一次搜索（R40）：把关键字放进 **`VIEW.search` 的视图参数**，内容区随之切到结果页。
-   *
-   * 为什么关键字走视图参数而不是留在搜索页的组件状态里：入口在侧栏（外壳），结果在内容区（页面），
-   * 两者必须是同一条数据——页面自己存一份就会出现"侧栏显示 A、内容区显示 B 的结果"。
-   * 空白关键字不发请求（core 侧那是 `invalid_payload`），此时切到搜索页显示"输入关键字开始搜索。"。
+   * 提交一次搜索：关键字放进 VIEW.search 的视图参数，空白关键字不发请求。
    */
   const submitSearch = useCallback(
     (value: string) => {
@@ -312,11 +244,7 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
   )
 
   /**
-   * 托盘可用性：启动时问宿主一次（R11）。
-   *
-   * 为什么要有这一步：设置页的关窗行为提示要么说"关窗后应用继续在托盘运行"，要么说
-   * "现在关窗会直接退出"——这两句话不能猜。R10 的 `TRAY_AVAILABLE` 常量现在是**兜底**：
-   * 查不到（宿主那条命令失败）就用它，落地的仍是保守的"不可用"。
+   * 托盘可用性：启动时问宿主一次，查不到就用 TRAY_AVAILABLE 兜底（保守的「不可用」）。
    */
   useEffect(() => {
     let alive = true
@@ -335,10 +263,7 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
   }, [])
 
   /**
-   * 托盘的"设置…"（R11）：宿主发一条 `app:open-settings`，渲染层切到设置页。
-   *
-   * 没有这一条订阅，那个菜单项就是"点了没反应"——广播发出去没人接，从界面上看不出任何异常。
-   * 视图状态在渲染层，所以切页只能由渲染层自己做（宿主发的是意图，不是命令式的"你跳到某页"）。
+   * 托盘的「设置…」：订阅 app:open-settings 后由渲染层自己切到设置页。
    */
   useEffect(() => {
     let alive = true
@@ -357,12 +282,7 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
     }
   }, [navigate])
 
-  /**
-   * 双击一首歌 = **整张列表进队列**并从那一首开始。
-   *
-   * 只播那一首而不是整张列表，会让"下一首"永远没有下一首——列表就在用户眼前，
-   * 队列用同一份顺序才符合预期（`songs` 由页面在点击点给出，见 pages.tsx 的注释）。
-   */
+  /** 双击一首歌 = 整张列表进队列，并从那一首开始。 */
   const onActivateTrack = useCallback(
     (song: unknown, index: number, songs: unknown[]) => {
       void runtime.player.playQueue(songs.length > 0 ? songs : [song], index)
@@ -392,13 +312,7 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
     [navigate],
   )
 
-  /**
-   * 歌单详情页的两个动作（R40）：都是**整队替换 / 追加**，动作全部转给播放运行时
-   * （页面拿不到音频，也拿不到地址——与双击播放同一条纪律）。
-   *
-   * `playAll` 用 `playQueue`（整队替换 + 从第一首开播）；`enqueue` 用 `enqueue`
-   * （追加到队尾、不动正在播的那一首）。两者都只作用于页面交上来的那批曲目。
-   */
+  /** 歌单详情页的两个动作：整队替换 / 追加，全部转给播放运行时。 */
   const onPlayAll = useCallback(
     (songs: unknown[]) => {
       void runtime.player.playQueue(songs, 0)
@@ -413,10 +327,7 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
     [runtime],
   )
 
-  /**
-   * 「下一首播放」（R63 行菜单）：插到当前曲目之后，不动正在播的那一首。
-   * 与 `enqueue` 是运行时里的两个动作，区别只在落点（见 player.mjs）。
-   */
+  /** 「下一首播放」：插到当前曲目之后，不动正在播的那一首。 */
   const onPlayNext = useCallback(
     (songs: unknown[]) => {
       runtime.player.playNext(songs)
@@ -424,10 +335,7 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
     [runtime],
   )
 
-  /**
-   * 行菜单的动作包（R63）：页面与列表都够不到播放运行时，所以外壳把这两个动作随
-   * `navigation` 一起交下去，页面只把它们转给曲目表（见 pages.tsx 的 PageNavigationProps）。
-   */
+  /** 行菜单的动作包：页面够不到播放运行时，外壳随 `navigation` 一起交下去。 */
   const rowActions = { onPlayNext, onEnqueue }
   const navigation = { onActivateTrack, onOpenAlbum, onOpenArtist, rowActions }
 
@@ -438,13 +346,7 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
   const accountFullNameText = accountFullName(profile)
   const accountVipLabel = accountVipText(profile)
 
-  /**
-   * 退出登录（R38 从设置页搬到这里）。
-   *
-   * 三件事都只有一处实现：确认框（`AlertDialog`）负责"防误触"，真正的调用走
-   * `host-api` 的 `coreLogout`（唯一的 `auth:logout` 出口），失败只在这里显示一句人话。
-   * **不做任何跳转**：`auth:status` 广播会把门禁翻回来（成功后这个组件随之卸载）。
-   */
+  /** 退出登录：确认框防误触，调用走 `host-api` 的 `coreLogout`，不做任何跳转。 */
   async function confirmLogout() {
     setLogoutFailure(null)
     try {
@@ -469,14 +371,11 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
       case VIEW.history:
         return <HistoryPage {...navigation} />
       case VIEW.local:
-        // 本地歌曲（R65）：页面自己向宿主取快照（导入/移除的回执就带着新快照），
-        // 外壳只交"双击播放"与行菜单那两个动作——与其余页同一条接法。
+        // 本地歌曲：页面自己向宿主取快照，外壳只交双击播放与行菜单两个动作。
         return <LocalSongsPage {...navigation} />
       case VIEW.settings:
-        // 设置页只读地显示队列状态（管理队列在播放队列面板里）：状态由外壳交下去，页面不自己取；
-        // 托盘可用性同理（R11：查一次、交下去，页面不自己问宿主）；
-        // 桌面歌词配置同理（Rust 权威，单例桥代理恢复/保存）；
-        // 运行日志同理（R39：订阅在外壳——广播没人接就丢了，页面只渲染，见 useNoticeLog 的注释）
+        // 设置页只读地显示队列状态，状态由外壳交下去，页面不自己取；
+        // 托盘可用性、桌面歌词配置、运行日志同理：查一次、交下去。
         return (
           <SettingsPage
             queue={playback}
@@ -493,19 +392,9 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
 
   return (
     <SidebarProvider className="h-full min-h-0">
-      {/*
-        R41b：`collapsible="icon"`。
-        shadcn sidebar 的默认模式是 `offcanvas`——收起 = **整块滑出**（`left: -16rem`），
-        于是"收起侧栏"与"关掉侧栏"在界面上一模一样，导航就再也点不到了。
-        `icon` 是官方为常驻导航准备的那一档：收起后侧栏留着一条 48px 的图标轨
-        （`--sidebar-width-icon`），导航项变成图标 + 悬停 tooltip，展开即恢复。
-      */}
+      {/* `collapsible="icon"`：收起后留一条 48px 图标轨，导航项变成图标 + 悬停 tooltip。 */}
       <Sidebar collapsible="icon">
-        {/*
-          侧栏顶部的常驻搜索框（R40 取代了原来那条「搜索」导航项）：入口在这里，结果在内容区。
-          R41b 把它的两种形态（展开时的输入框 / 窄轨里的一枚图标按钮）收进 `SidebarSearch`
-          ——那一层在 `SidebarProvider` 里，才拿得到收起态。
-        */}
+        {/* 侧栏顶部的常驻搜索框：入口在这里，结果在内容区。 */}
         <SidebarHeader>
           <SidebarSearch keyword={keyword} onKeywordChange={setKeyword} onSubmit={submitSearch} />
         </SidebarHeader>
@@ -534,21 +423,14 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>
-          {/*
-            侧栏「我的歌单」：组件自己取一次数、自己兜住加载/失败/空三态；
-            外壳只交当前打开的那张歌单（高亮用）与"点开"这个动作。
-          */}
+          {/* 侧栏「我的歌单」：组件自己取数并兜住三态，外壳只交当前歌单与"点开"。 */}
           <SidebarPlaylists
             activePlaylistId={view.id === VIEW.playlistDetail ? viewParam(view, "playlistId") : null}
             onOpen={onOpenPlaylist}
           />
         </SidebarContent>
         <SidebarFooter>
-          {/*
-            账号区（R38/R57）：头像 + 名字（悬停全名）+ 会员徽标 + 主题 + 退出登录。
-            资料来自 `auth:status` 的可选 `profile`；没有资料就是兜底（图标 + "已登录"），不造假。
-            窄轨里只留头像：名字/徽标/主题/退出一起隐藏。
-          */}
+          {/* 账号区：头像 + 名字 + 会员徽标 + 主题 + 退出登录；窄轨里只留头像。 */}
           <div
             className="flex items-center gap-2 px-1 py-0.5 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0"
             data-testid={ACCOUNT_AREA_TESTID}
@@ -584,7 +466,7 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
                 </Badge>
               )}
             </div>
-            {/* 主题三态循环（R41b）：与设置页「外观」卡的 Select 同源同向（同一份接线） */}
+            {/* 主题三态循环：与设置页「外观」卡的 Select 同源同向。 */}
             <ThemeToggle className="shrink-0 group-data-[collapsible=icon]:hidden" />
             <AlertDialog>
               <AlertDialogTrigger asChild>
@@ -672,9 +554,7 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
           />
         </div>
 
-        {/* R40：封面/曲目信息也是"进入播放页（歌词舞台）"的入口，与头部那枚按钮同一个 state
-            R45C：`lyrics` 是外壳那**唯一一份** binding（useLyricsWindow 的实例），
-            播放栏与沉浸页共用它——两处开关说的是同一个歌词窗，不存在第二份状态 */}
+        {/* 封面/曲目信息也是进入播放页的入口；`lyrics` 是外壳唯一的 binding，两处共用。 */}
         <PlayerBar runtime={runtime} state={playback} onOpenStage={() => setStageOpen(true)} lyrics={lyrics} />
       </SidebarInset>
       <PlaybackStage

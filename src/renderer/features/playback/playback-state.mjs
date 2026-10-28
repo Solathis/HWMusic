@@ -1,14 +1,8 @@
 /**
- * 播放器的**文案**（R9）：状态标签、失败人话、歌词占位文案。
+ * 播放器的文案：状态标签、失败人话、歌词占位文案。
  *
- * 与 R8 的 `library-state.mjs` 同一条纪律：**不冒充**。
- * - 播放地址端点没配置 → 说"接口尚未配置（待联调确认）"，不说"这首歌放不了"（后者听起来像歌的问题）；
- * - 队列空 → 说"先在列表里双击一首歌"（用户知道下一步做什么），不显示"播放失败"；
- * - 歌词：`unavailable`（还没有歌词来源）与 `empty`（取了，这首确实没有）**必须分开**——
- *   把前者说成后者，就是替一个还没接上的接口撒谎。
- *
- * 文案全部集中在这里：句长克制、句末句号、禁画饼（"敬请期待/即将上线"由测试禁掉）。
- * 界面上不出现"加载失败"这种只有我们看得懂的话——失败一定是可执行的下一步。
+ * 与 `library-state.mjs` 同一条纪律——不冒充：接口没配置就说未配置，队列空就说下一步做什么，
+ * 歌词 `unavailable`（没有来源）与 `empty`（确实没有）必须分开。
  */
 
 /** 失败类别 → 一句话（类别来自状态机的结构化错误，core 的类别原样透传）。 */
@@ -60,12 +54,7 @@ export function playerStatusText(state) {
   return PLAYER_STATUS_TEXT[status] ?? PLAYER_STATUS_TEXT.idle;
 }
 
-/**
- * 曲目标题：**只知道标识时就显示标识**。
- *
- * 恢复出来的队列按裁决只存了曲目标识（没有标题），这时候显示"未知歌曲"会让人以为
- * 队列坏了；显示"曲目 1001"才是实话——我们知道是哪一首，只是不知道它叫什么。
- */
+/** 曲目标题：只知道标识时就显示标识——说"曲目 1001"才是实话，说"未知歌曲"会让人以为队列坏了。 */
 export function trackTitleOf(track) {
   if (track === null || typeof track !== "object") return "未在播放";
   const name = typeof track.name === "string" && track.name.trim() !== "" ? track.name.trim() : null;
@@ -80,14 +69,7 @@ export function trackArtistOf(track) {
   return typeof track.artists === "string" && track.artists.trim() !== "" ? track.artists.trim() : "未知艺人";
 }
 
-/**
- * 歌词区的占位文案（四档分开：没有来源 ≠ 取不到 ≠ 这首歌没有歌词）。
- *
- * R12 起 `playback:lyrics` 这条来源通道真的接上了，所以 R9 那句"歌词来源尚未接入"
- * 不再成立——**缺的是端点**（业务端点全部待联调确认），文案如实改成"尚未配置"；
- * 而"网络不通/接口报错"是另一档（`failed`），把它说成"尚未配置"会让用户跑去设置页
- * 找一个本来就填好的端点。
- */
+/** 歌词区的占位文案：没有来源 ≠ 取不到 ≠ 这首歌没有歌词，四档分开说。 */
 export const LYRICS_NOTICE_TEXT = {
   unavailable: "歌词来源尚未配置。",
   loading: "正在取歌词…",

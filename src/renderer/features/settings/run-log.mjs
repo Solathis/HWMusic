@@ -1,11 +1,8 @@
 /**
- * 设置页运行日志的纯逻辑（R56）：级别归一、两路来源合并、筛选、脱敏兜底、文案。
- *
- * 两路来源的形状在这里统一成 `{id, time, level, source, message, masked}`：
- * - 宿主的日志文件（`core_read_run_log`，**返回前已按 `run_log.rs` 的规则脱敏**）；
- * - `app:notice` 广播（载荷只有 `text`，所以级别一律 info、来源「提示」）。
- *
- * 界面不发明级别，也不发明「有日志」：筛出 0 条与一条都没有是两句不同的话。
+ * 设置页运行日志的纯逻辑：级别归一、两路来源合并、筛选、脱敏兜底、文案。
+ * 两路来源统一成 `{id, time, level, source, message, masked}`。
+ * 宿主的日志文件返回前已按 `run_log.rs` 脱敏；`app:notice` 广播一律 info。
+ * 界面不发明级别，也不发明“有日志”：筛出 0 条与一条都没有是两句不同的话。
  */
 
 /** 设置页一次读多少条（与 Rust 侧的 `run_log::READ_LIMIT` 同一个数，由测试钉住）。 */
@@ -57,12 +54,7 @@ export function levelOf(raw) {
   return "info";
 }
 
-/**
- * 界面这一层再挡一次凭据（宿主已脱敏；这里防的是"以后谁换了数据源忘了脱敏"）。
- *
- * 只认两种形状：`Bearer <令牌>` 与 `键=值`（键在白名单里）。值太短（如已打码的 `***`）不动，
- * 所以重复调用是稳定的。
- */
+/** 界面这一层再挡一次凭据：只认 `Bearer <令牌>` 与白名单键的 `键=值`，值太短不动，重复调用稳定。 */
 const SECRET_KEY_PATTERN =
   /(bearer)\s+([^\s"'&,;)\]}]{6,})|([?&;\s"'](?:token|access_token|refresh_token|id_token|code|ticket|sign|signature|sig|sessionid|session_id|devicedata|accesskeyid|password|passwd|pwd|secret)=)([^\s&;,"')}\]]{4,})/gi;
 
@@ -113,12 +105,7 @@ export function noticeEntriesToRunLog(notices) {
   return entries;
 }
 
-/**
- * 两路来源 → 一份列表：文件条目在前、提示条目在后（提示是刚发生的，读日志的人从下往上找）。
- *
- * 入参是**原始形状**（宿主的 `core_read_run_log` 载荷 + `useNoticeLog()` 的条目）：
- * 归一化只在这一处发生，界面拿到的就是能直接渲染的东西。
- */
+/** 两路来源 → 一份列表：文件条目在前、提示条目在后，归一化只在这一处发生。 */
 export function mergeRunLogEntries(filePayload, notices) {
   return [...normalizeRunLogEntries(filePayload), ...noticeEntriesToRunLog(notices)];
 }
@@ -146,12 +133,7 @@ function searchTextOf(entry) {
   return `${message}\n${source}`;
 }
 
-/**
- * 级别多选 + 文本子串筛选。
- *
- * - `levels` 不是数组（没传/坏形状）= 不按级别筛；**空数组 = 一档都不选 = 什么都不显示**（如实）；
- * - 文本匹配 message 与 source，大小写不敏感，空白查询不筛。
- */
+/** 级别多选 + 文本子串筛选：`levels` 不是数组 = 不按级别筛，空数组 = 什么都不显示；文本匹配 message 与 source，空白查询不筛。 */
 export function filterRunLogEntries(entries, options = {}) {
   const list = Array.isArray(entries) ? entries : [];
   const levels = Array.isArray(options?.levels) ? options.levels.map(levelOf) : null;

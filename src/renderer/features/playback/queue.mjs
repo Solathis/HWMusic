@@ -77,8 +77,7 @@ function snapshotOf(raw, id) {
 }
 
 /**
- * 位置只跟当前曲目绑定：id 必须就是这一索引的曲目，否则整对字段都不算数。
- * 0 与"没有位置"是同一件事（从头开始），所以不写。
+ * 位置只跟当前曲目绑定：id 必须就是这一索引的曲目，否则整对字段都不算数；0 与「没有位置」是同一件事。
  * @returns {QueuePosition|null}
  */
 function positionOf(value, trackId) {
@@ -141,11 +140,7 @@ export function restoredEntries(record) {
   });
 }
 
-/**
- * 恢复队列时跳过**文件已不在**的本地曲目（R65）：等播放时才失败，用户看到的是"按了播放没反应"，
- * 而且"下一首"会一直卡在它上面。只动本地曲目（在线曲目没有"文件在不在"这回事）；
- * 被丢的正好是当前曲目就退到它前面最近的一首，进度字段一并清掉；全丢光回 `null`。
- */
+/** 恢复队列时跳过文件已不在的本地曲目；被丢的正好是当前曲目就退到它前面最近的一首，进度字段一并清掉；全丢光回 null。 */
 export function dropUnavailableLocalEntries(raw, availableIds) {
   const clean = sanitizeQueueRecord(raw);
   if (clean === null) return { record: null, skipped: 0 };

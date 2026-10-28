@@ -1,15 +1,7 @@
 /**
- * 库页面的失败/空态文案（R8）：一句话，克制，且**不冒充**。
- *
- * `app:notice` 收上来的提示的**拼接**逻辑也在这里（`appendNotice`）：条数有上限、丢最旧的。
- * 日志的展示、级别与筛选在 `features/settings/run-log.mjs`（R56 起日志文件才是主体）。
- *
- * 最重要的一条区分（R4 K1 风险的 UI 面）：**"接口没配" ≠ "确实没有数据"**。
- * 端点未配置时必须说"未配置/待联调"，绝不能显示"还没有收藏歌曲"——
- * 那会让用户以为自己的收藏空了，而事实是我们连不上（旧仓的"假空态"就是这种坑）。
- *
- * 同理不许画饼："敬请期待/即将上线"之类的话在本文件里被测试禁掉：
- * 页面已经在那里了，唯一诚实的说法是"未配置"（缺配置）或"未接入"（缺实现）。
+ * 库页面的失败/空态文案：一句话，克制，且不冒充。
+ * “接口没配” ≠ “确实没有数据”：端点未配置时只能说“未配置/待联调”，不能说“还没有收藏歌曲”。
+ * 也不许画饼：“敬请期待/即将上线”之类的话在本文件里被测试禁掉。
  */
 import { VIEW, normalizeView } from "./views.mjs";
 
@@ -25,12 +17,7 @@ export const LIBRARY_FAILURE_TEXT = {
 
 const UNKNOWN_FAILURE_TEXT = "加载失败（详情见日志）。";
 
-/**
- * 失败 → 显示文案。
- *
- * 认不出的类别带上 core 给的那句话——那句话已经在 core 侧清洗过（不带堆栈、不回显响应体），
- * 把它丢掉换成"未知错误"才是真的让用户没法自查。
- */
+/** 失败 → 显示文案：认不出的类别带上 core 已清洗过的那句话，不换成“未知错误”。 */
 export function libraryFailureText(error) {
   if (error === null || typeof error !== "object") return UNKNOWN_FAILURE_TEXT;
   const known = LIBRARY_FAILURE_TEXT[error.kind];
@@ -58,12 +45,7 @@ const EMPTY_TEXT = {
   [VIEW.settings]: "设置项将在后续任务接入。",
 };
 
-/**
- * 检索类页面的"查无所获"文案。
- *
- * 只有搜索有这一档：它跟"还没输入关键字"是两件事——把没结果说成"输入关键字开始搜索。"
- * 就是让用户对着一句"你还没搜"发呆（他明明刚搜过）。
- */
+/** 检索类页面的“查无所获”文案：它跟“还没输入关键字”是两件事。 */
 const NO_RESULT_TEXT = {
   [VIEW.search]: "没有找到相关歌曲。",
 };
@@ -74,12 +56,7 @@ export function libraryEmptyText(view, options = {}) {
   return EMPTY_TEXT[id] ?? EMPTY_TEXT[VIEW.favorites];
 }
 
-/**
- * 往运行日志里加一条（纯函数，UI 只 setState）。
- *
- * 只收非空文本：一条空日志只会让人以为"日志功能坏了"。
- * 条数有上限且丢最旧的：这是长跑进程的界面，没有上限就是缓慢的内存泄漏。
- */
+/** 往运行日志里加一条（纯函数）：只收非空文本，条数有上限且丢最旧的。 */
 export function appendNotice(entries, text, limit = 100, id = 0) {
   const current = Array.isArray(entries) ? entries : [];
   if (typeof text !== "string") return current;

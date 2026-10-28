@@ -1,14 +1,8 @@
 /**
- * 设置页的「任务栏歌词（Beta）」卡（R59）：颜色 / 逐字高亮 / 字号。
- *
- * 为什么在设置页、而不在歌词窗的齿轮菜单里：任务栏歌词与桌面歌词是**两套**配置
- * （字号、颜色、逐字开关各存一份），共用一处设置就会互相改写；而任务栏那扇窗被挂到系统
- * 任务栏之下并且整窗点透，它自己没有可点的控件——外观只能在主窗里改。
- *
- * 为什么单独一个组件：设置页本身不再膨胀（与 R41 的缓存卡同一个做法），桌面歌词那一套
- * 外观控件也就不会与这里混在一起。
- *
- * 平台判断走宿主回报的 `taskbar.supported`（能力查询的唯一真源），非 Windows 连这张卡都不渲染。
+ * 设置页的「任务栏歌词（Beta）」卡：颜色 / 逐字高亮 / 字号。
+ * 任务栏歌词与桌面歌词是两套配置，共用一处会互相改写；而任务栏窗整窗点透，没有可点的控件。
+ * 单独一个组件：设置页不膨胀，桌面歌词的外观控件也不会与这里混在一起。
+ * 平台判断走宿主回报的 taskbar.supported，非 Windows 连这张卡都不渲染。
  */
 import { Button } from "./components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card"
@@ -46,7 +40,7 @@ export function TaskbarLyricsCard({ lyrics }: { lyrics: LyricsWindowBinding | nu
           <Label htmlFor="taskbar-lyrics-color">颜色</Label>
           <Select value={config.taskbarColor} onValueChange={(value) => lyrics.updateConfig({ taskbarColor: value })}>
             <SelectTrigger id="taskbar-lyrics-color" data-testid="taskbar-lyrics-color" className="w-full max-w-xs">
-              {/* 标签直接写进 SelectValue：radix 在没展开过内容时拿不到选项文案（R10 的同一个坑） */}
+              {/* 标签直接写进 SelectValue：radix 在没展开过内容时拿不到选项文案。 */}
               <SelectValue>{colorTokenLabel(config.taskbarColor)}</SelectValue>
             </SelectTrigger>
             <SelectContent position="popper" align="start" sideOffset={4}>

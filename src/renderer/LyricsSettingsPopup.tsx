@@ -1,18 +1,8 @@
 /**
- * 桌面歌词的设置**气泡面板**（R60）：一扇独立透明窗里放一个 shadcn `Popover`。
- *
- * 为什么还在单独一扇窗：面板必须能长到 800×128 的歌词窗外面去。窗口尺寸/位置由 Rust 按齿轮的
- * 矩形算（`lyrics_settings.rs` 的 `bubble_placement`），这扇窗**没有任何 window 权限**。
- *
- * 三件事只在页面这一侧：
- * 1. **箭头指着齿轮**：面板贴在窗口留边内侧（Rust 保证），这里把隐形触发点摆到箭头该指的位置
- *    （`bubbleAnchorBox`）——radix 让面板对齐触发点左边缘、箭头对准触发点中心；
- * 2. **量尺寸**：`ResizeObserver` 把面板的 CSS 尺寸报给宿主，位置随之重算；
- * 3. **关窗**：Esc 与点面板外面交给 radix 的 dismiss → `core_lyrics_settings_close`。失焦（点到窗口
- *    外面）、锁定、歌词窗隐藏/切任务栏、退出都由 Rust 那一侧收。
- *
- * 开合状态**恒为 true**：关窗 = 隐藏窗口，页面不重载、React 不重挂（把 `open` 翻成 false 会让下次
- * 显示出来是一扇空窗）。
+ * 桌面歌词的设置气泡面板：一扇独立透明窗里放一个 shadcn Popover。
+ * 面板必须能长到 800×128 的歌词窗外面去，窗口尺寸/位置由 Rust 按齿轮矩形算，这扇窗没有任何 window 权限。
+ * 页面侧三件事：把隐形触发点摆到箭头该指的位置、量面板尺寸报给宿主、Esc 与点面板外面关窗。
+ * 开合状态恒为 true：关窗 = 隐藏窗口，翻成 false 会让下次显示出来是一扇空窗。
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 
@@ -141,12 +131,7 @@ export function LyricsSettingsPopup() {
     }
   }, [acceptStatus])
 
-  /**
-   * 量面板的**真实尺寸**报给宿主（窗口尺寸/位置由它按锚点重算），并留下几何回执。
-   *
-   * 量 `offsetWidth/offsetHeight`（不被打开动画的 `scale` 影响），向上取整——少一个像素就会
-   * 裁掉面板最后一行。尺寸没变就不报（配置变化不该反复摆窗口）。
-   */
+  /** 量面板的真实尺寸报给宿主（窗口尺寸/位置由它按锚点重算），尺寸没变就不报。 */
   useEffect(() => {
     const node = contentRef.current
     if (node === null || !ready) return undefined

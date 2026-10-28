@@ -3,9 +3,8 @@ import { LyricPlayer } from "@applemusic-like-lyrics/react"
 import type { LyricLine } from "@applemusic-like-lyrics/lyric"
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react"
 import { getCurrentWindow } from "@tauri-apps/api/window"
-// 缩放拖柄用 `MoveDiagonal2`：brief 点名的 `GripDiagonal` 在本仓钉住的 lucide-react 0.468.0
-// 里不存在（只有 Grip / GripHorizontal / GripVertical），而"不新增依赖"是硬约束——
-// 对角双箭头正是缩放手柄的形状，语义与几何都对（报告里如实登记了这处替换）。
+// 缩放拖柄用 `MoveDiagonal2`：`GripDiagonal` 在钉住的 lucide-react 0.468.0 里不存在，且不新增依赖。
+// 对角双箭头正好是缩放手柄的形状。
 import { MoveDiagonal2, GripHorizontal, Lock, Unlock, Pause, Play, SkipBack, SkipForward, Settings2 } from "lucide-react"
 
 import { LYRICS_DOCUMENT, LYRICS_POINTER, LYRICS_PROGRESS, LYRICS_STATE, THEME_CHANGED } from "../shared/channels.ts"
@@ -50,11 +49,7 @@ interface LyricsProgress {
 
 const INITIAL_DOCUMENT: LyricsDocument = { lines: [], status: LYRICS_STATUS.unavailable }
 
-/**
- * 拖拽缩放后多久算"尺寸稳定"（R45B）：拖动过程中每一帧都保存会把配置刷成几百条，
- * 而用户要的只是**最后**那一次。250ms 是"手一松就到了"的量级，也不至于让重启前的
- * 快速拖拽丢尺寸。
- */
+/** 拖拽缩放后 250ms 内没有新变化才保存，避免拖动过程中每帧都写配置。 */
 export const RESIZE_SAVE_DELAY_MS = 250
 
 export function LyricsWindow() {
@@ -63,7 +58,7 @@ export function LyricsWindow() {
   // 光标是否落在歌词窗里（锁定后窗不接收鼠标，这个事实只能由 Rust 轮询广播过来）
   const [pointerInside, setPointerInside] = useState(false)
   const unlockSlotRef = useRef<HTMLDivElement | null>(null)
-  // R59：这一份配置实际画成什么样由纯逻辑模块决定（任务栏只读任务栏那四个字段，桌面只读原字段）
+  // 这份配置实际画成什么样由纯逻辑模块决定（任务栏只读任务栏那四个字段，桌面只读原字段）。
   const appearance = useMemo(() => lyricsAppearance(config), [config])
   const [lyricDocument, setLyricDocument] = useState<LyricsDocument>(INITIAL_DOCUMENT)
   const [frame, setFrame] = useState({ time: 0, isSeeking: false, playing: false })
@@ -74,7 +69,7 @@ export function LyricsWindow() {
   const revisionRef = useRef(-1)
   const stageRef = useRef<HTMLDivElement | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
-  // R44e：持久化状态由 Rust 报告（这一层不保存任何东西）。保存失败也要在这个窗里看得见、点得动。
+  // 持久化状态由 Rust 报告，这一层不保存任何东西；保存失败也要在这个窗里看得见、点得动。
   const [saveError, setSaveError] = useState<string | null>(null)
   const acceptStatus = useCallback((payload: unknown) => {
     const next = payload as { ready?: boolean; config?: unknown; revision?: number; saveError?: unknown } | null
@@ -97,7 +92,7 @@ export function LyricsWindow() {
   useEffect(() => {
     let alive = true
     const stops: Array<() => void> = []
-    // R44e：主题也走共享的单调接受器（旧广播/旧回执不许盖掉新主题）
+    // 主题也走共享的单调接受器：旧广播或旧回执不许盖掉新主题。
     const themeAcceptor = createThemeAcceptor((choice) => applyThemeChoice(document.documentElement, choice))
     const keep = (off: () => void) => {
       if (alive) stops.push(off)
@@ -184,22 +179,13 @@ export function LyricsWindow() {
     return () => document.removeEventListener("visibilitychange", onVisibility)
   }, [])
 
-  // R45B：自定义颜色只写在**这一个容器**上（一次 scoped 变量覆盖，变量名与写法都在适配层），
-  // 空值就撤掉覆盖回设计令牌；变量的接线点仍然只在 css 与适配层（这里不出现 AMLL 变量名）。
-  // R59：颜色取哪一份（桌面 / 任务栏）也由纯逻辑模块决定。
+  // 自定义颜色只写在当前容器上（空值撤掉覆盖回设计令牌），变量接线点只在 css 与适配层。
+  // 颜色取哪一份（桌面 / 任务栏）由纯逻辑模块决定。
   useEffect(() => {
     applyCustomColor(stageRef.current, appearance.customColor)
   }, [appearance.customColor])
 
-  /**
-   * R45B：尺寸稳定 250ms 后保存 DIP 宽高（保存与落盘仍由 Rust 拥有，这里只发一条窄命令）。
-   *
-   * 三条克制：
-   * - 只在**未锁的桌面窗**上装监听（锁定/任务栏时 Rust 把窗口设成不可缩放，装监听等于存噪声）；
-   * - 与已保存的值相同就不发（程序化摆几何、方向切换后的重排都不产生无谓的写入）；
-   * - `configure` 是稳定引用、依赖只列四个标量——否则每帧 `frame` 重渲染都会把计时器清掉，
-   *   250ms 永远等不到。
-   */
+  /** 尺寸稳定 250ms 后保存 DIP 宽高；只在未锁的桌面窗上装监听，与已保存的值相同就不发。 */
   const savedWidth = config.windowWidth
   const savedHeight = config.windowHeight
   const { mode, locked, layout } = config
@@ -247,13 +233,13 @@ export function LyricsWindow() {
     }
   }, [config.mode, config.locked])
 
-  // R59：这一份配置实际画成什么样由纯逻辑模块决定（任务栏只读任务栏那四个字段，桌面只读原字段）
+  // 这一份配置实际画成什么样由纯逻辑模块决定（任务栏只读任务栏那四个字段，桌面只读原字段）。
   const size = appearance.size
   const hasLyric = lyricDocument.lines.length > 0
   const notice = lyricsNoticeText(lyricDocument)
   const canDrag = dragRegionEnabled(config)
-  // R45B：行级 LRC 在这里推导出逐字词（纯函数；词级源原样保留），官方组件负责着色。
-  // R59：任务栏关掉逐字高亮时**不推导**——行级数组交给官方组件，按行渐变（仍是同一个组件）。
+  // 行级 LRC 在这里推导出逐字词（纯函数；词级源原样保留），官方组件负责着色。
+  // 任务栏关掉逐字高亮时不推导，交给官方组件按行渐变。
   const playerLines = useMemo(
     () => (appearance.karaoke ? withKaraokeWords(lyricDocument.lines) : lyricDocument.lines),
     [lyricDocument.lines, appearance.karaoke],
@@ -274,16 +260,7 @@ export function LyricsWindow() {
     setActionError(null)
     void coreLyricsControl(action).catch(() => setActionError("媒体动作未能发出，请从主窗重试。"))
   }
-  /**
-   * R51：外观设置不再是这扇窗里内嵌的下拉菜单，而是**另一扇独立的小窗**（`lyrics-settings`）。
-   *
-   * 为什么（用户要求）：桌面歌词窗默认只有 800×128，radix 的菜单浮层被限制在窗口的可用高度里，
-   * 只能滚；菜单必须能长到窗口外面去。齿轮因此退回一枚普通按钮：点它把**自己客户区里的 DIP 矩形**
-   * 交给宿主，位置/尺寸/关闭全由 Rust 定（R51 简报：锚点 = `getBoundingClientRect()`）。
-   *
-   * 二次点击的闪烁由 Rust 侧兜住：那一下点击会让弹出窗失焦（先 hide），紧跟着到达的这笔 open
-   * 落在短窗口里被判为同一次点击的尾巴——不会出现"关掉又被同一次点击打开"。
-   */
+  /** 外观设置是另一扇独立小窗（`lyrics-settings`）：齿轮把自己客户区里的 DIP 矩形交给宿主，位置、尺寸、关闭全由 Rust 定。 */
   const openAppearance = (event: MouseEvent<HTMLButtonElement>) => {
     setActionError(null)
     const rect = event.currentTarget.getBoundingClientRect()
@@ -294,8 +271,7 @@ export function LyricsWindow() {
     <Button variant="ghost" size="icon-sm" aria-label="桌面歌词外观" data-testid="lyrics-appearance"
       onClick={openAppearance}><Settings2 /></Button>
   )
-  /** 锁定开关（R45B）：`locked=true` 显示 **Lock**（表示已锁），未锁显示 Unlock（表示可以锁）；
-   *  `aria-pressed` 让人知道这是个按压态开关，无障碍名称把"现在是什么 + 点下去会怎样"说全。 */
+  /** 锁定开关：`locked=true` 显示 **Lock**（已锁），未锁显示 Unlock；`aria-pressed` 让人知道这是按压态开关。 */
   const lockButton = (
     <Button variant="ghost" size="icon-sm" aria-pressed={config.locked}
       aria-label={config.locked ? "已锁定桌面歌词（点击解锁）" : "锁定桌面歌词"}
@@ -332,10 +308,7 @@ export function LyricsWindow() {
       {appearanceButton}
     </div>
   )
-  /**
-   * R61：竖版（桌面模式）改由自渲染的单列承担——一句一列、按演唱进度平移。横版与任务栏
-   * 仍是官方 `LyricPlayer`（渲染路径一个字节没动）。
-   */
+  /** 竖版（桌面模式）改由自渲染的单列承担，横版与任务栏仍是官方 `LyricPlayer`。 */
   const vertical = config.mode === "desktop" && config.layout === "vertical"
   const content = (
     <div className="relative isolate min-h-0 flex-1" onMouseDownCapture={startDrag}>
@@ -378,7 +351,7 @@ export function LyricsWindow() {
         </CardHeader> : null}
         <CardContent className="flex min-h-0 flex-1 flex-col px-0">{content}</CardContent>
       </Card> : <>{config.mode === "desktop" ? <div className="shrink-0 px-0.5 pt-0.5">{controls}</div> : null}{content}</>}
-      {/* R45B：右下角缩放拖柄（未锁的桌面窗才有；锁定/任务栏连按钮都不存在） */}
+      {/* 右下角缩放拖柄（未锁的桌面窗才有） */}
       {canResize ? <div className="absolute bottom-0 right-0 z-10 p-0.5" data-testid="lyrics-resize-handle">
         <Tooltip>
           <TooltipTrigger asChild>

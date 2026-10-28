@@ -1,73 +1,8 @@
 /**
- * 登录门禁的判定逻辑（纯函数，.mjs 是有意的：渲染层与测试 import 同一份，不经过 JSX/打包）。
+ * 登录门禁的判定逻辑（纯函数，渲染层与测试 import 同一份）。
  *
- * R16 起引导页的形态变了（用户指令）：**只展示二维码和提示文字**，进页面自动发起二维码会话，
- * 界面上没有"开始扫码"这类按钮；只有出错时才出现"重试"（R18 又加了一个常驻的次要入口，见下）。
- *
- * R18（用户指令 2026-10-20）又改了五件事，都落在本文件里：
- * 1. 提示文案换成手机控制中心/设置那两条路径那句（[`QR_HINT_TEXT`] 唯一真源），
- *    **状态行不再复述它**（pending 那一档说"等待扫码…"，免得同一句话在页面上出现两次）；
- * 2. 二维码容器带边框（视觉在 `login-gate.tsx`，是令牌工具类，这里不掺）；
- * 3. 过期仍由 sidecar 自动换新（第 4 条不变量不变），渲染层只需要"新内容到了就换"；
- * 4. **"在网页中打开登录"是常驻次要入口**（`WEB_LOGIN_ENTRY_TEXT`）——不再"只在协议不可用时
- *    出现"；与二维码互斥：发起时 path 转 `official`（自动发起与重试都停），那条路收场之后
- *    回到二维码态并**重新武装自动发起**（`officialNote` 记一句"它为什么结束了"）；
- * 5. 标题移到二维码正上方（[`LOGIN_GATE_TITLE`] 唯一真源，全页只出现一次）。
- *
- * 六条不变量：
- * 1. **未登录绝不渲染 app-shell**：`shouldShowLoginGate` 为真时，外层必须先渲染门禁；
- *    "还不知道"（`checking`：等 `auth:status` 的第一条广播）也按门禁处理。
- * 2. **自动开始只发生在"确定未登录"且没走网页那条路**：`shouldAutoStartQr` 要求四条件齐备
- *    （门禁内的确定态、不 busy、本轮未发起、`path` 不是 `official`）。检查中就发起 =
- *    可能覆盖已有登录态；网页那条路在跑时发起 = 两条路并发（各换一次码）。
- * 3. **二维码状态只认广播**：`auth:qr`（sidecar 建的会话）是唯一来源；认不出的档位**不猜**，
- *    保持原状态（陌生档位当成"已确认"是最严重的误判）。
- * 4. **过期由用户手动刷新**（R21 用户指令，**推翻** R16/R20 的"过期自动换新"）：`expired`
- *    是一条**终止**档——sidecar 停轮询、不建新单，本层撤掉旧码并显示"已过期，点击刷新"。
- *    本地还有一个秒级倒计时（[`qrCountdownText`]），但它只负责**显示**：过期判定一律以
- *    sidecar 那条 `expired` 广播为权威（本地归零只说"正在确认过期…"）。
- * 5. **失败必须可操作**：可重试（`canRetryQr`）；常驻入口在"开窗那条路没在跑"时永远可点
- *    （`canStartLogin`）——R17 抓到过"最需要它的场景里它恰好被禁用"这类坑，所以 `busy`
- *    只描述开窗那条路，二维码等待期间**不占** `busy`。
- * 6. **两条路互斥且可回退**：`path === "official"` 期间不建二维码订单；那条路收场
- *    （`busy` 落下来 **且带一句给人看的话**）时回到二维码态、重新武装自动发起。
- *    只认"带话的收场"是有原因的：二维码会话自己也会播 `busy:false`（没有文案），
- *    把它当成"网页那条路结束了"会让界面在窗还开着的时候跳回二维码。
- *
- * R20（用户真机验收反馈三项，2026-10-20）又加了三件事：
- * 1. **过期码绝不留在屏上**（`applyQrEvent` 的 expired 分支撤掉 content）：留在屏上的旧码
- *    是"扫了没反应"的死码——用户会以为是自己手机的问题；
- * 2. **过期提示要可感知**（`qrNotice` + `QR_REFRESH_NOTICE`）：sidecar 换新只隔一次
- *    `create` 请求，原来那句提示在新 `pending` 到达的瞬间就被"等待扫码…"顶掉（用户看不见）。
- *    现在它**挺过**那一跳，直到下次扫码状态变化（scanned/confirmed/failed）或用户自己动手；
- * 3. **二维码容器可点刷新**（[`canRefreshQr`]）：过期不必靠"重试"按钮，容器本身就是那个控件
- *    （键盘可达，可达名字 [`QR_REFRESH_LABEL`]）；点击 = `startQr`（与自动发起同一条路）。
- *
- * R21（用户指令 2026-10-20，**推翻 R16/R20 的"过期自动换新"**）改了三条，R20 的第 2 条随之删除：
- * 1. **过期倒计时**：`expiresInMs` 由建单应答/`auth:qr` 广播带过来，本层把它换算成**到期时刻**
- *    （`event.at + expiresInMs`，`at` 由调用方注入），显示文案由 [`qrCountdownText`] 从
- *    "现在几点"（每秒一次的 `tick` 事件）算出来。**钟在渲染层，权威在服务端**：本地数到 0
- *    只是「正在确认过期…」（[`QR_EXPIRING_TEXT`]），既不撤码也不改档——过期判定只认
- *    sidecar 那条 `expired` 广播（实测 TTL 181s、t+177.4s 收到 `103000201`，服务端通常
- *    早于本地归零，所以这一档是罕见的兜底）；
- * 2. **过期态不可扫**：`expired` 到达撤掉 content（R20 的裁决继续成立）+ 界面写
- *    [`QR_EXPIRED_BOX_TEXT`]——过期是一条**终止**档；
- * 3. **只能手动刷新**：过期**不**重新武装自动发起（`shouldAutoStartQr` 在这一档为假，
- *    sidecar 也不再自己建单，见 `src/protocols/qr-login.mjs`）；刷新由用户点击触发
- *    （二维码容器，或过期态那个显著的「刷新二维码」按钮 → 都是 `startQr`）。
- *    因为不再有"刚自动换过一张"这一刻，R20 的 `qrNotice` / `QR_REFRESH_NOTICE` **整条删除**。
- *
- * 诊断依据（可复现：`node scripts/probe-qr.mjs --until-expired`，摘要 `.probe/qr-expiry-diag.json`）：
- * 服务端**会**给出过期档位——TTL 181s，实测 t+177.4s 时 `103000200` → `103000201`，
- * 过期之后重新建单照常下发新码（R21 起这件事改为**用户点刷新**时才做）。
- *
- * R37（用户真机反馈之 2）在这里加了两条判定，**合起来才成立**：
- * 1. **扫到之后遮蔽二维码**（[`qrMaskText`]）：`scanned`/`confirmed` 两档返回遮罩文案
- *    （就是状态行那两句，同一份常量），界面在 canvas 上叠一层——用户报的现象正是"已经扫过了，
- *    屏上那张码看起来还能扫"；pending 不遮（那是屏上唯一有用的东西）、expired 也不遮
- *    （它走"撤下 canvas + 两行占位"那条终止档的路）；
- * 2. **`scanned` 档容器不可点**（[`canRefreshQr`] 的判据收窄）：手机正对着那张码的时候换码
- *    = 把这次扫码作废（用户只能重扫），所以点得动的档位只剩 pending / expired / failed。
+ * 六条不变量：未登录绝不渲染 app-shell；自动发起只发生在确定未登录且没走网页那条路时；
+ * 二维码状态只认 sidecar 广播；过期是终止档、只能手动刷新；失败必须可操作；两条路互斥且可回退。
  */
 
 /** 门禁的三个阶段。 */
@@ -80,14 +15,7 @@ export const LOGIN_GATE_PHASE = {
   loggedIn: "logged_in",
 };
 
-/**
- * 二维码在门禁里的阶段。
- *
- * `pending`/`scanned`/`confirmed`/`expired`/`failed` 与 sidecar 的 `QR_LOGIN_STATUS` **同值**
- * （两侧靠 `test/qr-protocol-parity` 式的人工对齐；渲染层不 import sidecar 的协议模块，
- * 因为那会把 Node 侧实现打进渲染层包）。`preparing` 是渲染层自己的一档：已发起、
- * 还没拿到内容（`auth:qr-start` 还没回，或广播还没到）。
- */
+/** 二维码在门禁里的阶段：pending/scanned/confirmed/expired/failed 与 sidecar 同值，preparing 是渲染层自己的一档。 */
 export const QR_GATE_STATUS = {
   preparing: "preparing",
   pending: "pending",
@@ -99,84 +27,43 @@ export const QR_GATE_STATUS = {
 
 const KNOWN_QR_STATUSES = Object.values(QR_GATE_STATUS);
 
-/** 提示文字的唯一真源（界面与测试读同一句）。R18 按用户指令换成"两条路径"那句。 */
+/** 提示文字的唯一真源（界面与测试读同一句）。 */
 export const QR_HINT_TEXT = "手机「控制中心」>「扫一扫」或者系统「设置」>「华为账号」>「扫一扫」。";
 
-/** 页面标题的唯一真源（R18：标题在二维码正上方，全页只出现一次——header 里那份已移除）。 */
+/** 页面标题的唯一真源，全页只出现一次。 */
 export const LOGIN_GATE_TITLE = "华为账号登录";
 
-/** 次要入口的文案（R18：常驻，不再只在错误态出现）。 */
+/** 次要入口的文案（常驻，不再只在错误态出现）。 */
 export const WEB_LOGIN_ENTRY_TEXT = "在网页中打开登录";
 
 /** 次要入口的测试锚点（真窗守卫 `npm run verify:live` 按它点名这个入口）。 */
 export const WEB_LOGIN_ENTRY_TESTID = "login-open-web";
 
-/**
- * 网页登录那条路开着时，次要入口**变形的文案**（R20 要求 3）。
- *
- * "打开"与"返回"是两件事，用同一句话表示会让用户以为点了没用：窗已经开着，再点一次
- * `auth:login` 只会撞上 `login_in_progress`。这一档点的必须是 `auth:cancel-login`（关窗）。
- */
+/** 网页登录那条路开着时次要入口的变形文案——这一档点的是关窗，不是再打开一次。 */
 export const WEB_LOGIN_BACK_TEXT = "返回扫码登录";
 
 /** 变形之后的测试锚点（与"打开"分开，真窗守卫/测试才能各点各的）。 */
 export const WEB_LOGIN_BACK_TESTID = "login-back-to-qr";
 
-/**
- * R27（用户指令 2026-10-20）：「在网页中打开登录」按下之后那一行 —— **正在打开华为官方登录页…**。
- *
- * 为什么必须有这一档（用户报的现象）：点完入口之后官方页要好**几秒**才画出来，而登录 webview
- * 一建出来就铺满整个内容区，于是那几秒里用户看到的是一片白。R27 的修法是**两层配合**——
- * Rust 侧把登录页先摆在**屏外**（`login::offscreen_rect`，客户区左沿之外），**静默窗走完**
- * （每次加载 `Finished` 之后 1.5 秒内没有新导航）或 30 秒首载期限到才摆进内容区；
- * 渲染层这一侧因此在屏外那一段时间里仍然看得见，它要显示的就是这一行。
- *
- * 与 R20 那句「已在网页中打开登录」的区别是**诚实**：`busy` 为真只说明那条路在跑，此刻官方页
- * 一个字都还没画出来。"已打开"会把"还在加载"描述成"就是白的"——那正是用户报的那个现象。
- * 那一句仍然保留给**另一档**：渲染层 reload / 崩溃重启之后只剩 `busy:true`（`path` 丢了），
- * 那一刻页面多半早就画好了，我们没有理由说它在加载（判定见 [`loginOpeningIndicator`]）。
- */
+/** 按下入口后那一行「正在打开华为官方登录页…」：官方页还没画出来，先别让用户看一片白。 */
 export const LOGIN_OPENING_TEXT = "正在打开华为官方登录页…";
 
 /** 加载动画的测试锚点（真窗守卫按它点名这个转圈）。 */
 export const LOGIN_OPENING_TESTID = "login-opening";
 
-/**
- * 二维码容器可点刷新的**可达名字**（R20 要求 2）。
- *
- * 容器本身是个 `<button>`：不写这一条，读屏与键盘用户只会听到"按钮"两个字，
- * 而它做的事（换一张新码）在页面上没有任何文字说明。
- */
+/** 二维码容器可点刷新的可达名字（容器本身就是那个按钮）。 */
 export const QR_REFRESH_LABEL = "刷新二维码";
 
 /** 刷新控件的测试锚点。 */
 export const QR_REFRESH_TESTID = "login-qr-refresh";
 
-/**
- * 过期态里写在二维码**原位**的那句（R21 要求 2）。
- *
- * 与状态行的关系（R26 起）：**遮罩是过期态唯一的提示载体**——原位这两行说完"这块地方怎么了、
- * 你该做什么"，状态行在过期档不再说话（见 [`loginGateStatusLine`]）。画布位置不留任何可扫的
- * 东西——留着死码是最坏的一种"没反应"。
- */
+/** 过期态里写在二维码原位的那句（遮罩是过期态唯一的提示载体）。 */
 export const QR_EXPIRED_BOX_TEXT = "二维码已过期";
 
-/**
- * 过期占位的**第二行**（R25 用户指令：遮罩只显示两行——「二维码已过期」/「点击刷新」）。
- *
- * 这一行说的是"这块地方点得动"：二维码容器本身就是那个控件（R20 起可点，键鼠都可达，
- * 可达名字是 [`QR_REFRESH_LABEL`]），所以过期态**不需要**再加一个按钮——R25 把 R21 那个
- * 显著的「刷新二维码」按钮删掉了，容器是唯一的换码入口。
- */
+/** 过期占位的第二行：这块地方点得动（容器就是换码入口）。 */
 export const QR_EXPIRED_BOX_HINT = "点击刷新";
 
-/**
- * 本地倒计时数到 0 时那一行（R21 要求 1）。
- *
- * 为什么不改成"已过期"：本地钟不是权威。服务端实测在本地归零前就给 `expired`
- * （TTL 181s、t+177.4s 观测到），所以这一档只在"那条广播还没到"的窗口里出现——
- * 说"正在确认"是诚实的，说"已过期"则是在替服务端下结论（万一它还没过期呢）。
- */
+/** 本地倒计时数到 0 时那一行：本地钟不是权威，所以只说正在确认。 */
 export const QR_EXPIRING_TEXT = "正在确认过期…";
 
 /** 倒计时的测试锚点（真窗守卫与标记测试按它点名那一行）。 */
@@ -185,22 +72,11 @@ export const QR_COUNTDOWN_TESTID = "login-qr-countdown";
 /** 倒计时的步长（秒级；改它等于改倒计时的分辨率，界面文案跟着变）。 */
 export const QR_COUNTDOWN_TICK_MS = 1_000;
 
-/**
- * 扫到之后那两句（R37）：**状态行与二维码遮蔽层共用同一份**。
- *
- * 为什么必须是常量而不是各写一份字面量：R37 起这两句话会**同时出现在两处**——
- * 状态行（`role="status"`，全页唯一的"现在到哪一步"）与二维码遮罩（那块地方已经用过了）。
- * 各写一份的下场是迟早有一处改了、另一处没跟上，而两处说的是同一件事。
- *
- * 与 `expired` 那一档的区别（R26）：过期是**终止**档，遮罩是唯一提示载体、状态行整行隐掉；
- * `scanned`/`confirmed` 还在流程中间（后面还有换码、落盘、广播），所以状态行**照旧说话**。
- */
+/** 扫到之后那两句：状态行与二维码遮蔽层共用同一份常量。 */
 export const QR_SCANNED_TEXT = "已扫码，请在手机上确认。";
 export const QR_CONFIRMED_TEXT = "已确认，正在完成登录…";
 
-/**
- * 二维码遮蔽层的测试锚点（R37）：真窗守卫与标记测试按它点名那一层。
- */
+/** 二维码遮蔽层的测试锚点。 */
 export const QR_MASK_TESTID = "login-qr-mask";
 
 /** 网页那条路收场、广播里却没带文案时的兜底说明（"刚退回来"这个标记永远不为空）。 */
@@ -229,7 +105,7 @@ export const LOGIN_GATE_EVENT = {
   qr: "qr",
   /** `auth:qr-start` 调用本身失败（连内容都没拿到） */
   qrFailed: "qr-failed",
-  /** 渲染层自己的钟走了一秒（R21 倒计时；`nowMs` 由调用方注入，纯函数里不读真实时钟） */
+  /** 渲染层自己的钟走了一秒（倒计时用）。 */
   tick: "tick",
 };
 
@@ -239,11 +115,7 @@ function initialQrState() {
     status: QR_GATE_STATUS.preparing,
     content: null,
     expiresInMs: null,
-    /**
-     * 到期时刻（本地钟，R21）：`= 事件发生时刻 at + expiresInMs`。倒计时就是
-     * "它减现在"，所以存的是**绝对时刻**而不是"还剩多少毫秒"——后者要每秒改一次状态，
-     * 而且 tick 迟到/丢一次就永远数不准。
-     */
+    /** 到期时刻（本地钟）：存绝对时刻而非剩余毫秒，倒计时就是「它减现在」。 */
     expiresAt: null,
     /** 渲染层当前采到的钟（每秒一次的 `tick` 事件喂进来；只在有 `expiresAt` 时才走） */
     nowMs: null,
@@ -264,22 +136,14 @@ export function initialGateState() {
     qrAttempted: false,
     /** 当前走的是哪条路：`"qr"`（默认）/ `"official"`（网页登录那条路）。状态行按它说人话 */
     path: null,
-    /**
-     * 网页那条路收场时留下的一句话（R18）：回到二维码态之后先说清楚"它怎么了"，
-     * 等新二维码真的到了（`pending` 带内容）再退场。
-     */
+    /** 网页那条路收场时留下的一句话，等新二维码到了再退场。 */
     officialNote: null,
   };
 }
 
 /**
- * 网页那条路收场 → 回到二维码态。
- *
- * 重新武装自动发起（`qrAttempted: false`）是有意的：用户关掉登录窗之后，眼前应该重新出现
- * 一张能扫的码，而不是让他自己去按什么东西（简报给的两个选项里选了"重新 qr-start"）。
- *
- * `officialNote` **永远不为空**：它既是给用户看的那句"那条路怎么了"，也是渲染层判断
- * "这一轮该重新发码"的标记（`useAuthGate` 的自动发起 effect 读它）。
+ * 网页那条路收场 → 回到二维码态，并重新武装自动发起。
+ * `officialNote` 永远不为空：既是给用户看的说明，也是渲染层判断该重新发码的标记。
  */
 function returnToQr(state, note) {
   return {
@@ -301,21 +165,8 @@ function isOfficialFinish(state, event) {
 }
 
 /**
- * 过期倒计时（R21 要求 1）：**只**显示"还剩多久"，不参与过期判定。
- *
- * 位置选在二维码**下方**（而不是状态行里）：状态行是"现在到哪一步"的唯一真源，
- * 而倒计时每一秒都在变——混进状态行会让"等待扫码…"这句恒定的说明被数字淹掉，
- * 也会让状态行的断言变得没法写。界面上两行各司其职：
- *
- * ```
- *   [二维码]
- *   剩 179 秒过期        ← 本函数（只在"码在屏上等着被扫"那一档出现）
- *   手机「控制中心」>「扫一扫」…。
- *   等待扫码…            ← 状态行
- * ```
- *
- * 本地归零（[`QR_EXPIRING_TEXT`]）**不是**过期：那一刻只是"该过期了"，码留在屏上等
- * 服务端那条 `expired` 广播收口（它是唯一权威；实测它在本地归零前就到了）。
+ * 过期倒计时：只显示「还剩多久」，不参与过期判定，位置在二维码下方而非状态行里。
+ * 本地归零不是过期，码留在屏上等服务端那条 `expired` 广播收口。
  *
  * @param {object} state 门禁状态
  * @returns {string|null} 要显示的那一行；没有可数的东西时 `null`（界面少一行，不是显示"剩 0 秒"）
@@ -330,10 +181,8 @@ export function qrCountdownText(state) {
 }
 
 /**
- * 倒计时每秒推进一次的那一格（R21）：把渲染层的钟喂进来。
- *
- * 钳在到期时刻：本地数到 0 之后就**不再变化**，reducer 因此返回同一个状态对象，
- * React 也就不再重渲染（表停了，而不是每秒白跑一次渲染直到服务端收口）。
+ * 把渲染层的钟喂进来，倒计时每秒推进一格。
+ * 钳在到期时刻：本地数到 0 后返回同一个状态对象，React 不再重渲染。
  */
 function tickQrClock(qr, nowMs) {
   if (typeof nowMs !== "number" || qr.expiresAt === null) return qr;
@@ -350,7 +199,7 @@ function applyQrEvent(qr, event) {
   if (typeof event.content === "string" && event.content !== "") next.content = event.content;
   if (typeof event.expiresInMs === "number") next.expiresInMs = event.expiresInMs;
   if (status === QR_GATE_STATUS.pending) {
-    // R21：建单应答/广播里的有效期 → 本地到期时刻（`at` 是事件发生时刻，由调用方注入）。
+    // 建单应答/广播里的有效期 → 本地到期时刻（`at` 由调用方注入）。
     // 两样缺一就不编造：宁可不显示倒计时，也不显示一个数不准的。
     const at = event.at;
     if (typeof event.expiresInMs === "number" && typeof at === "number") {
@@ -366,8 +215,8 @@ function applyQrEvent(qr, event) {
     next.nowMs = null;
   }
   if (status === QR_GATE_STATUS.expired) {
-    // R20 要求 2 / R21 要求 2：屏幕上那张已经**扫不动**了。留着一张死码是最坏的一种"没反应"
-    // ——用户会反复对着它扫，然后以为是自己手机/网络的问题。当场撤掉，等用户点刷新。
+    // 屏幕上那张码已经扫不动了，留着一张死码是最坏的一种「没反应」。
+    // 当场撤掉，等用户点刷新。
     next.content = null;
     next.expiresInMs = null;
   }
@@ -383,9 +232,7 @@ function applyQrEvent(qr, event) {
 }
 
 /**
- * 一份 `auth:status` 形状的载荷 → 门禁事件（**唯一一处**映射：广播回调与 `auth:get-status`
- * 的应答都经它，两处各写一份早晚会漂移）。
- *
+ * 一份 `auth:status` 形状的载荷 → 门禁事件（唯一一处映射，广播回调与应答都经它）。
  * `restoring:true` 走自己那条事件：它跟 `loggedIn:false` 长得像，含义却是"还不知道"。
  */
 export function statusEventOf(payload) {
@@ -420,7 +267,7 @@ export function reduceGateState(state, event) {
     }
     case LOGIN_GATE_EVENT.qrRequested:
       return { ...state, qrAttempted: true, path: "qr", message: null, qr: initialQrState() };
-    /** R21：每秒一次的钟（倒计时唯一的驱动力）。没有可数的到期时刻时**原样返回**（不重渲染）。 */
+    /** 每秒一次的钟（倒计时唯一的驱动力）。没有可数的到期时刻时原样返回，不重渲染。 */
     case LOGIN_GATE_EVENT.tick: {
       const qr = tickQrClock(state.qr, event.nowMs);
       return qr === state.qr ? state : { ...state, qr };
@@ -472,16 +319,8 @@ export function reduceGateState(state, event) {
 }
 
 /**
- * 「正在打开华为官方登录页…」这一档现在显不显示（R27 用户三项之 2）。
- *
- * 判据只有两条同时成立才算：**这条路是用户按出来的**（`path === "official"`）且**它还在跑**
- * （`busy`）。为什么不只看 `busy`：R19 那个场景（渲染层 reload / 崩溃重启之后靠
- * `auth:get-status` 重建状态）里 `path` 是 `null` 而 `busy` 仍为真——那一刻官方页多半早就
- * 画好了，说"正在打开"是编造。反过来只看 `path` 也不行：那条路收场之后 `path` 还留着，
- * 而页面已经回到二维码态，转圈就该停。
- *
- * 与 [`loginGateStatusLine`] 的关系：这个判定同时驱动**那一行的文案**（同一个 `role="status"`
- * 区域）与**旁边那个转圈**。两处读同一个判定，就不会出现"看见在转、读屏却被告知已打开"。
+ * 「正在打开华为官方登录页…」这一档现在显不显示。
+ * 判据是「用户按出来的」且「它还在跑」，同时驱动状态行文案与旁边那个转圈。
  *
  * @param {object} state 门禁状态
  * @returns {{showing: boolean, text: string}} `text` 恒为 [`LOGIN_OPENING_TEXT`]（唯一真源）
@@ -499,15 +338,8 @@ export function shouldShowLoginGate(state) {
 }
 
 /**
- * 该自动发起二维码吗？四条件缺一不可：
- * 1. 阶段是**确定的**"未登录"（`checking` 不发起：可能已有会话）；
- * 2. 不 busy（网页那条路正在跑）；
- * 3. 本轮没发起过（重试是用户按出来的，不是自动重来）；
- * 4. 当前不在网页那条路上（R18：两条路互斥，别在窗里又建一张码）。
- *
- * R21：**过期不会重新武装它**——`qrRequested`/`returnToQr` 之外没有任何一条路把
- * `qrAttempted` 打回 false，所以过期之后页面不会自己再发一次 `auth:qr-start`；
- * 换新只能来自用户点击（[`canRefreshQr`] 那一档）。
+ * 该自动发起二维码吗？阶段确定未登录、不 busy、本轮没发起过、不在网页那条路上。
+ * 过期不会重新武装它：换新只能来自用户点击（[`canRefreshQr`]）。
  */
 export function shouldAutoStartQr(state) {
   if (state?.phase !== LOGIN_GATE_PHASE.loggedOut) return false;
@@ -523,19 +355,8 @@ export function canRetryQr(state) {
 }
 
 /**
- * 二维码容器现在点得动吗？（R20 要求 2 / R21 要求 3：过期与等待时不必去找"重试"按钮）
- *
- * 点击的语义就是 `startQr`（= `auth:qr-start`，sidecar 会停掉旧会话、换一张新码），
- * 所以"点得动"的判据是"再发一次有意义"：
- * - `pending`：有码在屏上等着被扫，换一张是用户明确想要的（旧的那张他不想扫了）；
- * - `expired`：**R21 起这里是唯一的换码路径**（sidecar 不再自动换新）——过期态那张已经废了，
- *   点容器（或那个显著的「刷新二维码」按钮，R25 已删）就是"再来一张"；
- * - `failed`：与「重试」同一件事（两个入口都留着，用户按哪个都行）；
- * - `preparing`：已经有一次请求在飞，再点一次只是**重复建单**（还会白白换掉马上要到的码）；
- * - `scanned`（R37 改判）：**手机已经在扫这一张了**——此刻换码 = 把这次扫码作废
- *   （用户手机上正对着的那张码突然失效，只能重扫）。容器同时被遮蔽层盖住（见 [`qrMaskText`]）；
- * - `confirmed`：正在换码，这时换一张新码只会把已经成功的那次作废；
- * - 网页那条路开着：那层被窗盖住（点不到），而且此刻不该建第二张码（两条路互斥，不变量 6）。
+ * 二维码容器现在点得动吗？点击的语义就是 `auth:qr-start`，判据是「再发一次有意义」。
+ * 过期态这里是唯一的换码路径；`preparing`/`scanned`/`confirmed` 与网页那条路都点不动。
  */
 export function canRefreshQr(state) {
   if (state?.path === "official") return false;
@@ -546,18 +367,8 @@ export function canRefreshQr(state) {
 }
 
 /**
- * 二维码上要不要盖遮蔽层（R37，用户真机反馈之 2）：要盖就返回盖上去的那句话，不盖返回 `null`。
- *
- * 用户报的现象：手机上已经扫了码（甚至点了确认），屏上那张码还是原样——**看起来还能扫**。
- * 处置是"遮蔽 + 不可点"两条一起（后者见 [`canRefreshQr`]）：用户一眼看出"这块地方已经用过了"，
- * 而手也不会再往那儿点。
- *
- * 只认 `scanned`/`confirmed` 两档：
- * - `pending` 不遮——那张码是屏上唯一有用的东西（遮它等于自断出路）；
- * - `expired` 不遮——它走的是另一条路（canvas 直接撤下 + 两行占位，R21/R25/R26 的终止档语义）；
- * - `failed`/`preparing` 没有可扫的码，也就无所谓遮。
- *
- * 文案就是状态行那两句（同一份常量，见 [`QR_SCANNED_TEXT`]）：两处说同一件事。
+ * 二维码上要不要盖遮蔽层：要盖就返回盖上去的那句话，不盖返回 `null`。
+ * 只认 `scanned`/`confirmed` 两档，遮蔽与不可点两条一起处置。
  *
  * @param {object} state 门禁状态
  * @returns {string|null} 遮蔽层上那句文案；`null` = 这一档不盖
@@ -570,21 +381,8 @@ export function qrMaskText(state) {
 }
 
 /**
- * 次要入口现在是什么形态（R20 要求 3）：`"open"`（打开网页登录）还是 `"back"`（返回扫码登录）。
- *
- * 判据是 [`canStartLogin`]（= "那条路没在跑"），**不是** `path === "official"`：`path` 是渲染层
- * 这一次点击留下的本地猜测，渲染层 reload / 崩溃重启之后就没了——而那时窗很可能还开着
- * （`auth:get-status` 的应答会说 `busy:true`），恰恰是用户最需要这条返回路径的时刻。
- * `busy` 是 sidecar 自己的事实（R19 起查询与广播同源），所以形态跟着它走。
- *
- * 两种形态都**可点**（`disabled: false`）：打开与返回各自是那一刻唯一该做的事。
- * R17 抓过的那类坑正是"最需要某个控件时它恰好是灰的"，这里不再留任何一个灰的入口。
- *
- * 为什么要有"返回"这一档：走网页那条路时官方登录页**铺满整个主窗**（R25 起不再让出顶部那 48px），
- * 正文里的一切（包括原来那个入口）都在它底下——点不到。用户唯一能碰到的只有浮在网页之上的
- * 那两个控件，所以"返回"这一档**不再由 gate 渲染**（R25 用户指令：它要悬浮在网页左上角，
- * 不独占一行），改由浮动 webview `login-return` 渲染（同一个文案与锚点，见 `login-chrome.tsx`）。
- * 这里保留 `form` 这一档是因为"此刻该存在哪个控件"仍然是门禁的判定，只是落点搬了家。
+ * 次要入口现在是什么形态：`"open"`（打开网页登录）还是 `"back"`（返回扫码登录）。
+ * 判据是 [`canStartLogin`]（`busy` 是 sidecar 的事实），两种形态都可点。
  */
 export function webLoginEntry(state) {
   if (!canStartLogin(state)) {
@@ -594,12 +392,8 @@ export function webLoginEntry(state) {
 }
 
 /**
- * "网页那条路现在没在跑"吗？（R18 立、R20 扩用：它同时是次要入口**形态**的判据）
- *
- * `busy` 只描述开窗那条路（二维码在准备/等待/过期/失败**都不占** busy），所以：
- * - 它为真时，入口是「在网页中打开登录」（发起那条路）；
- * - 它为假时，入口是「返回扫码登录」（见 `webLoginEntry`）——eq. 窗开着，正文被盖住，
- *   用户需要的不是"再打开一次"（那只会撞上 `login_in_progress`）而是"关掉它"。
+ * 「网页那条路现在没在跑」吗？它同时是次要入口形态的判据。
+ * 为假时入口是「返回扫码登录」：窗开着，用户需要的是关掉它而不是再打开一次。
  */
 export function canStartLogin(state) {
   return state?.busy !== true;
@@ -612,24 +406,9 @@ export function qrContentOf(state) {
 }
 
 /**
- * 状态行文案（克制：一行，告诉用户现在是什么状态、下一步能做什么；`null` = 这一档不显示该行）。
- *
- * 优先级：**最新一次明确的失败/取消** → 会话阶段 → **网页那条路刚收场留下的那句话** →
- * 当前那条路的状态。失败文案排最前是有意的：出错时用户最需要看到的就是那一句
- * （而不是"正在准备二维码…"）；`officialNote` 排在"现状"之前，理由同 R19：
- * 它说的是**刚刚发生了什么**，而"正在检查登录状态…"只是"还不知道"。
- *
- * R21：倒计时**不进这一行**（它在二维码下方自成一行，见 [`qrCountdownText`]）。
- *
- * R26（用户真机反馈之 4）：`expired` 这一档**不说话**（返回 `null`，界面把那一行整个隐掉）——
- * 二维码遮罩上已经是「二维码已过期」/「点击刷新」两行，状态行再复述一遍等于同一句话说两次，
- * 还把用户的选择挤到更下面。**遮罩因此是过期态的唯一提示载体**（R21 立的那条终止档语义不变：
- * 过期仍然不自动换新，换新仍然只能由用户点容器触发）。
- *
- * R27（用户真机反馈之 2）：官方页**还在加载**那一刻（[`loginOpeningIndicator`]）说的是
- * 「正在打开华为官方登录页…」，不再是 R20 那句「已在网页中打开登录。」——那一刻页面还在屏外
- * 加载，一个字都没画出来。只按 `busy` 判会误伤 R19 那个 reload 场景（没有本地 `path`），
- * 所以这一档的判据不在 `busy` 上（见该函数）。
+ * 状态行文案：一行，告诉用户现在是什么状态、下一步能做什么；`null` = 不显示该行。
+ * 优先级：最新一次失败/取消 → 会话阶段 → 网页那条路刚收场的那句话 → 当前路的状态。
+ * `expired` 这一档不说话，遮罩是它唯一的提示载体；倒计时也不进这一行。
  *
  * @param {object} state 门禁状态
  * @returns {string|null} 要显示的那一行；`null` = 这一档不显示状态行
@@ -643,7 +422,7 @@ export function loginGateStatusLine(state) {
 
   if (state?.phase === LOGIN_GATE_PHASE.checking) return "正在检查登录状态…";
 
-  // R27：官方页还在加载（用户刚按下入口、页还在屏外）→ 如实说"正在打开"
+  // 官方页还在加载（页还在屏外）→ 如实说"正在打开"
   if (loginOpeningIndicator(state).showing) return LOGIN_OPENING_TEXT;
 
   // 官方页那条路（次要入口）跑起来时，说的是"窗已经开了"，而不是二维码现在到哪一步
@@ -663,7 +442,7 @@ export function loginGateStatusLine(state) {
     case QR_GATE_STATUS.confirmed:
       return QR_CONFIRMED_TEXT;
     case QR_GATE_STATUS.expired:
-      // R26（用户真机反馈之 4）：终止档且提示已经在二维码遮罩上了——状态行整行隐掉，不复述
+      // 终止档且提示已经在二维码遮罩上了——状态行整行隐掉，不复述
       return null;
     case QR_GATE_STATUS.failed:
       return qr.message ?? "二维码登录失败（详情见日志）";

@@ -1,6 +1,6 @@
 /**
- * 本地曲库的渲染层端口（R65）：基址只问宿主一次并缓存，回答形状在这一层统一收口。
- * 基址认不出来时**不猜**：回 `null`，调用方说"本地播放不可用"，而不是拼一个注定 404 的地址。
+ * 本地曲库的渲染层端口：基址只问宿主一次并缓存，回答形状在这一层统一收口。
+ * 基址认不出来时不猜：回 null，调用方说「本地播放不可用」，而不是拼一个注定 404 的地址。
  */
 import { coreLocalBaseUrl, coreLocalImport, coreLocalList, coreLocalRemove } from "../../host-api.ts";
 import { normalizeLocalAnswer, normalizeLocalBaseUrl } from "./local-library.mjs";
@@ -50,12 +50,7 @@ export async function fetchLocalLibrary() {
   return normalizeLocalAnswer(answer, baseUrl);
 }
 
-/**
- * 导入：`paths` 省略 = 开系统对话框；`folder: true` 是"导入文件夹"。
- *
- * 回执里那一份 `tracks` 是**导入之后**的整库快照：页面拿它直接替换列表，
- * 不需要再请求一次（两次请求之间的窗口里会闪一下"少了几首"）。
- */
+/** 导入：paths 省略 = 开系统对话框；folder: true 是「导入文件夹」。回执里的 tracks 是导入之后的整库快照，页面直接替换列表，不必再请求一次。 */
 export async function importLocalTracks(payload = {}) {
   const baseUrl = await localBaseUrlCached();
   if (baseUrl === null) throw { kind: "unavailable", message: "本地曲库不可用（宿主没有给出协议基址）" };

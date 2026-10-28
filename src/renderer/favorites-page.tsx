@@ -1,16 +1,8 @@
 /**
- * 收藏页（R8）：本任务唯一"有状态"的页面，三条约定都在这里落地。
+ * 收藏页：本任务唯一有状态的页面。
  *
- * 1. **常驻挂载、切页不卸载**：滚动加载了几十页、滚到第几百首，切去歌单再切回来，
- *    不该从头再来一遍。所以它是 App 里唯一一个挂在 `renderPage()` 之外的页面，
- *    用 `hidden` 控制显隐（`hidden` + 工具类的坑见下面注释）。
- * 2. **滚动到哨兵就加载下一页**（IntersectionObserver，root 是本页的滚动容器）：
- *    一次一页地走 `library:favorites`；分页结论由协议层给，合并/去重/计数全在
- *    features/library/favorites-pagination.mjs（纯逻辑，UI 只消费）。
- * 3. **总数与已加载数分开显示**：收藏没有可信总数，走完分页才有"共 M 首"。
- *    没走完、或者失败，都只能说"已加载 N 首"——这不是文案问题，是不许把一页说成全部。
- *
- * 失败不清空已加载内容，且**不自动重试**（离线时那是请求风暴）：失败态给一个"重试"按钮。
+ * 常驻挂载、切页不卸载（只切 `hidden`）；滚动到哨兵就加载下一页；总数与已加载数分开显示——没走完分页只能说"已加载 N 首"。
+ * 失败不清空已加载内容、不自动重试（离线时那是请求风暴），只给一个重试按钮。
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 
@@ -71,12 +63,7 @@ export function FavoritesPage({
   const sentinelRef = useRef<HTMLDivElement | null>(null)
   stateRef.current = state
 
-  /**
-   * 取下一页。
-   *
-   * 显式把"当前状态"作为入参而不是从 ref 里读：重试按钮是先清失败态、再立刻发起，
-   * 两步之间 React 还没重渲染，从 ref 读到的仍是"失败中"的旧状态（守卫会把重试吞掉）。
-   */
+  /** 取下一页：显式把当前状态作为入参而不是从 ref 读——重试时 React 还没重渲染，从 ref 会读到旧的失败态。 */
   const requestNextPage = useCallback(async (current: FavoritesState) => {
     if (loadingRef.current) return
     if (!shouldLoadNextFavoritesPage(current)) return
@@ -118,15 +105,7 @@ export function FavoritesPage({
     return () => observer.disconnect()
   }, [requestNextPage])
 
-  /**
-   * 位置恢复：切回来时把 scrollTop 写回去。
-   *
-   * 两个刻意的选择：
-   * - **只在变可见时写**，切走时**不读** scrollTop：`hidden`（display:none）会让浏览器把
-   *   滚动位置丢掉，等 effect 跑到时读到的可能已经是 0——那会把记忆里的好值覆盖成 0，
-   *   下次切回来就真的回到顶部了。真正的记录来自 `onScroll`（滚动时一直在写）。
-   * - 用 `useLayoutEffect`：在浏览器绘制前写回，用户看不到"先顶部、再跳回去"的闪动。
-   */
+  /** 位置恢复：只在变可见时把 scrollTop 写回去（`hidden` 会丢滚动位置，切走时不读），用 `useLayoutEffect` 避免闪动。 */
   useLayoutEffect(() => {
     if (!active) return
     const element = scrollRef.current

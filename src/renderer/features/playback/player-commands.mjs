@@ -1,14 +1,8 @@
 /**
- * `player:command` 广播的执行侧（R9 **预登记**，真正的发送方是 R11 的托盘）。
- *
- * 为什么要预登记：广播白名单是硬白名单——不在名单里的频道会被 Rust 的 FramePolicy
- * 当成"白名单外帧"丢掉（只有日志里有一条 Reject）。托盘是 Rust 侧的菜单，它点了之后
- * 唯一的出路就是广播一条命令；等 R11 再一起加，中间这段时间"托盘点了没反应"没有任何
- * 可诊断的痕迹。所以这里先备好：命令表（唯一真源）+ 一个**只会拒绝不会猜**的执行器。
- *
- * 两条纪律：
- * - 认不出的命令**不执行也不猜**（不把 "toggle" 当 "play"），回结构化 `invalid_command`；
- * - 命令是**意图**不是状态：执行结果由状态机自己的快照说话，命令的返回值只用来判断有没有受理。
+ * player:command 广播的执行侧：命令表（唯一真源）+ 一个只会拒绝不会猜的执行器。
+ * 广播白名单是硬白名单，不在名单里的频道会被 Rust 的 FramePolicy 当白名单外帧丢掉。
+ * 认不出的命令不执行也不猜，回结构化 invalid_command。
+ * 命令是意图不是状态：结果由状态机自己的快照说话，返回值只用来判断有没有受理。
  */
 import { PLAYER_ERROR_KINDS } from "./player.mjs";
 
@@ -21,8 +15,7 @@ export function isPlayerCommand(value) {
 }
 
 /**
- * 执行一条 `player:command` 广播载荷。
- *
+ * 执行一条 player:command 广播载荷。
  * @param {object} player 播放状态机（`createPlayer` 的产物）
  * @param {unknown} payload 广播载荷：`{command: "play" | "pause" | "toggle" | "next" | "previous"}`
  * @returns {Promise<{ok: true, data: unknown} | {ok: false, error: {kind: string, message: string}}>}

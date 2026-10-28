@@ -1,10 +1,7 @@
-/** 主窗配置代理（R44e）：只订阅/转发 Rust 的运行状态与权威配置；**不再自己写 settings**。
+/**
+ * 主窗配置代理：只订阅/转发 Rust 的运行状态与权威配置，不再自己写 settings。
  *
- * 为什么删掉这一层的保存队列（R44c 的旧裁决）：它绑在 React 的生命周期上。集成审查 I2 的复现是
- * "认证卸载 LibraryShell → 桥取消订阅 → 仍开着的歌词窗继续合法改配置，但磁盘没有新写"；
- * I1 则是"退出时第一笔挂起、第二笔还在本地队列里，`shutdown_core` 先拿走 process → 丢最后一笔"。
- * 现在配置的落盘由 Rust 的保存任务负责（`src-tauri/src/lyrics_window.rs`），与 WebView 是否还活着无关；
- * 这一层只剩：订阅广播、发窄命令、把权威状态投影给界面。
+ * 配置落盘由 Rust 的保存任务负责，与 WebView 是否还活着无关；这一层只剩订阅广播、发窄命令、把权威状态投影给界面。
  */
 import { LYRICS_STATE, LYRICS_TOGGLE } from "../../../shared/channels.ts";
 import {
@@ -54,10 +51,7 @@ async function defaultCallCommand(command, args) {
 }
 
 /**
- * 曲目元信息 → `playback:lyrics` 的载荷字段（R41）。
- *
- * 三个值只用于**第三方回退的严格匹配**，所以认不出就**不带**（不是编一个默认值）：
- * 一个编出来的时长会把匹配器带偏，而匹配器是"宁可不显示"的那一侧。
+ * 曲目元信息 → `playback:lyrics` 的载荷字段：只用于第三方回退的严格匹配，认不出就不带（不编默认值）。
  */
 function metadataPayload(query) {
   const payload = {};
@@ -129,7 +123,7 @@ export function createLyricsBridge(deps = {}) {
       taskbar: answer.taskbar ?? status.taskbar,
       revision: answer.revision,
       runtimeRevision,
-      // R44e：持久化状态由 Rust 报告（脏/失败都不藏在渲染层里），失败代码在这一层翻成人话
+      // 持久化状态由 Rust 报告（脏/失败都不藏在渲染层里），失败代码在这一层翻成人话。
       dirty: answer.dirty === true,
       saveErrorCode,
       saveError: saveErrorText(saveErrorCode),
@@ -221,18 +215,11 @@ export function createLyricsBridge(deps = {}) {
   }
 
   /**
-   * 取歌词文本并解析（**唯一入口**）：`playback:lyrics` → 官方 `parseLrc` 适配。
+   * 取歌词文本并解析（唯一入口）：`playback:lyrics` → 官方 `parseLrc` 适配。
    *
-   * 失败分类如实分开：端点没配（`endpoint_unknown`）说"尚未配置"，别的失败说"暂时取不到"
-   * ——把后者说成前者，用户会去设置里找一个本来就填好的端点。
+   * 失败分类如实分开：端点没配说尚未配置，别的失败说暂时取不到。
    *
-   * ## R41：入参可以带曲目元信息（`title` / `artist` / `durationSeconds`）
-   *
-   * 三个值只有**一个用途**：华为那条链全落空时，sidecar 拿它们去第三方公开歌词库做
-   * **严格匹配**（标题 + 艺人 + 时长，见 `src/main/lyrics-provider.mjs`）。缺了它们，
-   * 那一跳就不发生（没有标题的回退等于盲搜）——所以这里只传渲染层确实有的值，绝不补默认值。
-   *
-   * 兼容旧的字符串入参（`loadLyrics("s1")`）：那是 R40 的形状，测试与调用点都还在用。
+   * 入参可带曲目元信息（`title` / `artist` / `durationSeconds`），只用于第三方回退的严格匹配：缺了那一跳就不发生，所以只传确实有的值。
    */
   async function loadLyrics(target) {
     const query = target !== null && typeof target === "object" ? target : { trackId: target };
@@ -259,11 +246,9 @@ export function createLyricsBridge(deps = {}) {
   }
 
   /**
-   * 导入本地歌词文件（R41）：解码与"能不能解析出歌词行"都在这里判（见 `lyrics-import.mjs`），
-   * 通过了才把**文本**交给 core 落盘。
+   * 导入本地歌词文件：解码与能否解析出歌词行都在 `lyrics-import.mjs` 判，通过了才把文本交给 core 落盘。
    *
-   * 返回值与 `loadLyrics` 同形（`{status, lines, source, message}`）：导入成功 = 这一首的歌词
-   * **立刻**就是这一份，调用方不必再取一次词（少一次 IPC，也少一段"刚导入完又显示旧的"的窗口）。
+   * 返回值与 `loadLyrics` 同形：导入成功即这一首的歌词立刻生效，调用方不必再取一次词。
    */
   async function importLyrics({ trackId, file } = {}) {
     const id = typeof trackId === "string" ? trackId.trim() : "";

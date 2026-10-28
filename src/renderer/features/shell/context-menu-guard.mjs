@@ -1,7 +1,7 @@
 /**
- * 自有窗的右键菜单守卫（R63）：只留两类放行，其余一律吃掉 WebView2 那套「返回/刷新/检查」。
- * 行自己的菜单交给 radix：这里若抢先 `preventDefault()`，它的 `composeEventHandlers` 见到
- * `defaultPrevented` 就不再弹菜单；文本输入与 contenteditable 保留原生编辑菜单（粘贴的唯一路径）。
+ * 自有窗的右键菜单守卫：只留两类放行，其余一律吃掉 WebView2 那套「返回/刷新/检查」。
+ * 行自己的菜单交给 radix：这里若抢先 preventDefault()，它的 composeEventHandlers 见到 defaultPrevented 就不再弹菜单。
+ * 文本输入与 contenteditable 保留原生编辑菜单（粘贴的唯一路径）。
  */
 
 /** 装守卫的自有窗入口（清单写在这里，测试按它逐个扫）。 */
@@ -39,11 +39,7 @@ function nearestElement(target) {
   return found;
 }
 
-/**
- * 可编辑 = 非只读、非禁用的文本类 input（缺省 type 也算文本）、textarea，或 contenteditable 区域。
- * 非文本 input（color / file / checkbox / range / button 等）没有可粘贴的东西，网页菜单一项都用不上；
- * `isContentEditable` 由浏览器算好（含祖先继承），不自己猜属性。
- */
+/** 可编辑 = 非只读、非禁用的文本类 input（缺省 type 也算文本）、textarea，或 contenteditable 区域；isContentEditable 由浏览器算好（含祖先继承）。 */
 export function isEditableTarget(target) {
   const element = nearestElement(target);
   if (element === null) return false;

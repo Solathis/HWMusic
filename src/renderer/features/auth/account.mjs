@@ -1,18 +1,7 @@
 /**
- * 左下角账号区（R38）的**纯逻辑**：`auth:status` 载荷里的可选 `profile` → 能渲染的那三项。
+ * 左下角账号区的纯逻辑：auth:status 载荷里的 profile → 能渲染的那三项。
  *
- * 为什么单独一个模块：这里每一个判定都会被"界面长什么样"直接暴露出来——
- * 名字缺失时显示什么、头像地址不合格时怎么办、VIP 徽标什么时候出现。放进组件里就只能靠人眼，
- * 而这三条恰恰是"不造假数据"这条纪律最容易被破坏的地方。
- *
- * 四条口径（都是裁决，不是显然）：
- * 1. **缺什么就兜什么，绝不编**：没有名字 → [`ACCOUNT_FALLBACK_NAME`]（"已登录"），
- *    没有头像（或地址不合格/加载失败）→ 首字，连名字都没有 → 图标兜底；
- * 2. **会员只在有事实时显示**：`vip === true` 或**认得出的到期日**（R57）；
- *    到期日认不出时只说"会员"，绝不印一个编出来的日期；
- * 3. **旧载荷（没有 `profile` 这一格）必须照旧能认**：R38 之前建的会话就是这样，
- *    解析器对它返回 `null`（界面走兜底），**不抛错、不显示空壳**；
- * 4. **R57 的到期日不猜格式**：认哪种写法由 `src/shared/vip-expiry.mjs` 一处决定。
+ * 缺什么就兜什么绝不编；会员只在有事实时显示；旧载荷照旧能认，不抛错也不显示空壳。
  */
 import { normalizeVipExpiry } from "../../../shared/vip-expiry.mjs";
 
@@ -45,12 +34,7 @@ function textOf(value) {
   return trimmed === "" ? null : trimmed;
 }
 
-/**
- * `auth:status` 载荷 → 可渲染的 profile（认不出任何一项就是 `null`）。
- *
- * 只认三个键（与 `src/main/music-session.mjs` 的 `profileOfSessionRecord` 同一份形状）：
- * `userName` / `avatarUrl` / `vip`。其余一律忽略——载荷是**别人的数据**，形状不认识就当没有。
- */
+/** auth:status 载荷 → 可渲染的 profile（认不出任何一项就是 null）；只认 userName / avatarUrl / vip 三个键。 */
 export function profileFromStatusPayload(payload) {
   const source = isObject(payload) ? payload.profile : null;
   if (!isObject(source)) return null;
@@ -80,12 +64,7 @@ export function accountFullName(profile) {
   return isObject(profile) ? textOf(profile.userName) : null;
 }
 
-/**
- * 头像加载失败/没有头像时的首字（`null` = 连名字都没有，交给图标占位）。
- *
- * 取**第一个码点**（`[...name][0]`），不按 UTF-16 下标切——否则 emoji 会被切成半个碎字。
- * 拉丁字母转大写（头像位只有一个字符，大小写混排时大写更好认）。
- */
+/** 头像加载失败或没有头像时的首字：取第一个码点（不按 UTF-16 切），拉丁字母转大写；null 交给图标占位。 */
 export function accountAvatarFallbackText(profile) {
   const name = accountFullName(profile);
   if (name === null) return null;
@@ -98,23 +77,13 @@ export function accountAvatarUrl(profile) {
   return isObject(profile) ? textOf(profile.avatarUrl) : null;
 }
 
-/**
- * 是否会员：明确的 `true`，或者**有到期日**（有到期日本身就是会员的证据）。
- *
- * 到期日不是布尔标志：`vip === false` 却又带着到期日的载荷自相矛盾，这里按"有到期日算会员"
- * ——到期日比标志位更具体，而界面宁可多显示一个字，也不该把一个快到期的会员藏起来。
- */
+/** 是否会员：vip === true，或者有认得出的到期日（到期日比标志位更具体）。 */
 export function accountIsVip(profile) {
   if (!isObject(profile)) return false;
   return profile.vip === true || normalizeVipExpiry(profile.vipExpiresOn) !== null;
 }
 
-/**
- * 会员徽标的文案（`null` = 不显示徽标）：`会员` / `会员 · 至 2026-12-31`。
- *
- * 到期时间只在**认得出那一天**时才写进去（见 `src/shared/vip-expiry.mjs`）；
- * 认不出就只说"会员"，绝不显示一个编出来的日期。
- */
+/** 会员徽标文案（null = 不显示）：到期日只在认得出那一天时才写进去，认不出就只说会员。 */
 export function accountVipText(profile) {
   if (!accountIsVip(profile)) return null;
   const expiry = normalizeVipExpiry(profile.vipExpiresOn);

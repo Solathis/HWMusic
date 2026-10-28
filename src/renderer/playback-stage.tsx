@@ -24,10 +24,7 @@ export interface PlaybackStageProps {
   runtime: PlayerRuntime
   state: PlayerState
   onClose: () => void
-  /**
-   * 桌面/任务栏歌词的快捷开关（R45C）：与播放栏**同一个** binding（外壳那一份），
-   * 这里只读状态、只转一次 `setVisible`。不传 = 不渲染这枚按钮。
-   */
+  /** 桌面/任务栏歌词的快捷开关：与播放栏共用同一个 binding，这里只读状态、只转一次 `setVisible`。 */
   lyrics?: LyricsWindowBinding | null
 }
 
@@ -120,11 +117,7 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
         <span>{formatDuration(state.currentTimeMs / 1000)}</span>
         <span>{durationMs > 0 ? formatDuration(durationMs / 1000) : "—"}</span>
       </div>
-      {/*
-        R50：传输组只放传输控件 —— 上一首 → 播放 → 下一首。
-        R45C 那枚歌词开关曾夹在"播放"与"下一首"之间，把这段肌肉记忆劈成两半（播放栏 R46
-        已经搬走，沉浸页漏了这一处）；现在它和音量/静音/播放模式一起排在下面的工具行。
-      */}
+      {/* 传输组只放传输控件：上一首 → 播放 → 下一首；歌词开关与音量等一起排在下面的工具行。 */}
       <div className="flex items-center justify-evenly">
         <MediaButton className="size-10" aria-label="上一首" disabled={!hasTrack} onClick={() => void player.previous()}><SkipBackIcon /></MediaButton>
         <MediaButton className="size-14" aria-label={playing ? "暂停" : "播放"} disabled={!hasTrack} onClick={() => void player.toggle()}>
@@ -178,11 +171,7 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
           </>
         )}
       </div>
-      {/*
-        R45C：开关失败就在**沉浸页这枚按钮下面**说清（原因 + 下一步 + 重试/关掉）。
-        它挂在官方布局的 `controlsSlot` 里（我们自己那一列），不另起浮层、不弹 toast；
-        `toggleErrorSurface` 保证同一个失败只在这一面印一句（播放栏那份不会同时冒出来）。
-      */}
+      {/* 开关失败就在这枚按钮下面说清（原因 + 下一步 + 重试）：挂在 `controlsSlot` 里，不另起浮层；`toggleErrorSurface` 保证同一失败只在一面印一句。 */}
       {lyrics?.toggleError && lyrics.toggleErrorSurface === "playback-stage" ? (
         <Alert variant="destructive" className="flex flex-wrap items-center gap-2 py-2 text-left" data-testid="stage-lyrics-toggle-error">
           <AlertDescription className="min-w-0 flex-1">{lyrics.toggleError}</AlertDescription>
@@ -243,10 +232,7 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
             </div>
           )}
         />
-        {/*
-          收起 = **顶部整行**：行高只占顶部一条带，箭头居中，行内任意位置可点。
-          不用右上角叉号：在沉浸页里它像是"关掉这首歌"，而这里只是回到主界面。ESC 行为不变（见上面的 keydown）。
-        */}
+        {/* 收起 = 顶部整行：行高只占顶部一条带，箭头居中，行内任意位置可点（不用右上角叉号）。 */}
         <Button
           variant="ghost"
           className="absolute inset-x-0 top-0 h-10 w-full rounded-none motion-reduce:transition-none! motion-reduce:duration-0!"

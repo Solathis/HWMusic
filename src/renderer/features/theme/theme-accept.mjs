@@ -1,8 +1,6 @@
 /**
- * 主题回执的**单调接受器**（R44e）：把共享合同 [`acceptThemePayload`] 包成"落地 + 记水位"。
- *
- * 合同本身在 `theme.mjs` 的 `acceptThemePayload`（纯函数，三个消费者共用）；这一层只加两件事：
- * 记住水位、把接受的档位交给一个副作用（切 `<html>` 类 / 记控件高亮）。
+ * 主题回执的单调接受器：把共享合同 acceptThemePayload 包成「落地 + 记水位」。
+ * 合同本身在 theme.mjs 的 acceptThemePayload（纯函数，三个消费者共用）；这一层只加记住水位、把接受的档位交给一个副作用。
  */
 import { acceptThemePayload, normalizeThemeChoice, THEME_DEFAULT } from "./theme.mjs"
 

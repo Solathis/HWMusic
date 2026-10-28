@@ -1,21 +1,7 @@
 /**
- * 主界面的展示组件（R8）：**只组合 shadcn 原语 + Tailwind 工具类 + 设计令牌**。
- * R9 把 `PlayerBar` / `QueuePanel` 从占位骨架翻成接通播放状态机的真实组件。
- *
- * 分工（照简报）：
- * - `TrackTable`：曲目表的唯一实现（双击播放、键盘可达、艺人/专辑跳转、收藏槽位）；
- * - `PlayerBar`：播放/暂停、上下曲、进度（拖动走 200ms isSeeking 窗口）、音量、模式切换。
- *   **它不持有音频、不认识 core**：动作全部转给 `features/playback` 的运行时，
- *   所以 UI 层既拿不到播放地址，也不可能出现第二个 `Audio`；
- * - `QueuePanel`：真实队列（当前项高亮、点击跳播、清空）；旧记录只有标识时，
- *   标题如实显示"曲目 &lt;id&gt;"（见 playback-state.mjs）；
- * - 曲目表与队列的每一行都带专属右键菜单（`TrackRowMenu`）：播放 / 下一首播放 / 加入播放队列；
- * - `EmptyState` / `LoadFailed` / `ListSkeleton`：空态、失败态与骨架屏，
- *   文案一律由调用方从 features/library 的纯逻辑模块取（这里不造第二套文案）。
- *
- * 收藏槽位的诚实处理：收藏的**写入**接口还没确认（docs/API_CONTRACT.md §2.1），
- * 所以没接 `onToggleFavorite` 时按钮是禁用的，无障碍名称直接说明原因——
- * 不做"点了看起来成功、其实什么都没存"的乐观更新。
+ * 主界面的展示组件：只组合 shadcn 原语 + Tailwind 工具类 + 设计令牌。
+ * `TrackTable` 是曲目表的唯一实现；`PlayerBar` 不持有音频、不认识 core，动作全部转给 `features/playback`；`QueuePanel` 显示真实队列。
+ * 收藏的写入接口还没确认，没接 `onToggleFavorite` 时按钮禁用并直接说明原因，不做乐观更新。
  */
 import { useState } from "react"
 import type { ComponentType, ReactElement } from "react"
@@ -94,16 +80,8 @@ export function EmptyState({ text }: { text: string }) {
 }
 
 /**
- * 封面（R38）：`<img>` + 兜底占位。
- *
- * 三条硬约束（docs/API_CONTRACT.md §2.4）：
- * - **只用 `<img src>`，绝不 fetch**：图片走 CSP 的 `img-src` 白名单，而 `connect-src`
- *   只有 self/ipc——`fetch` 那张封面一定被拦掉，界面上表现为一片空白（比占位更糟）；
- * - **加载失败落回占位**：白名单内的地址也可能 404/过期，`onError` 之后不再留碎图；
- * - **地址由协议层筛过**（`normalizeTrack`/`normalizePlaylist` 只带 CDN 白名单内的地址），
- *   这里的 `coverUrl === null` 是常态（无封面/未投影），不是错误。
- *
- * 视觉只有令牌类与 lucide 图标，尺寸由调用方给（`size-9`/`size-10` 之类）。
+ * 封面：`<img>` + 兜底占位。
+ * 只用 `<img src>` 绝不 fetch（`connect-src` 只有 self/ipc）；加载失败落回占位；`coverUrl === null` 是常态而不是错误。
  */
 export function CoverArt({
   coverUrl,
@@ -120,11 +98,6 @@ export function CoverArt({
   icon?: ComponentType<{ className?: string }>
 }) {
   // 失败状态记的是**哪一个地址**失败过，而不是一个裸布尔：地址一换就自动重新给一次机会。
-  // 裸布尔会粘死 `PlayerBar`（:338）那一个跨曲目常驻的实例——一首歌的封面 404 一次，
-  // 之后每一首都永久落图标占位。TrackTable / QueuePanel 的行按条目重挂、`key` 一变就复位，
-  // 所以这个 bug 只在 PlayerBar 露头（R38 审查 §1）。
-  // 用"从 props 推"而不是 `useEffect(..., [coverUrl])` 复位：effect 在**绘制之后**才跑，
-  // 换歌那一帧会先画出上一首留下的占位图标（React 官方的 "You Might Not Need an Effect" 也推荐前者）。
   const [failedUrl, setFailedUrl] = useState<string | null>(null)
   const showImage = coverUrl !== null && failedUrl !== coverUrl
 
@@ -155,12 +128,7 @@ export function LoadFailed({ text }: { text: string }) {
 }
 
 /**
- * 列表骨架（曲目表的加载态）。
- *
- * R41b：行高从 `h-6`（24px）改成 `h-11`（44px）+ `gap-2`（8px）——**一行骨架 = 52px**，
- * 与真实行高（`p-2` + `size-9` 封面 = 52~53px，真机量的 53px）对齐。
- * 原来是 24 + 8 = 32px 一行：加载完的那一瞬间内容会往下长出一倍，用户看到的是"页面跳了一下"。
- * 骨架屏的职责就是占住真实内容的位置，占错位置比不占更糟。
+ * 列表骨架（曲目表的加载态）：一行骨架 52px，与真实行高对齐，避免加载完内容跳一下。
  */
 export function ListSkeleton({ count = 8 }: { count?: number }) {
   return (
@@ -188,8 +156,7 @@ export interface TrackTableProps extends TrackRowActions {
    */
   showFavorite?: boolean
   /**
-   * 文件已经不在的曲目 id（R65）：这些行被标出来（那句"文件不在"就写在行里），
-   * 而**不是**从列表里消失——用户在曲库里得看得见它，才能决定要不要移除。
+   * 文件已经不在的曲目 id：这些行被标出来，而不是从列表里消失。
    */
   unavailableIds?: string[]
   /** 移除这一行（本地歌曲那一列：占的正是收藏心形的位置） */
@@ -197,15 +164,7 @@ export interface TrackTableProps extends TrackRowActions {
 }
 
 /**
- * 曲目表的列宽配比（R40；`table-fixed` 下这就是真实列宽）。
- *
- * **为什么要 `table-fixed`**（真机取证，`.tmp/r40-table-baseline.json`）：默认的 `auto` 布局里
- * 列宽由内容决定，`w-40` 只是一个"建议"——艺人/专辑那两列被 nowrap 的长名字撑到 318 / 479 px，
- * 表格实测长到 1361 px 而内容区只有 1024 px（视口 1280 − 侧栏 256），于是整张表横向溢出，
- * 用户必须右滑才能看完（这正是用户报的那件事）。固定布局下**列宽由这张表说了算**，
- * 内容再长也只在列内截断。
- *
- * 配比：`#`／时长／收藏是固定小列，标题 32%、艺人 24%，专辑是唯一的余量列。
+ * 曲目表的列宽配比（`table-fixed` 下这就是真实列宽），任何窗宽都不出现横向滚动。
  */
 const TRACK_COLUMN_WIDTHS = {
   index: "w-10",
@@ -216,15 +175,7 @@ const TRACK_COLUMN_WIDTHS = {
 }
 
 /**
- * 曲目表。
- *
- * 键盘可达：行本身可聚焦，回车/空格等于双击（鼠标用户与键盘用户拿到同一件事）。
- * 艺人/专辑是 shadcn 的 link 按钮——跳不过去（缺 id）时禁用，而不是点了没反应。
- *
- * R40：`table-fixed` + 显式列宽配比 + cell 内真截断，**任何窗宽都不出现横向滚动**
- * （见 `TRACK_COLUMN_WIDTHS` 的说明）。行 key 带上行号：列表里出现同一首歌两次是合法的
- * （收藏/历史都可能有重复），只按 id 做 key 会让 React 报重复 key 并可能少渲染一行
- * ——真机上抓到过 200 条这种警告（`.tmp/r40-dupe-keys.json`）。
+ * 曲目表：行本身可聚焦，回车/空格等于双击；艺人/专辑是 link 按钮，缺 id 时禁用。
  */
 export function TrackTable({
   songs,
@@ -247,20 +198,9 @@ export function TrackTable({
 
   return (
     /*
-      R41b 排版两处（都只为"与其余页面一致 / 表头看得见"）：
-      1. **页面级横向留白**：`px-4`。此前曲目表是**贴边**的（真机量的表格左边缘 = 内容区左边缘
-         256px），而歌单网格（`p-4`）、设置页（`m-4`）、空态（`px-4`）都在 16px 上——
-         同一栏内容在不同页面里左边缘差 16px，翻页时看得出来。留白加在这一层而不是行内，
-         是为了让行的 hover 底色仍然铺满整栏（Spotify 那种"行满宽、内容有边距"的形态）。
-      2. **表头 sticky**：shadcn 生成的 `Table` 外面套着一层 `overflow-x-auto` 的容器
-         （`data-slot="table-container"`）。一个轴上是 `auto` 时另一个轴的 `visible` 会被算成
-         `auto`——那层容器于是成了**滚动容器**，表头的 `sticky top-0` 只会相对它定位，
-         而它自己从不纵向滚动 = 表头照样滚走（真机量的 `position: static`）。
-         这里在调用点把那层容器的 `overflow` 放开（`[&>[data-slot=table-container]]:overflow-visible`），
-         表头就跟着页面那个滚动根走。R40 的 `table-fixed` 已经保证不再横向溢出
-         （真机量的 `scrollWidth == clientWidth`），所以放开它不会把内容顶出去。
-         不改生成原语：这是调用点的覆盖，`components/ui/table.tsx` 一个字都没动。
-    */
+     * 页面级横向留白 `px-4`，让曲目表与其余页面左边缘一致，hover 底色仍铺满整栏。
+     * 表头 sticky 需要在调用点放开 shadcn 容器的 `overflow`，让它跟随页面滚动根；不改生成原语。
+     */
     <div className="px-4 [&>[data-slot=table-container]]:overflow-visible">
       <Table className="table-fixed" data-testid="track-table">
         <TableHeader className="sticky top-0 z-10 bg-background">
@@ -303,11 +243,11 @@ export function TrackTable({
                 >
                   <TableCell className="text-center tabular-nums text-muted-foreground">{index + 1}</TableCell>
                   <TableCell className="font-medium">
-                    {/* R38：小封面（`<img>` + 占位兜底见 CoverArt）——地址来自协议层的白名单投影 */}
+                    {/* 小封面：`<img>` + 占位兜底见 CoverArt，地址来自协议层的白名单投影 */}
                     <div className="flex min-w-0 items-center gap-2">
                       <CoverArt coverUrl={trackCoverUrlOf(song)} className="size-9 rounded-md" iconClassName="size-4" />
                       <span className="truncate">{trackNameOf(song)}</span>
-                      {/* R65：文件不在就写在这里。行本身留着（用户还看得见它、还能移除它） */}
+                      {/* 文件不在就写在这里，行本身留着（用户还看得见、还能移除） */}
                       {isUnavailable ? (
                         <Badge variant="outline" className="shrink-0" data-testid="track-unavailable">
                           文件不在
@@ -390,30 +330,19 @@ export function TrackTable({
 }
 
 /**
- * 播放栏（R9 接通状态机）。
- *
- * `data-state` 直接写状态机的状态（`idle`/`loading`/`playing`/`paused`/`ended`/`error`）：
- * 它是给测试与 review 的锚点，也是"界面现在到底是什么状态"的唯一说法。
- *
- * 进度条的拖动是**本地优先**的：拖动期间滑块显示手上的值（`dragMs`），松手后回到
- * 状态机的进度。每一次变化都真的 seek 一次（旧仓同款：拖动即试听），并因此让状态机
- * 递增 `seekGeneration` —— 歌词面板据此在 200ms 窗口内标注 `isSeeking`。
+ * 播放栏：`data-state` 直接写状态机的状态，是界面现在到底什么状态的唯一说法。
+ * 进度条拖动本地优先，每次变化都真的 seek 一次，因此状态机的 `seekGeneration` 递增，歌词面板据此标注 `isSeeking`。
  */
 export interface PlayerBarProps {
   runtime: PlayerRuntime
   state: PlayerState
   /**
-   * 打开歌词舞台（R40）：**封面与曲目信息整块**都是入口，与头部那枚「歌词」按钮**同一个 state**
-   * （用户直觉是"点正在播放这一条进播放页"，而头部的图标按钮不一定被注意到）。
-   * 不传就是不接（按钮语义不变，也不会出现"点了没反应"的死区——那时整块只是不可点）。
+   * 打开歌词舞台：封面与曲目信息整块都是入口，与头部那枚「歌词」按钮同一个 state；不传就是不接。
    */
   onOpenStage?: () => void
   /**
-   * 桌面/任务栏歌词的快捷开关（R45C）：播放栏与沉浸页**共用外壳那一个** binding
-   * （`useLyricsWindow` 的唯一实例），这里只读状态、只转一次 `setVisible`。
-   *
-   * 不传 = 不渲染这枚按钮：没有歌词窗接线时放一个按下去什么都不发生的图标，
-   * 比没有按钮更糟（用户会以为是自己点错了）。
+   * 桌面/任务栏歌词的快捷开关：播放栏与沉浸页共用外壳那一个 binding，这里只读状态、只转一次 `setVisible`。
+   * 不传 = 不渲染这枚按钮。
    */
   lyrics?: LyricsWindowBinding | null
 }
@@ -427,20 +356,8 @@ const MODE_ICONS = {
 }
 
 /**
- * 歌词快捷开关的**唯一语义**（R45C）：播放栏与沉浸页都读它，不许各写一份。
- *
- * 两条判据，都有理由：
- * 1. **状态取 `requestedVisible ?? visible`**：`visible` 是宿主的回执（它此刻真的开着），
- *    `requestedVisible` 是"我们请求它开着"（binding 里已把**待定意图**排在它前面）。
- *    点下去到回执回来之间有一小段，用回执会让按钮先弹回原状再翻过来（看起来像点了没反应）。
- *    设置页那个 Switch 用的也是这一条。
- * 2. **标签说模式**：同一个图标在桌面模式是"桌面歌词"，在任务栏模式是"任务栏歌词"——
- *    用户看不见歌词窗挂在哪里，只能靠这句话。
- *
- * **这里刻意不产出"下一次该发什么"**：目标态由 binding 的意图机决定（`toggleVisible`）。
- * 渲染快照里的 `!on` 在"同一个任务里连点两次"时是陈旧的——那正是 R45C 要修的那个 bug。
- *
- * 没有 binding 时返回 `null`（没有语义），而不是"假装它是关着的"。
+ * 歌词快捷开关的唯一语义，播放栏与沉浸页都读它，不许各写一份。
+ * 状态取 `requestedVisible ?? visible`（否则点下去先弹回原状），标签按模式说「桌面歌词」/「任务栏歌词」。
  */
 export function lyricsToggleView(lyrics?: LyricsWindowBinding | null): {
   on: boolean
@@ -490,7 +407,7 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
   const ModeIcon = MODE_ICONS[state.mode as keyof typeof MODE_ICONS] ?? ListMusicIcon
   const VolumeIcon = state.muted ? VolumeXIcon : state.volume === 0 ? VolumeXIcon : state.volume < 0.5 ? Volume1Icon : Volume2Icon
 
-  /** 左区：封面 + 曲目信息（R40 起整块可点 = 进歌词舞台）。 */
+  /** 左区：封面 + 曲目信息（整块可点 = 进歌词舞台）。 */
   const trackInfo = (
     <>
       <CoverArt coverUrl={trackCoverUrlOf(state.track)} className="size-10 rounded-md" />
@@ -510,12 +427,9 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
       data-testid="player-bar"
     >
       {/*
-        R45C：开关失败就**在按下去的这一条上**说清（原因 + 下一步），带「重试」与「知道了」两条路。
-        不另弹 toast、也不把这件事只留在设置页：用户按的是这里，答案就该出现在这里。
-        `toggleErrorSurface` 保证同一个失败只在**一处**印：沉浸页发起的那次由沉浸页说，
-        播放栏不重复；反过来从设置页/别处发起的（`null`）由这条常驻的播放栏兜住。
-        失败文案来自 binding（`toggleError`，由纯函数 `toggleFailureText` 生成，原始错误只在日志里）。
-      */}
+       * 开关失败就在按下去的这一条上说清（原因 + 下一步），带「重试」与「知道了」两条路。
+       * `toggleErrorSurface` 保证同一个失败只在一处印：沉浸页发起的由沉浸页说，其余由这条常驻的播放栏兜住。
+       */}
       {lyrics?.toggleError && lyrics.toggleErrorSurface !== "playback-stage" ? (
         <Alert variant="destructive" className="flex flex-wrap items-center gap-2 py-2" data-testid="lyrics-toggle-error">
           <AlertDescription className="min-w-0 flex-1">{lyrics.toggleError}</AlertDescription>
@@ -528,15 +442,9 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
         </Alert>
       ) : null}
       {/*
-        三区布局（R40 用户要求"控件居中"）：
-        左 = 封面 + 曲目信息（min-w-0 + truncate，窄窗先牺牲它）；中 = 播放控件组；
-        右 = 附加区（本轮为空占位，保持左中右三段的语义不塌成一团）。
-
-        **控件用绝对定位实现真居中**（`left-1/2 -translate-x-1/2`），而不是
-        `flex-1 basis-0` 的两侧等分：两侧内容天然不等宽（左边是封面 + 两行文字，右边是空占位），
-        等分只能让"剩余空间"相等，控件的实际中点仍会随左侧文字长度漂移。
-        左区预留中控的半宽与间距；长文字先截断，不覆盖中控。
-      */}
+       * 三区布局：左 = 封面 + 曲目信息（窄窗先牺牲），中 = 播放控件组，右 = 附加区。
+       * 控件用绝对定位实现真居中：两侧等分只能让剩余空间相等，中点仍会随左侧文字长度漂移。
+       */}
       <div className="relative flex items-center gap-3">
         <div className="flex min-w-0 flex-1 items-center gap-3">
           <div className="min-w-0 max-w-[calc(100%-6rem)]">
@@ -604,9 +512,8 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
             {playing ? <PauseIcon /> : <PlayIcon />}
           </Button>
           {/*
-            R46：传输组只放传输控件 —— 模式 → 上一首 → 播放 → 下一首。
-            R45C 那枚歌词开关已搬到尾部工具区（见下面的 `player-bar-trailing`）。
-          */}
+           * 传输组只放传输控件：模式 → 上一首 → 播放 → 下一首。
+           */}
           <Button
             variant="ghost"
             size="icon"
@@ -687,7 +594,7 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
   )
 }
 
-/** 播放队列面板（R9 接通）：真实队列 + 点击跳播 + 清空 + 行的专属右键菜单（R63）。 */
+/** 播放队列面板：真实队列 + 点击跳播 + 清空 + 行的专属右键菜单。 */
 export interface QueuePanelProps extends TrackRowActions {
   entries: PlayerState["entries"]
   index: number

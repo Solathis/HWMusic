@@ -1,33 +1,8 @@
 /**
- * 列表触底分页（R45A3）：**纯逻辑**，UI 只消费。
+ * 列表触底分页：**纯逻辑**，UI 只消费。
  *
- * 简报第 12 项（"歌曲列表触底加载，不一次加载全部"）的判定全部收在这里，页面只负责
- * 把 `state` 渲染出来、把哨兵交给 IntersectionObserver。为什么非要单列一个模块：
- * 分页里最容易骗人的几件事（"已加载 N 首"被说成"共 N 首"、旧查询的迟到响应覆盖新查询、
- * 失败后自动重试打成请求风暴、短列表自己无限连拉）都不是排版问题，靠肉眼看界面看不出来。
- *
- * ## 两条完全不同的"分页"
- *
- * - **服务端分页**（歌单详情 / 搜索 / 专辑）：接口真的认 `page`/`pageSize`，
- *   一次只取一页，`hasMore` 由协议层给（页面不自己从条数猜）。
- *   走 `createPaginationState` / `beginPage` / `applyPage` / `applyFailure`。
- * - **本地分批**（歌手 / 历史）：接口**本身不分页**，一次响应就是全部。
- *   UI 每批只揭示 50 条，**不重复发网络请求**。走 `createLocalListState` / `revealMore`。
- *
- * 状态行只说"已加载 N 首"（不再解释取数方式）；歌单详情的整表曲目由协议层交到
- * `state.full`，两个动作据此作用于**整张歌单**。
- *
- * ## 不无限连拉
- *
- * `armed` 是那条纪律的唯一实现：一页取完先"卸膛"，**用户再次接近底部**
- * （哨兵先离开触发区 = `markSentinelAway`）才允许取下一页。少了它，
- * 首屏比视口矮的列表会自己把整张歌单拉完——那正是简报禁止的事。
- *
- * ## 竞态
- *
- * 每次查询变化都 `resetPagination`（generation + 1）。迟到的旧响应带着旧 generation
- * 回来，`applyPage` / `applyFailure` 一眼认出并整条丢弃：换关键词之后屏幕上绝不
- * 出现上一个词的结果，也不会被旧失败标红。
+ * 服务端分页走 `createPaginationState` / `beginPage` / `applyPage` / `applyFailure`；
+ * 本地分批（接口本身不分页，不发请求）走 `createLocalListState` / `revealMore`。
  */
 
 import { trackIdOf } from "./track-fields.mjs";
@@ -51,32 +26,25 @@ export const PAGINATION_RETRY_TESTID = "list-pagination-retry";
 
 /**
  * 协议层对这一页的取数方式（`null` = 还没取到任何一页）。
- *
- * - `"server"`：服务端按 `start`/`limit` 返回了这一页（搜索/专辑，或歌单详情正好整页返回）；
- * - `"local-slice"`：**整张歌单已经随第一页一次取回**，这一页是本地切片（歌单详情的实测形状）；
- * - `"server-repeat"`：服务端重复返回同一页，停止继续请求但不推断歌单总数。
- *
- * 为什么要把这件事带到界面这一层：两种形状对"动作作用于多少曲目"不同——
- * `local-slice` 时整张歌单已在内存（`state.full`），`server` 时只有已加载的那批。
  */
 export const PAGINATION_SOURCE = Object.freeze({ server: "server", localSlice: "local-slice", serverRepeat: "server-repeat" });
 
 /**
  * @typedef {object} PaginationState
  * @property {unknown[]} items 已加载的条目（去重后）
- * @property {string[]} keys 已加载条目的去重键（与 items 同序，便于调试/断言）
- * @property {number} page 已经取回的页数（0 = 一页都没取回；下一页 = page + 1）
+ * @property {string[]} keys 已加载条目的去重键（与 items 同序）
+ * @property {number} page 已经取回的页数（0 = 一页都没取回）
  * @property {boolean} hasMore 协议层是否明说还有下一页
  * @property {boolean} loading 是否正在请求
  * @property {string|null} error 上一次失败的人话（null = 没失败）
  * @property {number} duplicates 被跨页去重掉的条数
- * @property {number} skipped 被丢弃的坏条目数（没有 id 之类）
- * @property {number} generation 查询代次（换查询就 +1，旧响应据此丢弃）
- * @property {boolean} armed 是否允许再次触发（离开触发区才重新上膛）
- * @property {unknown} meta 第一页附带的信息（歌单详情的歌单元信息），只认第一页
- * @property {unknown[]|null} full 整张列表（协议层确认整份已在内存时才给；只认第一页）
- * @property {string|null} pageSource 这一页的取数方式（`PAGINATION_SOURCE`；`null` = 还没取到）
- * @property {number} available 这一页背后那份响应的条数（本地切片时 = 整张歌单的条数）
+ * @property {number} skipped 被丢弃的坏条目数
+ * @property {number} generation 查询代次（旧响应据此丢弃）
+ * @property {boolean} armed 是否允许再次触发
+ * @property {unknown} meta 第一页附带的信息，只认第一页
+ * @property {unknown[]|null} full 整张列表（只认第一页）
+ * @property {string|null} pageSource 这一页的取数方式（`PAGINATION_SOURCE`）
+ * @property {number} available 这一页背后那份响应的条数
  */
 
 /**
@@ -103,14 +71,9 @@ export function createPaginationState() {
 }
 
 /**
- * 换查询（换关键词 / 换歌单 / 换专辑 / 切页）：清空列表并换代。
- *
- * 为什么必须清空而不是"合并进新列表"：上一个词的结果留在屏幕上，用户会以为
- * 那就是这次搜的东西。旧响应的丢弃交给 generation（见 `applyPage`）。
- *
+ * 换查询：清空列表并换代，迟到旧响应由 generation 丢弃。
  * @param {PaginationState} state
- * @param {number} [generation] 显式指定的新代次（UI 的 ref 是那条真源时用）；
- *   不给就是 `state.generation + 1`。
+ * @param {number} [generation] 显式指定的新代次；不给就是 `state.generation + 1`。
  * @returns {PaginationState}
  */
 export function resetPagination(state, generation) {
@@ -137,17 +100,14 @@ export function shouldObserve(state) {
 }
 
 /**
- * 现在能不能发请求：还要观察 + 不在请求中 + 已上膛（用户再次接近底部）。
- *
- * 三条分开看是故意的——它们对应三种不同的"不该发"：没有下一页、正在请求、
- * 刚取完一页还没等用户操作。
+ * 现在能不能发请求：还要观察 + 不在请求中 + 已上膛。
  */
 export function shouldRequestNext(state) {
   return shouldObserve(state) && state?.loading !== true && state?.armed === true;
 }
 
 /**
- * 进入请求态：卸膛（一页只由用户的一次"接近底部"触发）。
+ * 进入请求态：卸膛（一页只由用户的一次「接近底部」触发）。
  * @param {PaginationState} state
  * @returns {PaginationState}
  */
@@ -165,14 +125,10 @@ export function markSentinelAway(state) {
 }
 
 /**
- * 合并一页。
- *
+ * 合并一页；`generation` 对不上就整条丢弃。
  * @param {PaginationState} state
- * @param {{generation: number, items?: unknown[], hasMore?: unknown, skipped?: unknown, meta?: unknown,
- *          full?: unknown, pageSource?: unknown, available?: unknown}} answer
- *   协议层那一页的回执；`generation` 是发请求时的那一代（对不上就整条丢弃）。
- * @param {(item: unknown) => string|null} [keyOf] 去重键：默认按 `id`（与协议层同源）；
- *   历史/同类列表传"含播放时间"的键即可保留重复播放语义。
+ * @param {{generation: number, items?: unknown[], hasMore?: unknown, skipped?: unknown, meta?: unknown, full?: unknown, pageSource?: unknown, available?: unknown}} answer 协议层那一页的回执。
+ * @param {(item: unknown) => string|null} [keyOf] 去重键：默认按 `id`。
  * @returns {PaginationState}
  */
 export function applyPage(state, answer, keyOf = trackIdOf) {
@@ -230,9 +186,7 @@ export function applyPage(state, answer, keyOf = trackIdOf) {
 }
 
 /**
- * 记住一次失败：**不清空已加载内容**（把"读不到"变成"列表是空的"比报错更糟），
- * 也**不自动重试**（离线时那是一个请求风暴）。重试按钮走 `retryPagination`。
- *
+ * 记住一次失败：不清空已加载内容，也不自动重试（重试走 `retryPagination`）。
  * @param {PaginationState} state
  * @param {{generation: number, message?: unknown}} answer
  * @returns {PaginationState}
@@ -268,8 +222,7 @@ export function loadedTracksText(count) {
 }
 
 /**
- * 服务端分页的状态行：还有下一页才催用户滚动（走完了还催，就是撒谎）。
- *
+ * 服务端分页的状态行：还有下一页才催用户滚动。
  * @param {{loaded: number, hasMore: boolean, pageSource?: unknown}} summary
  * @returns {string}
  */
@@ -287,12 +240,13 @@ export function paginationNoticeText(summary) {
 
 /**
  * @typedef {object} LocalListState
- * @property {unknown[]} items 那**一次**网络响应的全部条目（原样保存，不改、不重排）
+ * @property {unknown[]} items 那**一次**网络响应的全部条目（原样保存）
  * @property {number} batch 每批揭示多少条
  * @property {number} revealed 现在已经揭示了多少条
  */
 
 /**
+ * 本地分批状态：这一次响应最多先揭示 `batch` 条。
  * @param {unknown[]} [items]
  * @param {number} [batch]
  * @returns {LocalListState}
@@ -344,12 +298,9 @@ function nearestIndex(list, predicate, row) {
 }
 
 /**
- * 双击一行时应放进队列的列表与起始下标：整表已在内存就排整表（否则"下一首"会在
- * 已显示的这批末尾断掉）。行对象可能不是整表里的同一引用（IPC 反序列化），
- * 所以先按身份、再按 id 找；同一首多处出现取离行号最近的那个。
- *
+ * 双击一行时应放进队列的列表与起始下标：整表已在内存就排整表，否则「下一首」会在本批末尾断掉。
  * @param {unknown[]} items 已显示的那批
- * @param {unknown[]} [queueItems] 整表（缺省 = 只有这一批是已知的）
+ * @param {unknown[]} [queueItems] 整表（缺省 = 只有这一批）
  * @param {unknown} song 被双击的那一行
  * @param {number} rowIndex 它在 `items` 里的下标
  * @returns {{queue: unknown[], index: number}}
@@ -379,17 +330,10 @@ function defaultComputedStyle(element) {
 }
 
 /**
- * 找哨兵真正该观察的滚动容器（`IntersectionObserver` 的 `root`）。
- *
- * 为什么不是"页面自己再造一个 `overflow-y-auto`"：
- * - 内容区那一层（`App.tsx` 的页面落点）本来就是全应用唯一的页面级滚动根，
- *   页面里再套一层会让"滚到底"分成两级（外层先滚完、内层才开始），
- *   也会被 `no-self-visual` 的例外集合抓住（那里写死了"只有 App 与收藏页"）；
- * - 而且用真实祖先做 root，`rootMargin` 的 240px 才真的是"离底 240px"。
- *
+ * 找哨兵真正该观察的滚动容器（`IntersectionObserver` 的 `root`）；用真实祖先做 root，`rootMargin` 才真的是「离底」距离。
  * @param {{parentElement?: any}|null} node 哨兵节点
  * @param {(element: any) => ({overflowY?: string}|null)} [getStyle] 计算样式（测试注入）
- * @returns {any} 滚动容器；null = 没有可滚祖先，用视口（`root: null` 的官方语义）
+ * @returns {any} 滚动容器；null = 用视口
  */
 export function findScrollRoot(node, getStyle = defaultComputedStyle) {
   let current = node?.parentElement ?? null;

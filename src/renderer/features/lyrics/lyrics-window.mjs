@@ -1,23 +1,6 @@
 /**
- * 桌面歌词窗的**纯逻辑**（R12）：配置、档位、拖动/点透判定、进度节流、查询串解析。
- *
- * 为什么单独一个模块：这些判定两边都要用（歌词窗渲染、主窗设置页、主窗转发桥），
- * 写在组件里就只能靠人眼对齐——而"任务栏模式字号必须 ≤ 20"这种规矩，靠人眼是守不住的。
- *
- * 三条口径（写清楚，因为它们都是裁决而不是显然）：
- * 1. **字号是档位，不是连续值**。渲染层的视觉一律走工具类/令牌，内联样式只允许
- *    几何契约与 AMLL 的 100% 尺寸那两处，所以"连续字号"这条 CSS 路本来就不存在。
- *    档位的 px 值在这里（钳制、文案用），实际字号在 `amll-theme.css` 的 `[data-lyrics-size]`
- *    规则里（rem，由测试钉住与 px 对得上）。契约里存的是**用户选的档位**；两种模式各读自己
- *    那一列（桌面的 `size` / 任务栏的 `taskbarSize`，见 `lyricsAppearance`）。
- * 2. **颜色只认设计令牌**（`LYRICS_COLOR_TOKENS`）：不接受任意色值。
- *    渲染层把令牌 id 写进 `data-lyrics-color`，真正的 AMLL 歌词颜色变量映射在
- *    `amll-theme.css`（那些变量的唯一接线点，R9 的规矩，由扫描钉住）。
- * 3. **任务栏模式一律点透**：Windows Beta 只占任务栏已确认的安全空白；失败停显。
- *    桌面模式默认可点（要能接手拖动）。
- *
- * Rust 侧握着同一张档位表/词表（`src-tauri/src/lyrics_window.rs`），由
- * `test/lyrics-window.test.mjs` 逐条钉住两侧相等。
+ * 桌面歌词窗的**纯逻辑**：配置、档位、拖动/点透判定、进度节流、查询串解析。
+ * 字号是档位不是连续值；颜色只认设计令牌；任务栏模式一律点透。
  */
 import { normalizeThemeChoice } from "../theme/theme.mjs";
 
@@ -29,12 +12,7 @@ const MODE_LABELS = {
   taskbar: "任务栏歌词（Beta）",
 };
 
-/**
- * 字号档位表（唯一真源）。
- *
- * 上限 56px 保留横条内多行上下文；竖版沿用同一档位表。
- * px 值必须与 `amll-theme.css` 里的 rem 规则一致（16px = 1rem，测试钉住）。
- */
+/** 字号档位表（唯一真源）；px 值必须与 `amll-theme.css` 里的 rem 规则一致（16px = 1rem）。 */
 export const LYRICS_FONT_STEPS = [
   { id: "sm", px: 16, label: "小" },
   { id: "md", px: 20, label: "较小" },
@@ -46,12 +24,7 @@ export const LYRICS_FONT_STEPS = [
 /** 任务栏模式的字号上限（简报钉死：≤ 20）：贴边的一条，字不能比系统的还大。 */
 export const TASKBAR_MAX_FONT_PX = 20;
 
-/**
- * 任务栏专用字号档位（R59）：44px 高的槽位只放得下一行当前歌词，所以压在 ≤ 20px、档距 2px
- * （桌面那张表最密的一档跨度 8px，套进 12–20px 只剩两档可挑）。
- *
- * id 与桌面档位不重叠：两张表互不通用，`taskbarSize` 收桌面档位一律判非法（两侧同一口径）。
- */
+/** 任务栏专用字号档位（≤ 20px）；id 与桌面档位不重叠，两张表互不通用。 */
 export const TASKBAR_FONT_STEPS = [
   { id: "tsm", px: 12, label: "小" },
   { id: "tmd", px: 14, label: "较小" },
@@ -60,15 +33,10 @@ export const TASKBAR_FONT_STEPS = [
   { id: "txxl", px: 20, label: "特大" },
 ];
 
-/** 任务栏的默认字号：取上限那一档（R44 起任务栏把桌面 lg 压到的就是 20px，观感不变）。 */
+/** 任务栏的默认字号：取上限那一档。 */
 export const DEFAULT_TASKBAR_SIZE = "txxl";
 
-/**
- * 颜色令牌表（唯一真源）：只在这几个设计令牌里选，不接受任意色值。
- *
- * 歌词窗是**透明**窗（浮在桌面/窗口之上），所以给一档"反差"（用背景色当字色）：
- * 深色壁纸上那才是唯一读得清的一档。
- */
+/** 颜色令牌表（唯一真源）：只在这几个设计令牌里选，不接受任意色值。 */
 export const LYRICS_COLOR_TOKENS = [
   { id: "foreground", label: "主题前景" },
   { id: "muted", label: "弱化" },
@@ -80,14 +48,7 @@ export const LYRICS_LAYOUTS = ["horizontal", "vertical"];
 export const LYRICS_STYLES = ["clean", "panel", "bare"];
 export const LYRICS_SETTING_KEY = "lyricsWindow";
 
-/**
- * 自定义歌词颜色（R45B）：**只认 `#RRGGBB`**，空串 = 用设计令牌（`data-lyrics-color`）。
- *
- * 为什么不让任意 CSS 色值进来：这个值会被写进官方 AMLL 组件消费的那个颜色变量
- * （唯一接线点在 `amll-theme.css`；用户指定的颜色由 `amll-adapter.ts` 做一次 scoped 覆盖），
- * 能写色值就能写 `url(...)`/`expression(...)`/`;}...`——六位 hex 是唯一"写成什么都只是一块颜色"
- * 的形状。两侧（Rust `is_hex_color`）同一口径。
- */
+/** 自定义歌词颜色：**只认 `#RRGGBB`**，空串 = 用设计令牌（两侧同一口径）。 */
 export const CUSTOM_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
 
 /** 这个值是不是合法的 `#RRGGBB`（唯一真源；配置归一、设置页、适配层都用它）。 */
@@ -110,12 +71,7 @@ export function normalizeDipSize(value) {
 }
 
 
-/**
- * 持久化失败的**代码 → 人话**（R44e）。
- *
- * Rust 的保存任务只报稳定的代码（`settings_write_failed` / `settings_write_unconfirmed`），
- * 文案在渲染层这一处翻——两侧不必各自维护一份中文，也不会把带路径的错误原文糊到界面上。
- */
+/** 持久化失败的**代码 → 人话**：Rust 只报稳定代码，文案在渲染层这一处翻。 */
 export const LYRICS_SAVE_ERRORS = {
   settings_write_failed: "桌面歌词配置未保存，本次运行仍生效。请检查数据目录后点击重试保存。",
   settings_write_unconfirmed: "桌面歌词配置未确认已保存，本次运行仍生效。请点击重试保存。",
@@ -131,11 +87,6 @@ export function saveErrorText(code) {
 
 /**
  * 桌面歌词配置的形状（渲染层这一侧的唯一真源；Rust 侧 `LyricsConfig` 是镜像副本）。
- *
- * 为什么要写这个 typedef：`windowWidth: null` 在纯 JS 里会被推成 `null` 字面量类型，
- * 于是 `configure({ windowWidth: 320 })` 在 TS 里就是"把数字塞进 null"——而它明明是
- * `number | null`。类型写在这里，组件与设置页就不用各写一份断言。
- *
  * @typedef {object} LyricsConfig
  * @property {string} mode desktop | taskbar
  * @property {string} layout horizontal | vertical
@@ -163,9 +114,9 @@ export const DEFAULT_LYRICS_CONFIG = {
   style: "clean",
   size: "lg",
   color: "foreground",
-  /** 自定义歌词颜色（`#RRGGBB`；空串 = 用 `color` 选的令牌）。R45B 新增。 */
+  /** 自定义歌词颜色（`#RRGGBB`；空串 = 用 `color` 选的令牌）。 */
   customColor: "",
-  /** 桌面窗的 DIP 尺寸（未锁定时拖拽缩放后由 Rust 保存；null = 用该方向的默认尺寸）。R45B 新增。 */
+  /** 桌面窗的 DIP 尺寸（未锁定时拖拽缩放后由 Rust 保存；null = 用该方向的默认尺寸）。 */
   windowWidth: null,
   windowHeight: null,
   locked: false,
@@ -173,7 +124,7 @@ export const DEFAULT_LYRICS_CONFIG = {
   enableScale: true,
   enableSpring: true,
   showControls: true,
-  /** 任务栏那扇窗的外观（R59）：与桌面各存一份，改一边不许动另一边。 */
+  /** 任务栏那扇窗的外观：与桌面各存一份，改一边不许动另一边。 */
   taskbarSize: DEFAULT_TASKBAR_SIZE,
   taskbarColor: "foreground",
   taskbarCustomColor: "",
@@ -258,12 +209,7 @@ export function lyricsTargetPlan(on, mode, target) {
   return { mode: target === current ? null : target, visible: on === true ? null : true };
 }
 
-/**
- * 配置归一（纯函数）：`patch` 里**认不出的值一律不猜**，落回 `base` 里那一个合法值
- * （`base` 也认不出就落默认）。布尔只认真正的布尔——`"yes"`、`1` 都不算。
- *
- * 空 patch / 坏 patch 返回 `base` 本身：设置页挂载时用空补丁读回当前配置，不该有任何副作用。
- */
+/** 配置归一（纯函数）：`patch` 里认不出的值一律不猜，落回 `base` 里那一个合法值。 */
 export function normalizeLyricsConfig(patch, base = DEFAULT_LYRICS_CONFIG) {
   const current = base !== null && typeof base === "object" ? base : DEFAULT_LYRICS_CONFIG;
   const source = patch !== null && typeof patch === "object" ? patch : {};
@@ -287,11 +233,7 @@ export function normalizeLyricsConfig(patch, base = DEFAULT_LYRICS_CONFIG) {
   return next;
 }
 
-/**
- * 有效字号档位：两种模式各读自己那一列（R59 之后桌面选的档位不参与任务栏的渲染）。
- *
- * 刻意**不改配置本身**：用户从桌面模式切到任务栏再切回来，看到的不该是自己没选过的小字号。
- */
+/** 有效字号档位：两种模式各读自己那一列，刻意不改配置本身。 */
 export function effectiveSizeId(config) {
   const normalized = normalizeLyricsConfig({}, config);
   if (normalized.mode !== "taskbar") return normalized.size;
@@ -299,13 +241,7 @@ export function effectiveSizeId(config) {
   return known ? normalized.taskbarSize : DEFAULT_LYRICS_CONFIG.taskbarSize;
 }
 
-/**
- * 这一份配置**实际要画成什么样**（纯函数）：任务栏模式只读任务栏那四个字段，桌面模式只读原字段。
- *
- * 为什么把它单独拎出来：歌词窗只该消费一个结果，别再在组件里写 `mode === "taskbar" ? … : …`——
- * 那样每加一个字段就要在组件里多一条分支，而分支是没法单测的。
- * 桌面模式的逐字高亮恒为开（任务栏那个开关不许影响桌面观感）。
- */
+/** 这一份配置**实际要画成什么样**（纯函数）：歌词窗只消费一个结果，不在组件里写三元分支。 */
 export function lyricsAppearance(config) {
   const normalized = normalizeLyricsConfig({}, config);
   if (normalized.mode === "taskbar") {
@@ -349,13 +285,7 @@ export function lyricsBackdrop(config) {
   return normalized.locked ? "light" : "normal";
 }
 
-/**
- * 歌词窗的初值来自 URL 查询串（Rust 建窗时按当前配置拼）。
- *
- * 为什么要带进 URL 而不是"建完再发一条广播"：渲染层订阅事件是异步的，
- * 建窗那一刻它可能还没 `listen`——事件发进空气，歌词窗就会用默认档位显示，
- * 而用户在设置页里明明选过。查询串是同步到位的，没有这个缝。
- */
+/** 歌词窗的初值来自 URL 查询串：渲染层订阅事件是异步的，查询串同步到位没有这个缝。 */
 export function lyricsConfigFromSearch(search) {
   const params = new URLSearchParams(typeof search === "string" ? search : "");
   const patch = {};
@@ -378,28 +308,13 @@ export function lyricsConfigFromSearch(search) {
 /** 主题档位从查询串来的参数名（Rust `lyrics_window_url` 写的就是它）。 */
 export const LYRICS_THEME_PARAM = "theme";
 
-/**
- * 歌词窗的主题初值（R41）：从查询串取 `theme=`，**只认那三个字面量**，其余回 `null`。
- *
- * 为什么歌词窗的主题要走查询串：它**调不动**读主题的那条命令（`core_login_chrome` 的来源
- * 守卫只放行主窗与两个浮动控件），所以问不出"现在是哪一档"。查询串是建窗时同步到位的。
- *
- * 认不出（缺参数 / 大写 / 别的词 / 空串）一律回 `null`：调用方 `applyThemeChoice` 把 null
- * 当**系统档**处理——这是"不猜"的那一侧，与主窗"读不到就什么都不改"的纪律一致。
- * 合法性判定复用 `theme.mjs` 的 `normalizeThemeChoice`（档位词表只有那一个真源）。
- */
+/** 歌词窗的主题初值：只认那三个字面量，其余回 `null`（调用方当系统档处理）。 */
 export function themeFromSearch(search) {
   const params = new URLSearchParams(typeof search === "string" ? search : "");
   return normalizeThemeChoice(params.get(LYRICS_THEME_PARAM));
 }
 
-/**
- * 该不该把这一帧进度推给歌词窗（纯函数）。
- *
- * 三条：第一次必推（否则歌词窗停在 0）；播放态或跳转信号变了立刻推（用户按了暂停/拖了进度，
- * 等 100ms 是能感觉到的）；否则要至少差 [`MIN_PROGRESS_INTERVAL_MS`]。
- * 算不出差值（NaN）时推一次——多推一帧的代价远小于"歌词卡住不动"。
- */
+/** 该不该把这一帧进度推给歌词窗（纯函数）：第一次必推，状态变了立刻推，否则按最小间隔。 */
 export function shouldPushProgress(previous, next) {
   if (previous === null || previous === undefined) return true;
   const before = previous;
@@ -435,20 +350,7 @@ export function lyricsDocumentOf(lines, status) {
   };
 }
 
-/**
- * 导入回执 → 落地计划（R41a 纯函数）：**成功的语义与失败的语义不是同一件事**。
- *
- * - 成功（`ok: true`）：这一首的歌词**现在**就是这一份——调用方把 `lines` 交给播放运行时
- *   （主窗面板）并转发给歌词窗，两处显示同一份行数组；
- * - 失败（`ok: false`）：只有一句给用户看的人话，**不带 `lines`/`status`**。失败的事实是
- *   "这首歌的歌词没有变"，所以界面必须停在原来那一份上——R41 曾在这里推一份空文档
- *   （"让界面回到事实"），那是把事实看反了：面板会从"有词"跳成"这首歌没有歌词"，
- *   而用户只是选错了文件（R41a 审查的 3/8）。
- *
- * 判据只有一条：桥在失败时一定给 `message`（它是给用户看的人话），成功时 `message` 为 null。
- * 再加一条**凭据**：成功必须真的带来行（桥在这条路上必给 ≥1 行——"没有带时间戳的歌词行"
- * 在桥里就被判失败了）。认不出的回执因此按失败处理：宁可不换，也不把面板清成"这首歌没有歌词"。
- */
+/** 导入回执 → 落地计划（纯函数）：成功带行数组，失败只带一句人话、绝不清空面板。 */
 export function importPlanOf(result) {
   const source = result !== null && typeof result === "object" ? result : {};
   const failure = typeof source.message === "string" && source.message.trim() !== "" ? source.message.trim() : null;
@@ -468,15 +370,7 @@ export function importPlanOf(result) {
   };
 }
 
-/**
- * 进度插值估计（纯函数）：`lastPush` = 最近一次广播 `{timeMs, playing, atMs}`，
- * `atMs` 是**本地**收到它的时刻。
- *
- * 为什么需要它：广播是节流的（≥100ms 一条），若直接把 `timeMs` 当 `currentTime`，
- * 逐字渐变会每 100ms 跳一格。播放中按"经过的真实时间"往前推即可平滑；
- * 暂停时**停住不动**（接着推算会让歌词在暂停时继续走）。这只是同一条进度的插值，
- * 不是第二份时钟——真正的进度始终只有播放状态机那一个来源。
- */
+/** 进度插值估计（纯函数）：播放中按经过的真实时间前推，暂停时停住不动。 */
 export function estimateTimeMs(lastPush, nowMs) {
   const push = lastPush !== null && typeof lastPush === "object" ? lastPush : null;
   const base = push === null ? 0 : Number(push.timeMs);
@@ -494,11 +388,7 @@ export function reanchorProgress(lastPush, nowMs) {
   return { ...push, atMs: Number.isFinite(Number(nowMs)) ? Number(nowMs) : push.atMs };
 }
 
-/**
- * 进度消息 → 官方歌词组件要的那一帧 `{time, isSeeking, playing}`。
- * `playing` 只认消息里的 true：官方组件按它决定逐字扫亮要不要前进，而这个窗在没有帧的时候
- * （被遮挡的置顶窗、挂在任务栏下的子窗）不会有别的重渲染时机。
- */
+/** 进度消息 → 官方歌词组件要的那一帧 `{time, isSeeking, playing}`；`playing` 只认 true。 */
 export function karaokeFrame(lastPush, nowMs, isSeeking) {
   return {
     time: estimateTimeMs(lastPush, nowMs),

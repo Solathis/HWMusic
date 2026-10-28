@@ -1,13 +1,7 @@
 /**
- * 歌曲条目的展示投影（R8）：把"字段名不确定"的原始条目翻成能渲染的几项。
- *
- * 为什么渲染层还要一份候选表：接口响应里的字段名待联调确认（docs/API_CONTRACT.md §2.3），
- * 而协议层的 `trackIdOf` 只在 Node 侧跑。渲染层这里**不重建对象**——只做读取兜底，
- * 取不到就如实回占位（"未知歌曲"/"—"），绝不编一个看起来像真的值。
- *
- * 与协议层的关系：id 的候选顺序必须与 `src/protocols/music.mjs` 的 `trackIdOf` **同结论**，
- * test/library-views.test.mjs 用同一批夹具对两处做差分钉——分开演进就会让"能显示的 id"
- * 和"能去重的 id"分家（列表里出现删不掉的幽灵行）。
+ * 歌曲条目的展示投影：把“字段名不确定”的原始条目翻成能渲染的几项。
+ * 渲染层不重建对象，只做读取兜底，取不到就如实回占位，绝不编一个看起来像真的值。
+ * id 候选顺序必须与 `src/protocols/music.mjs` 的 `trackIdOf` 同结论，由差分测试钉住。
  */
 
 /** 与协议层同序的 id 候选（差分测试钉住）。 */
@@ -41,13 +35,7 @@ export function trackNameOf(item) {
   return trackNameOrNull(item) ?? "未知歌曲";
 }
 
-/**
- * 曲名（**取不到就是 null**，不造文案）。
- *
- * 队列快照需要区分"标题未知"与"标题是未知歌曲"——前者是数据层的事实，后者是界面上的说法。
- * 文案只该出现在 UI 层，
- * 所以把"可空"的读取单独暴露出来，键候选表仍然只有这一份（`trackNameOf` 也走它）。
- */
+/** 曲名（取不到就是 null，不造文案）：文案只该出现在 UI 层。 */
 export function trackNameOrNull(item) {
   if (!isObject(item)) return null;
   for (const key of NAME_KEYS) {
@@ -140,17 +128,7 @@ export function trackArtistIdOf(item) {
   return null;
 }
 
-/**
- * 封面地址（R38 接线）。
- *
- * 协议层 `normalizeTrack` 产出的曲目**只在自己的白名单里**才会带 `coverUrl`
- * （`picture.bigImgURL` 等 → 白名单外的地址在投影时就被丢掉），所以这里读到的要么是
- * 一个 CDN 白名单内的地址，要么是 null。渲染层只把它交给 `<img src>`——**绝不 fetch**
- * （CSP 的 `connect-src` 只有 self/ipc，见 docs/API_CONTRACT.md §2.4）。
- *
- * 候选表与歌单那边同形（`playlistCoverUrlOf`）：字段名多一个不多，取不到就回 null，
- * 由调用方决定占位（界面上不留碎图）。
- */
+/** 封面地址：协议层白名单保证要么是 CDN 内地址要么是 null，渲染层只交给 `<img src>`，绝不 fetch。 */
 export function trackCoverUrlOf(item) {
   if (!isObject(item)) return null;
   for (const key of ["coverUrl", "cover", "picUrl", "imageUrl"]) {
@@ -160,14 +138,7 @@ export function trackCoverUrlOf(item) {
   return null;
 }
 
-/**
- * 时长读数：**只认 `duration` 秒数**（协议层 durationOfEntry 已从可信顶层或显式 MP3 资源归一化）。
- * `times` 不具时长资格，任何层都不按它的量级猜单位。
- *
- * 这里不再猜别的名字：单位与键名换算都在协议层一处收口，渲染层只认内部形状。
- * 契约与协议层同一份（有限正数、24 小时以内）：越界值回 null 而不是原样返回，
- * 否则表格会把坏数据画成 `0:00`/`1441:00`，看起来像"这首歌真的这么长"。
- */
+/** 时长读数只认 `duration` 秒数：单位与键名换算都在协议层收口，越界值回 null 而不是原样返回。 */
 const TRACK_DURATION_SECONDS_LIMIT = 24 * 3600;
 
 export function trackDurationOf(item) {

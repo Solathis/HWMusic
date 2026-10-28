@@ -1,19 +1,6 @@
 /**
- * AMLL 桌面歌词主题接线。
- * 只做变量映射，选择器是歌词容器 `.amll-lyrics-stage`（主窗歌词舞台与 R12 的桌面歌词窗共用）；
- * 歌词的排版、动画、着色全部由 @applemusic-like-lyrics/core 自带 style.css 负责，
- * 本文件不写任何自定义视觉样式（不写颜色值、不写字体族、不写布局）。
- * 变量由 AMLL 在 .amll-lyric-player 上以 var(...) 消费，靠继承生效。
- *
- * R12 的两组档位：
- * - `[data-lyrics-size]`：桌面歌词窗的字号档位。为什么是档位而不是连续字号——渲染层的视觉
- *   一律走工具类/令牌，内联样式只允许几何契约与 AMLL 的 100% 尺寸那两处，所以这里只能用
- *   "一个档位一条规则"的写法；档位的 px 值在 features/lyrics/lyrics-window.mjs（钳制与文案用），
- *   两边的对应关系由 test/lyrics-window.test.mjs 钉住（16px = 1rem）。
- * - `[data-lyrics-color]`：颜色令牌档位，一律映射到 styles.css 里的设计令牌（不接受任意色值）。
- *
- * R52：主窗**沉浸式歌词禁止改色**——`AmllLyricsPanel` 不写 `data-lyrics-color`、不写任何
- * 自定义颜色覆盖，落到它就是上面这条基线（`--foreground`）。颜色档位只剩桌面歌词窗一个使用者。
+ * AMLL 桌面歌词主题接线：只做变量映射，视觉样式全部由 @applemusic-like-lyrics/core 自带的 style.css 负责。
+ * 选择器 `.amll-lyrics-stage` 由主窗歌词舞台与桌面歌词窗共用，变量靠继承生效。
  */
 .amll-lyrics-stage {
   --amll-lp-color: var(--foreground);
@@ -38,7 +25,7 @@
   --amll-lp-font-size: 3.5rem;
 }
 
-/* 任务栏档位（R59：px 见 features/lyrics/lyrics-window.mjs 的 TASKBAR_FONT_STEPS） */
+/* 任务栏档位（px 见 features/lyrics/lyrics-window.mjs 的 TASKBAR_FONT_STEPS） */
 .amll-lyrics-stage[data-lyrics-size="tsm"] {
   --amll-lp-font-size: 0.75rem;
 }
@@ -69,25 +56,12 @@
   --amll-lp-color: var(--background);
 }
 
-/*
- * R51：桌面歌词窗的**歌词左右留白**收小（紧凑默认尺寸那一半）。
- *
- * 用的是官方样式自己暴露的那个变量（`.FmKaba_lyricLineWrapper { padding: .4em var(--lyric-line-padding-x) }`，
- * 官方在 `.amll-lyric-player` 上给 `1em`、窗口窄于 500px 时给 `20px`）——不改官方 CSS，不写死像素，
- * 也不另造一层容器内边距。窗口变紧凑之后，这 28~56px 的左右留白就是"字还没唱到就被挤掉"的那一块。
- *
- * 选择器只命中桌面歌词窗：`data-lyrics-layout` 只有那一个舞台根节点会写（主窗歌词面板只写
- * `data-lyrics-color`，任务栏那一条 Rust 强制 horizontal 也一样收小）。
- */
+/* 桌面歌词窗的歌词左右留白收小：改写官方暴露的 `--lyric-line-padding-x`，选择器只命中写了 `data-lyrics-layout` 的舞台。 */
 .amll-lyrics-stage[data-lyrics-layout] .amll-lyric-player {
   --lyric-line-padding-x: 0.5em;
 }
 
-/*
- * R61：竖版歌词不再借 AMLL 播放器排版（自渲染单列，见 VerticalLyricColumn.tsx 与 vertical-lyrics.css），
- * 旧的一整套竖排补丁规则（折列轴 `calc(100cqh - 0.8em)`、RTL 滚动容器、`br{display:none}`、细滚动条）
- * 全部删除。这里只保留颜色接线：自定义色仍由适配层写在同一个变量上，竖版组件直接继承。
- */
+/* 竖版歌词改为自渲染单列，这里只保留颜色接线，旧的竖排补丁规则已全部删除。 */
 .amll-lyrics-stage .vertical-lyric {
   color: var(--amll-lp-color);
   /* 竖版样式表只读这两个别名，不直接引用 AMLL 变量 */

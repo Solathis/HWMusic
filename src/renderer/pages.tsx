@@ -1,24 +1,8 @@
 /**
- * 库页面（R8）：歌单详情 / 搜索 / 专辑 / 歌手 / 播放历史，加上留给 R10 的设置页。
+ * 库页面：歌单详情 / 搜索 / 专辑 / 歌手 / 播放历史，加上设置页。
  *
- * 收藏页不在这里——它是常驻挂载的（favorites-page.tsx），挂在 `renderPage()` 之外。
- * 歌单列表也不在这里：它长在侧栏（sidebar-playlists.tsx），共用同一份取数。
- *
- * 所有页面的数据都走同一条路：`useLibraryResource`（features/library 里那一个 hook）
- * 一次只取一页（`hasMore` 由 sidecar 侧的协议层给，页面不自己猜）。
- * 三种状态分开渲染，且**绝不互相冒充**：
- * - 加载中 → Skeleton；
- * - 失败 → 结构化错误的人话（`libraryFailureText`：端点没配就说"未配置"，不显示空态）；
- * - 真的空 → 一句克制的空态（`libraryEmptyText`）。
- *
- * 端点默认值来自 `src/main/music-service.mjs` 文件头那张默认端点表；只有在设置文档的
- * `musicEndpoints` 里把某个键显式设为 `null`（显式关闭）时，协议层才回 `endpoint_unknown`，
- * 页面才显示"接口尚未配置（待联调确认）。"——这是排障用的确定态，不是默认面貌。
- *
- * R45A3（简报第 12 项"歌曲列表触底加载，不一次加载全部"）：列表分成两种，**不许混为一谈**——
- * - 歌单详情 / 搜索 / 专辑：接口真的认 `page`/`pageSize`，滚到离底 240px 取**下一页**；
- * - 歌手 / 历史：接口**本身不分页**，一次响应就是全部，UI 只本地分批揭示 50 条（不挂状态行）。
- * 判定（合并/去重/竞态/重试/上膛）全在 `features/library/pagination.mjs`，这里只接线。
+ * 所有页面都走 `useLibraryResource` 一次取一页；加载中 / 失败 / 真空调分开渲染。
+ * 歌单详情 / 搜索 / 专辑走服务端分页，歌手 / 历史接口本身不分页，只本地分批揭示。
  */
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 import { ListPlusIcon, ListMusicIcon, PlayIcon } from "lucide-react"
@@ -132,12 +116,7 @@ import {
 } from "./features/lyrics/lyrics-window.mjs"
 import type { LyricsWindowBinding } from "./use-lyrics-window.ts"
 
-/**
- * 页大小（收藏页有自己的常量）：与协议层默认的 50 同档。
- *
- * 曲目列表触底分页另用 `PAGINATION_PAGE_SIZE`（pagination.mjs 里的同一档数字，
- * 那里是唯一真源——页面与测试都按它算"一页几首"）。
- */
+/** 页大小：与协议层默认的 50 同档。 */
 const LIST_PAGE_SIZE = PAGINATION_PAGE_SIZE
 
 /** 视图对象（与 features/library/views.mjs 的 createView 产物同形）。 */
@@ -147,8 +126,7 @@ export interface View {
 }
 
 // ---------------------------------------------------------------------------
-// 触底分页（R45A3）：判定全在 pagination.mjs，这里只做 React 接线
-// ---------------------------------------------------------------------------
+// 触底分页：判定全在 pagination.mjs，这里只做 React 接线
 
 /** 分页状态（与 pagination.mjs 的产物同形）。 */
 type PaginationState = ReturnType<typeof createPaginationState>
@@ -178,8 +156,7 @@ function pageAnswerOf(data: unknown) {
     meta: payload.playlist ?? null,
     // 整张歌单（协议层确认整份已在内存时才给）：两个动作据此作用于全部曲目
     full: Array.isArray(payload.fullSongs) ? payload.fullSongs : null,
-    // 这一页是怎么来的（`server` / `local-slice` / `server-repeat`）与背后那份响应的条数：两者都由协议层说，
-    // 渲染层既不猜"这是本地切片"，也不自己数总数（R45A3 fix1）
+    // 这一页是怎么来的（server / local-slice / server-repeat）与响应条数都由协议层说，渲染层不猜。
     pageSource: payload.pageSource,
     available: payload.available,
   }
@@ -194,15 +171,7 @@ interface Paging {
 }
 
 /**
- * 服务端分页的列表取数（歌单详情 / 搜索 / 专辑）。
- *
- * 三件刻意的接线：
- * 1. **查询换代**：`holder.key` 与当前查询键不一致时**渲染期就给空状态**——切关键词的那一帧
- *    绝不能把上一个词的结果留在屏幕上（那是最容易"看起来对、其实在撒谎"的一处）；
- * 2. **正在请求不重复发**：`inFlightRef` 按"查询代次 + 页号"记在途请求，观察器/重试/首屏
- *    三条路同时触发也只发一次；
- * 3. **root 是应用内容区那个滚动容器**（`findScrollRoot` 从哨兵往上找 `overflow-y:auto`），
- *    页面自己不再造一层滚动容器——那是 `no-self-visual` 的例外集合写死的东西。
+ * 服务端分页取数（歌单详情 / 搜索 / 专辑）：查询换代即清空，在途请求不重复发。
  */
 function usePaginatedTracks({
   channel,
@@ -277,11 +246,7 @@ function usePaginatedTracks({
   }, [queryKey, enabled, fetchPage])
 
   /**
-   * 哨兵：进入前 240px 取下一页。
-   *
-   * "不无限连拉"靠 `armed`（pagination.mjs）：一页取完先卸膛，**离开触发区**才重新上膛。
-   * 观察器只在 `observe`/查询/`rescan` 变化时重建——重建会立刻回调一次当前相交状态，
-   * 所以"取完一页还停在底部"不会被自己再触发一次。
+   * 哨兵：进入前 240px 取下一页；`armed` 保证一页只取一次，离开触发区才重新上膛。
    */
   const [rescan, setRescan] = useState(0)
   const observe = shouldObserve(state)
@@ -306,11 +271,7 @@ function usePaginatedTracks({
   }, [observe, queryKey, rescan, fetchPage])
 
   /**
-   * 用户手势（滚轮 / 触摸）= "再次接近底部"，也是短列表唯一能继续取页的路。
-   *
-   * 为什么不只靠观察器：一页取完后哨兵如果**还**在视口里（列表比屏幕短），相交状态不再变化，
-   * 观察器就再也不会回调——用户明明想往下看，却没有下一页。所以一次真实手势就重新上膛并
-   * 请求观察器"再看一眼"，仍然一次手势只取一页（`rescan` 只在需要上膛时才动，滚动期间不重建）。
+   * 用户手势即"再次接近底部"：短列表里哨兵一直可见，只有真实手势能继续取页。
    */
   useEffect(() => {
     const sentinel = sentinelRef.current
@@ -343,10 +304,7 @@ function usePaginatedTracks({
 }
 
 /**
- * 本地分批（歌手 / 历史）：接口**不分页**，一次响应就是全部，这里只按批揭示。
- *
- * `revealMore` 不发任何请求（纯渲染策略）；换歌手/重进历史页时换成新的一份，
- * 重置发生在**渲染期**（effect 会晚一帧，那一帧会闪一次空态）。
+ * 本地分批（歌手 / 历史）：接口不分页，一次响应就是全部，这里只按批揭示。
  */
 function useLocalReveal(items: unknown[]): {
   state: LocalListState
@@ -380,10 +338,7 @@ function useLocalReveal(items: unknown[]): {
 }
 
 /**
- * 曲目列表的外壳：骨架 / 失败（带重试）/ 空 / 表格 + 状态行 + 哨兵。
- *
- * 服务端分页与本地分批**共用这一份渲染**（两者的区别只在喂进来的 `status` 文案与
- * `observe` 的真假）：两套渲染早晚会长出两种不一致的空态/失败态。
+ * 曲目列表外壳：骨架 / 失败（带重试）/ 空 / 表格 + 状态行 + 哨兵，两种分页共用。
  */
 function BrowsableTrackList({
   items,
@@ -482,25 +437,7 @@ export interface PageNavigationProps {
 // ---------------------------------------------------------------------------
 
 /**
- * 歌单详情页（R40 **删除重写**；R45A3 改成真分页）。
- *
- * 旧版只有一个曲目表：没有歌单名、没有封面、没有"播放全部"——点进一张歌单像是掉进了一份
- * 无名列表。现在三块：
- *
- * 1. **头部**：大封面 + 歌单名 + 元信息（共几首 / 已加载几首）+ 动作按钮。头部底景用 AMLL
- *    官方的 `BackgroundRender`（`AmllBackground`）：封面地址交给它之前先由宿主用 `new Image()`
- *    加载成 `HTMLImageElement`——**不是 fetch**（CSP 的 `connect-src` 只有 self/ipc，
- *    字符串地址会被 AMLL 拿去 fetch 而撞墙；图片走的是 `img-src`）；
- * 2. **动作**：`播放全部` = 用**整张歌单**的曲目整队替换并从第一首开始（`playQueue`）；
- *    `加入队列` = 追加到队尾、不动正在播的那一首（`enqueue`）。歌单详情那个端点一次回整张歌单，
- *    所以整表就在内存里（`state.full`），动作作用于全部曲目而不是已渲染的那 50 首；
- *    服务端真按页给时没有整表，动作退回已加载的那批；
- * 3. **正文**：曲目表（沿用 `TrackTable`：双击播放、键盘可达、艺人/专辑跳转），
- *    R45A3 起滚到离底 240px 就取下一页（`LIBRARY_PLAYLIST_DETAIL` 的 `page`/`pageSize`）。
- *
- * 数据来源仍是**一次一页**的歌单详情频道（载荷 `{playlistId, page, pageSize}`）：
- * `data.playlist` 是协议层归一化过的歌单元信息（名字/封面/曲目数都从它读，不在渲染层再解析
- * 一份原始响应）；分页纯逻辑只认**第一页**带回的那份（后续页不覆盖这张歌单的身份）。
+ * 歌单详情页：头部（封面 / 名称 / 元信息）+ 动作（播放全部 / 加入队列）+ 触底分页的曲目表。
  */
 export interface PlaylistDetailData {
   songs: unknown[]
@@ -594,21 +531,10 @@ export function PlaylistDetailPage({
 }
 
 // ---------------------------------------------------------------------------
-// 搜索：结果（输入框在侧栏顶部，R40 从页内搬走）
-// ---------------------------------------------------------------------------
+// 搜索：结果（输入框在侧栏顶部）
 
 /**
- * 搜索结果页（R40 删掉页内输入框，只剩结果；R45A3 加触底分页）。
- *
- * 检索词**由外壳经视图参数交下来**（`VIEW.search` 的 `keyword`）：入口在侧栏的常驻搜索框，
- * 结果在内容区，两处必须是同一条数据——页面自己存一份就会出现"侧栏显示 A、内容区显示 B"。
- * 所以这里既不渲染输入框，也不持有 keyword 状态：没提交过（没有 keyword）就显示
- * "输入关键字开始搜索。"，提交过就按同一档规则显示结果或「查无所获」。
- *
- * 换关键词 = 换查询：`usePaginatedTracks` 的查询键变了就换代清空并丢掉旧响应
- * （上一个词的迟到结果绝不许落到新结果里）。
- *
- * 页面本身不自带滚动容器：结果直接落在内容区那一个滚动根里（哨兵也观察那一层）。
+ * 搜索结果页：检索词由视图参数交下来，页面既不渲染输入框也不持有 keyword。
  */
 export function SearchPage({ view, ...navigation }: { view: View } & PageNavigationProps) {
   const keyword = viewParam(view, "keyword")
@@ -670,10 +596,7 @@ export function AlbumPage({ view, ...navigation }: { view: View } & PageNavigati
 }
 
 /**
- * 歌手页：**后端不分页**（协议层 `artist` 只认 `songNum`/`albumNum`，没有 start/limit）。
- *
- * 所以这里只发**一次**请求，拿到的那一份就是全部；UI 每批揭示 50 条，哨兵每批再加 50。
- * 不挂状态行：滚动就是显示更多，页面上不必解释取数方式。
+ * 歌手页：后端不分页，只发一次请求，UI 每批揭示 50 条。
  */
 export function ArtistPage({ view, ...navigation }: { view: View } & PageNavigationProps) {
   const artistId = viewParam(view, "artistId")
@@ -703,11 +626,7 @@ export function ArtistPage({ view, ...navigation }: { view: View } & PageNavigat
 }
 
 /**
- * 播放历史：与歌手页同一类——接口只给"一条查询的一次响应"（协议层固定 `hasMore:false`），
- * 所以同样只请求一次、本地分批揭示。
- *
- * 历史里的**重复条目是有意义的**（同一首歌今天听了两次），所以这一层不做任何去重；
- * 有的列表按 id 去重会把它抹成一条，那是在改历史。
+ * 播放历史：同样只请求一次、本地分批揭示；重复条目有意义，这一层不去重。
  */
 export function HistoryPage({ ...navigation }: PageNavigationProps) {
   const view = createView(VIEW.history)
@@ -732,13 +651,10 @@ export function HistoryPage({ ...navigation }: PageNavigationProps) {
 }
 
 // ---------------------------------------------------------------------------
-// 本地歌曲（R65）
-// ---------------------------------------------------------------------------
+// 本地歌曲
 
 /**
- * 本地歌曲页（R65）：导入/移除、`TrackTable` 列表、状态行只说事实；移除只删曲库记录，**不删用户的文件**。
- * 列表跟着命令回执里的整库快照走，不在这一页缓存后自己 += 增删（否则另一个窗口导入过、或导入失败一半时会和真相分家）。
- * 文件已不在的行**留着**并标出来：用户得看得见它才能决定要不要清掉。
+ * 本地歌曲页：移除只删曲库记录、不删文件；列表跟着命令回执里的整库快照走。
  */
 export function LocalSongsPage({ ...navigation }: PageNavigationProps) {
   const view = createView(VIEW.local)
@@ -851,15 +767,9 @@ export function LocalSongsPage({ ...navigation }: PageNavigationProps) {
 }
 
 // ---------------------------------------------------------------------------
-// 设置（R10）
-// ---------------------------------------------------------------------------
+// 设置
 
-/**
- * `settings:get` / `settings:set` 回执的形状（与 `src/main/settings.mjs` 同源）。
- *
- * 页面**只把整份文档交给 `proxyFormFromSettings`**，自己不去读 `data.proxy` 里的任何字段：
- * 凭据不回显这件事靠投影函数结构性保证，而不是靠这里"小心一点"。
- */
+/** `settings:get` / `settings:set` 回执的形状：页面只把整份文档交给 `proxyFormFromSettings`，凭据不回显由投影函数保证。 */
 interface SettingsAnswer {
   settings: { schemaVersion: number; data: Record<string, unknown> }
   restartRequired?: boolean
@@ -871,48 +781,15 @@ export interface SettingsPageProps {
    * 这里只是把"现在有几首、在放哪首"如实显示出来。
    */
   queue?: { entries?: unknown[]; track?: unknown } | null
-  /**
-   * 托盘是否真的可用（R11）：由外壳启动时查一次 `core_get_tray_available` 交下来。
-   *
-   * 默认值取那个保守常量（`TRAY_AVAILABLE = false`）：外壳还没查到时界面上说的是
-   * "托盘当前不可用"——这是**如实**（那一刻确实还没有答案，而 Rust 侧的 fail-safe
-   * 此刻也按"不可用"处理），比先画一个"能用"的饼再改口要好。
-   */
+  /** 托盘是否可用：由外壳启动时查一次 `core_get_tray_available` 交下来；缺省取保守常量 `TRAY_AVAILABLE`，还没答案时如实显示不可用。 */
   trayAvailable?: boolean
-  /**
-   * 桌面歌词窗的绑定（R12）：由外壳的 `useLyricsWindow` 交下来。
-   *
-   * 页面不自己问宿主：Rust 为运行配置权威，单例桥代理恢复/保存；页面只渲染并提交意图。
-   * 缺省 `null` = 外壳还没挂上（设置页不该因为少一个 prop 就崩）。
-   */
+  /** 桌面歌词窗的绑定：由外壳的 `useLyricsWindow` 交下来，页面只渲染并提交意图；缺省 `null` = 外壳还没挂上。 */
   lyrics?: LyricsWindowBinding | null
-  /**
-   * 运行日志（R39）：由外壳的 `useNoticeLog()` 交下来。
-   *
-   * 订阅留在外壳是**必须的**，不是风格问题：`app:notice` 是广播，没人订阅那一刻的提示就丢了，
-   * 而设置页只在切到设置时才挂载——在这里订阅等于"打开设置页之前的日志全丢"。
-   * 缺省 `[]` = 外壳还没交下来（这时如实显示"暂无日志。"，不编内容）。
-   */
+  /** 运行日志：由外壳的 `useNoticeLog()` 交下来——订阅必须留在外壳，否则打开设置页之前的 `app:notice` 全丢；缺省 `[]` 如实显示“暂无日志。”。 */
   notices?: LogEntry[]
 }
 
-/**
- * 设置页的二级分类（R41b）：**单页 Tabs 切换，不新开视图、不加路由**。
- *
- * 分法只有一条依据——**"用户要决定的到底是哪一件事"**：
- * - `通用`：日常使用里会被改的四件（关窗行为 / 开机自启 / 外观 / 播放队列只读摘要）；
- * - `网络`：代理（连不上网时才来看的那一类，与上面四件没有共同前提）；
- * - `歌词`：桌面歌词窗与歌词缓存/导入（同一件事的两半：在哪显示 / 从哪来）；
- * - `日志`：运行日志。
- *
- * **为什么日志单独成一类**（简报让我定并写理由）：它根本不是"设置"——没有可选项，
- * 是一块只读的诊断面板，而且很高（等宽正文 + 自己的滚动区 + 筛选框）。
- * 挂在「通用」尾部的话，用户想找"开机自启"要先划过一整块日志终端；
- * 反过来找日志的人也要先划过四张卡。给它一类，两类人都少滚一次。
- *
- * 这张表是 **trigger 与 content 的唯一真源**：两边各写一个字面量就会出现
- * "点了标签、内容区是空的"（radix 只认 `value` 相等，认不出就等于没配）。
- */
+/** 设置页的二级分类：单页 Tabs 切换，不新开视图、不加路由；这张表是 trigger 与 content 的唯一真源（radix 只认 `value` 相等）。 */
 export const SETTINGS_TABS = [
   { id: "general", label: "通用" },
   { id: "network", label: "网络" },
@@ -920,20 +797,7 @@ export const SETTINGS_TABS = [
   { id: "log", label: "日志" },
 ]
 
-/**
- * 设置页：二级分类下的代理表单、关窗行为、开机自启、外观、队列（只读）、桌面歌词、歌词缓存与日志。
- *
- * 三条纪律（沿 R8/R9 的做法）：
- * - 所有文案与判定都在 `features/settings/settings-form.mjs`（纯函数，跑得了测试）；
- *   页面只做"把状态塞进去、把返回值渲染出来"。
- * - 凭据只写不读：密码字段永远是 `type="password"`、永远从空开始，回执里有密码但**不进表单**。
- * - 不冒充：没测过不给测试结论、读不到自启状态就说"未取到"、保存回执按 `restartRequired`
- *   如实说"要重启"，主机没通过清洗就说"仍是直连"。
- *
- * R41b：卡片按 `SETTINGS_TABS` 分到四个标签页里（**卡片内部一个字都没改**，只是搬了位置）。
- * 失败/提示那两行留在标签页**之上**（页面级）：它们说的是"刚才那次保存的结果"，
- * 跟着某一张卡藏到标签页里，用户切过去才看得见——那时他已经不知道这句话在说哪次操作了。
- */
+/** 设置页：所有文案与判定都在 `features/settings/settings-form.mjs`（纯函数），页面只塞状态、渲染返回值；凭据只写不读，失败与提示按回执如实说。 */
 export function SettingsPage({
   queue = null,
   trayAvailable = TRAY_AVAILABLE,
@@ -953,11 +817,7 @@ export function SettingsPage({
   const [autostartBusy, setAutostartBusy] = useState(false)
   const [autostartFailure, setAutostartFailure] = useState<string | null>(null)
   const [autostartReadFailed, setAutostartReadFailed] = useState(false)
-  /**
-   * 主题档位（R41b 的「外观」卡）：与左下角那枚循环图标按钮、登录页那个控件**同一份接线**
-   * ——读回档位、订阅 `theme:changed`、写回档位都在 `useThemeChoice` 里，
-   * 页面自己不监听也不自己写（各写一份就会出现"两处显示不同档位"）。
-   */
+  /** 主题档位：与左下角循环按钮、登录页控件同一份接线——读回档位、订阅 `theme:changed`、写回档位全在 `useThemeChoice` 里。 */
   const { choice: themeChoice, select: selectTheme } = useThemeChoice()
 
   // 读设置：挂载时一次（表单是本地状态，之后的编辑不再打请求）
@@ -1116,7 +976,7 @@ export function SettingsPage({
         </p>
       ) : null}
 
-      {/* R41b 二级分类：单页 Tabs，不新开视图（分法与「日志为什么单独一类」见 SETTINGS_TABS） */}
+      {/* 二级分类：单页 Tabs，不新开视图（分法与「日志为什么单独一类」见 SETTINGS_TABS） */}
       <Tabs defaultValue={SETTINGS_TABS[0].id} className="flex flex-col gap-4" data-testid="settings-tabs">
         <TabsList aria-label="设置分类">
           {SETTINGS_TABS.map((tab) => (
@@ -1155,7 +1015,7 @@ export function SettingsPage({
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
-                {/* 可用性来自宿主（R11）：`trayAvailable` 由外壳启动时查一次交下来 */}
+                {/* 可用性来自宿主：`trayAvailable` 由外壳启动时查一次交下来 */}
                 {closeBehaviorNotice(closeBehavior, { trayAvailable })}
               </p>
             </CardContent>
@@ -1198,14 +1058,10 @@ export function SettingsPage({
             <CardContent>
               <div className="flex flex-col gap-1">
                 <Label htmlFor="theme-choice">主题</Label>
-                {/*
-                  R41b：三态落在这里（与左下角那枚循环图标按钮、登录页的控件**同源同向**——
-                  读回档位、订阅 theme:changed、写回档位全在 useThemeChoice 那一份接线里，
-                  写入口是 Rust 侧唯一的 core_login_chrome 的 theme 动作）。
-                */}
+                {/* 三态落在这里：与左下角循环按钮、登录页控件同源同向，接线全在 `useThemeChoice` */}
                 <Select value={themeChoice} onValueChange={selectTheme}>
                   <SelectTrigger id="theme-choice" aria-label="主题" className="w-full max-w-xs">
-                    {/* 标签直接写进 SelectValue：radix 在没展开过内容时拿不到选项文案（R10 的同一个坑） */}
+                    {/* 标签直接写进 SelectValue：radix 在没展开过内容时拿不到选项文案 */}
                     <SelectValue>{themeLabel(themeChoice)}</SelectValue>
                   </SelectTrigger>
                   <SelectContent position="popper" align="start" sideOffset={4}>
@@ -1336,14 +1192,7 @@ export function SettingsPage({
 
         {/* 歌词：桌面歌词窗口（在哪显示）+ 歌词缓存/导入（从哪来）——两半本来就可以并排看 */}
         <TabsContent value="lyrics" className="grid grid-cols-1 items-start gap-4 xl:grid-cols-2">
-          {/*
-            R52：这一页只放**必须在主窗操作**的行为项——显示 / 窗口位置。
-            外观（样式 / 方向 / 字号 / 效果 / 颜色）只在桌面歌词窗自己的齿轮菜单里改：同一项设置
-            有两个入口，用户会以为两边都该改得对，而其中一处迟早会落后。主窗设置不代管那扇窗的外观。
-            R59：任务栏歌词是**另一套**配置（颜色 / 字号 / 逐字），它没有可点的窗口，所以它的外观
-            就在下面那张卡里改（独立组件，与桌面歌词互不共用）。
-            沉浸式歌词（播放器歌词）的颜色**不可改**：`AmllLyricsPanel` 恒用 AMLL 默认 + 主题令牌。
-          */}
+          {/* 只放必须在主窗操作的行为项（显示 / 窗口位置）：桌面歌词外观只在它自己的齿轮菜单里改，主窗不代管那扇窗的外观 */}
           <Card>
             <CardHeader>
               <CardTitle>桌面歌词</CardTitle>
@@ -1368,7 +1217,7 @@ export function SettingsPage({
                   onValueChange={(value) => lyrics?.updateConfig({ mode: value })}
                 >
                   <SelectTrigger id="lyrics-mode" className="w-full max-w-xs">
-                    {/* 标签直接写进 SelectValue：radix 在没展开过内容时拿不到选项文案（R10 的同一个坑） */}
+                    {/* 标签直接写进 SelectValue：radix 在没展开过内容时拿不到选项文案 */}
                     <SelectValue>{modeLabel(lyrics?.config.mode)}</SelectValue>
                   </SelectTrigger>
                   <SelectContent position="popper" align="start" sideOffset={4}>
@@ -1404,20 +1253,16 @@ export function SettingsPage({
             </CardContent>
           </Card>
 
-          {/* R59：任务栏歌词的外观（颜色 / 逐字 / 字号）——与桌面歌词各存一份，只在 Windows 渲染 */}
+          {/* 任务栏歌词的外观（颜色 / 逐字 / 字号）——与桌面歌词各存一份，只在 Windows 渲染 */}
           <TaskbarLyricsCard lyrics={lyrics} />
 
-          {/* 歌词缓存 / 一键清除 / 导入本地歌词（R41）：与上面那张卡同一件事的两半（显示 vs 存放） */}
+          {/* 歌词缓存 / 一键清除 / 导入本地歌词：与上面那张卡是同一件事的两半（显示 vs 存放） */}
           <LyricsCacheCard lyrics={lyrics} />
         </TabsContent>
 
         {/* 日志：只读的诊断面板（不是设置项——理由见 SETTINGS_TABS 的注释）；终端始终整宽 */}
         <TabsContent value="log" className="grid grid-cols-1 items-start gap-4">
-          {/*
-            运行日志（R56）：宿主的日志文件（含 sidecar 那一侧）+ `app:notice` 的提示。
-            级别、筛选、脱敏、空态文案全在 `LogTerminal` 与 `features/settings/run-log.mjs`；
-            这里只给卡片外壳与那句说明。
-          */}
+          {/* 运行日志：宿主的日志文件（含 sidecar 那一侧）+ `app:notice` 的提示；级别、筛选与脱敏全在 `LogTerminal` 里 */}
           <Card>
             <CardHeader>
               <CardTitle>运行日志</CardTitle>

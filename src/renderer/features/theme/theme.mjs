@@ -1,22 +1,7 @@
 /**
- * 主题三态（浅色 / 深色 / 跟随系统）的**渲染层唯一真源**（R25 用户四项之 4）。
+ * 主题三态（浅色 / 深色 / 跟随系统）的渲染层唯一真源。
  *
- * 三者怎么落到 CSS 上：
- *
- * | 档位 | `<html>` 上的类 | 谁决定颜色 |
- * |---|---|---|
- * | `light` | `light` | `.light` 令牌块（**特异性高于**媒体查询里的 `:root`，压过系统暗色） |
- * | `dark` | `dark` | `.dark` 令牌块（shadcn 默认写法） |
- * | `system` | 无 | `@media (prefers-color-scheme: dark)`（R10 既有映射，原样保留） |
- *
- * 三条纪律：
- * 1. **状态归 Rust 持有**（`settings.json` 的 `theme` 键 + `theme:changed` 广播）；这里只有
- *    纯函数与"把类落到 html 上"这一个副作用，不存第二份（不引 next-themes、不写 localStorage
- *    ——R10 的裁决里那条"防闪烁内联脚本会被 CSP 拦"的理由仍然成立）；
- * 2. **认不出的档位不猜**：`normalizeThemeChoice` 返回 `null`，调用方按系统档处理
- *    （退回"跟系统"是安全的默认，猜成强制档会让用户的机器突然变色）；
- * 3. **切类只有这一处**：`applyThemeChoice` 是唯一的入口（由 `test/login-chrome.test.mjs` 扫描钉住），
- *    其余文件一律经它——两个 webview 各切一遍类是"两处早晚会漂移"的典型形状。
+ * 状态归 Rust 持有，这里只有纯函数与把类落到 html 上这一个副作用；认不出的档位不猜，按系统档处理。
  */
 
 /** 三个档位（磁盘与广播上的字面量，Rust 侧镜像同值）。 */
@@ -36,24 +21,14 @@ export const THEME_LABELS = {
   [THEME_CHOICE.system]: "跟随系统",
 };
 
-/** 认不出档位时的落点：跟系统（R10 起的行为，也是"什么都不强制"的那一档）。 */
+/** 认不出档位时的落点：跟系统。 */
 export const THEME_DEFAULT = THEME_CHOICE.system;
 
 /** 会被强制加到 `<html>` 上的两个类（system 一个都不加）。 */
 export const THEME_FORCED_CLASSES = [THEME_CHOICE.light, THEME_CHOICE.dark];
 
 /**
- * 主题回执的**单调 revision 合同**（R44e）：读回、广播、歌词窗补发**共用这一份判定**。
- *
- * 为什么需要它：每个消费者都"先订阅广播、再读回当前档位"，而读回是异步的——慢半拍的旧回执
- * 会盖掉刚收到的新广播（界面从新主题跳回旧主题）。把判定收成一个纯函数，就不会出现
- * "主窗拒旧回执、歌词窗不拒"这种各写一套的不一致。
- *
- * 规则：
- * - 带 `revision` 的载荷按**单调**收：比已见的旧 → 拒（`accept:false`，水位不动）；
- * - 同一个 revision 再来一次 → 收（幂等，界面刷新不会被卡住）；
- * - **没有** `revision` 的老形状 → 照旧收，但**不把水位往回退**（C 阶段的广播没有编号）。
- *
+ * 主题回执的单调 revision 合同（读回、广播、歌词窗补发共用）：比已见的旧 → 拒，同号幂等收，无编号的老形状照收但不退水位。
  * @param {number} seen 已见的最高 revision（`-1` = 还没见过）
  * @param {unknown} payload `{theme?, revision?}`
  * @returns {{accept: boolean, seen: number}}
@@ -74,41 +49,22 @@ export function themeOptionTestId(choice) {
   return `login-theme-${choice}`;
 }
 
-/** 主窗左下角那枚**循环切换**按钮的测试锚点（R41b：窄轨收起后它仍在）。 */
+/** 主窗左下角那枚循环切换按钮的测试锚点。 */
 export const THEME_TOGGLE_TESTID = "theme-toggle";
 
-/**
- * 档位 → 给人看的文案（**认不出时按系统档**，与 `applyThemeChoice` 的落点逐字一致）。
- *
- * 与 `settings-form.mjs` 的 `closeBehaviorLabel` / `lyrics-window.mjs` 的 `modeLabel` 同款：
- * 界面不直接拿字符串去索引 `THEME_LABELS`，而是经这个入口——那两处的教训是"控件里多写一次
- * `LABELS[值]`，就等于多一处要自己保证值一定在表里"。
- */
+/** 档位 → 给人看的文案（认不出时按系统档）；界面经这个入口取，不直接索引 THEME_LABELS。 */
 export function themeLabel(choice) {
   return THEME_LABELS[normalizeThemeChoice(choice) ?? THEME_DEFAULT];
 }
 
-/**
- * 循环切换的下一档（R41b 左下角那枚图标按钮）：浅色 → 深色 → 跟随系统 → 浅色。
- *
- * 顺序**就是** `THEME_CHOICES` 的顺序（展示顺序 = 点击顺序），不另写一张表：
- * 两处各写一份，早晚出现"控件里排 A、点一下跳到 B"。
- *
- * 认不出的档位按系统档起步（与 `applyThemeChoice` 的落点逐字一致）：界面上那时显示的就是
- * 跟随系统，点一下就该走到浅色——从"上一个合法档位"接着走会跳过一个用户没选过的档。
- */
+/** 循环切换的下一档：浅色 → 深色 → 跟随系统，顺序就是 THEME_CHOICES 的顺序。 */
 export function nextThemeChoice(choice) {
   const current = normalizeThemeChoice(choice) ?? THEME_DEFAULT;
   const index = THEME_CHOICES.indexOf(current);
   return THEME_CHOICES[(index + 1) % THEME_CHOICES.length];
 }
 
-/**
- * 循环按钮的无障碍名称：**当前是哪一档、点一下会到哪一档**都要说出来。
- *
- * 纯图标按钮没有可见文字，`aria-label` 就是它唯一的说法——只写"主题"等于让读屏用户
- * 靠猜（点三下才知道转到哪）。文案与档位标签同源（`THEME_LABELS`），不另抄一份。
- */
+/** 循环按钮的无障碍名称：当前是哪一档、点一下会到哪一档都要说出来。 */
 export function themeToggleLabel(choice) {
   const current = normalizeThemeChoice(choice) ?? THEME_DEFAULT;
   return `当前${themeLabel(current)}，点击切换到${themeLabel(nextThemeChoice(current))}`;
@@ -125,14 +81,7 @@ export function themeClassesFor(choice) {
   return normalized === null || normalized === THEME_DEFAULT ? [] : [normalized];
 }
 
-/**
- * 把档位落到 `<html>` 上（**唯一的切类入口**），返回**实际生效**的档位。
- *
- * 两个类一起处理（要加的那个加上、另一个去掉）而不是"只加不去"：否则从强制暗色切到强制浅色时
- * 两个类会同时在，谁赢取决于 CSS 顺序——那是最难查的一类主题 bug。
- *
- * 认不出的档位按系统档处理并如实返回 `"system"`（调用方据此更新界面上的高亮，不许留在旧档位）。
- */
+/** 把档位落到 html 上（唯一的切类入口），返回实际生效的档位；两个类一起处理，认不出的按系统档。 */
 export function applyThemeChoice(root, choice) {
   const applied = normalizeThemeChoice(choice) ?? THEME_DEFAULT;
   const wanted = themeClassesFor(applied);

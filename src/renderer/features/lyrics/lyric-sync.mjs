@@ -1,27 +1,13 @@
 /**
- * 歌词进度同步（R9）：rAF 逐帧把进度推给 AMLL `LyricPlayer` + 200ms 的 `isSeeking` 窗口。
- *
- * 为什么需要这个模块：AMLL 的 `LyricPlayer` 是**受控组件**——它不自己去读音频进度，
- * 由宿主每帧把 `currentTime`（整数毫秒）推给它，内部按调用间隔与进度自行决定滚动/弹簧动画。
- * 所以宿主只有两条责任：
- * 1. **每帧推一次进度**（推得越勤越准；只在值真的变了的时候推，省下的是一次 React 渲染）；
- * 2. **标注"这一次变化是跳转造成的"**（`isSeeking`）：拖进度条时歌词应该跟着手走而不是
- *    自己飞出去，AMLL 收到 `isSeeking` 会强制重排一次。
- *
- * 拖动窗口为什么是"最后一次 seek 之后 200ms"而不是"按下/松开"两个事件：连续拖动会不断续期，
- * 手一停窗口自然过期。pointerup 在"拖到窗外松手"这类情况下并不可靠，靠它收窗会卡在拖动态。
- *
- * 时钟与帧调度全部注入：这个模块里**没有一帧是真的等来的**（node 里也能完整测）。
+ * 歌词进度同步：rAF 逐帧把进度推给 AMLL `LyricPlayer`，外加 200ms 的 `isSeeking` 窗口。
+ * `LyricPlayer` 是受控组件：宿主每帧推一次整数毫秒的 `currentTime`，并标注这次变化是否由跳转造成。
+ * 拖动窗口取「最后一次 seek 之后 200ms」：连续拖动不断续期，手一停窗口自然过期。
  */
 
 /** `isSeeking` 窗口（毫秒）：最后一次 seek 之后的这段时间内，推送都标注为"跳转中"。 */
 export const LYRICS_SEEK_WINDOW_MS = 200;
 
-/**
- * 进度读数 → 整数毫秒（AMLL 明确要求整数）。
- * 读不到数字（NaN/Infinity/字符串/undefined）→ `null`：**那一帧不推**，
- * 而不是推 0——把歌词打回开头比"这一帧没动"糟得多。
- */
+/** 进度读数 → 整数毫秒；读不到数字回 `null`（那一帧不推），而不是推 0。 */
 export function integerMsOf(value) {
   const number = typeof value === "number" ? value : Number.NaN;
   if (!Number.isFinite(number)) return null;
@@ -40,7 +26,6 @@ export function progressPatchOf(previous, time, isSeeking) {
 
 /**
  * 造一个歌词进度泵。
- *
  * @param {object} options
  * @param {() => number} options.readTime 读当前进度（毫秒）
  * @param {(patch: {time: number, isSeeking: boolean}) => void} options.push 推送（组件里 = setState）

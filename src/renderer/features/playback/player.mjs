@@ -1,24 +1,8 @@
 /**
- * 播放状态机（R9）：**一个 Audio 实例**的全部行为都在这里，但这里没有 Audio。
- *
- * 端口全部注入（所以每条路径都能在 node 里跑完，也让"地址闸门"成为不可绕过的结构）：
- * - `audio`：音频端口（`setSource/play/pause/setCurrentTime/setVolume/setMuted/on`）。
- *   真实实现是 `features/playback/audio-element.mjs`——**全应用只有那里 new Audio()**；
- * - `resolveUrl(trackId)`：取**当次**播放地址（走 core 的 `playback:resolve-url`）；
- * - `guardUrl(url)`：地址闸门（`features/playback/media-url.mjs` → CSP 的 media-src 白名单）。
- *   **构造时缺它就抛**：闸门不能是可选参数，否则"忘了校验"会变成默认放行；
- * - `persistQueue` / `loadQueue`：队列持久化（标识 + 索引 + 安全展示快照 + 当前曲目的进度，见 queue.mjs）；
- * - `log`：只写**不该打扰用户**的失败（落盘失败、恢复失败），**绝不写播放地址**；
- * - `random`：随机的注入点（测试用确定序列）；`now` / `schedule`：进度节流的时钟与尾随写定时。
- *
- * 五条设计裁决：
- * 1. **状态里没有音频地址**。播放地址只在当次应答与音频元素之间流转；快照只记 `loaded`。
- *    安全封面属于展示快照，与 signed 音频地址分开。
- * 2. **双击不打架**：每次装载领一个令牌，取地址回来后令牌对不上就整包丢掉（网络乱序是常态）。
- * 3. **播完按模式走**：顺序（播完即停）/ 列表循环 / 单曲循环 / 随机；随机走**轮换排列**——
- *    "上一首"在随机模式下才有意义（真随机退不回去），且一轮内不重复。
- * 4. **换队列 = 停止播放**：队列被替换后，音频里装着的还是上一首，装作没发生只会播错歌。
- * 5. **进度按"可能马上就没机会写"的时刻落盘**：播放中节流、暂停/切歌/清空/窗口隐藏立刻写。
+ * 播放状态机：一个 Audio 实例的全部行为都在这里，但这里没有 Audio。
+ * 端口全部注入：`audio`、`resolveUrl(trackId)`、`guardUrl(url)`（缺它就抛，闸门不能可选）、
+ * `persistQueue`/`loadQueue`、`log`（只写该打扰的失败，绝不写播放地址）、`random`/`now`/`schedule`。
+ * 状态里没有音频地址；每次装载领一个令牌，乱序应答整包丢掉；换队列 = 停止播放。
  */
 import { queueEntriesOf, queueRecordOf, restoredEntries, sanitizeQueueRecord } from "./queue.mjs";
 import { LYRICS_STATUS } from "../lyrics/lyrics-window.mjs";
@@ -83,10 +67,7 @@ function millisOfSeconds(value) {
 }
 
 /**
- * 有效总时长（毫秒）：音频报的**有限正值** → 曲目元数据秒数 → 0（界面显示「—」）。
- *
- * 流媒体常先报 `Infinity`/`NaN`，恢复的队列在装载前没有任何读数；0 是"不知道"，不是"零秒"。
- *
+ * 有效总时长（毫秒）：音频报的有限正值 → 曲目元数据秒数 → 0（界面显示「—」）。
  * @param {{duration?: unknown}|null} track
  * @param {number} reportedMs 音频元素最近报的时长（毫秒，0 = 没报到可用值）
  */
@@ -121,7 +102,6 @@ function kindOf(cause) {
 
 /**
  * 造播放状态机。
- *
  * @param {object} options
  * @param {object} options.audio 音频端口（单实例！真实实现见 audio-element.mjs）
  * @param {(trackId: string) => Promise<{ok: true, data: {url?: unknown}} | {ok: false, error: {message?: string, kind?: string}}>} options.resolveUrl
@@ -190,10 +170,8 @@ export function createPlayer(options = {}) {
   let trailingCancel = null;
 
   /**
-   * 状态是**不可变替换**的：React 的 useSyncExternalStore 靠引用比较认变化。
-   * 形状写在 JSDoc 里，TS 侧（use-player.ts / 组件 props）才拿得到准确的类型——
-   * 否则 `entries: []` 会被推断成 `never[]`，界面上取字段就会红。
-   *
+   * 状态是不可变替换的：React 的 useSyncExternalStore 靠引用比较认变化。
+   * 形状写在 JSDoc 里，TS 侧才拿得到准确类型，否则 `entries: []` 会被推断成 `never[]`。
    * @type {{
    *   status: string,
    *   error: {kind: string, message: string}|null,
@@ -458,10 +436,7 @@ export function createPlayer(options = {}) {
   }
 
   /**
-   * 装载并播放第 `index` 首。
-   *
-   * `manual: true`（用户点的）在随机模式下会**以这一首开头重开一轮**——否则用户点了第 5 首，
-   * 下一首会跳到某个随机位置，"我点的那首去哪了"。
+   * 装载并播放第 `index` 首（`manual: true` 在随机模式下以这一首开头重开一轮）。
    */
   async function start(index, { manual = true } = {}) {
     if (state.entries.length === 0) {
@@ -506,7 +481,7 @@ export function createPlayer(options = {}) {
       audio.setSource(resolved.url);
       audio.setVolume(state.volume);
       audio.setMuted(state.muted);
-      // 元数据之前写入是规范里的"默认起播位置"：真实元素装载后从这里开始（守卫里实测过）
+      // 元数据之前写入是规范里的「默认起播位置」：真实元素装载后从这里开始。
       const pendingMs = resume !== null && resume.trackId === entry.id ? resume.positionMs : null;
       if (pendingMs !== null) {
         audio.setCurrentTime(pendingMs);
@@ -630,20 +605,8 @@ export function createPlayer(options = {}) {
   }
 
   /**
-   * 往队列**末尾追加**（R40；歌单详情页的「加入队列」）。
-   *
-   * 与 `setQueue`/`playQueue` 的区别只有一件事：**不动正在播的那一首**。整队替换会把音频
-   * 里装着的上一首打回停止（换队列 = 停止播放，那是对的语义），而"加入队列"不是换队列——
-   * 用户要的是"这些排到后面去"，正在响的那一首必须继续响。
-   *
-   * 四条边界：
-   * 1. **空队列时追加 = 建立队列并停在第一首**（`index` 从 -1 变成 0，出现可播曲目），
-   *    但**不自动开播**：没有用户手势的出声是打扰（与 `restore` 同一条纪律）；
-   * 2. **不去重、不排序**：同一首歌在队列里出现两次是合法的（`queueEntriesOf` 的既有语义），
-   *    追加的语义就是"把这一批原样排到后面"；
-   * 3. **已装载的那一首不动**：`loadedId` 与音频源都不碰（只有整队替换才需要作废它们）；
-   * 4. 空列表/没有标识的条目一律不产生变化（`added: 0`），不写盘（`persist` 自己会去重）。
-   *
+   * 往队列末尾追加：只动落点，不动正在播的那一首。
+   * 空队列时追加 = 建立队列并停在第一首（不自动开播），不去重、不排序，已装载的那首不动；空列表不写盘。
    * @returns {{ok: true, data: {added: number, queueLength: number, index: number}}}
    */
   function enqueue(items) {
@@ -667,9 +630,7 @@ export function createPlayer(options = {}) {
   }
 
   /**
-   * 插到**当前曲目之后**（R63 行菜单的「下一首播放」）：与 `enqueue` 只差落点，其余四条纪律一致
-   * （空队列停在第一首不出声、不去重、不动已装载的音频、空列表不写盘）。
-   * 随机模式的 `order` 跟着后移，否则"下一首播放"等于没插；过期的 `order` 不动（下次 `shuffleNext` 重建）。
+   * 插到当前曲目之后（「下一首播放」）：与 `enqueue` 只差落点，其余纪律一致。
    */
   function playNext(items) {
     const appended = queueEntriesOf(items);
@@ -820,14 +781,8 @@ export function createPlayer(options = {}) {
   }
 
   /**
-   * 歌词行（AMLL 的 `LyricLine[]`）：状态机只做**搬运**，解析在 features/lyrics/amll-adapter.ts。
-   * `status` 是"不冒充"的关键：`unavailable`（来源没配/还没请求）、`loading`（正在取）、
-   * `empty`（取了，这首没有）、`failed`（取不到）、`ready`。把前者说成后者，就是替接口撒谎。
-   *
-   * R12 增补第二个参数：主窗在"还没有行但要说清是哪一档"的情形（loading / failed /
-   * unavailable）下把状态显式给出来。给的值必须出自 `LYRICS_STATUS`（同一份词表），
-   * 认不出的按行数推断（绝不把任意字符串当状态发给界面）。
-   *
+   * 歌词行（AMLL 的 `LyricLine[]`）：状态机只做搬运，解析在 features/lyrics/amll-adapter.ts。
+   * `status` 是「不冒充」的关键：`unavailable` / `loading` / `empty` / `failed` / `ready`。
    * @param {Array<import("@applemusic-like-lyrics/lyric").LyricLine>|null|undefined} lines
    * @param {string} [status]
    */

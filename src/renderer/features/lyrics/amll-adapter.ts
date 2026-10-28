@@ -1,41 +1,15 @@
 /**
- * 歌词适配（R9）：AMLL 官方 `parseLrc` → `LyricLine[]`，外加两处**补偿**。
- *
- * R4 的实测结论（协议层 `src/protocols/lyrics.mjs` 的文件头登记了它）：
- * 1. `[offset:±ms]` 元数据被 AMLL 忽略（不参与时间平移）——这里补上；
- * 2. 同一时间戳的多行（译文/音译）不会被合并进 `translatedLyric`，而是各自成行——这里合并。
- *
- * 边界（与协议层同一条）：**解析、时间轴、逐字切分全是官方 `parseLrc` 的事**。
- * 本文件里没有一行时间戳正则、没有任何标记输出，也没有"自己画歌词"的东西——
- * 逐行滚动与排版是 AMLL 组件（`AmllLyricsPanel` 里的 `LyricPlayer`）的职责，
- * 宿主只做定位容器与进度推送。任何输入都不抛：歌词拿不到时播放必须照常。
- *
- * 语义约定（写清楚，因为它没有权威文档）：
- * - `offset` 取**加**到时间戳上的解释（`[offset:+250]` = 歌词整体后 250ms 出现）。
- *   真实样本若证明是反的，改动只有 `shiftLyricLines` 里的一处符号。
- * - 时间戳夹在 ≥ 0：负时间戳不是"更早"，只是解析器与渲染器都不认的坏值。
+ * 歌词适配：AMLL 官方 `parseLrc` → `LyricLine[]`，外加 `[offset:±ms]` 平移与同时间戳多行合并两处补偿。
+ * 解析、时间轴、逐字切分全是官方 `parseLrc` 的事；逐行滚动与排版归 AMLL 组件，宿主只做定位容器与进度推送。
  */
 import { parseLrc, type LyricLine } from "@applemusic-like-lyrics/lyric";
 
 import { normalizeCustomColor } from "./lyrics-window.mjs";
 
-/**
- * 官方 AMLL 歌词颜色变量的名字（R45B）。
- *
- * 这个变量在 `amll-theme.css` 里按设计令牌接线（`[data-lyrics-color="..."]`）；用户选了
- * 自定义颜色时，只有**歌词窗**这一个元素上的一次 scoped 覆盖（[`applyCustomColor`]）。
- * 变量名写在这里而不是组件里：组件不出现 AMLL 变量名（那条扫描保证变量只有 css 与适配层
- * 两个接线点）。
- */
+/** 官方 AMLL 歌词颜色变量名；用户选自定义颜色时，只在歌词窗上做一次 scoped 覆盖。 */
 export const AMLL_COLOR_VAR = "--amll-lp-color";
 
-/**
- * 把自定义颜色写到容器上（scoped 覆盖官方歌词颜色变量）；空/非法值 = 撤掉覆盖回令牌。
- *
- * 只用 `style.setProperty` 写**一个已验证的 `#RRGGBB`**：不拼 CSS 文本、不写 `cssText`，
- * 因此不存在"用户输入变成一条样式规则"的注入面（合法性判定在 `lyrics-window.mjs` 的
- * `isCustomColor`，那是唯一真源）。
- */
+/** 把自定义颜色写到容器上（scoped 覆盖）；空/非法值 = 撤掉覆盖回令牌，只用 `style.setProperty` 写已验证的 `#RRGGBB`。 */
 export function applyCustomColor(element: HTMLElement | null | undefined, customColor: unknown): void {
   if (element === null || element === undefined) return;
   const color = normalizeCustomColor(customColor);
@@ -91,12 +65,7 @@ function shiftTime(value: number, offsetMs: number): number {
   return Math.max(MIN_TIME_MS, Math.round(shifted));
 }
 
-/**
- * offset 平移（纯函数，返回**新对象**）。
- *
- * AMLL 的铁律是"传进去的数组及其内容不得再改"，所以这里一律重建：行、词数组、词对象
- * 全部是新引用——复用旧引用会让上一份解析结果被就地改掉。
- */
+/** offset 平移（纯函数）：一律重建行、词数组与词对象，传进去的数组及其内容不得再改。 */
 export function shiftLyricLines(lines: LyricLine[], offsetMs: number): LyricLine[] {
   if (!Array.isArray(lines)) return [];
   if (offsetMs === 0) return lines.map((line) => cloneLine(line));
@@ -124,14 +93,7 @@ function cloneLine(line: LyricLine): LyricLine {
   };
 }
 
-/**
- * 同时间戳多行合并（纯函数）：第一行是正文，第二行进 `translatedLyric`，第三行进 `romanLyric`。
- *
- * 两条克制：
- * - 与正文**完全相同**的行不当译文（同一句话被重复标注是数据问题，不是译文）；
- * - 第四行及以后**保留为独立行**：宁可多显示一行，也不能静默吃掉歌词
- *   （"显示得丑"看得见，"少了一句"看不见）。
- */
+/** 同时间戳多行合并：第一行正文、第二行译文、第三行音译，第四行及以后保留为独立行。 */
 export function mergeTranslationLines(lines: LyricLine[]): { lines: LyricLine[]; merged: number; extraKept: number } {
   if (!Array.isArray(lines) || lines.length === 0) return { lines: [], merged: 0, extraKept: 0 };
 
@@ -193,20 +155,7 @@ function finiteMs(value: unknown): number | null {
   return value;
 }
 
-/**
- * 逐字高亮（R45B 的 `withKaraokeWords`）：把**行级**歌词推导成逐字词数组，喂给官方
- * `LyricPlayer` 的逐词高亮（组件只在 `words.length > 1` 且时间不同时才逐字着色）。
- *
- * 三条克制，每条都是为了不把"看起来像卡拉 OK"变成"假装精确"：
- * 1. **已有词级时间原样保留**（`words.length > 1`）：那是源里真有的时间，重切就是破坏数据；
- * 2. **行级 LRC 的逐字时间是按行时长线性推导的**（按 Unicode code point 等分，末字正好收在
- *    行尾）。它**不是**服务端精确的卡拉 OK 时间——这句话也写在会话说明与报告里；
- * 3. **坏时间不伪造**：行区间不是有限正区间、或词上写着倒挂/无限/零长的时间，就原样交回，
- *    让官方组件按行级处理（宁可不逐字，也不能凭空造一个错的节拍）。
- *
- * 返回**全新对象**（行、词数组、词对象全部新建）：AMLL 的铁律是传进去的数组及其内容不得再改，
- * 而它自己会对行做规范化（`resetLineTimestamps` 等），复用旧引用会把上一份解析结果改掉。
- */
+/** 逐字高亮：把行级歌词按行时长线性推导出逐字词数组；已有词级时间原样保留，坏时间不伪造。 */
 export function withKaraokeWords(lines: LyricLine[]): LyricLine[] {
   if (!Array.isArray(lines)) return [];
   return lines.map((line) => karaokeLine(line));
@@ -241,12 +190,7 @@ function karaokeLine(line: LyricLine): LyricLine {
   return next;
 }
 
-/**
- * 歌词文本 → AMLL 行数组（**唯一入口**，面板只消费它）。
- *
- * 顺序是刻意的：先平移 offset（同时间戳的等值关系不受影响），再合并同时间戳的行。
- * 反过来的话，合并后的行会被平移到不同的时间戳上，"译文跟着正文走"这件事就断了。
- */
+/** 歌词文本 → AMLL 行数组（唯一入口）：先平移 offset，再合并同时间戳的行。 */
 export function parseAmllLyrics(text: unknown): LyricsResult {
   if (typeof text !== "string") return { lines: [], stats: { ...EMPTY_STATS }, isEmpty: true };
   const trimmed = text.replace(/^\uFEFF/, "");

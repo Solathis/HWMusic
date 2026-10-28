@@ -25,11 +25,7 @@ function textOf(line) {
   return line.words.map((word) => (typeof word?.word === "string" ? word.word : "")).join("");
 }
 
-/**
- * 当前句：时间落在哪一行（取最后一行已开始且有字的）。
- * 纯时间戳的空白行不占屏——沿时间往前找有字行，否则竖版只剩一片空白、等于吞掉上一句；
- * 时间还没到第一句时回 -1（组件显示占位）。
- */
+/** 当前句：时间落在哪一行（取最后一行已开始且有字的）；纯时间戳的空白行沿时间往前找有字行，时间未到第一句回 -1。 */
 export function activeLyricIndex(lines, timeMs) {
   if (!Array.isArray(lines) || lines.length === 0) return -1;
   const time = finite(timeMs);
@@ -81,11 +77,7 @@ export function lineProgress(line, timeMs, nextStartMs) {
 /** 组合符号/变体选择符/零宽连接符：它们属于前一个字素簇，不能独立成列。 */
 const CLUSTER_CONTINUATION = /^[\p{M}\u200d\ufe0e\ufe0f]$/u;
 
-/**
- * 逐字词 → 渲染用的字素簇 token（只合并，不切分）。
- * `withKaraokeWords` 按 code point 切，组合重音与 Emoji 序列会被拆成"两个半个字"；
- * 时间跟着合并：起点取首字、终点取末字。
- */
+/** 逐字词 → 渲染用的字素簇 token（只合并，不切分）；时间跟着合并：起点取首字、终点取末字。 */
 export function karaokeTokens(words) {
   if (!Array.isArray(words)) return [];
   const tokens = [];

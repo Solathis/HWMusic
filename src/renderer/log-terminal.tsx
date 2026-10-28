@@ -1,12 +1,6 @@
 /**
- * 运行日志面板（R8 起；R39 搬到设置页并改成编辑器样式；R56 换成真正的运行日志）。
- *
- * R56 之前这里只显示 `app:notice` 广播（很少），所以几乎总是「暂无日志」。
- * 现在两路合并：**宿主的日志文件**（`readRunLog` → `core_read_run_log`，含 sidecar 那一侧）
- * 在前，提示在后；文件条目自带级别，提示条目一律 info、来源「提示」。
- *
- * 订阅仍留在外壳（`useNoticeLog`）：`app:notice` 是广播，没人订阅那一刻的提示就丢了，
- * 而设置页只在切到「日志」标签时才挂载。
+ * 运行日志面板：宿主的日志文件（`readRunLog` → `core_read_run_log`）在前，`app:notice` 提示在后。
+ * 文件条目自带级别，提示条目一律 info、来源「提示」；订阅仍留在外壳（`useNoticeLog`），因为设置页只在切到「日志」标签时才挂载。
  */
 import { useCallback, useEffect, useState } from "react"
 
@@ -50,12 +44,7 @@ export const LOG_ENTRY_LIMIT = 100
 /** 自动刷新的间隔：日志是人在看，5 秒够用且不会把读盘做成负担。 */
 const AUTO_REFRESH_MS = 5000
 
-/**
- * 订阅 `app:notice` 的提示日志。
- *
- * 订阅失败（外壳没起来）不打扰用户：面板照常显示文件里的日志——
- * 这类失败的原因在门禁与启动提示里已经说过一遍了，再说一遍只会变成噪声。
- */
+/** 订阅 `app:notice` 的提示日志：订阅失败不打扰用户，面板照常显示文件里的日志。 */
 export function useNoticeLog(limit: number = LOG_ENTRY_LIMIT): LogEntry[] {
   const [entries, setEntries] = useState<LogEntry[]>([])
 
@@ -88,12 +77,7 @@ export function useNoticeLog(limit: number = LOG_ENTRY_LIMIT): LogEntry[] {
   return entries
 }
 
-/**
- * 日志卡本体：级别筛选 + 搜索 + 刷新 + 编辑器样式的日志区。
- *
- * 行号是**显示位置**（1..N，跟着筛选结果走）：它是 gutter 的序号，不是日志的身份——
- * 拿条目的 key 当行号会在筛选后留下跳号，读起来像丢了行。行号那一段对读屏 `aria-hidden`。
- */
+/** 日志卡本体：级别筛选 + 搜索 + 刷新 + 编辑器样式的日志区；行号是显示位置（跟着筛选结果走），不是日志的身份。 */
 export function LogTerminal({ notices = [] }: { notices?: LogEntry[] }) {
   const [payload, setPayload] = useState<unknown>([])
   const [failed, setFailed] = useState(false)
@@ -195,10 +179,7 @@ export function LogTerminal({ notices = [] }: { notices?: LogEntry[] }) {
       ) : shown.length === 0 ? (
         <EmptyState text={RUN_LOG_NO_MATCH_TEXT} />
       ) : (
-        /*
-          有界高度落到 radix 的 viewport 上：只写在 ScrollArea 根上时，viewport 的
-          `height: 100%` 解不出百分比高度（实测日志会溢出卡片而不是滚动）。
-        */
+        /* 有界高度落在 radix 的 viewport 上：只写在 ScrollArea 根上时 viewport 的 `height: 100%` 解不出百分比高度。 */
         <ScrollArea
           className="max-h-[60vh] rounded-md border [&>[data-slot=scroll-area-viewport]]:max-h-[60vh]"
           data-testid="log-lines"

@@ -1,21 +1,7 @@
 /**
- * 播放运行时（R9）：把状态机、音频元素、地址闸门、队列持久化、媒体会话、
- * `player:command` 广播**装配成一个单例**。
- *
- * 分工：`player.mjs` 是纯逻辑（不知道 core、不知道 DOM），这个文件是它的**端口实现**。
- * 具体接的线：
- * - `resolveUrl`：`coreCall(PLAYBACK_RESOLVE_URL, {trackId})`——通道名来自共享常量；
- *   地址只在这条调用里出现，**不进状态、不写日志、不落盘**；
- * - `guardUrl`：`media-url.mjs`（CSP `media-src` 同源的白名单）；
- * - `persistQueue` / `loadQueue`：`settings:set` 的 `patch.queue`（标识 + 索引 + 安全展示快照
- *    + 当前曲目的进度）与 `settings:get` 的同一键（`null` = 删除，语义在 `src/main/settings.mjs`）；
- * - 进度落盘：主窗 `visibilitychange`（hidden）/`pagehide` 时立刻写一次（节流规则在 player.mjs）；
- * - 媒体会话：只在该更新的时候更新（曲目或播放状态变化），避免每帧都去写系统控件；
- * - `player:command`：R11 托盘用的播放控制广播（预登记），认不出的命令只留痕。
- *
- * 单例的原因：音频元素、媒体会话、广播订阅都是"系统级资源"，多份会互相打架
- * （两个 Audio 同时出声、系统控件指向另一个实例）。React 严格模式会双挂载，
- * 所以单例必须建在模块层，而不是组件的 ref 里。
+ * 播放运行时：把状态机、音频元素、地址闸门、队列持久化、媒体会话与 `player:command` 广播装配成一个单例。
+ * `player.mjs` 是纯逻辑，这个文件是它的端口实现；地址只出现在 `resolveUrl` 那条调用里，不进状态、不写日志、不落盘。
+ * 单例建在模块层：音频元素与媒体会话都是系统级资源，多份会互相打架，而 React 严格模式会双挂载。
  */
 import { toast } from "sonner";
 import { PLAYER_COMMAND } from "../../../shared/channels.ts";import { PLAYBACK_RESOLVE_URL, SETTINGS_GET, SETTINGS_SET } from "../../../shared/request-channels.ts";
@@ -107,12 +93,7 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
   const readLocalTracks =
     deps.localLibraryIds ?? (async () => (await fetchLocalLibrary()).tracks.map((song) => ({ id: song.localId, available: song.available })));
 
-  /**
-   * 恢复队列时用得上的本地曲目：**只取 id 与可用性**，不碰元数据（那属于页面）。
-   *
-   * 宿主问不到（曲库不可用 / 命令失败）时回 `null` = "这一次不判"：宁可让一条死链留在队列里
-   * （播到它时报错），也不要在不知道的情况下把用户队列里的条目删掉。
-   */
+  /** 恢复队列时用得上的本地曲目：只取 id 与可用性；问不到时回 `null` = 这一次不判，不动用户的队列。 */
   async function localAvailableIds(): Promise<Set<string> | null> {
     try {
       const tracks = await readLocalTracks();
@@ -152,8 +133,7 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
       const answer = (await callCore(SETTINGS_GET)) as SettingsAnswer | null;
       const data = answer?.settings?.data;
       const record = data !== null && typeof data === "object" ? (data[QUEUE_SETTING_KEY] ?? null) : null;
-      // 恢复时跳过"文件已不在"的本地曲目（R65）：留在队列里只会变成一条永远播不出来的条目。
-      // 曲库读不到（`null`）就整段跳过判定——不知道的时候不许动用户的队列。
+      // 恢复时跳过「文件已不在」的本地曲目；曲库读不到（`null`）就整段跳过判定。
       const availableIds = await localAvailableIds();
       const filtered =
         availableIds === null ? { record, skipped: 0 } : dropUnavailableLocalEntries(record, availableIds);
@@ -206,7 +186,7 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
     seek: (ms: number) => player.seek(ms),
   });
 
-  // `player:command`（R11 托盘的预登记频道）：广播是别人发来的，任何坏载荷都不许把播放器打崩
+  // `player:command` 是别人发来的广播：任何坏载荷都不许把播放器打崩。
   let unlisten: (() => void) | null = null;
   let disposed = false;
   const subscription = subscribeCoreEvent(PLAYER_COMMAND, (payload: unknown) => {
@@ -249,8 +229,7 @@ let runtime: PlayerRuntime | null = null;
 export function getPlayerRuntime(): PlayerRuntime {
   if (runtime === null) {
     runtime = createPlayerRuntime({
-      // 一句话提示走 shadcn 的 Toaster（R65）：队列里"文件已不在"的本地曲目要在界面上说出来，
-      // 只留一行控制台警告等于没说。
+      // 一句话提示走 shadcn 的 Toaster：队列里「文件已不在」的本地曲目要在界面上说出来。
       notify: (text) => toast(text),
     });
     void runtime.initialize();

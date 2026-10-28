@@ -1,14 +1,7 @@
 /**
- * 收藏页的分页合并与滚动位置记忆（R8）：**纯逻辑**，UI 只消费。
- *
- * 收藏语义（旧仓踩过的坑，见 docs/API_CONTRACT.md §2.3）：
- * - 接口**没有可信总数** → 总数 = 完整分页后的 ID 去重数；没走完就是 `null`；
- * - 接口上报的 `total` 只作记录（`reportedTotal`），**永远不参与 UI 数字**；
- * - "已加载 N 首"与"共 M 首"分开显示（`describeFavoritesCounts`）。
- *
- * 另外两条是为了不把用户坑得更深：
- * - 失败**不清空**已加载内容（把"读不到"变成"收藏是空的"比报错更糟）；
- * - 失败后**不自动重试**（离线时那是一个请求风暴）；重试要么用户点，要么重新进页面。
+ * 收藏页的分页合并与滚动位置记忆：纯逻辑，UI 只消费。
+ * 接口没有可信总数 → 总数 = 完整分页后的 ID 去重数，没走完就是 null；上报的 total 只作记录。
+ * 失败不清空已加载内容（把"读不到"变成"收藏是空的"更糟），也不自动重试。
  */
 import { trackIdOf } from "./track-fields.mjs";
 
@@ -115,12 +108,7 @@ export function describeFavoritesCounts(summary) {
 /** 首屏提示文案（首次加载期间替掉"已加载 0 首"——那个数字看起来像"你什么都没有"）。 */
 export const FAVORITES_LOADING_TEXT = "正在加载…";
 
-/**
- * 还是首屏吗：**一页都没取回来**、且没有失败。
- *
- * 这个区分是必要的：首屏期间 `songs.length === 0`，但此时显示"还没有收藏歌曲。"
- * 就是假空态（数据还在路上）；失败时也不能算——失败有自己的说法（"接口未配置"）。
- */
+/** 还是首屏吗：一页都没取回来、且没有失败——否则 songs.length === 0 会显示成假空态。 */
 export function isFavoritesInitialLoad(state) {
   return state.pages === 0 && state.failure === null;
 }
@@ -149,13 +137,7 @@ export function nextFavoritesPage(state) {
   return state.pages + 1;
 }
 
-/**
- * 滚动位置记忆：按视图键分开记。
- *
- * 为什么必须自己记：收藏页常驻挂载但切走时会被 `hidden`（display:none），
- * 而浏览器在这种元素上会把 scrollTop 丢掉——用户切回来就回到了列表顶部，
- * 对"滚动加载到底是滚到哪一页"的体验是毁灭性的。
- */
+/** 滚动位置记忆按视图键分开记：收藏页切走时被 hidden，浏览器会把 scrollTop 丢掉。 */
 export function createScrollMemory() {
   const offsets = new Map();
   return {

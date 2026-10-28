@@ -1,6 +1,6 @@
 /**
- * 行的专属右键菜单（R63）：曲目表与播放队列共用这一份；菜单项与动作 id 全由
- * `features/shell/track-menu.mjs` 决定（纯逻辑，测试按 id 认），这里只把 id 接到动作上。
+ * 行的专属右键菜单：曲目表与播放队列共用这一份。
+ * 菜单项与动作 id 全由 features/shell/track-menu.mjs 决定（纯逻辑，测试按 id 认），这里只把 id 接到动作上。
  */
 import type { ReactNode } from "react"
 

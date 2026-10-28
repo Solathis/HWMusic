@@ -22,26 +22,13 @@ export interface LyricsWindowBinding {
   config: typeof DEFAULT_LYRICS_CONFIG
   /** 歌词窗此刻是不是开着（宿主回执里的观测值，不是"我们请求它开着"）。 */
   visible: boolean
-  /**
-   * "我们请求它开着"：**待定意图优先**（见 [`toggleVisible`]），否则是宿主回执里的值。
-   *
-   * 为什么不是直接用宿主的 `requestedVisible`：点下去到回执回来之间有一段真空，
-   * 那段时间里按钮必须已经翻过去（否则第二次点击会按旧状态再算一次同一个目标）。
-   */
+  /** 我们请求它开着：待定意图优先，否则用宿主回执里的值（点下去到回执回来之间按钮必须已经翻过去）。 */
   requestedVisible?: boolean
   runtimeRevision?: number
   taskbar?: { supported: boolean; attached: boolean; reason: string }
   /** 开/关桌面歌词窗（设置页的 Switch 与托盘广播走它；目标态由调用方给）。 */
   setVisible: (next: boolean) => void
-  /**
-   * 切换桌面/任务栏歌词窗（播放栏与沉浸页那两枚快捷开关走它）。
-   *
-   * **取反由意图机决定，不由渲染快照决定**：同一个任务里连点两次时，第二次拿到的渲染状态
-   * 还是第一次之前的那一份；意图机记得最后一次意图（`pending`），所以第二次仍然取反
-   * ——两条命令是"开、关"，不是"开、开"（见 `features/lyrics/lyrics-toggle-intent.mjs`）。
-   *
-   * `surface` 说明是哪一面按的：失败时那句话只印在那一面（同一个失败在界面上只有一句）。
-   */
+  /** 切换桌面/任务栏歌词窗；取反由意图机决定而非渲染快照，同一任务里连点两次是开、关两条命令。 */
   toggleVisible: (surface?: LyricsToggleSurface) => void
   /** 直接切到关闭 / 桌面歌词 / 任务栏歌词（先改模式，再开窗；失败只记日志）。 */
   selectTarget: (target: "off" | "desktop" | "taskbar", surface?: LyricsToggleSurface) => void
@@ -60,17 +47,9 @@ export interface LyricsWindowBinding {
   updateConfig: (patch: Partial<typeof DEFAULT_LYRICS_CONFIG>) => void
   saveError?: string | null
   retrySave?: () => void
-  /**
-   * 本地歌词导入是否可用（R41）：**没有正在播放的曲目时不可用**。
-   *
-   * 为什么以"当前曲目"为准（而不是让用户先挑歌再挑文件）：导入的语义是"换掉**这首歌**的歌词"，
-   * 没有这首歌就无从换起。界面据此禁用入口并说清原因，而不是让用户选完文件才被告知失败。
-   */
+  /** 本地歌词导入是否可用：没有正在播放的曲目时不可用（导入的语义是换掉这首歌的歌词）。 */
   canImport: boolean
-  /**
-   * 导入一份本地歌词文件（R41）：解码、官方解析、落盘全在桥里，成功后歌词**立刻**生效。
-   * 回执 `{ok, message}` —— 失败时 `message` 是给用户看的人话（带原因与下一步）。
-   */
+  /** 导入一份本地歌词文件：解码、解析、落盘都在桥里，成功后歌词立刻生效；失败时 message 是给用户看的人话。 */
   importFile: (file: unknown) => Promise<{ ok: boolean; message: string }>
 }
 
@@ -97,12 +76,7 @@ export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): Lyr
   const statusRef = useRef(windowStatus)
   statusRef.current = windowStatus
 
-  /**
-   * 开关的待定意图（R45C）：`pending` 是"最后一次点击想让它变成什么"，`error` 是失败人话。
-   *
-   * 为什么状态在这里、而不在按钮里：播放栏与沉浸页是**两枚按钮、同一个歌词窗**。意图放在
-   * binding 这一层，两枚按钮才共享同一条"还没回执的意图"，也不会各自记一份"我以为开着"。
-   */
+  /** 开关的待定意图：pending 是最后一次点击想让它变成什么，error 是失败人话；放在 binding 层让两枚按钮共享同一条意图。 */
   const [toggleState, setToggleState] = useState<{
     pending: boolean | null
     error: string | null
@@ -132,10 +106,7 @@ export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): Lyr
 
   useEffect(() => bridge.observe(setWindowStatus, () => stateRef.current), [bridge])
 
-  // 3. 歌词数据链：曲目变化 → 取文本 → 官方解析 → 主窗面板与歌词窗共用同一份行
-  //
-  // R41：取词时把**曲目元信息**（标题/艺人/时长）一并交上去——那是第三方回退做严格匹配要用的
-  // 三个值，就在渲染层手里这份曲目投影里（不必让 sidecar 再问一次曲目接口）。
+  // 3. 歌词数据链：曲目变化 → 取文本 → 官方解析 → 主窗面板与歌词窗共用同一份行（取词时带上曲目元信息供严格匹配）。
   useEffect(() => {
     let alive = true
     void (async () => {
@@ -174,20 +145,8 @@ export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): Lyr
     [bridge, runtime],
   )
 
-  /**
-   * 开关：`setVisible` / `toggleVisible` 都只经过意图机（唯一主人），不各自发 IPC。
-   *
-   * `toggleVisible` 在这里用**意图机的待定目标**取反，而不是读渲染闭包里的 `on`：
-   * 同一任务里的第二次点击拿到的渲染状态还是第一次之前那一份（React 还没重渲染），
-   * 按它取反就会把同一个 `true` 再发一遍（brief 明确要修的那件事）。
-   */
-  /**
-   * 开关：`setVisible` / `toggleVisible` 都只经过意图机（唯一主人），不各自发 IPC。
-   *
-   * `toggleVisible` 的"当前状态"读的是**意图机自己的 pending**（同步、权威），不是渲染闭包里的
-   * `toggleState.pending`：同一个任务里连点两次时，React 还没把第一次的状态渲染回来，
-   * 读渲染值会拿到旧的那一份，于是第二次又把同一个 `true` 发出去（浏览器守卫抓到的正是这个）。
-   */
+  /** 开关都只经过意图机（唯一主人），不各自发 IPC；取反读意图机的待定目标，不读渲染闭包里的 on。 */
+  /** 开关都只经过意图机；toggleVisible 的当前状态读意图机自己的 pending，不读渲染值，否则连点两次会重复发同一个目标。 */
   const setVisible = useCallback((next: boolean) => {
     void intent.request(next)
   }, [intent])
@@ -224,15 +183,7 @@ export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): Lyr
     void bridge.retrySave().catch((cause: unknown) => log("歌词配置保存重试失败：", cause))
   }, [bridge])
 
-  /**
-   * 导入一份本地歌词文件（R41）：桥里解码 + 官方解析 + 落盘，成功之后**立刻**把这一份推给
-   * 主窗面板与桌面歌词窗（同一份行数组，两处不可能显示两首歌）。
-   *
-   * **失败不动歌词**（R41a）：失败的事实是"这首歌的歌词没变"，所以既不 `setLyrics` 也不
-   * `pushDocument`——推进一份空文档会让面板从"有词"跳成"这首歌没有歌词"，那是把事实看反了
-   * （用户只是选错了文件）。失败只回一句人话，界面照旧显示原来那一份。
-   * 判据与文案在纯函数 `importPlanOf` 里（`features/lyrics/lyrics-window.mjs`），有单测。
-   */
+  /** 导入本地歌词文件：桥里解码 + 解析 + 落盘，成功后立刻推给主窗面板与歌词窗；失败不动歌词，只回一句人话。 */
   const importFile = useCallback(
     async (file: unknown) => {
       if (trackId === null) return { ok: false, message: "没有正在播放的曲目：先播一首，再导入歌词。" }

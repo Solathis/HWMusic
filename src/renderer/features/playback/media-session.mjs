@@ -1,15 +1,7 @@
 /**
- * Media Session 对接（R9）：系统媒体控件 / 耳机按键 / SMTC 的播放控制入口。
+ * Media Session 对接：系统媒体控件 / 耳机按键 / SMTC 的播放控制入口，纯浏览层能力。
  *
- * 这是**浏览层能力**——不涉新权限、不起新窗口、不读文件：`navigator.mediaSession`
- * 由 webview 提供（Tauri 的主窗就是 Chromium/WebKit 的 webview）。
- *
- * 三条纪律：
- * 1. **能力缺失就静默降级**：没有 `mediaSession` 的环境（部分 Linux webview）不算错误，
- *    播放照常，只是系统控件里没有这一项；
- * 2. **不支持的动作跳过但留痕**：规范允许 `setActionHandler` 对未知动作抛错，
- *    一个动作失败不该带走其余动作（"没有快进"要能在日志里查到）；
- * 3. **不编元数据**：标题/艺人/专辑来自队列快照，封面再次过媒体白名单。
+ * 能力缺失就静默降级；不支持的动作跳过但留痕；不编元数据（标题/艺人/专辑来自队列快照）。
  */
 import { PLAYER_STATUS } from "./player.mjs";
 import { guardMediaUrl } from "./media-url.mjs";
@@ -32,7 +24,6 @@ function describe(cause) {
 
 /**
  * 造 Media Session 端口。
- *
  * @param {object} [options]
  * @param {object|null} [options.session] `navigator.mediaSession`（默认取全局；显式 null = 环境没有）
  * @param {new (init: object) => object} [options.metadataCtor] `MediaMetadata`

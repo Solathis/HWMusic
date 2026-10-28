@@ -1,7 +1,6 @@
 /**
- * 侧栏「我的歌单」（R62）：组标题 + 歌单列表（封面 / 名字 / 歌曲数量）。
- * 数据只在这里取一次并留在内存（侧栏随外壳常驻，切页不重取）。
- * 窄轨（48px）里只剩封面，名字与数量交给 tooltip。
+ * 侧栏「我的歌单」：组标题 + 歌单列表（封面 / 名字 / 歌曲数量）。
+ * 数据只在这里取一次并留在内存（侧栏随外壳常驻，切页不重取）；窄轨（48px）里只剩封面，名字与数量交给 tooltip。
  */
 import { ListMusicIcon, RefreshCwIcon } from "lucide-react"
 
@@ -97,7 +96,7 @@ export function SidebarPlaylists({ activePlaylistId, onOpen }: SidebarPlaylistsP
   } else {
     body = (
       // 列表自己滚：歌单上百张时不许把「音乐库」那一组和底部账号区顶出画面。
-      // 最后那一段把 radix viewport 的 `display:table` 内容盒压回 block，否则长名字会把列表撑宽（截图实测）
+      // 最后那一段把 radix viewport 的 display:table 内容盒压回 block，否则长名字会把列表撑宽。
       <ScrollArea className="h-full min-w-0 group-data-[collapsible=icon]:h-auto [&_[data-slot=scroll-area-viewport]>div]:!block">
         <SidebarMenu data-testid={SIDEBAR_PLAYLISTS_LIST_TESTID}>
           {items.map((item) => (

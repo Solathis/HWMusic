@@ -1,7 +1,6 @@
 /**
- * 渲染层唯一的宿主桥封装（R3 交付封装与类型；R10 增补开机自启；R11 增补托盘可用性）。
+ * 渲染层唯一的宿主桥封装：白名单方法，拿不到任何 Token——凭据与业务 HTTP 只在 sidecar/Rust。
  *
- * 边界：渲染层拿到的是白名单方法，拿不到任何 Token——凭据与业务 HTTP 只在 sidecar/Rust。
  * 歌词窗仅获配置与三种媒体动作的专命令；任意业务请求仍只在主窗执行。
  */
 import { invoke } from "@tauri-apps/api/core";
@@ -51,11 +50,11 @@ export interface DesktopBridge {
   rendererReady: () => Promise<number>;
   /** 订阅漏斗事件并按频道过滤；返回退订函数。 */
   onCoreEvent: <T = unknown>(channel: string, handler: (payload: T) => void) => Promise<UnlistenFn>;
-  /** 开机自启：写入并返回观测状态（R10）。 */
+  /** 开机自启：写入并返回观测状态。 */
   setAutostart: (enabled: boolean) => Promise<boolean>;
-  /** 开机自启：读当前状态（R10）。 */
+  /** 开机自启：读当前状态。 */
   getAutostart: () => Promise<boolean>;
-  /** 托盘是否真的可用（R11）：设置页的关窗行为提示靠它说真话。 */
+  /** 托盘是否真的可用：设置页的关窗行为提示靠它说真话。 */
   getTrayAvailable: () => Promise<boolean>;
 }
 
@@ -92,27 +91,18 @@ export async function rendererReady(): Promise<number> {
 }
 
 /**
- * 退出登录（R38）：`core_call(auth:logout)` 的**唯一实现**。
+ * 退出登录：`core_call(auth:logout)` 的唯一实现，让退出始终是同一件事（一个频道、一种载荷）。
  *
- * 为什么收进这里（而不是让某个页面自己写一行 coreCall）：R38 把退出入口从设置页搬到了左下角
- * 账号区，而"退出"必须始终是**同一件事**——一个频道、一种载荷（`null`）。摆在具名封装里，
- * 第二份实现就没有地方可长（设置页那份已经删掉了）。
- *
- * 失败抛 `CoreError` 形状（与 `coreCall` 同一套归一）：调用方用 `accountLogoutFailureText`
- * 变成人话，别把原始错误糊到界面上。成功后**不需要**任何跳转：`auth:status` 广播会把门禁翻回来。
+ * 失败抛 `CoreError` 形状，调用方用 `accountLogoutFailureText` 变成人话；成功后靠 `auth:status` 广播翻回门禁。
  */
 export async function coreLogout(): Promise<unknown> {
   return coreCall(AUTH_LOGOUT, null);
 }
 
 /**
- * 开机自启的开关（R10）。
+ * 开机自启的开关：回执是 Rust 观测到的实际状态，界面开关直接跟着它走，不做乐观翻转。
  *
- * 回执是 Rust **观测到的实际状态**（写完再 `is_enabled` 回读），所以界面上的开关直接跟着它走：
- * 乐观地把开关翻过去，会在注册表写入失败时显示一个不存在的状态（用户下次开机才发现没生效）。
- *
- * 失败抛出 `CoreError` 形状（与 `coreCall` 同一套归一）：调用方用 `settingsFailureText` 之类
- * 的纯函数把它变成人话，不把原始错误糊到界面上。
+ * 失败抛 `CoreError` 形状，调用方用 `settingsFailureText` 之类把它变成人话。
  */
 export async function setAutostart(enabled: boolean): Promise<boolean> {
   try {
@@ -132,11 +122,7 @@ export async function getAutostart(): Promise<boolean> {
 }
 
 /**
- * 托盘是否真的可用（R11）。
- *
- * 回执只有 `true` 才算"可用"：命令失败、回执形状不对都按"不可用"处理
- * （调用方用 `trayAvailabilityFromAnswer` 投影）——界面说"不可用"而实际能用，
- * 比反过来（界面说能用、关窗却退出了）代价小得多。
+ * 托盘是否真的可用：只认 `true`，命令失败或回执形状不对都按不可用处理——界面说不可用比反过来代价小。
  */
 export async function getTrayAvailable(): Promise<boolean> {
   try {
@@ -147,10 +133,9 @@ export async function getTrayAvailable(): Promise<boolean> {
 }
 
 /**
- * 运行日志：日志文件的最后 N 条（旧的在前），默认只取本次启动之后的。
+ * 运行日志：日志文件最后 N 条（旧的在前），默认只取本次启动之后的。
  *
- * 回执是**已经脱敏**的结构化条目（`{time, level, source, message}`）：脱敏在 Rust 侧做，
- * 渲染层不再有"原文"这一层可用。条数上限也在那里（`run_log::READ_LIMIT`）。
+ * 回执是已脱敏的结构化条目，脱敏与条数上限都在 Rust 侧。
  */
 export async function readRunLog(scope: "session" | "all" = "session"): Promise<unknown> {
   try {
@@ -175,10 +160,10 @@ export async function coreLyricsToggle(checked: boolean): Promise<unknown> {
   return invokeLyrics(CORE_LYRICS_TOGGLE, { checked });
 }
 
-/** 改歌词窗配置（**空对象 = 读回当前配置**，设置页挂载时用）。
+/**
+ * 改歌词窗配置（空对象 = 读回当前配置）；`retrySave` 只能与空 config 一起用，重存的是当前运行配置。
  *
- * R44e：`retrySave` 只能与空 config 一起用——它重存的是**当前运行配置**（保存失败后的手动重试），
- * 不是又改一次值。落盘由 Rust 拥有的保存任务完成，渲染层不再自己写 settings。
+ * 落盘由 Rust 的保存任务完成，渲染层不再自己写 settings。
  */
 export async function coreLyricsConfigure(config: unknown, retrySave?: boolean): Promise<unknown> {
   return invokeLyrics(CORE_LYRICS_CONFIGURE, retrySave === undefined ? { config } : { config, retrySave });
@@ -204,12 +189,9 @@ export async function coreLyricsProgress(progress: unknown): Promise<unknown> {
 }
 
 /**
- * 打开桌面歌词的设置弹出窗（R51）。
+ * 打开桌面歌词的设置弹出窗：`anchor` 是调用窗口客户区里的 CSS 像素矩形，Rust 换算后右对齐、下方优先、夹进工作区。
  *
- * `anchor` 是**调用窗口客户区里的 CSS 像素**矩形（齿轮按钮的 `getBoundingClientRect()`）：
- * Rust 用调用窗口的客户区原点与缩放比换算到屏幕物理坐标，再右对齐、下方优先、放不下翻上方、
- * 最后夹进工作区。回执是事实（`{open, visible}`）：`open:false` 表示这次被"刚失焦关掉"的
- * 短窗口挡了（齿轮二次点击），不显示任何东西。
+ * 回执是事实 `{open, visible}`：`open:false` 表示这次被刚失焦关掉的短窗口挡了。
  */
 export async function coreLyricsSettingsOpen(anchor: { x: number; y: number; width: number; height: number }): Promise<unknown> {
   return invokeLyrics(CORE_LYRICS_SETTINGS_OPEN, { anchor });
@@ -225,9 +207,7 @@ export async function coreLyricsSettingsClose(): Promise<unknown> {
   return invokeLyrics(CORE_LYRICS_SETTINGS_CLOSE);
 }
 
-// ---------------------------------------------------------------------------
-// 登录体验的浮动控件（R25）：一条专用命令
-// ---------------------------------------------------------------------------
+// 登录体验的浮动控件：一条专用命令。
 
 /** 浮动控件能发的两种动作（与 `src/shared/commands.ts` 的说明同源）。 */
 export type LoginChromeRequest =
@@ -236,11 +216,9 @@ export type LoginChromeRequest =
   | { action: "theme"; theme?: string };
 
 /**
- * 登录体验的控件命令（**`core_call` 之外的第二条业务命令**，理由见 `src/shared/commands.ts`）。
+ * 登录体验的控件命令（`core_call` 之外的第二条业务命令），只对主窗与两个浮动 webview 开放。
  *
- * 谁调它：主窗里 gate 的主题控件、以及两个浮动 webview（label `login-return` / `login-theme`）。
- * 官方登录页与歌词窗调不动（来源守卫只放行那三个 label）。回执是**事实**：
- * `{cancelled}` 或 `{theme}`——调用方不必猜"到底改没改"。
+ * 回执是事实：`{cancelled}` 或 `{theme}`，调用方不必猜到底改没改。
  */
 export async function coreLoginChrome<T = unknown>(payload: LoginChromeRequest): Promise<T> {
   try {
@@ -250,9 +228,7 @@ export async function coreLoginChrome<T = unknown>(payload: LoginChromeRequest):
   }
 }
 
-// ---------------------------------------------------------------------------
-// 本地曲库（R65）：四条命令，全部只对主窗开放（Rust 侧 `require_main_webview`）
-// ---------------------------------------------------------------------------
+// 本地曲库：四条命令，全部只对主窗开放（Rust 侧 `require_main_webview`）。
 
 /** 本地曲库协议基址（平台不同：Windows 是 `http://hwlocal.localhost`，mac/Linux 是 `hwlocal://localhost`）。 */
 export async function coreLocalBaseUrl(): Promise<{ baseUrl?: string }> {
@@ -280,8 +256,7 @@ export async function coreLocalRemove(id: string): Promise<unknown> {
 /**
  * 订阅漏斗事件。
  *
- * 广播白名单（`src/shared/channels.ts` 的 `BROADCAST_CHANNELS`）初始只有 `app:notice`，
- * 且 R4+ 还会往里加，所以这里按 `string` 接收、运行时靠事件载荷里的 channel 过滤。
+ * 广播白名单还会不断扩充，所以这里按 `string` 接收、运行时靠载荷里的 channel 过滤。
  */
 export async function onCoreEvent<T = unknown>(
   channel: string,
@@ -298,10 +273,8 @@ export async function signalLyricsReady(): Promise<void> {
 }
 
 /**
- * 主窗替歌词窗"补一次主题"（歌词窗调不动读主题那条命令）。
+ * 主窗替歌词窗补一次主题：判定用共享的单调合同 `acceptThemePayload`，读回必须比期间收到的广播更新才补发。
  *
- * R44e：判定用共享的单调合同 [`acceptThemePayload`]——读回**必须比期间收到的广播更新**才补发，
- * 否则这份延迟的旧读回会把刚广播出去的新主题又盖回去（主窗与歌词窗一起回退）。
  * 临时观察无论成功失败都要清掉。
  */
 export async function syncLyricsTheme(): Promise<void> {
@@ -334,7 +307,7 @@ export const desktopBridge: DesktopBridge = {
   getTrayAvailable,
 };
 
-/** 挂到 `window.desktop`（R8 起在 main.tsx 调用；本任务不接 UI）。 */
+/** 挂到 `window.desktop`（在 main.tsx 调用）。 */
 export function installDesktopBridge(target: Window = window): void {
   target.desktop = desktopBridge;
 }
