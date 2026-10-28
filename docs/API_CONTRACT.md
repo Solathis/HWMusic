@@ -120,7 +120,7 @@ bundle（`/static_rss_vue3/js/index-legacy-*.js`，213575 B）里逐个列出 `"
 | 授权码 → 账号 AT/RT（token 端点，带 `code_verifier`） | 已确认（§1.3） | — |
 | 账号 AT → **音乐会话**（旧仓称 `loginex`，请求带 Digest 头） | **端点已确认（R17）；兑换往返仍未实测** | 见下方 §1.5.1：端点 URL、请求形状、Digest 头形状都有公开证据，且**端点存在性经本机实测**（405 / 对照 404 / 无效 AT → 200 + 业务码）；但"有效 AT 换到真会话"要用户授权扫码，本仓**没跑过** |
 | 账号 AT 有效期 | 审计事实 ≈ 1 小时 | 未实测；`isTokenExpired` 默认提前 60 秒判过期 |
-| 音乐会话有效期 | 审计事实 ≈ 7 天（到期字段提示） | 未实测完整周期；自动续期未打通，失效需重扫 |
+| 音乐会话有效期 | 审计事实 ≈ 7 天（到期字段提示） | R75 起按 `expireTime`（按北京时间解读，推断）判到期：到期回登录页并说明原因；自动续期未打通，到期需重扫 |
 | 刷新账号 AT | 已实现（注入端点） | 华为是否轮换 RT 未知；实现按"响应不发新 RT 就沿用旧 RT"处理 |
 
 #### 1.5.1 `loginex`（R17 补全）：证据分三级，逐级如实标注
@@ -160,7 +160,7 @@ DNS  api-drcn.music.dbankcloud.cn                  → 2407:c080:1400:61:40a0:d5
 
 本项目据此接线的落点：`src/main/music-session.mjs`（端点常量 + Digest 构造 + 响应解析 + 可注入 fetch），
 默认值经 `src/main/auth-manager.ts` 的 `HUAWEI_OAUTH_ENDPOINTS.loginex` 注入。
-`expireTime` **刻意不换算**成 `expiresAt`（时区未确认，宁可留原样也不造一个偏 8 小时的"精确"时间戳）。
+`expireTime` 在会话记录里仍保留 14 位原始串；R75 起读取时由 `musicSessionExpiresAt` 按北京时间（`MUSIC_EXPIRE_TIME_UTC_OFFSET_MINUTES = 480`）换算成到期时刻。这是推断：session.enc 写于 2026-10-21T07:52:23Z，按北京时间算 7 天后的到期时刻（10-28 15:52）早于用户看到空列表的 17:30，按 UTC 算（23:52）则矛盾；官方未确认（KNOWN_LIMITATIONS B33）。
 
 **③ 仍未实测（本仓 untested，一条不漏）**
 
@@ -378,6 +378,7 @@ auth:status → {loggedIn: boolean, busy: boolean, message?: string,
   **结论**（画登录页并自动建码）。带 `restoring:true` 的载荷渲染层当 `checking`：中性启动屏、不发码。
   恢复期间除 `concludeRestore()` 之外的广播（取消、失败……）都不是结论，因此也带这一格；
   只有恢复落定那条播出去时不带（清位之后构造载荷）。
+- **会话到期（R75）**：恢复读到会话后先按 `expireTime` 判到期；已到期就不发验证请求（到期会话服务端照样回 200 + `000000`、只是不给数据，验证器验不出来），恢复档位记 `session_expired`，`auth:status` 带「音乐会话已于 X月X日 HH:mm 到期，请重新扫码登录。」，session.enc 不删。sidecar 的业务会话来源是 `activeSession()`，`auth:get-status` 的快照也先判一次：运行中到期就收回会话、epoch 前移并广播同一句话。渲染层把它存进 `sessionNote`，新码准备中与等待扫码时一直显示，扫码后让位、登录后清掉；会话从已登录转未登录时复位 `qrAttempted`，二维码重新自动出现。恢复与登录成功各记一行「会话到期：expireTime=…（按北京时间 …），已过/还剩 … 小时」。
 - **登录态确立即停二维码（R53）**：每一份"已登录"的 `auth:status` 播出去之前，sidecar 会停掉在跑的
   二维码会话（停轮询 + 作废待兑换的尝试）。这一处是所有来源的收口：restore 成功 / 扫码确认收尾成功 /
   网页登录成功。渲染层另有 `auth:cancel-qr`（见 §2.11）在门禁收场时停一次。
@@ -1476,7 +1477,7 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 `core_call` 与 `core_login_chrome` 的既有来源守卫不放宽。歌词窗没有任意业务 HTTP、登录、文档写入或进度写入权限。
 歌词页先订阅 document/config/progress/theme，再 `configure({})` 回读权威配置，最后 signalReady；主窗补读最新配置、补文档/进度/主题。
 
-**几何**：desktop 横版默认 **800×128 DIP**、竖版默认 **240×600 DIP**（R51 收紧，原 960×160 / 320×620；R70 竖版由 260×520 改为 240×600；用户拖过的尺寸优先，切换方向/模式会丢弃上一方向的尺寸）；竖版**不再使用官方 AMLL 组件**，由渲染层自渲染单列（`VerticalLyricColumn` + `features/lyrics/vertical-lyrics.mjs`，R61：一句一列、`writing-mode: vertical-rl` + `text-orientation: mixed`、字号与横版同档位（R70）、按演唱进度沿书写方向平移）；横版、任务栏与沉浸页仍走官方 `LyricPlayer`。taskbar 最多 **1200×44 DIP**，实际尺寸由安全空白决定，不能走 desktop 几何/样式分支。
+**几何**：desktop 横版默认 **800×128 DIP**、竖版默认 **112×600 DIP**（R51 收紧，原 960×160 / 320×620；R70 竖版由 260×520 改为 240×600；R76 收窄到 lg 档正好两列，最小尺寸按布局取：桌面竖版 96×120、横版与任务栏 240×120，运行中切换布局先下发 `WindowEffect::MinSize` 再改几何；用户拖过的尺寸优先，切换方向/模式会丢弃上一方向的尺寸）；竖版**不再使用官方 AMLL 组件**，由渲染层自渲染单列（`VerticalLyricColumn` + `features/lyrics/vertical-lyrics.mjs`，R61：一句一列、`writing-mode: vertical-rl` + `text-orientation: mixed`、字号与横版同档位（R70）、按演唱进度沿书写方向平移）；横版、任务栏与沉浸页仍走官方 `LyricPlayer`。taskbar 最多 **1200×44 DIP**，实际尺寸由安全空白决定，不能走 desktop 几何/样式分支。
 只 mode/layout 变化重新计算 size/position，颜色、字号、锁、点透、演出选项不重定位。已有用户位置保留并夹入当前歌词窗显示器工作区；首次优先主窗显示器，退主屏。
 window-state 不自动恢复 lyrics 的旧尺寸/坐标，避免异步覆盖配置几何或 Taskbar。拖柄与非交互歌词宿主通过官方 `startDragging()` 拖动，排除按钮/输入/滑块等交互节点。
 
@@ -1487,7 +1488,7 @@ window-state 不自动恢复 lyrics 的旧尺寸/坐标，避免异步覆盖配�
 > `every_monitor_keeps_the_window_inside_its_own_work_area` 两条用例钉住。
 
 **配置**：`{mode:'desktop'|'taskbar', layout:'horizontal'|'vertical', style:'clean'|'panel'|'bare', size, color, locked, enableBlur, enableScale, enableSpring, showControls, taskbarSize, taskbarColor, taskbarCustomColor, taskbarKaraoke}`。
-默认 desktop/horizontal/clean/lg/foreground，locked=false，四个演出/控件布尔=true。R69 起没有 clickThrough 配置（落盘键 18→17，旧盘上的键被忽略）：鼠标穿透由 `mode=taskbar || locked` 推导；锁定时衬底更淡（clean 为 `bg-background/35`，panel 为 `bg-card/65`），`bare`（纯透明）不画衬底、字加 `drop-shadow-md`。AMLL 官方 props 控制模糊/缩放/弹簧，panel 使用 shadcn Card 语义 surface；宿主隔离 AMLL 合成以保证浅暗文字可见。panel+contrast 的有效字色使用既有 foreground 令牌，配置仍保留 contrast，切回 clean 还原。
+默认 desktop/horizontal/clean/lg/foreground，locked=false，四个演出/控件布尔=true。R69 起没有 clickThrough 配置（落盘键 18→17，旧盘上的键被忽略）：鼠标穿透由 `mode=taskbar || locked` 推导；锁定时衬底更淡（clean 为 `bg-background/35`，panel 为 `bg-card/65`），`bare`（纯透明）不画衬底、字加 `drop-shadow-md`。AMLL 官方 props 控制模糊/缩放/弹簧，panel 使用 shadcn Card 语义 surface（R77 起只在桌面模式：任务栏只画歌词文字，不套卡片底色与边框，判定在 `lyricsPanelCard`）；宿主隔离 AMLL 合成以保证浅暗文字可见。桌面 panel+contrast 的有效字色使用既有 foreground 令牌，配置仍保留 contrast，切回 clean 还原；任务栏没有卡片底，字色按 `taskbarColor` 原样取。
 字号档位为 **桌面 16/20/28/40/56px**（`sm|md|lg|xl|xxl`）与 **任务栏 12/14/16/18/20px**（`tsm|tmd|tlg|txl|txxl`）两张表，id 不重叠、互不通用（`taskbarSize` 收桌面档位一律 `invalid_payload`）。颜色只认 foreground/muted/primary/contrast 令牌。
 **竖版字号（R70）**：竖版与横版用同一套字号档位——竖版 CSS 读 `amll-theme.css` 里的别名 `--vertical-lyric-font-size`（= 横版 `--amll-lp-font-size`），不随窗口宽度和拖放变化，设置气泡面板的「字号」项在竖版下照常可用。正在唱的字按 `--vertical-word-progress`（0–1，每帧由 `setProperty` 写在视口上）由上往下连续扫亮；减少动效时不扫。R61 的 `clamp(1rem, 26cqw, 6rem)` 与对应纯函数已删除。
 **任务栏外观独立（R59）**：`taskbarSize`（默认 `txxl` = 20px）、`taskbarColor`（默认 `foreground`）、`taskbarCustomColor`（`#RRGGBB` 或空串，默认空）、`taskbarKaraoke`（逐字高亮，默认 `true`）。`mode=taskbar` 时歌词窗**只读**这四个字段（字号/颜色/自定义色/逐字），`mode=desktop` 只读 `size`/`color`/`customColor` 且逐字恒开；两套值各存一份，改一边不动另一边。逐字关闭 = 不经逐字词推导（行级数组直接交给官方 `LyricPlayer`，按行渐变），仍是同一个官方组件。任务栏模式强制横条点透；clean/panel 均不渲染任何控件带，showControls 不改变 44px 歌词可用高度。
@@ -1836,7 +1837,8 @@ R63 按下面四条标准逐条查过，**一条都没满足**，所以 `src/ren
 | `CORE_LYRICS_TOGGLE` / `_CONFIGURE` / `_CONTROL` / `_DOCUMENT` / `_PROGRESS` | `core_lyrics_*` 五条具名命令 | `src/shared/commands.ts` | 名字、Rust 注册、来源守卫与最小 capability 一次补齐 |
 | `CORE_LYRICS_UNLOCK_ZONE` | `"core_lyrics_unlock_zone"` | `src/shared/commands.ts` | R69：第六条歌词专命令，歌词窗上报解锁键矩形（只接受歌词窗调用） |
 | `LYRICS_WINDOW_LABEL` | `"lyrics"` | `src-tauri/src/lib.rs` | 歌词窗 label、来源守卫、window-state 与几何接管 |
-| `TASKBAR_SIZE` / `DESKTOP_SIZE` / `DESKTOP_VERTICAL_SIZE` / `DESKTOP_LIFT` | `1200×44` / `800×128` / `240×600` / `120` DIP | `src-tauri/src/lyrics_window.rs` | R51 收紧桌面默认尺寸、R70 竖版由 260×520 改为 240×600；按 scale 与工作区夹限（最小 240×120 不变） |
+| `TASKBAR_SIZE` / `DESKTOP_SIZE` / `DESKTOP_VERTICAL_SIZE` / `DESKTOP_LIFT` | `1200×44` / `800×128` / `112×600` / `120` DIP | `src-tauri/src/lyrics_window.rs` | R51 收紧桌面默认尺寸、R70 竖版由 260×520 改为 240×600、R76 收窄到 112×600（lg 档正好两列）；按 scale 与工作区夹限（最小尺寸见下一行） |
+| `MIN_WINDOW_WIDTH_DIP` / `MIN_VERTICAL_WINDOW_WIDTH_DIP` / `MIN_WINDOW_HEIGHT_DIP` | `240` / `96` / `120` DIP | `src-tauri/src/lyrics_window.rs` 的 `min_window_size` | R76：最小尺寸按布局取，桌面竖版 96×120（xxl 档也放得下一列），横版与任务栏 240×120；建窗、尺寸补丁夹紧与运行中切换布局同一口径 |
 | `LYRICS_SETTINGS_WINDOW_LABEL` / `CORE_LYRICS_SETTINGS_OPEN` / `_RESIZE` / `_CLOSE` | `"lyrics-settings"` / `core_lyrics_settings_*` 三条命令 | `src-tauri/src/lib.rs` ↔ `src/shared/commands.ts` | R51：设置弹出窗（独立小窗；尺寸/位置/关闭全由 Rust 定，窗口没有任何 window 权限）。R60 起回执多一个 `geometry: { side: "bottom"\|"top", arrow, pad }`（CSS 像素）：`_RESIZE` 与已量过尺寸的 `_OPEN` 都带，页面按它摆箭头 |
 | `LYRICS_FONT_STEPS` / `TASKBAR_MAX_FONT_PX` | `sm16/md20/lg28/xl40/xxl56` / `20` | `src/renderer/features/lyrics/lyrics-window.mjs` ↔ `src-tauri/src/lyrics_window.rs` | R12：字号档位与任务栏模式上限（两侧一张表，由 `test/lyrics-window.test.mjs` 逐条钉住；CSS 的 rem 规则在 `amll-theme.css`） |
 | `LYRICS_COLOR_TOKENS` | `foreground`/`muted`/`primary`/`contrast` | 同上（TS 为真源、Rust 为镜像） | R12：歌词颜色的令牌档位（只认设计令牌，绝不接受任意色值） |
@@ -1872,6 +1874,7 @@ R63 按下面四条标准逐条查过，**一条都没满足**，所以 `src/ren
 | `LOGIN_QUIET_WINDOW_MS` | `1_500` | `src-tauri/src/login.rs` | **R28 新增**：摆进内容区之前的**静默窗**（毫秒）。每次加载 `Finished` 起窗、窗内出现新导航就撤窗，窗内没有新导航才摆进（R27 那一版是"首载 `Finished` 就摆"，而首载多半只是 authorize 中间页）。30 秒首载期限那条兜底不变。时序矩阵见 §1.7 的 R28 段 |
 | `LOGIN_OPENING_TEXT` / `LOGIN_OPENING_TESTID` | `"正在打开华为官方登录页…"` / `"login-opening"` | `src/renderer/features/auth/login-gate-logic.mjs` | **R27 新增**：官方页还在**屏外加载**那一刻，门禁状态行那一句（旁边带一个 `Loader2Icon animate-spin`）。R20 那句「已在网页中打开登录。」保留给**另一档**：渲染层 reload 之后只剩 `busy:true`（`path` 丢了），那一刻页多半早画好了——说"正在打开"是编造（判定见 `loginOpeningIndicator`） |
 | `SESSION_DIAG_LABEL` | `"登录态持久化诊断"` | `src/main/session-diagnostic.mjs` | **R27 新增**：启动诊断那一行的开头（grep 用）。内容是"数据根 + 它是哪来的 + 那个根里有没有 `session.enc` + 恢复档位"——`数据根漂移`（调试根 vs `%APPDATA%` 根）一眼可判。Rust 侧另有一行 `数据根：<路径>（来源：…）`（`lib.rs::data_root_note`） |
+| `MUSIC_EXPIRE_TIME_UTC_OFFSET_MINUTES` | `480` | `src/main/music-session.mjs` | R75：`expireTime` 按北京时间（UTC+8）解读，到期判定、到期文案与诊断行同一口径；推断，官方未确认（KNOWN_LIMITATIONS B33） |
 | `QR_TTL_DIFF` / `QR_TTL_LEGACY`（内部两条路，不是导出常量） | `expiredTime − qrCodeCreateTime` / `expiredTime − now()` | `src/protocols/qr-login.mjs` 的 `resolveExpiresInMs` | R22：有效期换算。两条都是**服务端值**相减时免疫本地时钟偏差；`qrCodeCreateTime` 缺失/非法才回退老公式——**已知偏差风险**：本地钟快 1 小时，倒计时就早归零 1 小时（用户看到的是"卡在正在确认过期…"）。两值矛盾或 `expiredTime` 不可信 → `null`（不猜，界面少一行倒计时） |
 | `MAX_URL_LOG_CHARS` | `160` | `src-tauri/src/login.rs` | R16：登录窗导航/加载日志里 URL 的截断上限（查询值一律不进日志） |
 | `HUAWEI_MUSIC_LOGINEX_ENDPOINT` | `https://api-drcn.music.dbankcloud.cn/music-odpapp-service/v5/service/userinfo/loginex` | `src/main/music-session.mjs`（默认值经 `auth-manager.ts` 的 `HUAWEI_OAUTH_ENDPOINTS.loginex` 注入） | R17：音乐会话兑换端点（证据分级见 §1.5.1）。协议层 `auth.mjs`/`music.mjs` 仍只收注入；`test/auth-manager.test.mjs` 拿本文件反查这串字面量 |
