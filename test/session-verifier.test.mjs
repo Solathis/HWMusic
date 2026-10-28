@@ -160,7 +160,7 @@ test("没验成：HTTP 200 但响应里没有业务码 → 不认（成功判据
 
 test("会话来源：验证的就是**传进来的那一个**（登录/恢复那一刻内存会话还没翻过去）", async () => {
   const { verifySession, calls } = verifierOver(async () => jsonResponse(okBody()), {
-    // sidecar 里 `musicSessionSource` 读的是 `authManager.currentSession().session`，
+    // sidecar 里 `musicSessionSource` 读的是 `authManager.activeSession()`，
     // 而登录/恢复调用验证器时，那个格子里装的还是**旧会话或 null**（新会话要验过才落进去）。
     sessionSource: () => ({ musicSession: "STALE-TOKEN", userId: "STALE-USER" }),
   });

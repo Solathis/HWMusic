@@ -27,7 +27,10 @@ import {
   HUAWEI_MUSIC_LOGINEX_ENDPOINT,
   attachClaimProfile,
   createHuaweiMusicSessionPort,
+  musicSessionExpiredText,
+  musicSessionExpiresAt,
   profileOfSessionRecord,
+  sessionExpiryLine,
 } from "./music-session.mjs";
 import { createHuaweiQrPort } from "./qr-login.mjs";
 import {
@@ -75,6 +78,8 @@ export const AUTH_ERROR_KINDS = {
   loginexPending: "loginex_pending",
   /** 会话验证明确判定失效 */
   sessionInvalid: "session_invalid",
+  /** 音乐会话已过 `expireTime` */
+  sessionExpired: "session_expired",
 } as const;
 
 /** loginex 端点被显式关掉（注入 `null`）时的结构化说明（**不猜 URL**）。 */
@@ -149,6 +154,8 @@ export interface AuthManagerDeps {
   broadcast?: (channel: string, payload: unknown) => unknown;
   /** 用户可见提示（默认走 stderr 日志） */
   notify?: (text: string) => unknown;
+  /** 时钟（判会话到期用；默认 `Date.now`） */
+  now?: () => number;
   log?: (message: string) => void;
 }
 
@@ -161,6 +168,7 @@ export interface RestoreStatus {
     | "no_session"
     | "verified"
     | "session_invalid"
+    | "session_expired"
     | "verify_unavailable"
     | "session_unreadable";
   epoch: number;
@@ -203,7 +211,7 @@ async function verifySessionUnavailable(): Promise<CoreResult<unknown>> {
 }
 
 /** 造认证状态机。
- * @returns `login` / `cancelLogin` / `restore` / `logout` / `currentSession` / `status` / `endpoints` */
+ * @returns `login` / `cancelLogin` / `restore` / `logout` / `currentSession` / `activeSession` / `status` / `endpoints` */
 export function createAuthManager(deps: AuthManagerDeps) {
   const { host, sessionStore } = deps;
   if (host === undefined || typeof host.openLoginPage !== "function") {
@@ -230,6 +238,7 @@ export function createAuthManager(deps: AuthManagerDeps) {
         onResponseKeys: (keys) => log(`token 响应顶层键名（只记键名，不记值）：${keys.join(", ")}`),
       }));
   const log = deps.log ?? defaultLog;
+  const now = deps.now ?? Date.now;
   const exchangeMusicSession = deps.exchangeMusicSession ?? createHuaweiMusicSessionPort({ log });
   const verifySession = deps.verifySession ?? verifySessionUnavailable;
   const broadcast = deps.broadcast ?? (() => undefined);
@@ -306,6 +315,18 @@ export function createAuthManager(deps: AuthManagerDeps) {
   function concludeRestore(extra: { busy?: boolean; message?: string } = { busy: false }): void {
     restoring = false;
     announce(extra);
+  }
+
+  /** 内存里的会话过了 `expireTime` 就收回并回到登录页（服务端对到期会话照样回 200 + 空数据）；返回是否刚收回。 */
+  function expireIfDue(): boolean {
+    const expiresAt = musicSessionExpiresAt(session);
+    const at = now();
+    if (session === null || expiresAt === null || at < expiresAt) return false;
+    log(`${sessionExpiryLine(session, at)}：运行中收回会话，回到登录页`);
+    session = null;
+    epoch += 1;
+    announce({ busy: false, message: musicSessionExpiredText(expiresAt) });
+    return true;
   }
 
   /** 失败收口：广播"空闲 + 原因文案"（渲染层的状态行就靠这句话），然后原样返回失败。 */
@@ -522,6 +543,7 @@ export function createAuthManager(deps: AuthManagerDeps) {
     }
     session = sessionRecord;
     epoch = nextEpoch;
+    log(sessionExpiryLine(session, now()));
     announce({ busy: false });
     return ok({ session, epoch });
   }
@@ -661,6 +683,24 @@ export function createAuthManager(deps: AuthManagerDeps) {
       session = null;
       concludeRestore();
       return { loggedIn: false, verified: false, sessionKept: false, reason: "no_session", epoch };
+    }
+
+    const restoredAt = now();
+    log(sessionExpiryLine(loaded, restoredAt));
+    const expiresAt = musicSessionExpiresAt(loaded);
+    if (expiresAt !== null && restoredAt >= expiresAt) {
+      // 到期会话验证器验不出来，不发验证请求；盘上的文件不删（时区是推断，留着可挽回）
+      session = null;
+      const message = musicSessionExpiredText(expiresAt);
+      concludeRestore({ busy: false, message });
+      return {
+        loggedIn: false,
+        verified: false,
+        sessionKept: false,
+        reason: "session_expired",
+        epoch,
+        error: { message, kind: AUTH_ERROR_KINDS.sessionExpired },
+      };
     }
 
     let verified: CoreResult<unknown>;
@@ -852,13 +892,20 @@ export function createAuthManager(deps: AuthManagerDeps) {
       return { session, epoch };
     },
 
+    /** 业务请求用的会话：先判到期，到期就收回并回到登录页，返回 null。 */
+    activeSession(): unknown {
+      expireIfDue();
+      return session;
+    },
+
     status(): { loggedIn: boolean; epoch: number; loginInFlight: boolean } {
       return { loggedIn: session !== null, epoch, loginInFlight: inFlight !== null };
     },
 
     /** 当前状态快照：auth:get-status 的应答体，与 auth:status 广播同形状（同一个 statusPayload 构造点）。 */
-    // 广播只在变化时说话，而渲染层 reload/崩溃重启后“现在是什么”无处可等；它不广播、不带 message。
+    // 广播只在变化时说话，而渲染层 reload/崩溃重启后“现在是什么”无处可等；先判到期（到期时那条广播带原因），快照本身不带 message。
     statusSnapshot(): AuthStatusPayload {
+      expireIfDue();
       return statusPayload({ busy });
     },
 

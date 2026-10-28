@@ -11,6 +11,7 @@ import {
   HUAWEI_MUSIC_LOGINEX_ENDPOINT,
   HUAWEI_MUSIC_LOGINEX_PATH,
   MUSIC_BUSINESS_OK,
+  MUSIC_EXPIRE_TIME_UTC_OFFSET_MINUTES,
   MUSIC_PROFILE_CLAIM_AVATAR_KEYS,
   MUSIC_PROFILE_CLAIM_NAME_KEYS,
   MUSIC_PROFILE_NESTED_CONTAINER_KEYS,
@@ -21,11 +22,14 @@ import {
   createHuaweiMusicSessionPort,
   digestCreatedAt,
   mergeProfiles,
+  musicSessionExpiredText,
+  musicSessionExpiresAt,
   nestedContainerKeyNamesOf,
   parseMusicSessionResponse,
   profileFromClaims,
   profileFromResponse,
   profileOfSessionRecord,
+  sessionExpiryLine,
   topLevelKeysOf,
 } from "../src/main/music-session.mjs";
 
@@ -129,6 +133,46 @@ test("响应解析：**不**把 14 位 expireTime 换算成 expiresAt（时区�
   });
   assert.equal(result.ok, true);
   assert.ok(!("expiresAt" in result.data), "时区未确认就不许造一个看起来精确的时间戳");
+});
+
+test("R75 expireTime 按北京时间解读：14 位串或整数 → UTC 毫秒；认不出就是 null（不猜）", () => {
+  assert.equal(MUSIC_EXPIRE_TIME_UTC_OFFSET_MINUTES, 480);
+  const expected = Date.UTC(2026, 9, 28, 7, 52, 23);
+  assert.equal(musicSessionExpiresAt({ expireTime: "20261028155223" }), expected, "北京时间 15:52:23 = UTC 07:52:23");
+  assert.equal(musicSessionExpiresAt({ expireTime: 20261028155223 }), expected, "整数形式同样认");
+  for (const bad of [undefined, null, "", "2026102815522", "202610281552230", "20260230120000", "20261328120000",
+    "20261028250000", "abcdefghijklmn", "19991231235959", 2026102815, true, {}]) {
+    assert.equal(musicSessionExpiresAt({ expireTime: bad }), null, `认不出：${JSON.stringify(bad)}`);
+  }
+  assert.equal(musicSessionExpiresAt(null), null);
+  assert.equal(musicSessionExpiresAt("20261028155223"), null, "不是会话记录");
+});
+
+test("R75 到期文案与诊断行：给人看的是北京时间的月日时分；诊断行带原文与距离，不带令牌", () => {
+  const expiresAt = musicSessionExpiresAt({ expireTime: "20261028155223" });
+  assert.equal(musicSessionExpiredText(expiresAt), "音乐会话已于 10月28日 15:52 到期，请重新扫码登录。");
+  const record = { musicSession: MUSIC_TOKEN, userId: "42", expireTime: "20261028155223" };
+  const late = sessionExpiryLine(record, expiresAt + 90 * 60_000);
+  assert.match(late, /expireTime=20261028155223/);
+  assert.match(late, /北京时间 2026-10-28 15:52/);
+  assert.match(late, /已过 1\.5 小时/);
+  assert.match(sessionExpiryLine(record, expiresAt - 30 * 60_000), /还剩 0\.5 小时/);
+  assert.match(sessionExpiryLine({ musicSession: MUSIC_TOKEN }, expiresAt), /没有 expireTime/);
+  assert.match(sessionExpiryLine({ expireTime: "bad" }, expiresAt), /认不出/);
+  for (const line of [late, sessionExpiryLine({ musicSession: MUSIC_TOKEN }, expiresAt)]) {
+    assert.ok(!line.includes(MUSIC_TOKEN), "诊断行不许带令牌");
+  }
+});
+
+test("R75 响应解析：expireTime 是 14 位整数时转成串保存（不丢掉唯一的到期信号）", () => {
+  const result = parseMusicSessionResponse({
+    result: { resultCode: MUSIC_BUSINESS_OK },
+    token: MUSIC_TOKEN,
+    snsUserID: "42",
+    expireTime: 20261027120000,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.data.expireTime, "20261027120000");
 });
 
 test("响应解析：业务码不是 000000 → 结构化失败，且错误里不含令牌", () => {

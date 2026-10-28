@@ -138,6 +138,8 @@ export function initialGateState() {
     path: null,
     /** 网页那条路收场时留下的一句话，等新二维码到了再退场。 */
     officialNote: null,
+    /** 上一个会话为什么结束（如到期）：等新码时显示，登录后清掉。 */
+    sessionNote: null,
   };
 }
 
@@ -260,9 +262,17 @@ export function reduceGateState(state, event) {
         busy: event.busy === true,
         // 广播里带文案就用它（失败原因），没带就保留本地那条（别把用户刚看到的说明抹掉）
         message: loggedIn ? null : (event.message ?? state.message),
+        sessionNote: loggedIn ? null : state.sessionNote,
       };
+      const note = typeof event.message === "string" && event.message !== "" ? event.message : null;
+      // 会话结束（登出/到期）：本轮扫过码也要重新出码，结束原因留在 sessionNote
+      if (!loggedIn && state.phase === LOGIN_GATE_PHASE.loggedIn) {
+        return { ...base, path: "qr", qrAttempted: false, qr: initialQrState(), officialNote: null, message: note, sessionNote: note };
+      }
       // 网页那条路收场（判据看的是**旧状态**的 path：base 里 phase 已经翻过面了）
       if (isOfficialFinish(state, event)) return returnToQr(base, event.message);
+      // 启动恢复的结论自带原因（如会话到期）：留在 sessionNote，自动建码清掉 message 后仍看得见
+      if (!loggedIn && state.phase === LOGIN_GATE_PHASE.checking && note !== null) return { ...base, sessionNote: note };
       return base;
     }
     case LOGIN_GATE_EVENT.qrRequested:
@@ -301,7 +311,7 @@ export function reduceGateState(state, event) {
       // 走网页那条路：清掉上一轮的说明（这次是用户自己按的），二维码会话由 sidecar 停掉
       return { ...state, busy: true, attempted: true, path: "official", message: null, officialNote: null };
     case LOGIN_GATE_EVENT.succeeded:
-      return { ...state, phase: LOGIN_GATE_PHASE.loggedIn, busy: false, message: null };
+      return { ...state, phase: LOGIN_GATE_PHASE.loggedIn, busy: false, message: null, sessionNote: null };
     case LOGIN_GATE_EVENT.failed: {
       if (state?.path === "official") return returnToQr(state, event.message);
       return { ...state, busy: false, message: event.message ?? "登录未完成（详情见日志）" };
@@ -407,7 +417,7 @@ export function qrContentOf(state) {
 
 /**
  * 状态行文案：一行，告诉用户现在是什么状态、下一步能做什么；`null` = 不显示该行。
- * 优先级：最新一次失败/取消 → 会话阶段 → 网页那条路刚收场的那句话 → 当前路的状态。
+ * 优先级：最新一次失败/取消 → 会话阶段 → 网页那条路刚收场的那句话 → 上一个会话为什么结束 → 当前路的状态。
  * `expired` 这一档不说话，遮罩是它唯一的提示载体；倒计时也不进这一行。
  *
  * @param {object} state 门禁状态
@@ -429,6 +439,10 @@ export function loginGateStatusLine(state) {
   if (state?.path === "official") {
     return state.busy === true ? "已在网页中打开登录。" : "官方登录页已收起（可以再打开一次）";
   }
+
+  // 上一个会话为什么结束（如到期）：新码准备中、等待扫码时一直说，扫码之后让位
+  const pendingQr = state?.qr?.status === QR_GATE_STATUS.preparing || state?.qr?.status === QR_GATE_STATUS.pending;
+  if (typeof state?.sessionNote === "string" && state.sessionNote !== "" && pendingQr) return state.sessionNote;
 
   const qr = state?.qr ?? initialQrState();
   switch (qr.status) {

@@ -145,6 +145,46 @@ test("自动开始：发起之后置位 attempted，重试时重新武装", () =
   assert.equal(state.qr.message, null, "重试要把上一次的错误文案清掉");
 });
 
+test("R75 会话结束（登出/到期）：本轮扫过码也重新自动出码，到期原因一直留到新码扫上", () => {
+  const notice = "音乐会话已于 10月28日 15:52 到期，请重新扫码登录。";
+  let state = reduceGateState(loggedOut(), { type: LOGIN_GATE_EVENT.qrRequested });
+  state = reduceGateState(state, { type: LOGIN_GATE_EVENT.status, loggedIn: true, busy: false });
+  assert.equal(state.phase, LOGIN_GATE_PHASE.loggedIn);
+
+  state = reduceGateState(state, { type: LOGIN_GATE_EVENT.status, loggedIn: false, busy: false, message: notice });
+  assert.equal(state.phase, LOGIN_GATE_PHASE.loggedOut);
+  assert.equal(shouldAutoStartQr(state), true, "本轮已经扫过码，会话结束后也必须重新自动出码");
+  assert.equal(state.sessionNote, notice);
+  assert.equal(loginGateStatusLine(state), notice);
+
+  state = reduceGateState(state, { type: LOGIN_GATE_EVENT.qrRequested });
+  assert.equal(loginGateStatusLine(state), notice, "自动建码清掉 message 后，到期原因还在");
+  state = reduceGateState(state, { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.pending, content: "NEW", expiresInMs: 181_000, at: 1_000_000 });
+  assert.equal(loginGateStatusLine(state), notice, "等待扫码时仍说明为什么要重新扫");
+  state = reduceGateState(state, { type: LOGIN_GATE_EVENT.qr, status: QR_GATE_STATUS.scanned });
+  assert.equal(loginGateStatusLine(state), QR_SCANNED_TEXT, "扫码之后让位给扫码进度");
+
+  state = reduceGateState(state, { type: LOGIN_GATE_EVENT.status, loggedIn: true, busy: false });
+  assert.equal(state.sessionNote, null, "重新登录后清掉");
+
+  const loggedOutAgain = reduceGateState(state, { type: LOGIN_GATE_EVENT.status, loggedIn: false, busy: false });
+  assert.equal(shouldAutoStartQr(loggedOutAgain), true, "手动登出（不带原因）同样重新出码");
+  assert.equal(loggedOutAgain.sessionNote, null);
+});
+
+test("R75 启动恢复判到期：原因留在 sessionNote；二维码失败的文案不算会话结束原因", () => {
+  const notice = "音乐会话已于 10月28日 15:52 到期，请重新扫码登录。";
+  let state = reduceGateState(initialGateState(), { type: LOGIN_GATE_EVENT.status, loggedIn: false, busy: false, message: notice });
+  assert.equal(state.sessionNote, notice);
+  assert.equal(shouldAutoStartQr(state), true);
+  state = reduceGateState(state, { type: LOGIN_GATE_EVENT.qrRequested });
+  assert.equal(loginGateStatusLine(state), notice);
+
+  const failure = reduceGateState(loggedOut(), { type: LOGIN_GATE_EVENT.status, loggedIn: false, busy: false, message: "二维码登录失败" });
+  assert.equal(failure.sessionNote, null);
+  assert.equal(loginGateStatusLine(failure), "二维码登录失败");
+});
+
 // ---------------------------------------------------------------------------
 // 3. 状态机：auth:qr 广播是二维码状态的唯一来源
 // ---------------------------------------------------------------------------

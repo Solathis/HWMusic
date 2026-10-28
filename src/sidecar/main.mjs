@@ -184,8 +184,8 @@ const authManager = createAuthManager({
   log,
 });
 
-// 音乐业务的会话来源（`currentSession()` 是内存里的活会话；登录/登出/恢复都会更新它）。
-musicSessionSource = () => authManager.currentSession().session;
+// 音乐业务的会话来源：`activeSession()` 每次先按 expireTime 判到期，到期就收回会话并回到登录页。
+musicSessionSource = () => authManager.activeSession();
 
 // `auth:login` 是长轮询：这里立刻回「已受理」，真正的结论经 `auth:status` 广播送达。
 dispatcher.register(AUTH_LOGIN, (request, respond) => {

@@ -320,7 +320,7 @@ export function topLevelKeysOf(payload, limit = 40) {
 
 /**
  * loginex 响应 → 本项目的会话形状（token / userId / expireTime / profile）。
- * 刻意不换算成 `expiresAt` 毫秒：时区未确认，保留 14 位原始串。
+ * 保留 14 位原始串（整数也转成串），到期时刻由 `musicSessionExpiresAt` 在读取时按北京时间换算。
  */
 export function parseMusicSessionResponse(payload, options = {}) {
   if (payload === null || typeof payload !== "object") {
@@ -341,7 +341,7 @@ export function parseMusicSessionResponse(payload, options = {}) {
   }
 
   const snsUserID = payload.snsUserID;
-  const expireTime = payload.expireTime;
+  const expireTime = Number.isSafeInteger(payload.expireTime) ? String(payload.expireTime) : payload.expireTime;
   const profile = profileFromResponse(payload, options);
   return ok({
     musicSession: token,
@@ -349,6 +349,55 @@ export function parseMusicSessionResponse(payload, options = {}) {
     ...(typeof expireTime === "string" && expireTime.trim() !== "" ? { expireTime } : {}),
     ...(hasProfileContent(profile) ? { profile } : {}),
   });
+}
+
+/** `expireTime` 按北京时间（UTC+8）解读：华为中国区服务，实测到期时刻与此吻合，官方未确认。 */
+export const MUSIC_EXPIRE_TIME_UTC_OFFSET_MINUTES = 480;
+
+/**
+ * 会话记录的到期时刻（UTC 毫秒）；没有 `expireTime` 或认不出就是 null，不猜。
+ * @param {unknown} record
+ * @returns {number | null}
+ */
+export function musicSessionExpiresAt(record) {
+  const raw = isObject(record) ? record.expireTime : undefined;
+  const text = typeof raw === "number" && Number.isSafeInteger(raw) ? String(raw) : raw;
+  if (typeof text !== "string" || !/^\d{14}$/.test(text)) return null;
+  const part = (start, length) => Number(text.slice(start, start + length));
+  const [year, month, day, hour, minute, second] = [part(0, 4), part(4, 2), part(6, 2), part(8, 2), part(10, 2), part(12, 2)];
+  const wall = Date.UTC(year, month - 1, day, hour, minute, second);
+  const check = new Date(wall);
+  if (year < 2000 || check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day
+    || check.getUTCHours() !== hour || check.getUTCMinutes() !== minute || check.getUTCSeconds() !== second) return null;
+  return wall - MUSIC_EXPIRE_TIME_UTC_OFFSET_MINUTES * 60_000;
+}
+
+/**
+ * 到期后给用户看的那句话（北京时间的月日时分）。
+ * @param {number} expiresAt UTC 毫秒
+ * @returns {string}
+ */
+export function musicSessionExpiredText(expiresAt) {
+  const wall = new Date(expiresAt + MUSIC_EXPIRE_TIME_UTC_OFFSET_MINUTES * 60_000);
+  const pad = (value) => String(value).padStart(2, "0");
+  return `音乐会话已于 ${wall.getUTCMonth() + 1}月${wall.getUTCDate()}日 ${pad(wall.getUTCHours())}:${pad(wall.getUTCMinutes())} 到期，请重新扫码登录。`;
+}
+
+/**
+ * 诊断日志里的那一行：`expireTime` 原文、北京时间的到期时刻、还剩或已过多久；不含令牌。
+ * @param {unknown} record
+ * @param {number} nowMs
+ * @returns {string}
+ */
+export function sessionExpiryLine(record, nowMs) {
+  const raw = isObject(record) ? record.expireTime : undefined;
+  if (raw === undefined || raw === null || raw === "") return "会话到期：会话记录里没有 expireTime，无法按到期时刻判断";
+  const expiresAt = musicSessionExpiresAt(record);
+  if (expiresAt === null) return `会话到期：expireTime=${String(raw).slice(0, 20)} 认不出（不是 14 位 yyyyMMddHHmmss），不按它判断`;
+  const wall = new Date(expiresAt + MUSIC_EXPIRE_TIME_UTC_OFFSET_MINUTES * 60_000).toISOString().slice(0, 16).replace("T", " ");
+  const hours = (Math.abs(nowMs - expiresAt) / 3_600_000).toFixed(1);
+  const distance = nowMs >= expiresAt ? `已过 ${hours} 小时` : `还剩 ${hours} 小时`;
+  return `会话到期：expireTime=${raw}（按北京时间 ${wall}），${distance}`;
 }
 
 /**

@@ -20,6 +20,10 @@ const AUTHORIZE_URL = `${HUAWEI_OAUTH_ENDPOINTS.authorize}?client_id=101444301&s
 const MUSIC_SESSION = { musicSession: "user$abc", userId: "42" };
 const ACCOUNT_TOKENS = { accessToken: "AT-1", refreshToken: "RT-1", expiresAt: 1_700_000_000_000 };
 
+/** 北京时间 2026-10-28 15:52:23 到期的会话（= UTC 07:52:23）。 */
+const EXPIRING_SESSION = { musicSession: "user$expiring", userId: "42", expireTime: "20261028155223" };
+const EXPIRES_AT = Date.UTC(2026, 9, 28, 7, 52, 23);
+
 /** 造一个真回调 URL：state 必须取自本次 attempt（自编 state 测的是不匹配那条路）。 */
 function callbackUrl(host, code = "CODE-1") {
   const state = new URL(host.opened[0].url).searchParams.get("state");
@@ -85,6 +89,7 @@ function managerOf(overrides = {}) {
     exchangeMusicSession: overrides.exchangeMusicSession ?? (async () => ({ ok: true, data: MUSIC_SESSION })),
     verifySession: overrides.verifySession ?? (async () => ({ ok: true, data: { total: 3 } })),
     clearPersonalCache: overrides.clearPersonalCache,
+    now: overrides.now,
     broadcast: (channel, payload) => {
       broadcasts.push({ channel, payload });
       return { ok: true, data: null };
@@ -729,4 +734,85 @@ test("状态快照（R19）：形状就是广播那一份（只多不许少）�
     );
   }
   assert.equal(snapshot.loggedIn, false, "取消之后没有会话");
+});
+
+test("R75 restore：会话已过 expireTime → 不发验证请求，回未登录并说明原因；盘上的文件不删", async () => {
+  const verified = [];
+  const store = fakeSessionStore({ loaded: EXPIRING_SESSION });
+  const { auth, broadcasts, logs } = managerOf({
+    sessionStore: store,
+    now: () => EXPIRES_AT + 98 * 60_000,
+    verifySession: async (session) => {
+      verified.push(session);
+      return { ok: true, data: {} };
+    },
+  });
+  const status = await auth.restore();
+  assert.equal(status.loggedIn, false);
+  assert.equal(status.reason, "session_expired");
+  assert.equal(status.error?.kind, AUTH_ERROR_KINDS.sessionExpired);
+  assert.equal(AUTH_ERROR_KINDS.sessionExpired, "session_expired");
+  assert.deepEqual(verified, [], "到期会话验证器验不出来，不发验证请求");
+  assert.equal(auth.currentSession().session, null);
+  assert.deepEqual(store.calls, [["load"]], "不删 session.enc（时区是推断，留着可挽回）");
+  assert.deepEqual(broadcasts.at(-1), {
+    channel: AUTH_STATUS,
+    payload: { loggedIn: false, busy: false, message: "音乐会话已于 10月28日 15:52 到期，请重新扫码登录。" },
+  });
+  assert.ok(logs.some((line) => /expireTime=20261028155223/.test(line) && /已过 1\.6 小时/.test(line)), logs.join("\n"));
+});
+
+test("R75 restore：expireTime 未到或没有这个字段 → 照常验证（没有字段就如实记一行，不猜）", async () => {
+  const fresh = managerOf({ sessionStore: fakeSessionStore({ loaded: EXPIRING_SESSION }), now: () => EXPIRES_AT - 60_000 });
+  const freshStatus = await fresh.auth.restore();
+  assert.equal(freshStatus.loggedIn, true);
+  assert.equal(freshStatus.reason, "verified");
+
+  const unknown = managerOf({ sessionStore: fakeSessionStore({ loaded: MUSIC_SESSION }), now: () => EXPIRES_AT + 60_000 });
+  const unknownStatus = await unknown.auth.restore();
+  assert.equal(unknownStatus.loggedIn, true, "没有 expireTime 就没法按到期判，交给验证器");
+  assert.ok(unknown.logs.some((line) => line.includes("没有 expireTime")), unknown.logs.join("\n"));
+});
+
+test("R75 运行中到期：activeSession 收回会话、回到登录页，只广播一次；currentSession 没有副作用", async () => {
+  let clock = EXPIRES_AT - 60_000;
+  const { auth, broadcasts } = managerOf({ sessionStore: fakeSessionStore({ loaded: EXPIRING_SESSION }), now: () => clock });
+  await auth.restore();
+  assert.deepEqual(auth.activeSession(), EXPIRING_SESSION, "没到期照常给会话");
+  const before = broadcasts.length;
+  const epochBefore = auth.currentSession().epoch;
+
+  clock = EXPIRES_AT + 1_000;
+  assert.deepEqual(auth.currentSession().session, EXPIRING_SESSION, "currentSession 只读，不判到期");
+  assert.equal(broadcasts.length, before);
+  assert.equal(auth.activeSession(), null, "到期就收回");
+  assert.equal(broadcasts.length, before + 1);
+  assert.deepEqual(broadcasts.at(-1).payload, {
+    loggedIn: false,
+    busy: false,
+    message: "音乐会话已于 10月28日 15:52 到期，请重新扫码登录。",
+  });
+  assert.ok(auth.currentSession().epoch > epochBefore, "epoch 前移：在途请求的响应作废");
+  assert.equal(auth.activeSession(), null);
+  assert.equal(broadcasts.length, before + 1, "已经收回了，不再重复广播");
+});
+
+test("R75 运行中到期：auth:get-status 的快照也先判到期（渲染层 reload 之后不再显示已登录）", async () => {
+  let clock = EXPIRES_AT - 60_000;
+  const { auth, broadcasts } = managerOf({ sessionStore: fakeSessionStore({ loaded: EXPIRING_SESSION }), now: () => clock });
+  await auth.restore();
+  assert.equal(auth.statusSnapshot().loggedIn, true);
+  clock = EXPIRES_AT;
+  assert.equal(auth.statusSnapshot().loggedIn, false, "到期那一刻起就不算已登录");
+  assert.match(broadcasts.at(-1).payload.message, /到期，请重新扫码登录/);
+});
+
+test("R75 登录成功：日志记一行新会话的到期时刻（事后核对时区用），不带令牌", async () => {
+  const { result, logs } = await loginWith(realCallback, {
+    exchangeMusicSession: async () => ({ ok: true, data: EXPIRING_SESSION }),
+    now: () => EXPIRES_AT - 3_600_000,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.ok(logs.some((line) => /expireTime=20261028155223/.test(line) && /还剩 1\.0 小时/.test(line)), logs.join("\n"));
+  assert.ok(logs.every((line) => !line.includes(EXPIRING_SESSION.musicSession)), "日志不带令牌");
 });
