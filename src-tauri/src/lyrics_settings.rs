@@ -930,7 +930,7 @@ mod tests {
         ] {
             assert!(production.contains(required), "建窗契约缺一项：{required}");
         }
-        // 先删后写：旧的"右边缘对齐"定位规则不许留一半
+        // 右边缘对齐的旧定位规则必须整段删掉，不许留一半
         assert!(
             !production.contains("settings_popup_placement")
                 && !production.contains("settings_popup_window_rect"),

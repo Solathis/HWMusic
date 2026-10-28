@@ -419,8 +419,7 @@ export function createHuaweiQrPort(options = {}) {
       loginChannel: chain.loginChannel,
       lang: chain.lang,
       appID: new URL(endpoints.create).searchParams.get("appID") ?? "",
-      // 当前那张码的 qrCode：过期自动换新之后，最早建单那一张已经作废，拿它换码只会白跑一趟。
-      // 所以读 session.current()，不是 start() 时的一份快照。
+      // 换码带被确认的那张码的 qrCode：读确认会话自己的 current()。
       qrCode: session?.current()?.qrCode ?? "",
     });
     // 确认载荷里的字段原样带上（页面自己也是这么传的：userID/siteID/accountType/code/userAccount/opType）

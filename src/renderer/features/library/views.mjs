@@ -91,7 +91,7 @@ export function viewKey(view) {
   return `${normalized.id}?${entries.map(([key, value]) => `${key}=${value}`).join("&")}`;
 }
 
-/** 常驻挂载的视图（切走不卸载）：本任务只有收藏页需要——滚动加载的进度不该切一次页就丢。 */
+/** 常驻挂载的视图（切走不卸载）：只有收藏页需要，滚动加载的进度不该切一次页就丢。 */
 export function isResidentView(view) {
   return normalizeView(view).id === VIEW.favorites;
 }
