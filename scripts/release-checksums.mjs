@@ -1,24 +1,9 @@
 #!/usr/bin/env node
 /**
- * `npm run release:checksums`：给**发布产物**算 SHA256 并写出 `SHA256SUMS`。
- *
- * ## 为什么校验和也算一道闸
- *
- * 发布出去的东西是"安装包 + sidecar 二进制"两份文件，下载页上只写一个版本号是无法验证的。
- * `SHA256SUMS` 让人能回答"我下到的这份就是 CI 打出来的那份吗"——没有它，
- * 中间任何一跳（镜像、缓存、二手转存）换掉文件都没人发现。
- *
- * ## 口径
- *
- * - 行格式用 `sha256sum` 的通用形状：`<sha256>  <文件名>`（两个空格）；**按文件名排序**，
- *   同一次构建重跑不会产生无意义的 diff。
- * - 只收**真产物**：安装包（`bundle/nsis/*.exe`）与 sidecar（`binaries/hwmusic-core-*`）。
- *   **一个都没有就报错退出**——写出一个空的 `SHA256SUMS` 比不写更糟：它看起来像"校验过了"。
- * - 文件名只取 basename：`SHA256SUMS` 是要跟产物放一起发布的，带路径的行在下载页上没法用。
- * - 默认写到安装包旁边（`bundle/nsis/SHA256SUMS`）；`--out` 可指定别处（CI 收集用）。
- *
- * `profile` 与 `check-nsis-package.mjs` 同一处事实：默认 `release`，
- * `HWMUSIC_BUNDLE_PROFILE=debug` 时拿开发期产物验骨架。
+ * `npm run release:checksums`：给发布产物算 SHA256 并写出 `SHA256SUMS`——没有它，中间任何一跳（镜像、缓存、二手转存）换掉文件都没人发现。
+ * 行格式用 `sha256sum` 的通用形状 `<sha256>  <文件名>`（两个空格），**按文件名排序**，重跑不会产生无意义的 diff。
+ * 只收真产物（安装包与 sidecar），一个都没有就报错退出——空的 `SHA256SUMS` 看起来像「校验过了」，比不写更糟。
+ * 文件名只取 basename（要跟产物放一起发布）；默认写到安装包旁边，`--out` 可指定别处。
  */
 import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
@@ -38,9 +23,7 @@ export function sha256Of(buffer) {
 
 /**
  * `SHA256SUMS` 的正文行：`<sha>  <name>`，按名字稳定排序。
- *
- * 排序是刻意的：产物顺序受 readdir 影响（不同文件系统的返回顺序不一样），
- * 不排序的话同一份构建在不同机器上算出的文件内容不同，diff 会一直"有变化"。
+ * 排序是刻意的：产物顺序受 readdir 影响（不同文件系统返回顺序不一样），不排序则同一份构建在不同机器上内容不同，diff 会一直「有变化」。
  */
 export function checksumLines(entries) {
   return [...entries]

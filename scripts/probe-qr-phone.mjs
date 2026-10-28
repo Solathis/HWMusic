@@ -1,31 +1,10 @@
 #!/usr/bin/env node
 /**
- * 手机侧二维码页探针（R29）：回答"扫码之后为什么桌面端还停在未扫档"。
- *
- * 背景（R29 真机现场）：用户扫码后桌面端轮询 36 轮以上全部 `resultCode=103000200`、
- * `errorDesc="Please to login."`——连 `103000202`（已扫待确认）都没出现过。也就是说
- * **扫码从未关联到我们会话**。桌面侧已经实测健康（建单 → 轮询 → 服务端正常应答），
- * 所以问题的落点只可能在"手机打开那张码之后发生了什么"。
- *
- * 本探针把手机侧那条路走一遍，**只读公开页面**（不登录账号、不提交任何凭据、不扫码确认）：
- *
- * 1. 建一个**本脚本自己的**二维码会话（与 `scripts/probe-qr.mjs` 同一条链）；
- * 2. 记下 content URL 的**非敏感**参数（`qRCode` 只留指纹）；
- * 3. 用**手机 UA** 打开 content URL，看它跳到哪一页（实探：`/CAS/mobile/confirmQRLogin.html`）；
- * 4. 打开前后各轮询一次，如实记下 `resultCode`/`errorDesc`——"光把页面打开"到底会不会翻档；
- * 5. 顺着手机页的静态资源链（shell → `hwidConfig.js` → 该页的 entry bundle）把**手机页自己
- *    会发什么请求**读出来（接口名计数），因为"扫码上报"是它发的还是 App 发的，决定了
- *    我们能修什么、不能修什么。
- *
- * **不承诺**：本探针不会、也不能产生一次真实的"已扫/已确认"——那需要一个已登录华为账号的
- * 手机（用户在场的授权动作）。它只回答"不登录的手机会怎样"和"手机页的代码长什么样"。
- *
- * 落盘只留形状：端点、参数名与非敏感参数值、resultCode、errorDesc 文案、接口名计数；
- * `qRCode`/`qrToken`/二维码内容一律只留长度与指纹。
- *
- * 用法：
- *   node scripts/probe-qr-phone.mjs                 # 默认写 .probe/r29-phone.json
- *   node scripts/probe-qr-phone.mjs --out .probe/x.json
+ * 手机侧二维码页探针：测「扫码后桌面端为何仍停在未扫档」——桌面侧已实测健康，所以把手机打开那张码之后的路走一遍，
+ * 并从手机页静态资源链（shell → `hwidConfig.js` → entry bundle）读出它会发哪些请求。
+ * 只读公开页面：不登录、不提交凭据、不扫码确认。
+ * 落盘只留形状，`qRCode`/`qrToken` 只留长度与指纹。
+ * 不承诺产生真实的「已扫/已确认」——那需要已登录华为账号的手机。
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -33,7 +12,7 @@ import { dirname, resolve } from "node:path";
 
 import { HUAWEI_QR_ENDPOINTS } from "../src/main/qr-login.mjs";
 
-/** 协议事实照抄任务书与 R16 的实探（client_id 是公开标识符，不是凭据）。 */
+/** 协议常量与实探结果（`client_id` 是公开标识符，不是凭据）。 */
 const CLIENT_ID = "101444301";
 const REDIRECT_URI = "hms://redirect_uri";
 const DUMMY_CODE_CHALLENGE = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -239,13 +218,7 @@ async function poll() {
   return { status: response.status, resultCode: body?.resultCode ?? null, errorDesc: body?.errorDesc ?? null, responseKeys: body ? Object.keys(body) : [] };
 }
 
-/**
- * 建单保真度：**今天**页面下发的模板 vs 我们硬编码的端点，逐参数比一遍。
- *
- * 这是 R29 简报方向 ① 的直接答案（"我们的参数与页面是否一致"）——不靠历史探针的记录，
- * 每次跑都当场取、当场比。`localInfo` 里另有一套 `reqClientType`/`loginChannel`（OAuth 客户端
- * 的上下文），**二维码建单不用那一套**：页面用的是 `getqrContent` 里自带的值（下面比的就是它）。
- */
+/** 建单保真度：当场取页面下发的模板与硬编码端点逐参数比对；二维码建单用的是 `getqrContent` 自带的值，不是 `localInfo` 里那套 `reqClientType`。 */
 function compareCreateFidelity() {
   const live = new URL(createEndpoint);
   const ours = new URL(HUAWEI_QR_ENDPOINTS.create);

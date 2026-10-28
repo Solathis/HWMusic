@@ -1,17 +1,10 @@
 #!/usr/bin/env node
 /**
- * 音乐业务端点探针（R4 / K1 风险缓解）。
- *
- * **只请求外网公开资源**：不带任何账号凭据、不写 cookie、不读任何本地私密文件。
- * 手段（三步，全部可离线复现）：
- *   1. 白名单 CDN 域可达性（校验 CSP/`safe-media-url.mjs` 里那三个后缀真的存在）；
- *   2. 公开入口页 → 脚本清单 → 从脚本正文里正则提取"像业务接口"的候选 URL（只留候选，不留正文）；
- *   3. 对候选做**无凭据**探测：401/403 = 端点存在但要授权，404 = 路径不对，2xx = 公开可读。
- *
- * 结论写入 docs/API_CONTRACT.md；**端点未确认前 `src/protocols/music.mjs` 一律走注入式**，
- * 本脚本里的候选清单只是探测输入，生产代码不得引用。
- *
- * 用法：node scripts/probe-music.mjs [--out .probe/music-probe.json] [--scripts 4] [--candidates 12]
+ * 音乐业务端点探针：**只请求外网公开资源**（不带账号凭据、不写 cookie、不读本地私密文件），三步全部可离线复现——
+ * 1. 白名单 CDN 域可达性（校验 CSP/`safe-media-url.mjs` 里那三个后缀真的存在）；
+ * 2. 公开入口页 → 脚本清单 → 从脚本正文里正则提取「像业务接口」的候选 URL（只留候选，不留正文）；
+ * 3. 对候选做**无凭据**探测：401/403 = 端点存在但要授权，404 = 路径不对，2xx = 公开可读。
+ * **端点未确认前 `src/protocols/music.mjs` 一律走注入式**，本脚本的候选清单只是探测输入，生产代码不得引用。
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";

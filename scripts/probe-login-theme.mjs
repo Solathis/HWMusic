@@ -1,31 +1,16 @@
 #!/usr/bin/env node
 /**
- * 官方登录页主题探针（R26）：应用切深色时，嵌入的官方页能不能跟着变深？
- *
- * **只碰公开页面与公开接口**：不登录、不输账号、不提交凭据、不扫码。authorize 用的是 demo
- * `code_challenge` 与探针自己的一次性 `state`，因此拿不到任何可用凭据。
- *
- * 三个问题（结论与落点登记在 `docs/API_CONTRACT.md` §1.7 的 R26 段）：
- *
- *  A. `themeName` 是不是官方页的主题开关？它加在 **authorize 请求**上会不会传播到
- *     服务端生成的 `/CAS/portal/loginAuth.html?…`？
- *  B. 真正裁决主题的是谁？—— 页面第一个脚本 `hwidConfig.js` 会**同步** POST
- *     `common/getBaseSwitchInfo`，并用**服务端回的那一份**覆盖本地配置；这一问直接问服务端：
- *     哪些值它认、UA 会不会改变答案（桌面 UA 与 HarmonyOS 移动 UA 各来一遍）。
- *  C. 结论落到页面上是什么样？—— 用 headless Chromium 打开门户页（与 `npm run test:browser`
- *     同一套浏览器候选），量 body/root 的**计算背景色**、看它实际请求了哪一份主题 CSS。
- *
- * 用法：
- *   node scripts/probe-login-theme.mjs                 # 全部三段
- *   node scripts/probe-login-theme.mjs --out .probe/login-theme-probe.json
- *   node scripts/probe-login-theme.mjs --no-browser    # 只跑 A/B（不起浏览器）
+ * 官方登录页主题探针：应用切深色时，嵌入的官方页能不能跟着变深？只碰公开页面与公开接口（不登录、不输账号，用 demo `code_challenge` 与一次性 `state`）。
+ * A. `themeName` 是不是主题开关？加在 authorize 请求上会不会传播到服务端生成的登录页？
+ * B. 真正裁决主题的是谁？页面首个脚本 `hwidConfig.js` 会同步 POST `common/getBaseSwitchInfo` 并用服务端回的那份覆盖本地配置，所以直接问服务端。
+ * C. 结论落到页面上是什么样？用 headless Chromium 量 body/root 的计算背景色、看它请求了哪份主题 CSS（`--no-browser` 只跑 A/B）。
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 const CHROME_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-/** HarmonyOS 移动 UA（唯一一条服务端认深色的路；这也是**没有采纳**它的原因，见 §1.7 R26 段）。 */
+/** HarmonyOS 移动 UA：探针里唯一一条服务端认深色的路；产品没采用（登录 webview 保持宿主默认 UA，见 docs/API_CONTRACT.md「官方登录页的主题」）。 */
 const HARMONY_UA =
   "Mozilla/5.0 (Phone; HarmonyOS 4.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36";
 

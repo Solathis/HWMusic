@@ -146,8 +146,7 @@ export function extractEndpointPaths(text, options = {}) {
 }
 
 /**
- * 小 JSON 错误响应里的标准错误码：只取 `error`（字符串或数字）与 `sub_error`，
- * **不取 `error_description`**（那是自由文本，可能回显调用方参数）。
+ * 小 JSON 错误响应里的标准错误码：只取 `error`（字符串或数字）与 `sub_error`，**不取 `error_description`**（那是自由文本，可能回显调用方参数）。
  * @returns {{code: string, subCode: string|null} | null}
  */
 export function errorInfoFromBody(body, contentType) {

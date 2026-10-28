@@ -1,19 +1,9 @@
 #!/usr/bin/env node
 /**
- * 登录链路探针（R4 / K1 风险缓解）。
- *
- * **只请求外网公开页面**：不登录任何账号、不提交任何凭据、不写 cookie、不带任何私人数据。
- * 目的：把 authorize / token / loginCallback 的确切 URL 与跳转链重新确定下来，
- * 结论写入 docs/API_CONTRACT.md（本脚本自己只落摘要，不落响应正文）。
- *
- * 用法：
- *   node scripts/probe-login.mjs                        # 默认：只做 GET，公开页面
- *   node scripts/probe-login.mjs --include-token-probe   # 追加：POST 一个**无效**授权码，只看错误码
- *   node scripts/probe-login.mjs --out .probe/login.json # 摘要落盘（.probe/ 已在 .gitignore）
- *
- * `--include-token-probe` 仍不涉及任何账号：它发的是 `code=PROBE-INVALID-CODE`，
- * 期望得到 `invalid_grant`/`invalid_request` 这类标准错误码——那只证明"这个 token 端点存在、
- * client_id 形态被受理"，证明不了任何账号信息。
+ * 登录链路探针：**只请求外网公开页面**（不登录、不提交凭据、不写 cookie、不带私人数据），结论写入 docs/API_CONTRACT.md。
+ * 目的：把 authorize / token / loginCallback 的确切 URL 与跳转链确定下来（只落摘要，不落响应正文）。
+ * 用法：`node scripts/probe-login.mjs` 只做 GET；`--include-token-probe` 追加 POST 一个**无效**授权码
+ * （`code=PROBE-INVALID-CODE`），只期望 `invalid_grant`/`invalid_request` 这类标准错误码，不涉及任何账号。
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -27,7 +17,7 @@ import {
   verdictOf,
 } from "./probe-lib.mjs";
 
-/** 协议事实照抄任务书（client_id 是公开标识符，不是凭据）。 */
+/** 协议常量（client_id 是公开标识符，不是凭据）。 */
 const CLIENT_ID = "101444301";
 const REDIRECT_URI = "hms://redirect_uri";
 const SCOPE = "openid";

@@ -1,87 +1,9 @@
 #!/usr/bin/env node
 /**
- * `npm run verify:live`：**真应用**里的门禁页守卫（playwright-core 经 CDP 驱动主窗 webview）。
- *
- * ## 为什么要它
- *
- * R1–R16 的渲染层证据都停在"注入式/SSR/静态标记"这一层：它们证明得了状态机与结构，
- * 证明不了"真 webview 里二维码**真的画出了墨迹**、正常路径**真的只有那一个入口**、
- * 真机上**一条 console error 都没有**"。这一条把最后那段补上——它驱动的是
- * `npm run dev` 起出来的那个真窗口。
- *
- * ## 前置（脚本不会替你起应用）
- *
- * ```powershell
- * $env:HWMUSIC_DATA_DIR = "E:\Projects\华为云音乐桌面端\.tmp\r17-data"
- * $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9223"
- * npm run dev
- * ```
- *
- * `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 是 WebView2 官方认的"给底层 Chromium 加参数"旋钮；
- * 没有它，`9223` 上不会有人监听，本脚本会如实报连不上而不是静默跳过。
- *
- * **`npm run dev` 不重建 sidecar**：改了 sidecar 源码（`src/main/**`、`src/protocols/**`）之后
- * 必须先 `npm run dist:sidecar`，否则跑的是上一次的 `hwmusic-core.exe`，门禁页会显示
- * "未知请求频道：auth:qr-start"（详见 docs/RUN_AND_PACKAGING.md §1）。
- *
- * ## 断言（像素/几何/行为级，不放水）
- *
- * R17 起：二维码 canvas 真**有墨迹**（暗像素占比落在二维码的合理区间，空白画布会红）、
- * 三个**定位图案**都在、状态行文案是门禁状态机里的**已知档位**之一、**零 console error /
- * 零 pageerror**；证据落盘（主窗截图 + DOM 摘要）。
- *
- * R18 增补（用户指令的五项里"页面上长什么样"那几项，在真窗上量）：
- * - **标题**"华为账号登录"全页只出现一次、且几何上在二维码**正上方**、与二维码**同轴居中**；
- * - 二维码容器的**计算边框**非零（量 `getComputedStyle`，不是"类名里有 border"）；
- * - 提示文字就是唯一真源那一句、且只出现一次（状态行不许复述它）；
- * - 「在网页中打开登录」**常驻且可点**（正常路径恰好这一个按钮，"重试"只在失败态出现）；
- * - 自上而下的几何顺序：标题 → 二维码 → 提示 → 状态行 → 次要入口。
- *
- * ## R17 审查的三项修正（同批）
- *
- * 1. "渲染层已出内容"原来写成 `!Loading || length>0`——**恒真**（空串也过）。现在要求
- *    "非空 **且** 不是加载态文案"；
- * 2. 截图落盘从"一条断言"降为**信息输出**（它证明不了任何行为，不该计入 PASS 数）；
- * 3. console 捕获窗口：监听器是 attach 之后才挂上的，**启动期**的错误抓不到。选 reload 方案
- *    ——挂好监听器后 `page.reload()`，让从第一帧起的错误都落进缓冲区（顺带证明"重新加载
- *    之后二维码还会重新建单并画出来"）。
- *
- * ## R19 增补
- *
- * R18 的 reload 方案真的踩中了那个缺口：`auth:status` 只在 sidecar 启动时广播一次，渲染层
- * reload 之后拿不到 → 门禁停在 `checking`、二维码不发起。修法是渲染层挂载时主动查一次
- * `auth:get-status`（与托盘可用性查询同款模式）。守卫这边对应地把"等二维码"从
- * `waitForSelector(canvas)` 换成 [`waitForQrTier`]：轮询 canvas **与状态行**，等不到就把
- * 卡住的那一档报出来（"当时状态行「正在检查登录状态…」"），而不是只留一句"canvas 没出现"。
- * 断言条数不变（同一个位置，成功/失败两种证据）。
- *
- * ## R20 增补（用户真机验收反馈三项；可量的两项都在这里量）
- *
- * 1. header 里那句品牌已删 → 量的是**渲染后的可见文字**（`headerText` 必须是空串），
- *    不是"类名里没有某个字符串"；
- * 2. 二维码容器本身可点刷新 → 量它的 `aria-label`（可达名字）与 `disabled`，并把
- *    "正常路径恰好两个可操作元素（刷新容器 + 常驻入口）"钉住；
- * 3. 「返回扫码登录」要先把网页登录窗打开才量得到——那会真的开一个子窗、走一次真实网络，
- *    而且守卫必须在收尾前把它关回去，所以它是**显式开关**：
- *    `node scripts/verify-live.mjs --check-back-path`（默认不跑）。跑起来的那一段：
- *    点入口 → 等 header 里出现「返回扫码登录」→ 点它 → 等回到二维码态。
- *
- * ## R25 增补（用户四项之 1/2/4；这一层量的是真窗上的形态）
- *
- * 1. **过期遮罩两行**（「二维码已过期」/「点击刷新」）、过期态**不再**多一个「刷新二维码」按钮
- *    ——门禁的还是 R25 那套：可操作元素集合 = 主题三档 + 二维码容器 + 常驻入口
- *    （过期/失败各按自己的档位多一个「重试」）。过期那一档要**真的等到一张码过期**才量得到，
- *    所以不在默认路径里（TTL 约 181 秒）；
- * 2. **「返回扫码登录」浮在网页之上**：它不在门禁里了（官方页铺满整窗），而是独立的小 webview
- *    `login-return`。`--check-back-path` 那一段因此改成**跨 CDP target** 找那个浮动页面：
- *    找到 → 量文案/可点/透明背景/加载的是 `login-chrome` 入口 → 点它 → 回到二维码态
- *    → 再断言浮动页面随登录页一起消失；
- * 3. **主题控件**（浅色 / 深色 / 跟随系统）：量 gate 右上角那一份——三档文案与唯一真源逐字一致、
- *    恰有一档是生效的（`aria-pressed`）。浮动 `login-theme` 那一份与它是同一个组件，
- *    由 ② 的跨 target 机制覆盖（同一个页面入口、不同 kind）。
- *
- * 用法：`node scripts/verify-live.mjs [--port 9223] [--out .tmp/r17-live] [--timeout 60000]
- *        [--check-back-path]`
+ * `npm run verify:live`：**真应用**里的门禁页守卫（playwright-core 经 CDP 驱动主窗 webview），断言到像素/几何/行为级。
+ * 量二维码墨迹、三个定位图案、几何顺序、可操作元素集合与零 console error。
+ * 前置：`npm run dev` 起好应用，并设 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 打开 `--remote-debugging-port=9223`。
+ * 没它 `9223` 无人监听；改了 sidecar 源码必须先 `npm run dist:sidecar`，否则跑的是旧 exe。
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -94,12 +16,7 @@ export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 /** 门禁页的二维码选择器（`src/renderer/login-gate.tsx` 的 `data-testid`）。 */
 export const QR_TESTID = "login-qr";
 
-/**
- * 暗像素占比的合理区间。
- *
- * 一个成型的二维码（含 1 模块静区、纠错 L）实测约 0.45–0.55；空白画布是 0。
- * 区间取得比实测宽，是为了容忍不同内容/版本，同时仍然把"空白"和"几乎全黑"挡在外面。
- */
+/** 暗像素占比的合理区间：成型二维码（含 1 模块静区、纠错 L）实测约 0.45–0.55，空白画布是 0；区间取得比实测宽，是为了容忍不同内容/版本，同时仍然把「空白」和「几乎全黑」挡在外面。 */
 export const INK_COVERAGE_RANGE = [0.15, 0.8];
 
 /** 定位图案所在角落（左上/右上/左下）的暗像素占比下限：这三个是二维码的结构签名。 */
@@ -116,7 +33,7 @@ const argValue = (name, fallback) => {
 const PORT = Number(argValue("--port", "9223"));
 const OUT_DIR = argValue("--out", ".tmp/r17-live");
 const TIMEOUT_MS = Number(argValue("--timeout", "60000"));
-/** R20：显式开关——开着才会真的点开网页登录窗（会开子窗、走真实网络，收尾前必须关回去）。 */
+// 显式开关：开着才会真的点开网页登录窗（会开子窗、走真实网络，收尾前必须关回去）。
 const CHECK_BACK_PATH = args.includes("--check-back-path");
 const CDP_URL = `http://127.0.0.1:${PORT}`;
 
@@ -153,11 +70,8 @@ export function formatSummary({ pass, fail }) {
 }
 
 /**
- * 在页面里量二维码墨迹：整体覆盖率 + 三个定位图案的暗像素占比。
- *
- * 必须是**真函数**（不是字符串）：`page.evaluate` 收到字符串时按"表达式"求值，
- * 一个箭头函数字面量只会求值成函数对象、结果是 undefined。函数会被序列化送进页面，
- * 所以它**不许闭包引用外部变量**（参数之外的一切都得在这里面重新取）。
+ * 量二维码墨迹（整体覆盖率 + 三个定位图案）：必须是**真函数**——`page.evaluate` 收到字符串时按表达式求值，箭头函数只得到 undefined。
+ * 函数会被序列化送进页面，所以**不许闭包引用外部变量**。
  */
 export function measureQrInPage(testid) {
   const canvas = document.querySelector('[data-testid="' + testid + '"]');
@@ -243,7 +157,7 @@ export function measureGateLayoutInPage(params) {
   const buttons = [...document.querySelectorAll("button")];
   const header = document.querySelector("header");
 
-  /** R25：主题控件那三档的形状（文案 / 锚点 / 哪一档是当前生效的）。 */
+  // 主题控件那三档的形状（文案 / 锚点 / 哪一档是当前生效的）。
   const themeOf = () => {
     const control = document.querySelector('[data-testid="' + themeControlTestid + '"]');
     if (control === null) return { found: false, options: [], pressed: [] };
@@ -271,10 +185,10 @@ export function measureGateLayoutInPage(params) {
     entryText: textOf(entry),
     entryBox: rectOf(entry),
     entryDisabled: entry === null ? null : entry.disabled === true,
-    /** R20：header 里渲染后的可见文字（R25 起里面只有主题控件那三个档位的文案） */
+    /** header 里渲染后的可见文字（里面只有主题控件那三个档位的文案）。 */
     headerText: textOf(header),
     headerBox: rectOf(header),
-    /** R25：主题控件（浅色 / 深色 / 跟随系统）——真窗要看得见、点得动 */
+    /** 主题控件（浅色 / 深色 / 跟随系统）——真窗要看得见、点得动。 */
     themeControl: themeOf(),
     paragraphs: paragraphs.map((node) => textOf(node)),
     containerBorder: containerStyle === null
@@ -284,7 +198,7 @@ export function measureGateLayoutInPage(params) {
           style: containerStyle.borderTopStyle,
           radius: containerStyle.borderTopLeftRadius,
         },
-    /** R20：可操作元素的形状——文案 / 可达名字（aria-label）/ 锚点 / 是否禁用 */
+    /** 可操作元素的形状——文案 / 可达名字（aria-label）/ 锚点 / 是否禁用。 */
     buttons: buttons.map((node) => ({
       text: textOf(node),
       label: node.getAttribute("aria-label") ?? "",
@@ -295,19 +209,10 @@ export function measureGateLayoutInPage(params) {
 }
 
 /**
- * R19：等门禁真的走到 QR 档（画布出现），最多等 `timeoutMs`。
- *
- * 为什么不能只等 canvas：`auth:status` 只在 sidecar 启动时广播一次，渲染层 reload 之后收不到
- * → 门禁停在 `checking`（"正在检查登录状态…"）→ 既不自动发起二维码、也没有画布。那时
- * "canvas 没出现"这条红是**对的**，但它说不清卡在哪一档。所以这里同时轮询**状态行**，
- * 超时时把它原样带出来（"门禁停在「正在检查登录状态…」"直接指认根因）。
- *
- * 判到达只看 **canvas**，不看状态行文案：`preparing` 那一档（"正在准备二维码…"）在内容
- * 还没回来时就已经出现了——拿它当"到了"，后面那几条像素断言就会在二维码还没画出来时抢跑，
- * 变成随机假红。状态行在这里只承担"说清为什么没到"。
- *
- * 页面读不到（`evaluate` 抛错，例如正在导航）当成"还没到"继续轮询，不把守卫自己炸掉。
- *
+ * 等门禁真的走到 QR 档（画布出现），超时时把当时那一档状态行原样带出来，直接指认卡在哪。
+ * `auth:status` 只在 sidecar 启动时广播一次，渲染层 reload 后收不到就会停在 `checking`。
+ * 判到达只看 **canvas** 不看状态行文案：`preparing` 在内容回来前就已出现，拿它当到了会让像素断言抢跑成随机假红。
+ * 页面读不到（`evaluate` 抛错）当成还没到继续轮询，不把守卫自己炸掉。
  * @returns `{seen, reason, canvas, status}`；`reason` ∈ `canvas`（到了）/ `timeout`（没到）
  */
 export async function waitForQrTier(page, { testid, timeoutMs, pollMs = 400 }) {
@@ -333,11 +238,8 @@ export async function waitForQrTier(page, { testid, timeoutMs, pollMs = 400 }) {
 }
 
 /**
- * R25：量登录体验的**浮动控件**（返回 / 主题）那一个 webview 里的东西。
- *
- * 与门禁那份不同：这两个控件活在**独立的小 webview** 里（`login-return` / `login-theme`），
- * 所以它们的页面是另一个 CDP target，量的时候要指名道姓地问"这一页里有没有它"。
- *
+ * 量登录体验的**浮动控件**（返回 / 主题）那一个 webview 里的东西。
+ * 它们活在**独立的小 webview** 里（`login-return` / `login-theme`），所以是另一个 CDP target，量的时候要指名道姓地问这一页。
  * 同其余 measure* 函数的纪律：会被序列化送进页面，不许闭包引用外部变量。
  */
 export function measureFloatingControlInPage(params) {
@@ -356,11 +258,9 @@ export function measureFloatingControlInPage(params) {
 }
 
 /**
- * R20 要求 3（R25 改写）：量「返回扫码登录」那一条（只在 `--check-back-path` 下跑）。
- *
- * R25 起它**不在门禁里**了：官方登录页铺满整个主窗，门禁那一层整个被盖住——控件浮在
- * 网页**之上**（独立的小 webview `login-return`），所以"在不在 header 里"这条断言退休，
- * 换成"它在一个独立的、铺透明背景的小 webview 里，且此刻可点"。
+ * 量「返回扫码登录」那一条（只在 `--check-back-path` 下跑）。
+ * 它**不在门禁里**了：官方登录页铺满整个主窗、把门禁盖住，控件浮在网页**之上**（独立的小 webview `login-return`）。
+ * 所以量的是它在一个独立的、铺透明背景的小 webview 里，且此刻可点。
  */
 export function measureBackEntryInPage(params) {
   const { backTestid, backText } = params;
@@ -400,7 +300,7 @@ async function main() {
     WEB_LOGIN_ENTRY_TESTID,
     WEB_LOGIN_ENTRY_TEXT,
   } = await import(pathToFileURL(path.join(ROOT, "src/renderer/features/auth/login-gate-logic.mjs")).href);
-  // R25：主题三态的真源（gate 里的控件与浮动控件是同一个组件）
+  // 主题三态的真源（gate 里的控件与浮动控件是同一个组件）
   const { THEME_CHOICES, THEME_CONTROL_TESTID, THEME_LABELS, themeOptionTestId } = await import(
     pathToFileURL(path.join(ROOT, "src/renderer/features/theme/theme.mjs")).href
   );
@@ -429,8 +329,8 @@ async function main() {
     });
     page.on("pageerror", (error) => pageErrors.push(String(error.message ?? error).slice(0, 300)));
 
-    // R17 审查 3/3：监听器挂好之后**重新加载**一次——只捕捉 attach 之后的事件会漏掉启动期
-    // 那几条（正是最可能报错的地方）。顺带证明"重新加载之后二维码会重新建单并画出来"。
+    // 监听器挂好之后**重新加载**一次——只捕捉 attach 之后的事件会漏掉启动期那几条（正是最可能报错的地方）。
+    // 顺带证明：重新加载之后二维码会重新建单并画出来。
     await page.reload({ waitUntil: "load" });
     // 等渲染层真的画出东西（Vite 的模块图 + React 首帧）：等不到就让下面那条断言如实报红
     await page
@@ -438,7 +338,7 @@ async function main() {
       .catch(() => undefined);
     info("已重新加载主窗", "console 捕获窗口从第一帧起（R17 审查 3/3：reload 方案）");
 
-    // 渲染层已出内容：**真断言**（R17 审查 1/3：原来的 `!Loading || length>0` 恒真）
+    // 渲染层已出内容：**真断言**——必须非空**且**不是加载态文案（`!Loading || length>0` 恒真，空串也过）。
     const bodyText = (await page.evaluate(() => document.body.innerText).catch(() => "")).trim();
     record(
       bodyText.length > 0 && !/正在加载|Loading/i.test(bodyText),
@@ -446,11 +346,8 @@ async function main() {
       `${bodyText.replace(/\s+/g, " ").slice(0, 70)}`,
     );
 
-    // 等门禁进 QR 档（自动发起 auth:qr-start → 建单 → 画码，允许一点时间）。
-    //
-    // R19：这一步是"断言前先把门禁等到位"。reload 之后渲染层要重新问一次
-    // `auth:get-status` 才知道该显示哪一层（旧版靠一条一次性广播 → 会卡在 checking），
-    // 所以等待必须带上**状态行**：等不到时把当时那一档报出来，日志直接指认"卡在检查登录状态…"。
+    // 等门禁进 QR 档（自动发起 auth:qr-start → 建单 → 画码），这一步是断言前先把门禁等到位。
+    // reload 之后渲染层要重新问一次 `auth:get-status` 才知道该显示哪一层（旧版靠一次性广播会卡在 checking），所以等待必须带上**状态行**，等不到时把当时那一档报出来。
     const qrTier = await waitForQrTier(page, { testid: QR_TESTID, timeoutMs: TIMEOUT_MS });
     const canvasSeen = qrTier.seen;
     record(
@@ -505,7 +402,7 @@ async function main() {
     const statusText = await page.evaluate(() => document.querySelector('[role="status"]')?.textContent?.trim() ?? "");
     record(knownLines.has(statusText), "状态行文案是已知档位之一", `"${statusText}"`);
 
-    // R18：布局与视觉（标题/边框/提示/几何顺序/常驻入口/主题控件）在真窗上量
+    // 布局与视觉（标题/边框/提示/几何顺序/常驻入口/主题控件）在真窗上量。
     const layout = await page.evaluate(measureGateLayoutInPage, {
       testid: QR_TESTID,
       entryTestid: WEB_LOGIN_ENTRY_TESTID,
@@ -540,8 +437,8 @@ async function main() {
       `入口文案 "${layout.entryText}"，disabled=${layout.entryDisabled}`,
     );
 
-    // R20 要求 1 / R25：header 里那句品牌与窗口标题栏重复 → 删掉；R25 起里面只放主题控件。
-    // 量的是**渲染后的可见文字**：它必须恰好是主题那三档的文案（多一个字都说明品牌回来了）。
+    // header 里那句品牌与窗口标题栏重复 → 删掉，里面只放主题控件。
+    // 量的是**渲染后的可见文字**：必须恰好是主题那三档的文案（多一个字都说明品牌回来了）。
     const headerText = layout.headerText ?? "";
     const themeLabels = THEME_CHOICES.map((choice) => THEME_LABELS[choice]);
     record(
@@ -550,7 +447,7 @@ async function main() {
       headerText === "" ? "空" : `header 文本「${headerText}」`,
     );
 
-    // R25 用户四项之 4：gate 视图右上角的主题控件（浅色 / 深色 / 跟随系统），三档都在、恰有一档生效
+    // gate 视图右上角的主题控件（浅色 / 深色 / 跟随系统）：三档都在、恰有一档生效。
     const theme = layout.themeControl ?? { found: false, options: [], pressed: [] };
     record(
       theme.found === true && theme.inHeader === true,
@@ -563,7 +460,7 @@ async function main() {
       `文案 ${JSON.stringify(theme.options)}；生效 ${JSON.stringify(theme.pressed)}（期望 ${JSON.stringify(themeLabels)}）`,
     );
 
-    // R20 要求 2：二维码容器本身可点刷新（可达名字 + 当前可点）
+    // 二维码容器本身可点刷新（可达名字 + 当前可点）。
     const refresh = layout.buttons.find((button) => button.testid === QR_REFRESH_TESTID);
     record(
       refresh !== undefined && refresh.label === QR_REFRESH_LABEL && refresh.disabled === false,
@@ -573,8 +470,7 @@ async function main() {
         : `aria-label="${refresh.label}"，disabled=${refresh.disabled}`,
     );
 
-    // R20 要求 2 / R25 要求 1：正常路径的可操作元素集合——主题三档 + 二维码容器 + 常驻入口
-    //（「重试」只在失败态；过期态**不再**多一个「刷新二维码」按钮）
+    // 正常路径的可操作元素集合——主题三档 + 二维码容器 + 常驻入口（「重试」只在失败态；过期态**不再**多一个「刷新二维码」按钮）。
     const buttonIds = layout.buttons.map((button) => button.testid || button.text);
     const expectedIds = [
       ...THEME_CHOICES.map(themeOptionTestId),
@@ -620,9 +516,8 @@ async function main() {
         : `标题底 ${boxes.title.y + boxes.title.height} ≤ 二维码顶 ${boxes.qr.y}；中心横坐标 ${boxes.title.centerX} vs ${boxes.qr.centerX}（容差 ${CENTER_TOLERANCE_PX}px）`,
     );
 
-    // R20 要求 3 / R25 要求 2（显式开关）：点开网页登录之后，官方页铺满整个主窗，
-    // 「返回扫码登录」**浮在网页之上**（独立的小 webview `login-return`）——它是用户此刻
-    // 唯一能点到的控件。这里跨 CDP target 找到那个浮动页面，量它、点它，看门禁是不是回到二维码态。
+    // 显式开关下：点开网页登录之后官方页铺满整个主窗，「返回扫码登录」**浮在网页之上**（独立的小 webview `login-return`），是用户此刻唯一能点到的控件。
+    // 这里跨 CDP target 找到那个浮动页面，量它、点它，看门禁是不是回到二维码态。
     if (CHECK_BACK_PATH) {
       const entrySelector = `[data-testid="${WEB_LOGIN_ENTRY_TESTID}"]`;
       const backSelector = `[data-testid="${WEB_LOGIN_BACK_TESTID}"]`;

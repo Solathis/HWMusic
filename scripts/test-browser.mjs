@@ -1,29 +1,12 @@
 #!/usr/bin/env node
 /**
- * `npm run test:browser`：**真浏览器**里的 AMLL 守卫（playwright-core + Chromium）。
- *
- * ## 守什么
- *
- * R8/R9/R12 的冒烟都是 `react-dom/server` 渲静态标记——它证明不了"AMLL 组件在真浏览器里
- * 真的挂上、真的画出了像素、真的跟着进度动"。这里补上这一段：
- *
- * 1. 真 LibraryShell → PlaybackStage → AMLL/PlayerBar 组合，只在 Tauri IPC 边界给夹具；
- * 2. 浅/暗语义主题，文字 Range 截图与隐藏文字后的同区域对比，不能把背景误算成歌词；
- * 3. 反转下层侧栏/header/列表/播放器，舞台像素必须不受影响；
- * 4. 暂停打开/重开、播放/seek、菜单与 Sheet/Dialog 真交互，桌面歌词也测字迹；
- * 5. 运行期错误（console error / pageerror）一条都不许有。
- *
- * ## 口径：SKIP 不算成功
- *
- * 没有 Chromium 可用时**判 FAIL**，不静默跳过：CI 里"跳过的守卫"和"没有守卫"是同义词。
- * 本机可能只有旧 revision 的 Chromium（playwright 自带的那个版本号对不上），所以浏览器按
- * 候选顺序找：`PLAYWRIGHT_CHROMIUM_EXECUTABLE` → playwright 自带 → 系统 Chrome → 系统 Edge。
- * 判据是"能不能真跑起来"（真启动 + 真渲染），不是"配置文件里写着有"。
- *
- * ## 被测产物
- *
- * 使用 build:web 产出的真实 CSS 与 esbuild 打包的生产组件；Tauri IPC 与音频响应为夹具。
- * 这不替代真实 WebView2 的在线取词取证，真窗验证另行记录。
+ * `npm run test:browser`：**真浏览器**里的 AMLL 守卫（playwright-core + Chromium）；静态标记证明不了组件真挂上、真画出像素、真跟着进度动。
+ * 守五件事：真 LibraryShell → PlaybackStage → AMLL/PlayerBar 组合（只在 Tauri IPC 边界给夹具）；
+ * 浅/暗主题下文字 Range 截图与隐藏文字后的同区域对比；反转下层侧栏/header/列表/播放器后舞台像素不受影响；
+ * 暂停打开/重开、播放/seek、菜单与 Sheet/Dialog 真交互（桌面歌词也测字迹）；运行期零 console error / pageerror。
+ * 没有 Chromium 时**判 FAIL**、不静默跳过（CI 里跳过的守卫等于没有守卫）；判据是能不能真跑起来，不是配置里写着有。
+ * 浏览器按 `PLAYWRIGHT_CHROMIUM_EXECUTABLE` → playwright 自带 → 系统 Chrome → 系统 Edge 的顺序找。
+ * 被测的是 build:web 的真实 CSS 与 esbuild 打包的生产组件；不替代真实 WebView2 的在线取词取证，真窗验证另行记录。
  */
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
@@ -46,25 +29,22 @@ export const GUARD_DIR = ".tmp/browser-guard";
 export const FIXTURE_LRC = ["[00:00.00]第一行歌词守卫", "[00:03.00]第二行歌词守卫"].join("\n");
 
 /**
- * R46 竖排重设计的夹具。
- *
- * - `R46_MIXED_LRC`：**中英混排**（CJK + 拉丁 + 数字 + 空格）。Unicode 默认竖排方向下 CJK 直立、
- *   拉丁旋转，这条夹具是判定"到底直立还是旋转"的唯一来源；
- * - `R46_LONG_LRC`：一行刻意很长（远超一列能装下的字数），用来量"折成多列 + 沿书写方向滚动"。
+ * 竖排重设计的夹具：`R46_MIXED_LRC` 中英混排（CJK + 拉丁 + 数字 + 空格）——Unicode 默认竖排方向下 CJK 直立、拉丁旋转，
+ * 它是判定「到底直立还是旋转」的唯一来源；
+ * `R46_LONG_LRC` 一行刻意很长（远超一列能装下的字数），用来量「折成多列 + 沿书写方向滚动」。
  */
 export const R46_MIXED_LRC = ["[00:00.00]第一行歌词 2024 hey", "[00:03.00]第二行歌词 guard test line"].join("\n");
 export const R46_LONG_LRC = ["[00:00.00]这一行被刻意写得很长 hello world 2024 混排 ABCdef 0123456789 再补几个字", "[00:03.00]第二行"].join("\n");
 
-/** R61 竖版译文夹具：同一时间戳的第二行会被适配层并成 `translatedLyric`（相邻第二列、字号略小）。 */
+/** 竖版译文夹具：同一时间戳的第二行会被适配层并成 `translatedLyric`（相邻第二列、字号略小）。 */
 export const R61_TRANSLATION_LRC = ["[00:00.00]第一行歌词守卫", "[00:00.00]译文与原文同时刻", "[00:03.00]第二行歌词守卫"].join("\n");
 
 /**
- * R45A3 的库列表分页夹具（脚本与守卫页共用同一份常量，避免两边各写一套数字）。
- *
- * - `total`/`pageSize`：歌单/专辑/搜索的假后端总量与页大小（首屏只该拿到一页）；
- * - `slowKeyword`/`slowDelayMs`：慢关键字（换关键词时用来制造"旧查询迟到"）；
- * - `shortKeyword`/`shortTotal`/`shortPerPage`：短列表（每页 2 首、总共 4 首），
- *   用来量"哨兵一直在视口里也不许自己连拉"。
+ * 库列表分页夹具（脚本与守卫页共用同一份常量，避免两边各写一套数字）。
+ * `total`/`pageSize`：歌单/专辑/搜索的假后端总量与页大小（首屏只该拿到一页）；
+ * `slowKeyword`/`slowDelayMs`：慢关键字（换关键词时用来制造「旧查询迟到」）；
+ * `shortKeyword`/`shortTotal`/`shortPerPage`：短列表（每页 2 首、总共 4 首），
+ * 用来量「哨兵一直在视口里也不许自己连拉」。
  */
 export const PAGINATION_FIXTURE = Object.freeze({
   total: 120,
@@ -77,7 +57,7 @@ export const PAGINATION_FIXTURE = Object.freeze({
 });
 
 /**
- * R64 的恢复夹具：队列记录 + 保存的进度（时长 12 秒与假音频一致，5 秒处离结尾还有 7 秒）。
+ * 恢复夹具：队列记录 + 保存的进度（时长 12 秒与假音频一致，5 秒处离结尾还有 7 秒）。
  * 写进夹具的 settings 后端再重载，走的就是真实启动恢复那条路。
  */
 export const RESUME_QUEUE = Object.freeze({
@@ -144,32 +124,32 @@ const songs = Array.from({ length: 36 }, (_, index) => ({
 let desktopConfig = { ...DEFAULT_LYRICS_CONFIG };
 let desktopRevision = 0;
 /**
- * R59：任务栏能力（宿主回报的 \`taskbar.supported\`）。
+ * 任务栏能力来自宿主回报的「taskbar.supported」。
  *
- * 守卫里可以切换它，用来验"非 Windows 不渲染那张卡"：能力只能来自宿主查询，
+ * 守卫里可以切换它，用来验「非 Windows 不渲染那张卡」：能力只能来自宿主查询，
  * 页面里不许自己判断平台。
  */
 let taskbarSupported = false;
 const taskbarStatus = () => ({ supported: taskbarSupported, attached: false, reason: taskbarSupported ? "disabled" : "unsupported" });
 /**
- * R50：普通 settings 文档（settings:get / settings:set 的夹具后端）。
+ * 普通 settings 文档（settings:get / settings:set 的夹具后端）。
  *
- * 存在 localStorage 里是为了"重载后仍然保留"那一项：真的重新加载页面之后，夹具后端剩下什么
- * 就取决于这里——扫描用的模块内存会被重建，localStorage 不会。
+ * 存在 localStorage 里是为了「重载后仍然保留」那一项：真的重新加载页面之后，
+ * 夹具后端剩下什么就取决于这里——扫描用的模块内存会被重建，localStorage 不会。
  */
 let settingsData = (() => {
   try { return JSON.parse(localStorage.getItem("guard-settings") || "{}") || {}; } catch { return {}; }
 })();
 const persistSettings = () => localStorage.setItem("guard-settings", JSON.stringify(settingsData));
-/** R50：每次 settings:set 的补丁与时刻（"播放器歌词走的是普通 settings 键"按它判）。 */
+/** settings:set 的补丁与时刻（「播放器歌词走的是普通 settings 键」按它判）。 */
 const settingsWrites = [];
-/** R50：settings:set 的夹具行为（拒绝几次）——写盘失败要回滚，这一项得能造出来。 */
+/** settings:set 的夹具行为（拒绝几次）——写盘失败要回滚，这一项得能造出来。 */
 let settingsSetPlan = { failTimes: 0 };
 /**
- * R56：运行日志夹具（core_read_run_log 的返回）。
+ * 运行日志夹具（core_read_run_log 的返回）。
  *
  * 四条覆盖四档级别 + 一条带假 token 的行：界面必须显示打码后的星号
- * （宿主侧已脱敏，渲染层再兜一层——守卫按"DOM 里搜不到那串"判）。
+ * （宿主侧已脱敏，渲染层再兜一层——守卫按「DOM 里搜不到那串」判）。
  */
 const GUARD_RUN_LOG_SECRET = "guardsecret123456";
 const guardRunLogEntries = () => [
@@ -182,13 +162,13 @@ let runLogPlan = { failTimes: 0, mode: "entries" };
 const runLogReads = [];
 const runLogScopes = [];
 let dragCalls = 0;
-/** R45B：官方 startResizeDragging 的方向记录（缩放手柄"真的调了官方 API"按它判）。 */
+/** 官方 startResizeDragging 的方向记录（缩放手柄「真的调了官方 API」按它判）。 */
 const resizeCalls = [];
-/** R45B：每次 core_lyrics_configure 的补丁（窗口尺寸保存与"锁定后不保存"按它判）。 */
+/** 每次 core_lyrics_configure 的补丁（窗口尺寸保存与「锁定后不保存」按它判）。 */
 const configureCalls = [];
 /**
- * R51：设置弹出窗的三条命令。歌词窗那一侧只该出现 open（锚点 = 齿轮矩形），
- * 另两条只有弹出窗自己会发——这里一并记下来，免得"谁发的"变成猜的。
+ * 设置弹出窗的三条命令。歌词窗那一侧只该出现 open（锚点 = 齿轮矩形），
+ * 另两条只有弹出窗自己会发——这里一并记下来，免得「谁发的」变成猜的。
  */
 const settingsPopupOpens = [];
 const settingsPopupResizes = [];
@@ -198,24 +178,22 @@ const mediaActions = [];
 let lyricsProgressCalls = 0;
 /** 歌词页上报的解锁区（null = 没有解锁按钮）。 */
 let unlockZones = [];
-/** R45C：core_lyrics_toggle 的请求次数与每次的意图（"一次点击只发一次"按它判）。 */
+/** core_lyrics_toggle 的请求次数与每次的意图（「一次点击只发一次」按它判）。 */
 const lyricsToggles = [];
 /** 歌词窗当前是否真的开着（configure 回执按它报，免得"开着时换模式"被误判成关）。 */
 let desktopVisible = false;
 /**
- * R45C：每一次 core_lyrics_toggle 的时间戳与当时的夹具延迟。
- *
- * 为什么要时间戳：简报点名"快速双击要发生在**第一次回执之前**"——两枚点击都落在
- * 夹具的延迟窗口里，这条记录才是证据（光有点击次数证明不了"回执还没回来"）。
+ * 每一次 core_lyrics_toggle 的时间戳与当时的夹具延迟：快速双击必须发生在第一次回执之前，
+ * 两枚点击都落在夹具的延迟窗口里，这条记录才是证据（光有点击次数证明不了回执还没回来）。
  */
 const toggleLog = [];
 /**
- * R45C：开关夹具的行为（延迟多久回执 / 拒绝几次）。
- * failTimes 递减到 0 之后恢复正常——"被拒绝一次再重试成功"就是靠它造的。
+ * 开关夹具的行为（延迟多久回执 / 拒绝几次）。
+ * failTimes 递减到 0 之后恢复正常——「被拒绝一次再重试成功」就是靠它造的。
  */
 let togglePlan = { delayMs: 0, failTimes: 0 };
 /**
- * R45A3：库列表分页的夹具。三件事必须能在真浏览器里量到：
+ * 库列表分页的夹具。三件事必须能在真浏览器里量到：
  * - 一页只取一次（每次 core_call 的频道/页号记进 libraryCalls）；
  * - 首屏不是全部（歌单/专辑 120 首、每页 50）；
  * - 失败可重试、换关键词丢旧响应、短列表不自动连拉。
@@ -231,7 +209,7 @@ const GUARD_PLAYLISTS = [
   { id: "PL-REPEAT", name: "重复页守卫歌单", songCount: 50, kind: "collected", coverUrl: "https://music.dbankcdn.cn/guard-cover-cool.png" },
 ];
 /**
- * R62：侧栏歌单的四档夹具（查询串给）：默认两张、many（24 张，撑出滚动）、
+ * 侧栏歌单的四档夹具（查询串给）：默认两张、many（24 张，撑出滚动）、
  * empty（真空）、error（第一次失败，点「重试」才成功）、slow（4 秒才回，留住骨架那一帧）。
  */
 const playlistsMode = new URLSearchParams(location.search).get("playlists") ?? "fixture";
@@ -273,8 +251,8 @@ function pagedAnswer(channel, payload, prefix, options) {
   };
 }
 /**
- * R65：本地曲库夹具（查询串给）：默认三条（第二条带封面、第三条的文件已不在）、empty（一首都没有）。
- * 回执照真命令的契约只给 id 与元数据；移除之后回的是"整库快照"，所以这张表自己记住剩下什么。
+ * 本地曲库夹具（查询串给）：默认三条（第二条带封面、第三条的文件已不在）、empty（一首都没有）。
+ * 回执照真命令的契约只给 id 与元数据；移除之后回的是「整库快照」，所以这张表自己记住剩下什么。
  */
 const localMode = new URLSearchParams(location.search).get("local") ?? "fixture";
 const localFixture = () => [
@@ -333,8 +311,7 @@ mockIPC(async (command, args) => {
       }
       case "library:playlist-detail": {
         /**
-         * R45A3 复审：这条**不再**由夹具自己切片——它走**真协议层**（src/protocols/music.mjs），
-         * 上游是"永远忽略 start/limit、每次回整张 120 首"的假服务端（真接口的实测行为）。
+         * 这条不由夹具自己切片，走真协议层（src/protocols/music.mjs）；上游是「永远忽略 start/limit、每次回整张 120 首」的假服务端（真接口实测）。
          * 于是本地切片、hasMore、整份只取一次这些结论只可能来自被测代码本身。
          */
         const page = Math.max(1, Number(args.payload?.page ?? 1) || 1);
@@ -427,7 +404,7 @@ mockIPC(async (command, args) => {
     settingsPopupCloses.push(Math.round(performance.now()));
     return { open: false };
   }
-  /** R56：日志文件的夹具（失败、空文件、正常三种都由 runLogPlan 造）。 */
+  /** 日志文件的夹具（失败、空文件、正常三种都由 runLogPlan 造）。 */
   if (command === "core_read_run_log") {
     runLogReads.push(Math.round(performance.now()));
     runLogScopes.push(args?.scope ?? null);
@@ -444,11 +421,11 @@ const runtime = getPlayerRuntime();
 function Guard() {
   const [desktop, setDesktop] = useState(false);
   /**
-   * R45C：?surface=no-lyrics 挂的是**不带 lyrics binding** 的播放栏 + 沉浸页。
+   * ?surface=no-lyrics 挂的是不带 lyrics binding 的播放栏 + 沉浸页。
    *
    * 为什么另起一页而不是塞进主页面：LibraryShell 永远会造一份 binding（那是它的职责），
-   * 而这一项要证的正是"没有 binding 时组件不崩、也不出现按了没反应的死按钮"——
-   * 只有一个**真的不传** lyrics 的挂载点才量得到。
+   * 而这一项要证的正是「没有 binding 时组件不崩、也不出现按了没反应的死按钮」——
+   * 只有一个真的不传 lyrics 的挂载点才量得到。
    */
   const surface = new URLSearchParams(location.search).get("surface");
   const live = useSyncExternalStore(
@@ -463,8 +440,8 @@ function Guard() {
       nextTrack: () => runtime.player.next(),
       prepareRepeatedQueue: () => runtime.player.playQueue([songs[0], songs[0]], 0),
       /**
-       * R54：只把队列摆好、**不播**（恢复队列的样子）。音频一次都没装载，所以总时长只能来自
-       * 条目元数据——正是"底栏不该显示「—」"那条路径。seconds 为 null 的条目没有时长字段。
+       * 只把队列摆好、不播（恢复队列的样子）。音频一次都没装载，所以总时长只能来自
+       * 条目元数据——正是「底栏不该显示占位横线」那条路径。seconds 为 null 的条目没有时长字段。
        */
       queueWithTrackDuration(seconds) {
         const song = { id: "meta-" + (seconds === null ? "none" : seconds), name: "元数据时长曲目", artists: "守卫艺人" };
@@ -479,8 +456,8 @@ function Guard() {
       },
       setLyrics: (status) => runtime.player.setLyrics([], status),
       /**
-       * R46：换成任意 LRC 文本（竖排的混排/长行几何需要中英混排的夹具）。
-       * 走的仍是**真适配层** parseAmllLyrics，不手搓 LyricLine——否则量的就不是产品路径。
+       * 换成任意 LRC 文本（竖排的混排/长行几何需要中英混排的夹具）。
+       * 走的仍是真适配层 parseAmllLyrics，不手搓 LyricLine——否则量的就不是产品路径。
        */
       async setLrc(text) {
         const { parseAmllLyrics } = await import("../../src/renderer/features/lyrics/amll-adapter.ts");
@@ -516,27 +493,27 @@ function Guard() {
       resizeCalls: () => resizeCalls.slice(),
       configureCalls: () => configureCalls.map((patch) => ({ ...patch })),
       resetConfigureCalls: () => { configureCalls.length = 0; },
-      /** R51：歌词窗发出的打开请求（锚点矩形），以及它自己收到的尺寸/关闭（不该有）。 */
+      /** 歌词窗发出的打开请求（锚点矩形），以及它自己收到的尺寸/关闭（不该有）。 */
       settingsPopupCalls: () => settingsPopupOpens.map((anchor) => ({ ...anchor })),
       settingsPopupResizes: () => settingsPopupResizes.slice(),
       settingsPopupCloses: () => settingsPopupCloses.slice(),
       resetSettingsPopupCalls: () => { settingsPopupOpens.length = 0; settingsPopupResizes.length = 0; settingsPopupCloses.length = 0; },
       mediaActions: () => mediaActions.slice(),
       lyricsToggles: () => lyricsToggles.slice(),
-      /** R45C：每次开关请求的时间戳（"第二次点击发生在第一次回执之前"照它判）。 */
+      /** 每次开关请求的时间戳（「第二次点击发生在第一次回执之前」照它判）。 */
       toggleLog: () => toggleLog.map((entry) => ({ ...entry })),
-      /** R45C：改开关夹具（延迟多久回执、拒绝几次）。 */
+      /** 改开关夹具（延迟多久回执、拒绝几次）。 */
       setTogglePlan: (patch) => { togglePlan = { ...togglePlan, ...(patch ?? {}) }; },
       resetLyricsToggles: () => { lyricsToggles.length = 0; toggleLog.length = 0; },
-      /** R45A3：库列表分页的调用记录（频道/页号/页大小/关键字），"一页只取一次"按它判。 */
+      /** 库列表分页的调用记录（频道/页号/页大小/关键字），「一页只取一次」按它判。 */
       libraryCalls: () => libraryCalls.slice(),
       resetLibraryCalls: () => { libraryCalls.length = 0; },
-      /** R45A3 复审：**假上游**（每次都回整张歌单）的请求记录——"整份只取一次"按它判。 */
+      /** 假上游（每次都回整张歌单）的请求记录——「整份只取一次」按它判。 */
       playlistFetches: () => playlistProbe.fetches(),
       resetPlaylistFetches: () => { playlistProbe.reset(); },
-      /** R62：侧栏歌单列表取了几次（"只取一次并缓存"按它判）。 */
+      /** 侧栏歌单列表取了几次（「只取一次并缓存」按它判）。 */
       playlistListCalls: () => playlistListCalls.slice(),
-      /** R65：本地曲库夹具的调用记录与当前整库（移除之后少了哪一行按它判）。 */
+      /** 本地曲库夹具的调用记录与当前整库（移除之后少了哪一行按它判）。 */
       localRemoveCalls: () => localRemoveCalls.map((entry) => ({ ...entry })),
       localImportCalls: () => localImportCalls.map((entry) => ({ ...entry })),
       localTracks: () => localTracks.map((track) => ({ ...track })),
@@ -545,9 +522,9 @@ function Guard() {
       pause: () => runtime.player.pause(),
       desktopConfig: () => desktopConfig,
       /**
-       * R59：切换任务栏能力回报（true = Windows）。
+       * 切换任务栏能力回报（true = Windows）。
        *
-       * 必须经**真实广播**回来：能力是宿主状态的一部分，设置页读的是 lyrics:state 那一份，
+       * 必须经真实广播回来：能力是宿主状态的一部分，设置页读的是 lyrics:state 那一份，
        * 直接调命令不会更新桥（那样量到的就不是产品路径）。
        */
       async setTaskbarSupported(value) {
@@ -556,25 +533,25 @@ function Guard() {
           config: desktopConfig, revision: desktopRevision, visible: desktopVisible, taskbar: taskbarStatus(),
         }});
       },
-      /** R50：settings 夹具后端（播放器歌词那一份）。 */
+      /** settings 夹具后端（播放器歌词那一份）。 */
       settingsData: () => JSON.parse(JSON.stringify(settingsData)),
-      /** R50：每次 settings:set 的补丁（"播放器歌词是普通键"按它判）。 */
+      /** 每次 settings:set 的补丁（「播放器歌词是普通键」按它判）。 */
       settingsWrites: () => settingsWrites.map((entry) => JSON.parse(JSON.stringify(entry))),
-      /** R50：把 settings 夹具清空（含 localStorage——重载后不该被上一项污染）。 */
+      /** 把 settings 夹具清空（含 localStorage——重载后不该被上一项污染）。 */
       resetSettings: () => {
         settingsData = {};
         settingsWrites.length = 0;
         settingsSetPlan = { failTimes: 0 };
         try { localStorage.removeItem("guard-settings"); } catch {}
       },
-      /** R50：让接下来 N 次 settings:set 被拒绝（写盘失败 → 回滚）。 */
+      /** 让接下来 N 次 settings:set 被拒绝（写盘失败 → 回滚）。 */
       setSettingsPlan: (patch) => { settingsSetPlan = { ...settingsSetPlan, ...(patch ?? {}) }; },
-      /** R56：日志夹具（mode=entries|empty，failTimes）与读取次数。 */
+      /** 日志夹具（mode=entries|empty，failTimes）与读取次数。 */
       setRunLogPlan: (patch) => { runLogPlan = { ...runLogPlan, ...(patch ?? {}) }; },
       runLogReads: () => runLogReads.slice(),
       runLogScopes: () => runLogScopes.slice(),
       resetRunLog: () => { runLogPlan = { failTimes: 0, mode: "entries" }; runLogReads.length = 0; runLogScopes.length = 0; },
-      /** R56：经**真实广播通道**播一条 app:notice（提示条目的来源是这条广播）。 */
+      /** 经真实广播通道播一条 app:notice（提示条目的来源是这条广播）。 */
       async emitNotice(text) {
         await emit("core:event", { channel: "app:notice", payload: { text } });
       },
@@ -606,8 +583,8 @@ function Guard() {
         await emit("core:event", { channel: "lyrics:progress", payload: { timeMs: 700, playing, seekGeneration: 100 } });
       },
       /**
-       * R58：任意时刻 + 任意播放态的进度（逐字遮罩只在 playing 为真时自行前进，
-       * 所以夹具必须能把"同一行、两个时刻、两种播放态"分别造出来）。
+       * 任意时刻 + 任意播放态的进度（逐字遮罩只在 playing 为真时自行前进，
+       * 所以夹具必须能把「同一行、两个时刻、两种播放态」分别造出来）。
        */
       async desktopProgress(progress) {
         const next = progress !== null && typeof progress === "object" ? progress : {};
@@ -642,7 +619,7 @@ function Guard() {
   );
 }
 
-// R63：与四扇自有窗的入口同一条接线（右键默认菜单被吃掉，可编辑元素例外）
+// 与四扇自有窗的入口同一条接线（右键默认菜单被吃掉，可编辑元素例外）
 installContextMenuGuard();
 createRoot(document.getElementById("root")).render(<StrictMode><Guard /></StrictMode>);
 `;
@@ -667,23 +644,18 @@ export function harnessHtml(hasCss) {
 }
 
 /**
- * R45A1（复审）：启动三态的**真浏览器**验收页（独立入口，挂的是真 `App`）。
- *
- * 为什么必须另开一页：主守卫页挂的是 `LibraryShell`（登录之后那一块），它根本不经过
- * `startupViewOf` 那三道门。而这一项要证的正是"**第一帧画什么**"——只有真 `App` +
- * 真 `useAuthGate` + 真 IPC 边界才能把它量出来。
- *
+ * 启动三态的**真浏览器**验收页（独立入口，挂的是真 `App`）。
+ * 必须另开一页的原因：主守卫页挂的是 `LibraryShell`（登录之后那一块），它根本不经过 `startupViewOf` 那三道门，
+ * 而这里要证的是「第一帧画什么」——只有真 `App` + 真 `useAuthGate` + 真 IPC 边界才能量出来。
  * IPC 只给门禁需要的那几条；三种模式（`?startup=fail` / `?startup=logged-in` / `?startup=restoring`）：
- * - `fail`：第一次 `auth:get-status` **故意失败**（延迟 400ms 再抛，让"还不知道"那一屏
- *   真的出现在屏幕上），第二次（用户点「重新检查登录状态」）才答 `loggedIn:false`
- *   → 登录页 + 二维码自动发起**恰好一次**；
- * - `logged-in`：第一次就答 `loggedIn:true` → app-shell，且**一张码都不建**。
- * - `restoring`（R53）：`auth:get-status` 答 `{loggedIn:false, restoring:true}`，测试再用
- *   `__startupGuard.emitStatus` 播一条"已登录"当作恢复结论 → 全程不许画登录页、不许建码。
- *
- * 计数（`window.__startupGuard`）是断言的核心：`auth:get-status` 次数证明"重试真的重发了"，
- * `auth:qr-start` 次数证明"二维码只在确定未登录之后才建、且只建一次"，
- * `auth:cancel-qr` 次数证明"门禁收场时真的停了一次轮询"（R53）。
+ * - `fail`：第一次 `auth:get-status` **故意失败**（延迟 400ms 再抛，让「还不知道」那一屏真的出现在屏幕上），
+ *   第二次（用户点「重新检查登录状态」）才答 `loggedIn:false` → 登录页 + 二维码自动发起**恰好一次**；
+ * - `logged-in`：第一次就答 `loggedIn:true` → app-shell，且**一张码都不建**；
+ * - `restoring`：`auth:get-status` 答 `{loggedIn:false, restoring:true}`，测试再用 `__startupGuard.emitStatus`
+ *   播一条「已登录」当作恢复结论 → 全程不许画登录页、不许建码。
+ * 计数（`window.__startupGuard`）是断言的核心：`auth:get-status` 次数证明「重试真的重发了」，
+ * `auth:qr-start` 次数证明「二维码只在确定未登录之后才建、且只建一次」，
+ * `auth:cancel-qr` 次数证明「门禁收场时真的停了一次轮询」。
  */
 export function startupHarnessSource() {
   return `import { StrictMode } from "react";
@@ -766,13 +738,10 @@ export function startupHarnessHtml() {
 }
 
 /**
- * R57：左下角账号区的**真浏览器**验收页（独立入口，挂的是真 `App`）。
- *
- * 四种状态由查询串给（`?variant=`）：`profile`（有名字+能加载的头像）、`empty`（老会话，
- * 载荷里没有 profile）、`vip`（会员 + 到期日 + **坏头像**，同时验首字回退）、
- * `collapsed`（`?variant=profile&collapsed=1`，侧栏窄轨）。
- *
- * 夹具里的名字是编的长名字：它必须长到被 `truncate` 切掉，否则"悬停看全名"这件事测不出来。
+ * 左下角账号区的**真浏览器**验收页（独立入口，挂的是真 `App`）。
+ * 四种状态由查询串给（`?variant=`）：`profile`（有名字 + 能加载的头像）、`empty`（老会话，载荷里没有 profile）、
+ * `vip`（会员 + 到期日 + **坏头像**，同时验首字回退）、`collapsed`（`?variant=profile&collapsed=1`，侧栏窄轨）。
+ * 夹具里的名字是编的长名字：它必须长到被 `truncate` 切掉，否则「悬停看全名」这件事测不出来。
  */
 export function accountHarnessSource() {
   return `import { StrictMode } from "react";
@@ -841,10 +810,9 @@ export function accountHarnessHtml() {
 }
 
 /**
- * R57：左下角账号区四态的验收（有资料 / 无资料 / 有会员到期 / 窄轨只剩头像）。
- *
- * 判据只看**DOM 事实**：有没有头像 `<img>`、是不是首字兜底、名字是否真被截断、
- * 悬停是否给出全名、会员徽标文案、窄轨里除了头像还剩什么。四种状态各留一张截图。
+ * 左下角账号区四态的验收（有资料 / 无资料 / 有会员到期 / 窄轨只剩头像）。
+ * 判据只看 **DOM 事实**：有没有头像 `<img>`、是不是首字兜底、名字是否真被截断、悬停是否给出全名、
+ * 会员徽标文案、窄轨里除了头像还剩什么。四种状态各留一张截图。
  */
 export async function checkAccountArea(page, port, guardDir, add) {
   const area = '[data-testid="account-area"]';
@@ -976,25 +944,20 @@ export async function checkAccountArea(page, port, guardDir, add) {
 }
 
 /**
- * R45A1（复审）：启动三态的**真浏览器**行为验收。
- *
- * 钉六件事：
-
+ * 启动三态的**真浏览器**行为验收。钉六件事：
  * 1. 首帧（`checking`，状态查询还没落地）**没有**登录页/二维码/任何按钮；
  * 2. 查询失败之后仍是中性启动屏：没有 LoginGate/二维码，但原因、重试、网页登录都在；
  * 3. 点「重新检查登录状态」= **真的再发一次 `auth:get-status`**（计数 +1），
  *    并且答案是未登录之后才出现登录页、二维码**恰好建一次**；
- * 4. 已登录的会话：直接 app-shell，登录页出现 0 次、二维码 0 次。
+ * 4. 已登录的会话：直接 app-shell，登录页出现 0 次、二维码 0 次；
  * 5. 恢复中（`restoring:true`）同样是中性启动屏：6 次 DOM 采样里登录页/二维码/壳都是 0、
- *    `auth:qr-start` 0 次；"已登录"广播到达后直接进壳；
+ *    `auth:qr-start` 0 次；「已登录」广播到达后直接进壳；
  * 6. 门禁从登录页切到主界面时发**一次** `auth:cancel-qr`（停掉轮询，不靠延时）。
  */
 export async function checkStartupGate(page, port, guardDir, add) {
   /**
-   * 登录页/二维码的节点数（**复审 R45A1 的判据**）：
-   * 二维码容器、画布、遮蔽层、以及那条标题文案——这些在 `checking` 里一个都不许有。
-   *
-   * 「在网页中打开登录」**不算**：失败档上它必须存在（那是两条出路之一，brief 点名要的）。
+   * 登录页/二维码的节点数：二维码容器、画布、遮蔽层、以及那条标题文案——这些在 `checking` 里一个都不许有。
+   * 「在网页中打开登录」**不算**：失败档上它必须存在（那是两条出路之一）。
    */
   const loginNodes = () =>
     page.evaluate(
@@ -1144,14 +1107,12 @@ export async function checkStartupGate(page, port, guardDir, add) {
 }
 
 /**
- * R45C：播放栏 / 沉浸页的快捷歌词开关与沉浸页收起（真组件 + 真 IPC 边界的**行为**验收）。
- *
- * 钉 brief C 节 + fix1 的六件事（都不看结构，只看行为）：
+ * 播放栏 / 沉浸页的快捷歌词开关与沉浸页收起（真组件 + 真 IPC 边界的**行为**验收）。
+ * 钉六件事（都不看结构，只看行为）：
  * 1. 歌词窗关着时点一下能开：恰好一条 `core_lyrics_toggle(true)`；
- * 2. **回执被延迟**时快速双击：第二次点击必须取反（`true` → `false`），不是再发一个 `true`。
- *    两条请求的时间戳都落在夹具延迟窗口里，这就是"第二次点击发生在第一次回执之前"的证据
- *    （原来那版 150ms 间隔的连点证明不了这件事——回执早就回来了）；
- * 3. 两种模式：任务栏模式的标签说"任务栏歌词"，点击照样只发一条；
+ * 2. **回执被延迟**时快速双击：第二次点击必须取反（`true` → `false`），不是再发一个 `true`；
+ *    两条请求的时间戳都落在夹具延迟窗口里，这就是「第二次点击发生在第一次回执之前」的证据；
+ * 3. 两种模式：任务栏模式的标签说「任务栏歌词」，点击照样只发一条；
  * 4. 开关被拒绝：**发起面**出现一句可操作的话（原因 + 下一步）与「重试」/「知道了」，
  *    没有第二条 toast；重试之后恢复（窗口真的开起来）；
  * 5. 沉浸页那枚开关失败：提示在沉浸页，播放栏不重复印同一句；
@@ -1165,7 +1126,7 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
   await page.evaluate(() => { document.documentElement.className = "light"; });
   await page.evaluate(() => window.__guard.ready());
   await page.waitForFunction(() => window.__guard.snapshot().lyrics.status === "ready" && window.__guard.snapshot().durationMs > 0);
-  // R46 证据：播放栏的真实截图（传输组 模式→上一首→播放→下一首，歌词开关在尾部工具区）
+  // 证据：播放栏的真实截图（传输组 模式→上一首→播放→下一首，歌词开关在尾部工具区）
   const barBox = await page.getByTestId("player-bar").boundingBox();
   if (barBox) await page.screenshot({ path: path.join(guardDir, "r46-player-bar-order.png"), clip: barBox });
 
@@ -1309,8 +1270,7 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
     JSON.stringify(closeGeometry));
 
   /**
-   * R54：收起从"顶部中央一小块"扩成**顶部一整行**：宽度≈舞台宽度、箭头居中、
-   * 行高只占顶部一条带（下面一点仍是歌词/封面，不被这一行挡住）。
+   * 收起入口是**顶部一整行**：宽度≈舞台宽度、箭头居中，行高只占顶部一条带（下面一点仍是歌词/封面，不被这一行挡住）。
    */
   const closeRow = await stage.evaluate((element) => {
     const row = element.querySelector('[data-testid="playback-stage-close-row"]');
@@ -1345,11 +1305,10 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
     JSON.stringify(closeRow));
 
   /**
-   * R50（brief 第 1 项）：传输组只剩 上一首 → 播放 → 下一首，歌词开关在**下方工具行**尾部。
-   *
-   * 量几何而不是标记：开关的中心既不许落在"播放与下一首之间"，也不许落在传输行的高度带里；
-   * 它自己约 32px（与音量/模式同档），并且与音量条/播放模式同一条水平线。
-   * 「播放/下一首相邻」用"这段横带里除了它们自己没有任何其它可见按钮"来判。
+   * 沉浸页的传输组只有 上一首 → 播放 → 下一首，歌词开关在**下方工具行**尾部。
+   * 量几何而不是标记：开关的中心既不许落在「播放与下一首之间」，也不许落在传输行的高度带里；
+   * 它自己约 32px（与音量/模式同档），并且与音量条/播放模式同一条水平线；
+   * 「播放/下一首相邻」用「这段横带里除了它们自己没有任何其它可见按钮」来判。
    */
   const stageToggleGeometry = await stage.evaluate((element) => {
     const toggle = element.querySelector('[data-testid="stage-lyrics-toggle"]');
@@ -1421,7 +1380,7 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
     const content = document.querySelector('[data-slot="sheet-content"]');
     const button = document.querySelector('[data-testid="playback-stage-close-row"]');
     // 收起入口是**整行**（横跨舞台），Sheet 是右侧抽屉，必然与行本身相交；
-    // 这里量的是"箭头这处可见入口没被上层盖住"，与 R45C 的意图一致。
+    // 这里量的是「箭头这处可见入口没被上层盖住」。
     const arrow = button?.querySelector("svg");
     if (!content || !button || !arrow) return { ok: false };
     const s = content.getBoundingClientRect();
@@ -1441,7 +1400,7 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
   await page.keyboard.press("Escape");
   add("playback-stage-escape-closes", await stage.count() === 0, "没有上层弹窗时 ESC 关闭舞台");
 
-  // R54：行内任意位置都能收起（点在行的左端，而不是箭头所在的中线上）
+  // 行内任意位置都能收起（点在行的左端，而不是箭头所在的中线上）
   await page.getByRole("button", { name: "歌词", exact: true }).click();
   await stage.waitFor();
   await page.waitForTimeout(600);
@@ -1450,7 +1409,7 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
   add("r54-stage-close-row-anywhere", closedByRow, "行的左端（远离箭头）点击同样收起沉浸页");
 
   /**
-   * R54：底栏总时长。队列摆好但一次都没播（音频没装载）时，读数要来自条目元数据秒数；
+   * 底栏总时长：队列摆好但一次都没播（音频没装载）时，读数要来自条目元数据秒数；
    * 条目也没有时长字段才是「—」，此时进度条保持禁用（范围未知）。
    */
   await page.evaluate(() => window.__guard.queueWithTrackDuration(184));
@@ -1624,10 +1583,9 @@ export async function checkLyricsTargetMenus(browser, port, guardDir, add) {
 }
 
 /**
- * R45C：没有 `lyrics` binding 时，播放栏与沉浸页都不出现死按钮、也不崩。
- *
- * 挂在另一份**真的不传 lyrics** 的挂载点上（`?surface=no-lyrics`），因为 `LibraryShell`
- * 永远会造 binding——在它里面证明不了"没有 binding 会怎样"。
+ * 没有 `lyrics` binding 时，播放栏与沉浸页都不出现死按钮、也不崩。
+ * 必须挂在另一份**真的不传 lyrics** 的挂载点上（`?surface=no-lyrics`），
+ * 因为 `LibraryShell` 永远会造 binding——在它里面证明不了「没有 binding 会怎样」。
  */
 export async function checkNoBindingSurface(page, port, add) {
   await page.setViewportSize({ width: 1280, height: 800 });
@@ -1657,18 +1615,9 @@ export async function checkNoBindingSurface(page, port, add) {
 
 
 /**
- * R45A3（复审）：歌单详情的**真协议边界**夹具说明。
- *
- * 上一版的 browser 夹具自己按 page/pageSize 切片（`pagedAnswer`）——那等于把"服务端已经
- * 替我们分好页"当成事实，协议层的本地切片路径一次都没被跑到。复审后的夹具是**两个东西**：
- *
- * 1. 假上游（`guardPlaylistFetch`）：**永远忽略 `start`/`limit`，每次都回整张 120 首**
- *    （真接口 2026-10-23 的实测行为）；
- * 2. 真协议层（`createMusicApi`，从 `src/protocols/music.mjs` 直接打进来）：归一化 +
- *    "整份响应缓存 + 按页本地切片"全都在浏览器里真的跑。
- *
- * 于是 `library:playlist-detail` 这条 IPC 的载荷进的是**真协议层**，页面拿到的
- * `hasMore`/切片条数只可能来自它；假上游的请求次数（`playlistFetches`）证明"整份只取了一次"。
+ * 歌单详情的**真协议边界**夹具：1. 假上游（`guardPlaylistFetch`）永远忽略 `start`/`limit`，每次回整张 120 首（真接口 2026-10-23 实测）；
+ * 2. 真协议层（`createMusicApi`，从 `src/protocols/music.mjs` 直接打进）：归一化 +「整份响应缓存 + 按页本地切片」都在浏览器里真跑。
+ * 于是 `library:playlist-detail` 的载荷进的是真协议层，页面拿到的 `hasMore`/切片条数只可能来自它；`playlistFetches` 证明整份只取了一次。
  */
 export function protocolPlaylistFixtureSource() {
   return `import { createMusicApi } from "../../src/protocols/music.mjs";
@@ -1823,11 +1772,9 @@ async function textPixels(page, selector, theme, file) {
 }
 
 /**
- * R45B：量「墨色 vs 背景」的亮度差（只统计与"隐藏文字"不同的像素，所以背景不参与）。
- *
- * 为什么要它：桌面歌词窗是**透明窗**，官方组件还带 `mix-blend-mode: plus-lighter`，
- * 所以"字是深的还是浅的"取决于下面是桌面壁纸——截图里只能确定"字与背景差多少"。
- * 于是这一项问的是可读性本身（墨色亮度 vs 背景亮度 ≥ 40），而不是"必须比某条阈值深"。
+ * 量「墨色 vs 背景」的亮度差（只统计与"隐藏文字"不同的像素，所以背景不参与）。
+ * 桌面歌词窗是**透明窗**且带 `mix-blend-mode: plus-lighter`，"字深还是浅"取决于桌面壁纸，截图只能确定"字与背景差多少"；
+ * 所以问的是可读性本身（墨色亮度 vs 背景亮度 ≥ 40），不是"必须比某条阈值深"。
  */
 async function inkContrast(page, selector, file) {
   const box = await stableTextBox(page, selector);
@@ -1907,7 +1854,7 @@ export async function checkDesktopSurface(page, guardDir, add) {
     await page.setViewportSize({ width: 800, height: 128 });
     await page.evaluate(() => window.__guard.configureDesktop({ mode: "desktop", style: "panel", color: "contrast", locked: false }));
     await page.waitForTimeout(700);
-    // R45B：桌面歌词窗是透明窗 + `plus-lighter`，所以可读性看"墨色与背景的亮度差"，不看绝对的深浅
+    // 桌面歌词窗是透明窗 + `plus-lighter`，所以可读性看"墨色与背景的亮度差"，不看绝对的深浅
     const pixels = await inkContrast(page, '[data-testid="lyrics-window"] [class*="lyricMainLine"][class*="active"]', path.join(guardDir, `${theme}-panel-contrast.png`));
     const rawColor = await page.evaluate(() => window.__guard.desktopConfig().color);
     add(`${theme}-panel-contrast-ink`, pixels.changed > 60 && pixels.contrast > 40 && rawColor === "contrast", JSON.stringify({ ...pixels, rawColor }));
@@ -1927,8 +1874,8 @@ export async function checkDesktopSurface(page, guardDir, add) {
 }
 
 /**
- * R58：桌面/任务栏歌词的**行内逐字扫亮**——同一行两个时刻已唱字变多、同一时刻已唱明显浓于未唱；
- * 再把 rAF 摘掉（真窗里=窗没有帧），进度消息仍必须把官方组件从暂停推到播放（这是扫描推进的前提）。
+ * 桌面/任务栏歌词的**行内逐字扫亮**：同一行两个时刻已唱字变多、同一时刻已唱明显浓于未唱；
+ * 再把 rAF 摘掉（真窗里 = 窗没有帧），进度消息仍必须把官方组件从暂停推到播放（这是扫描推进的前提）。
  */
 export async function checkLyricsKaraoke(page, guardDir, add) {
   const activeLine = '[data-testid="lyrics-window"] [class*="lyricMainLine"][class*="active"]';
@@ -2077,7 +2024,7 @@ export async function checkLyricsKaraoke(page, guardDir, add) {
   await runMode("desktop-clean", { ...baseline }, { width: 800, height: 128 }, "light");
   await runMode("desktop-panel", { ...baseline, style: "panel", color: "contrast" }, { width: 800, height: 128 }, "dark");
   await runMode("taskbar-clean", { ...baseline, mode: "taskbar", size: "md" }, { width: 1200, height: 44 }, "light");
-  // 竖版（R61 整体重做）：只记录现状，不断言（逐字/滚动由 checkDesktopInteraction 的 r61-* 判）
+  // 竖版：只记录现状，不断言（逐字/滚动由 checkDesktopInteraction 的 r61-* 判）
   await page.setViewportSize({ width: 260, height: 520 });
   await page.evaluate(() => { document.documentElement.className = "light"; });
   await configure({ ...baseline, layout: "vertical" });
@@ -2110,7 +2057,7 @@ export async function checkLyricsKaraoke(page, guardDir, add) {
 const DESKTOP_BASELINE = {
   mode: "desktop", layout: "horizontal", style: "clean", color: "foreground", customColor: "",
   locked: false, showControls: true, size: "lg", enableBlur: true, enableScale: true, enableSpring: true,
-  // R59：任务栏那一套字段与桌面各存一份（一起归位，免得上一项改过的值漏到下一项）
+  // 任务栏那一套字段与桌面各存一份（一起归位，免得上一项改过的值漏到下一项）
   taskbarSize: "txxl", taskbarColor: "foreground", taskbarCustomColor: "", taskbarKaraoke: true,
 };
 
@@ -2287,15 +2234,13 @@ export async function checkLockedLyricsPointer(browser, port, guardDir, add) {
 }
 
 /**
- * R45B：桌面歌词的**交互**验收（锁定 / 缩放 / 竖排 / 逐字 / 颜色）。
- *
- * 每一项都钉一个"看起来做了、其实没做"的地方：
- * 1. 锁定时图标是 **Lock**（此前反了）、无障碍名称说清"已锁定"、按压态为 true；
+ * 桌面歌词的**交互**验收（锁定 / 缩放 / 竖排 / 逐字 / 颜色）。每一项都钉一个"看起来做了、其实没做"的地方：
+ * 1. 锁定时图标是 **Lock**、无障碍名称说清"已锁定"、按压态为 true；
  * 2. 锁定后窗口里**只剩**解锁按钮，且不悬停时不可见；悬停后可见且真的可点；
  * 3. 解锁后拖动柄/媒体/外观/缩放柄全部回来，媒体动作仍只发一次；
  * 4. 右下角缩放柄调用官方 `startResizeDragging("SouthEast")`（mock 计数），锁定/任务栏时连按钮都不存在；
  * 5. 尺寸稳定 250ms 后保存 DIP 宽高；锁定时不再保存（Rust 那边窗口也不可缩放）；
- * 6. 竖版是**真竖排**：同一列的字符 x 相同、y 严格递增（横排对照则 x 递增）——不是窄窗换行；
+ * 6. 竖版是**真竖排**：同一列字符 x 相同、y 严格递增（横排对照则 x 递增）——不是窄窗换行；
  * 7. 竖版下切到第二行仍是官方组件在排版，当前行整行都在播放器范围内；
  * 8. **最小窗口 240×120**（Rust 里写的下限）里当前行仍整行可读、墨迹真的画在窗口里；
  *    真滚轮往书写方向滚，被裁到窗口外的另一行能滚进来，超大的滚轮被钳住（不会越界滚到屏外）；
@@ -2317,8 +2262,7 @@ export async function checkDesktopInteraction(page, guardDir, add) {
     const playerRect = player?.getBoundingClientRect();
     /**
      * 每个字的**字形框**（`Range` 选中文字本身），不是 span 的盒子：
-     * AMLL 的每个词 span 带 `margin:-1em; padding:1em`，盒子比字形大 2em，
-     * 拿盒子判"是否在窗口内"会把贴着边的一列误判成越界。
+     * AMLL 的每个词 span 带 `margin:-1em; padding:1em`，盒子比字形大 2em，拿盒子判"是否在窗口内"会把贴着边的一列误判成越界。
      */
     const chars = [...(line?.querySelectorAll("span") ?? [])]
       .filter((span) => span.children.length === 0 && (span.textContent ?? "").length === 1)
@@ -2341,15 +2285,13 @@ export async function checkDesktopInteraction(page, guardDir, add) {
       });
     /**
      * 书写模式读**行内容**（竖排真正的落点），也读播放器（横版对照时两者相同）。
-     * R45B fix2：竖排必须写在行内容上——写在播放器上会让官方按 `blockSize` 量出来的
-     * "行高"变成"一行有多少列那么宽"，当前行就被推到窗口外（见 ⑦c）。
+     * 竖排必须写在行内容上——写在播放器上会让官方按 `blockSize` 量出来的"行高"变成"一行有多少列那么宽"，当前行就被推到窗口外（见 ⑦c）。
      */
     const lineStyle = line ? getComputedStyle(line) : null;
     const playerStyle = player ? getComputedStyle(player) : null;
     /**
-     * R46：行盒（官方量高的那个 wrapper）与播放器的纵向关系。
-     * 当前行必须被官方**居中**（wrap 中心 ≈ 播放器中心），且行盒不许比播放器高——
-     * 高出多少，上下就会被 `overflow: hidden` 裁掉多少（这就是 brief 说的"底部剪掉"）。
+     * 行盒（官方量高的那个 wrapper）与播放器的纵向关系：当前行必须被官方**居中**（wrap 中心 ≈ 播放器中心），
+     * 且行盒不许比播放器高——高出多少，上下就会被 `overflow: hidden` 裁掉多少（底部剪掉就是这么来的）。
      */
     const wrapper = line?.closest('[class*="lyricLineWrapper"]');
     const wrapperRect = wrapper?.getBoundingClientRect();
@@ -2535,11 +2477,8 @@ export async function checkDesktopInteraction(page, guardDir, add) {
   await configure({ locked: false });
 
   /**
-   * R61 竖版重做（`VerticalLyricColumn` + `vertical-lyrics.mjs`）：一句一列、字号随窗口宽度、
-   * 长句按演唱进度平移、逐字扫亮、译文第二列。
-   *
-   * 有意整块替换 R45B/R46/fix4 的竖版用例：那些量的是"给 AMLL 播放器打补丁"的行为（行盒折列、
-   * 横向滚动条、RTL 滚动容器）。竖版现在自渲染，选择器与几何判据都换成新组件的 DOM。
+   * 竖版（`VerticalLyricColumn` + `vertical-lyrics.mjs`）：一句一列、字号随窗口宽度、长句按演唱进度平移、逐字扫亮、译文第二列。
+   * 竖版自渲染，所以选择器与几何判据都对着新组件的 DOM，而不是给 AMLL 播放器打补丁（行盒折列、横向滚动条、RTL 滚动容器）。
    */
   const verticalRootSelector = '[data-testid="lyrics-vertical"]';
   /** 竖版几何：当前句每个字素框（Range 选中文字，不含 span 的盒子）、列、平移量、字号、译文/下一句。 */
@@ -2926,15 +2865,10 @@ export async function checkDesktopInteraction(page, guardDir, add) {
 }
 
 /**
- * R51（brief 第二项之一）：桌面歌词窗里**只剩那枚齿轮**——菜单内容不在这扇窗里。
- *
- * 这条**有意替换 R50 的 `checkDesktopLyricsSettings`**（内嵌菜单的"装得下/够得着/锚定齿轮/改得动"
- * 四项）：菜单整段搬到了 `LyricsSettingsPopup.tsx`，那四项跟着搬到 `checkLyricsSettingsPopup`
- * （单独一页、单独一扇窗）。这里只钉两件事：
- *
- * 1. 歌词窗的 DOM 里**没有**菜单内容（旧实现是删掉的，不是藏起来的）；
- * 2. 点齿轮 = 一笔 `core_lyrics_settings_open`，锚点正是齿轮自己的矩形（DIP / CSS 像素），
- *    而且这一下**不改配置**（它是"打开设置"，不是"改一个值"）。
+ * 桌面歌词窗里**只剩那枚齿轮**——菜单内容不在这扇窗里。菜单整段在 `LyricsSettingsPopup.tsx`，
+ * 那四项（装得下/够得着/锚定齿轮/改得动）由 `checkLyricsSettingsPopup`（单独一页、单独一扇窗）覆盖。这里只钉两件事：
+ * 1. 歌词窗的 DOM 里**没有**菜单内容（是压根没渲染，不是藏起来）；
+ * 2. 点齿轮 = 一笔 `core_lyrics_settings_open`，锚点正是齿轮自己的矩形（DIP / CSS 像素），且这一下**不改配置**（它是"打开设置"，不是"改一个值"）。
  */
 export async function checkDesktopLyricsSettings(page, guardDir, add) {
   const desktop = page.getByTestId("lyrics-window");
@@ -3072,13 +3006,9 @@ export function lyricsSettingsHarnessHtml() {
 }
 
 /**
- * R60：设置面板那一页的**真浏览器**验收（气泡形态）。
- *
- * 单独一页、单独一扇窗（`?` 里不带主界面）：这一页挂的就是 `LyricsSettingsPopup`，IPC 只给
- * `core_lyrics_configure` / `core_lyrics_settings_resize` / `core_lyrics_settings_close` 三条。
- * 宿主侧的定位算法在 Rust（`bubble_placement`，纯函数单测）；这里按查询串挑几种它算得出的几何，
- * 只钉页面这一侧真的照着摆：
- *
+ * 设置面板那一页的**真浏览器**验收（气泡形态）：单独一页、单独一扇窗（`?` 里不带主界面），这一页挂的就是 `LyricsSettingsPopup`；
+ * IPC 只给 `core_lyrics_configure` / `core_lyrics_settings_resize` / `core_lyrics_settings_close` 三条；
+ * 宿主侧定位算法在 Rust（`bubble_placement` 纯函数单测），这里按查询串挑几种它算得出的几何，只钉页面这一侧真的照着摆：
  * 1. **面板贴在窗口留边内侧**（`(pad, pad)`），窗口尺寸 = 面板 + 四周留边，面板高度 ≤ 360 且不滚；
  * 2. **箭头指着锚点**：居中 / 左夹紧 / 右夹紧三种偏移下，箭头中心都落在 `pad + arrow` 上；
  * 3. **翻到上方**时面板底边贴留边、箭头在面板下方；
@@ -3089,7 +3019,7 @@ export function lyricsSettingsHarnessHtml() {
  * 8. **色块显示主题下的真实颜色**（未设自定义色时与歌词实际颜色一致）。
  */
 export async function checkLyricsSettingsPopup(page, port, guardDir, add) {
-  /** 五个字号档位 + R50 那九个锚点：缺一个就等于"够不着"。 */
+  /** 五个字号档位 + 那九个锚点：缺一个就等于"够不着"。 */
   const CONTROLS = [
     '[data-testid="lyrics-style-clean"]',
     '[data-testid="lyrics-style-panel"]',
@@ -3346,7 +3276,6 @@ export async function checkLyricsSettingsPopup(page, port, guardDir, add) {
 
   /**
    * ⑨ 截图：浅/深各一张，**箭头指向齿轮**。
-   *
    * 用 `?bubble=roomy`（留边临时放宽到 48）给"齿轮"留出可见的位置——面板与箭头的关系是同一套规则，
    * 只是把窗外那块透明留边画出来，好让白色齿轮框落在箭头正上方。
    */
@@ -3395,7 +3324,7 @@ export async function checkLyricsSettingsPopup(page, port, guardDir, add) {
     JSON.stringify({ targetUnsupported, targetSupported, switched }));
 }
 
-/** R52：走到 设置 → 歌词（外壳里那一条真实路径）。沉浸页开着就先收起。 */
+// 走到 设置 → 歌词（外壳里那一条真实路径）。沉浸页开着就先收起。
 async function openSettingsLyricsPane(page) {
   const stage = page.getByTestId("playback-stage");
   if (await stage.count()) {
@@ -3410,10 +3339,8 @@ async function openSettingsLyricsPane(page) {
 }
 
 /**
- * R46 的逐字着色验收（R52 只把颜色那半删掉，逐字这半原样保留）。
- *
- * 1. 主窗面板同样把行级 LRC 推导成逐字词（`words.length > 1`，一个字一个 span）——
- *    R45B 只接了桌面窗，同一首歌在两个面上差一代；
+ * 逐字着色验收（颜色那半在别处，逐字这半在这里）：
+ * 1. 主窗面板同样把行级 LRC 推导成逐字词（`words.length > 1`，一个字一个 span）——两个面必须是同一代实现；
  * 2. 逐字高亮**真的在动**：同一条当前行在两个播放时刻的像素必须变（不是只有 DOM 里有 span）。
  */
 export async function checkImmersiveKaraoke(page, guardDir, add) {
@@ -3459,18 +3386,13 @@ export async function checkImmersiveKaraoke(page, guardDir, add) {
 }
 
 /**
- * R52：设置页「歌词」只剩**一张**桌面歌词卡，且没有任何外观入口。
- *
- * 判据与桌面歌词设置面同一条：每个控件滚进视口后，命中的必须是它自己（960×600 里不许被裁）。
- * 三件事各钉一处"看起来重构了、其实漏了"的地方：
- * 1. 搬进弹出窗的那些控件**不许留在页面里**（字号/方向/样式/四个效果/播放器歌词颜色）；
- * 2. 设置页**没有「外观设置」入口**：桌面歌词外观只在歌词窗自己的齿轮菜单里改，从这一页
- *    点任何东西都不该发出 `core_lyrics_settings_open`（R52 收尾按用户要求撤掉那条接线）；
- * 3. 任务栏模式下状态只有 Badge + 一句 `taskbarStatusText`，页面里也不会冒出新入口。
+ * 设置页「歌词」只剩**一张**桌面歌词卡，且没有任何外观入口；每个控件滚进视口后命中的必须是它自己（960×600 里不许被裁）。
+ * 钉三处：搬进弹出窗的控件（字号/方向/样式/四个效果/播放器歌词颜色）不许留在页面；点这一页任何东西都不发 `core_lyrics_settings_open`；
+ * 任务栏模式下状态只有 Badge + 一句 `taskbarStatusText`，不冒出新入口。
  */
 export async function checkSettingsPageLyricsCard(page, guardDir, add) {
   const CONTROLS = ["#lyrics-visible", "#lyrics-mode"];
-  /** R52 删掉的那些控件（它们只在 R51 的弹出窗里）。 */
+  /** 只该存在于弹出窗、不许留在页面里的那些控件。 */
   const GONE = [
     "#lyrics-size", "#lyrics-layout", "#lyrics-style",
     "#lyrics-enableBlur", "#lyrics-enableScale", "#lyrics-enableSpring", "#lyrics-showControls",
@@ -3571,14 +3493,9 @@ export async function checkSettingsPageLyricsCard(page, guardDir, add) {
 }
 
 /**
- * R59：任务栏歌词的**独立外观**（颜色 / 逐字高亮 / 字号）——设置在设置页，与桌面歌词不共用。
- *
- * 五项各钉一处"看起来做了、其实没做"的地方：
- * 1. 能力回报为假（非 Windows）时那张卡**不渲染**；能力来自宿主查询，页面不判断平台；
- * 2. 卡片里的控件写进去的只有 `taskbar*` 四个键（不碰桌面字段），且每次一条窄命令；
- * 3. 任务栏模式的歌词窗按任务栏颜色/字号渲染：令牌换档 ⇒ 计算出的色值真的变，档位换档 ⇒ 字号真的变；
- * 4. 逐字关闭 ⇒ 不再有逐字 span（行级 ⇒ 官方按行渐变），但仍是官方 `LyricPlayer` 在画；
- * 5. 改任务栏字段**不影响桌面模式**（桌面窗的字号与颜色照旧）。
+ * 任务栏歌词的**独立外观**（颜色 / 逐字高亮 / 字号）：设在设置页，与桌面歌词不共用。钉五处：
+ * 能力为假（非 Windows）时那张卡不渲染（能力来自宿主查询，页面不判断平台）；控件只写 `taskbar*` 四个键，每次一条窄命令；
+ * 任务栏模式按任务栏颜色/字号渲染（换档后色值与字号真的变）；逐字关闭后没有逐字 span，但仍是官方 `LyricPlayer` 在画；改任务栏字段不影响桌面模式。
  */
 export async function checkTaskbarLyricsSettings(page, guardDir, add) {
   const CARD = '[data-testid="taskbar-lyrics-card"]';
@@ -3742,13 +3659,7 @@ export async function checkTaskbarLyricsSettings(page, guardDir, add) {
   await page.waitForTimeout(200);
 }
 
-/**
- * R60：色块显示的是**当前主题下的真实颜色**（桌面面板与任务栏卡共用一个纯函数）。
- *
- * 这一项单独成段：守卫页里壳与歌词窗互斥（`desktop ? <LyricsWindow/> : <LibraryShell/>`），
- * 而"色块 == 歌词实际颜色"要求两边都读到——先在任务栏歌词窗里用画布取官方播放器真正用的那个
- * 颜色（独立于渲染层的换算），再回主界面读设置页那张卡的色块，两处必须是同一个十六进制值。
- */
+/** 色块显示的是当前主题下的真实颜色（两侧共用一个纯函数）：壳与歌词窗互斥，所以先在歌词窗用画布取官方播放器的真实颜色，再去主界面读那张卡的色块，两处必须是同一个十六进制值。 */
 export async function checkLyricsColorSwatches(page, guardDir, add) {
   const CARD = '[data-testid="taskbar-lyrics-card"]';
   const configure = (patch) => page.evaluate((next) => window.__guard.configureDesktop(next), patch);
@@ -3816,10 +3727,8 @@ export async function checkLyricsColorSwatches(page, guardDir, add) {
 }
 
 /**
- * R56：设置页「日志」标签——日志文件真的显示出来、级别标识与筛选真的生效。
- *
- * 夹具覆盖四档级别 + 一条带假 token 的行；判据里"DOM 里搜不到那串"是脱敏的证据，
- * "没有横向溢出"是布局的证据（长行必须断行，不许把卡片撑破）。
+ * 设置页「日志」标签：日志文件真的显示出来、级别标识与筛选真的生效。
+ * 夹具覆盖四档级别 + 一条带假 token 的行：DOM 里搜不到那串是脱敏的证据，没有横向溢出是布局的证据（长行必须断行，不许把卡片撑破）。
  */
 export async function checkSettingsLogPane(page, guardDir, add) {
   const openLogPane = async () => {
@@ -3985,13 +3894,9 @@ export async function checkRunLogScope(page, guardDir, add) {
 }
 
 /**
- * R52：沉浸式歌词**禁止改色**——桌面歌词的颜色与它无关（R50 的 `playerLyrics` 已整段删除）。
- *
- * 三层判据（缺一层就可能是"看起来没变色，其实只是没生效"）：
- * 1. 结构：沉浸页舞台根节点没有 `data-lyrics-color`，也没有内联 `--amll-lp-color` 覆盖；
- * 2. 令牌：算出来的 `--amll-lp-color` **就是**主题前景色（`--foreground`），不是某个写死的颜色；
- * 3. 像素：把**桌面歌词**的自定义色设成绿色之后（弹出窗里那枚取色器写的就是这条命令），
- *    沉浸页当前行的墨色仍是主题前景色——不偏绿。
+ * 沉浸式歌词**禁止改色**，桌面歌词的颜色与它无关。三层判据，缺一层就可能只是「没生效」：
+ * 根节点没有 `data-lyrics-color`、也没有内联 `--amll-lp-color` 覆盖；算出来的 `--amll-lp-color` 就是主题前景色（`--foreground`）；
+ * 把桌面歌词的自定义色设成绿色之后，沉浸页当前行的墨色仍是主题前景色，不偏绿。
  */
 export async function checkImmersiveLyricsColorIsFixed(page, guardDir, add) {
   const configureDesktop = (patch) => page.evaluate((next) => window.__guard.configureDesktop(next), patch);
@@ -4038,11 +3943,8 @@ export async function checkImmersiveLyricsColorIsFixed(page, guardDir, add) {
 }
 
 /**
- * R50（brief 第 3 项）：透明桌面歌词的**衬底**必须让两种"最坏桌面"都读得清。
- *
- * 这个窗是透明的，所以量"可读性"只能靠像素：把页面底色当桌面壁纸，改极端的白/黑，
- * 再看墨色与背景的亮度差（`inkContrast`）。同时看结构：`data-lyrics-scrim` 与根节点算出来的
- * 背景色——`panel`（Card 自己有背景）与 `mode=taskbar`（要透出系统任务栏）都必须是透明的。
+ * 透明桌面歌词的**衬底**必须让极端白 / 黑桌面都读得清：窗是透明的，可读性只能靠墨色与背景的亮度差（`inkContrast`）量。
+ * `data-lyrics-scrim` 与根节点背景在 `panel`（Card 自带背景）与 `mode=taskbar`（要透出系统任务栏）下都必须是透明的。
  */
 export async function checkDesktopLyricsScrim(page, guardDir, add) {
   const configure = (patch) => page.evaluate((next) => window.__guard.configureDesktop(next), patch);
@@ -4090,18 +3992,10 @@ export async function checkDesktopLyricsScrim(page, guardDir, add) {
 }
 
 /**
- * R45A3：库列表触底分页的**真浏览器**验收（mockIPC 边界给夹具，组件与样式都是真的）。
- *
- * 钉七件事，每一件都是"看起来在分页、其实在撒谎"的地方：
- * 1. 首屏只有第一页（歌单 120 首只拿到 50，状态行说"已加载 50 首"，头部说"共 120 首"）；
- * 2. 没有用户手势时**一页都不多取**（不许自动连拉）；
- * 3. 触底只发一次第 2 页：请求在途期间再滚三次也被吞掉（正在请求不重复发）；
- * 4. 每页完成后要用户再次接近底部才取第 3 页；没有下一页之后哨兵消失、不再催滚动；
- * 5. "播放全部"把**整张歌单**（120 首）放进队列——整表已在内存，不再只作用于已渲染的 50 首；
- * 6. 专辑页第一次失败给出可点的重试，第二次成功（失败不自动重试、也不丢页面）；
- * 7. 换关键词时旧查询的迟到响应被丢掉；歌手/历史后端不分页，只本地分批（R55 起不挂说明文案）。
- *
- * 滚动都是**真滚轮**（`page.mouse.wheel`）：程序化改 scrollTop 证明不了"用户滚到底"这件事。
+ * 库列表触底分页的**真浏览器**验收（mockIPC 边界给夹具，组件与样式都是真的），钉七处「看起来在分页、其实在撒谎」：
+ * 首屏只有第一页（「已加载 50 首」与「共 120 首」分开说）；没有用户手势一页都不多取；请求在途时再滚也不重复发；
+ * 每页完成后要再次接近底部才取下一页，没有下一页哨兵就消失；「播放全部」作用于整张歌单；专辑页失败给可点的重试、不自动重试；
+ * 换关键词时旧查询的迟到响应被丢掉。滚动都是真滚轮（`page.mouse.wheel`）：程序化改 scrollTop 证明不了「用户滚到底」。
  */
 export async function checkLibraryPagination(page, guardDir, add) {
   /**
@@ -4142,7 +4036,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
   await page.evaluate(() => window.__guard.resetLibraryCalls());
   // 假上游（每次都回整张歌单的那个）的请求记录也要从零开始：这一项的判据之一是"整份只取一次网络"
   await page.evaluate(() => window.__guard.resetPlaylistFetches());
-  // R62：歌单列表在侧栏（原来的「我的歌单」页已删除），点第一张进详情
+  // 歌单列表在侧栏（没有单独的「我的歌单」页），点第一张进详情
   await page.getByTestId("sidebar-playlist-item").first().click();
   await page.getByTestId("playlist-detail").waitFor();
   const firstPageLoaded = await visibleRowsIn(50).then(() => true).catch(() => false);
@@ -4170,16 +4064,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
     && detailText.includes("共 120 首 · 已加载 50 首"),
   JSON.stringify({ firstCalls, firstRows, firstStatus, header: detailText.slice(0, 40) }));
 
-  /**
-   * ①b 这一页是**本地切片**，并且"整份只取了一次网络"（R45A3 fix1）。
-   *
-   * 关键在夹具的形状：`library:playlist-detail` 的 IPC 走的是**真协议层**（`guardMusicApi`），
-   * 它背后的假上游**永远忽略 `start`/`limit`、每次都回整张 120 首**（真接口的实测行为）。
-   * 所以下面这个数字不可能来自"夹具替我们分好了页"：
-   * - `playlistFetches()` = 假上游被调用的次数 → 整份只取一次网络；
-   *
-   * 那句"服务端一次返回整张歌单…"的说明**不再显示**（锚点与文案一起删，R55）。
-   */
+  /** ①b 这一页是本地切片、整份只取一次网络：假上游永远忽略 `start`/`limit`、每次回整张 120 首（真接口实测），`playlistFetches()` 因此不可能来自夹具替我们分页。 */
   const sliceNoticeCount = await page.getByTestId("playlist-local-slice").count();
   const firstFetches = await page.evaluate(() => window.__guard.playlistFetches());
   add("pagination-first-page-is-local-slice", firstFetches.length === 1
@@ -4193,7 +4078,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
   add("pagination-no-auto-chain", idleCalls.length === 1 && (await rowCount()) === 50,
     JSON.stringify({ pages: idleCalls.map((call) => call.page) }));
 
-  // ③ R55："播放全部"作用于**整张歌单**（120 首），不是已渲染的那 50 首
+  // ③ 「播放全部」作用于整张歌单（120 首），不是已渲染的那 50 首
   await page.getByRole("button", { name: "播放全部", exact: true }).click();
   await page.waitForFunction((total) => window.__guard.queueLength() === total, PAGINATION_FIXTURE.total, { timeout: 5000 }).catch(() => {});
   const queued = await page.evaluate(() => window.__guard.queueLength());
@@ -4206,11 +4091,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
     return { length: state.entries.length, index: state.index, name: state.track?.name ?? null };
   });
 
-  /**
-   * ③b R55 修订：双击一行与「播放全部」同一基准——整表在内存就是整张表。
-   * 双击第 3 行必须排出 120 首、当前曲目是第 3 首（用已显示的 50 行当队列，
-   * "下一首"会在第 50 首处断掉，而界面上已没有任何一句话提这件事）。
-   */
+  /** ③b 双击一行与「播放全部」同一基准——整表在内存就是整张表：双击第 3 行必须排出 120 首、当前曲目是第 3 首，拿已显示的 50 行当队列会让「下一首」在第 50 首处断掉而界面毫无提示。 */
   await table.locator("tbody tr").nth(2).dblclick();
   await page.waitForFunction((total) => {
     const state = window.__guard.snapshot();
@@ -4275,12 +4156,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
     && exhaustedStatus.includes("已加载 120 首") && !exhaustedStatus.includes("继续向下滚动"),
   JSON.stringify({ pages: thirdCalls.map((call) => call.page), exhaustedStatus }));
 
-  /**
-   * ⑥b 第 2 页和第 3 页都是**同一份缓存上的本地切片**：假上游的请求次数必须还是 1。
-   *
-   * 这一条是"整表响应 → 本地分页"的核心证据：真协议层把第一页那份 120 首缓存下来，
-   * 页 2/页 3 只切不发请求。若哪天有人把缓存删了（或让页面自己切片），这里的数字会立刻变 3。
-   */
+  /** ⑥b 第 2、3 页都是同一份缓存上的本地切片：真协议层把第一页那份 120 首缓存下来，页 2/页 3 只切不发请求，所以假上游的请求次数必须还是 1（缓存没了，这里立刻变 3）。 */
   const finalFetches = await page.evaluate(() => window.__guard.playlistFetches());
   add("pagination-pages-2-3-one-network-fetch", finalFetches.length === 1
     && (await page.getByTestId("playlist-local-slice").count()) === 0,
@@ -4313,7 +4189,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
     && (await failure.count()) === 0 && (await rowCount()) === 50,
   JSON.stringify({ failureText: failureText.slice(0, 30), albumCalls: albumCalls.map((call) => call.page) }));
 
-  // ⑧ 歌手页：后端不分页（一次响应 120 首），本地每批 50，且不再挂说明文案（R55）
+  // ⑧ 歌手页：后端不分页（一次响应 120 首），本地每批 50，页面不挂说明文案
   await table.getByRole("button", { name: "守卫艺人", exact: true }).first().click();
   await visibleRowsIn(50);
   const artistStatus = await statusText();
@@ -4328,9 +4204,8 @@ export async function checkLibraryPagination(page, guardDir, add) {
   add("pagination-local-reveal-no-extra-network", artistCallsAfter === 1 && artistRevealed >= 100,
     `揭示 ${artistRevealed} 条，网络请求 ${artistCallsAfter} 次`);
 
-  // ⑨ 历史页：同一类（本地分批），一次响应就是全部；R55 起不再挂说明文案
-  // 先回到顶部：内容区滚到底的位置会被下一张列表继承，哨兵一挂上就在视口里 → 会立刻再揭示一批
-  // （那是本地揭示、不是网络请求；但"首屏 50 条"这件事要在同一基线上量）
+  // ⑨ 历史页同一类（本地分批，一次响应就是全部）。先滚到顶部：继承的滚动位置会让哨兵一挂上就再揭示一批，
+  // 那是本地揭示、不是网络请求，但「首屏 50 条」要在同一基线上量。
   await scrollToTop();
   await page.getByRole("button", { name: "播放历史", exact: true }).click();
   await visibleRowsIn(50);
@@ -4340,7 +4215,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
   JSON.stringify({ historyStatus }));
   await page.screenshot({ path: path.join(guardDir, "r55-playlist-history.png") });
 
-  // ⑨b R55 修订：历史页双击第 2 行 → 队列是本页整份历史（120），当前曲目是第 2 首
+  // ⑨b 历史页双击第 2 行 → 队列是本页整份历史（120），当前曲目是第 2 首
   await table.locator("tbody tr").nth(1).dblclick();
   await page.waitForFunction((total) => {
     const state = window.__guard.snapshot();
@@ -4351,10 +4226,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
   add("pagination-dblclick-history-whole-list", historyQueue.length === PAGINATION_FIXTURE.total
     && historyQueue.index === 1 && historyQueue.name === "历史曲目 2", JSON.stringify(historyQueue));
 
-  /**
-   * ⑨c R55 修订反向项：收藏页是**服务端真分页**的来源，只有已加载的那批是已知的。
-   * 双击第 2 行时队列仍等于已加载条数（行为不变，不许顺手把"未加载"当成"有"）。
-   */
+  /** ⑨c 反向项：收藏页是服务端真分页的来源，只有已加载的那批是已知的：双击第 2 行时队列仍等于已加载条数，不许把「未加载」当成「有」。 */
   await page.getByRole("button", { name: "我的收藏", exact: true }).click();
   await page.getByTestId("favorites-page").waitFor();
   await visibleRowsIn(36);
@@ -4411,9 +4283,8 @@ export async function checkLibraryPagination(page, guardDir, add) {
 }
 
 /**
- * R62：侧栏「我的歌单」。五档夹具（默认两张 / 24 张 / slow / error / empty）各走一遍：
- * 条目上的封面·名字·数量、当前歌单高亮、窄轨只剩封面与 tooltip、骨架、失败重试、空态，
- * 以及"窗口矮时列表自己滚、导航与账号区不被顶出去"。截图落在 `.tmp/browser-guard/r62-*`。
+ * 侧栏「我的歌单」：五档夹具（默认两张 / 24 张 / slow / error / empty）各走一遍——封面·名字·数量、当前高亮、窄轨只剩封面与 tooltip、
+ * 骨架、失败重试、空态，以及窗口矮时列表自己滚、导航与账号区不被顶出去。截图落在 `.tmp/browser-guard/r62-*`。
  */
 export async function checkSidebarPlaylists(page, port, guardDir, add) {
   const sidebar = '[data-slot="sidebar-container"]';
@@ -4688,9 +4559,8 @@ export async function checkSidebarPlaylists(page, port, guardDir, add) {
 }
 
 /**
- * R63：行的**专属右键菜单**（曲目表 + 播放队列）与默认网页菜单的屏蔽。
- * 动作真改了队列、非行区域不弹菜单、文本输入保留原生编辑菜单、取色器与非文本控件被吃掉。
- * 右键一律用 Playwright 派发；截图等淡入收尾（opacity=1）再拍，落在 `.tmp/browser-guard/r63-*`。
+ * 行的专属右键菜单（曲目表 + 播放队列）屏蔽默认网页菜单：动作真改队列、非行区域不弹；右键一律用 Playwright 派发。
+ * 文本输入保留原生编辑菜单、取色器与非文本控件被吃掉；截图等淡入收尾（opacity=1）再拍，落在 `.tmp/browser-guard/r63-*`。
  */
 export async function checkRowContextMenus(page, port, guardDir, add) {
   const table = page.getByTestId("track-table");
@@ -4703,11 +4573,7 @@ export async function checkRowContextMenus(page, port, guardDir, add) {
     await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
     await page.getByTestId("main-content").waitFor();
     await table.locator("tbody tr").first().waitFor();
-    /**
-     * 记下每一次 contextmenu 的默认行为有没有被吃掉。监听挂在**冒泡**阶段：
-     * 守卫那一条是捕获阶段（先跑），radix 的触发器在行上（更先跑），所以这里读到的是
-     * "最后到底拦没拦"。
-     */
+    /** 记下每次 contextmenu 的默认行为有没有被吃掉；监听挂**冒泡**阶段：守卫那一条是捕获阶段（先跑），radix 的触发器在行上（更先跑），所以这里读到的是「最后到底拦没拦」。 */
     await page.evaluate(() => {
       window.__ctxProbe = [];
       document.addEventListener("contextmenu", (event) => {
@@ -4923,9 +4789,8 @@ export async function checkRowContextMenus(page, port, guardDir, add) {
 
 
 /**
- * R65：侧栏「本地歌曲」。导航入口（长在「音乐库」组里）、表格三列与「文件不在」标记、
- * 空态与导入按钮、播放地址（协议 + 32 位 id，不含任何路径）、专属右键菜单、移除。
- * 假的本地曲库只在 IPC 边界；本地协议由 page.route 接住（顺带证明渲染层真的按 id 去取）。截图落在 `.tmp/browser-guard/r65-*`。
+ * 侧栏「本地歌曲」：导航入口长在「音乐库」组里、表格三列与「文件不在」标记、空态与导入按钮、播放地址（协议 + 32 位 id，不含任何路径）、专属右键菜单。
+ * 假的本地曲库只在 IPC 边界；本地协议由 page.route 接住（顺带证明渲染层真的按 id 去取），截图落在 `.tmp/browser-guard/r65-*`。
  */
 export async function checkLocalSongs(page, port, guardDir, add) {
   const menu = page.getByTestId("row-context-menu");
@@ -5104,9 +4969,8 @@ export async function checkLocalSongs(page, port, guardDir, add) {
 }
 
 /**
- * R66b：主内容区铺满。逐页量内容右边缘到可用区域右边缘的空白，要求不超过页面左内边距 + 8px，且无横向滚动。
- * 1900 宽下再人为恢复 768px 上限量一次，证明判据抓得住这类缺陷；960×600 检查设置卡片回到单列。
- * 明细写入 `.tmp/browser-guard/r66b-page-fill.json`。
+ * 主内容区铺满：逐页量内容右边缘到可用区域右边缘的空白，要求不超过页面左内边距 + 8px，且无横向滚动。
+ * 1900 宽下人为恢复 768px 上限再量一次，证明判据抓得住这类缺陷；960×600 检查设置卡片回到单列（明细在 `.tmp/browser-guard/r66b-page-fill.json`）。
  */
 export async function checkPageFill(page, guardDir, add) {
   const sizes = [
@@ -5244,9 +5108,9 @@ export async function checkPageFill(page, guardDir, add) {
     measured.push(await visit(size, "我的收藏", '[data-testid="favorites-page"]'));
     if (size.width === 1900) await page.screenshot({ path: path.join(guardDir, "r66b-favorites-1900.png") });
 
-    // ② 我的歌单：R62 起歌单列表长在侧栏，这一页连同它的铺满测量一起删除（见 task-62-report.md）
+    // ② 我的歌单：歌单列表长在侧栏，没有单独的页面可量。
 
-    // ②b 歌单详情（同一套内容区；简报只点名了五个页面，这一页顺手一起量，免得"其它页也白"没依据）
+    // ②b 歌单详情（同一套内容区）：顺手一起量，免得「其它页也白」没依据。
     await step(`${size.width} 歌单详情`, async () => {
       await page.getByTestId("sidebar-playlist-item").first().click();
       await page.getByTestId("playlist-detail").waitFor();
@@ -5319,9 +5183,8 @@ export async function checkPageFill(page, guardDir, add) {
   }
 
   /**
-   * 控制实验的判据：人为恢复 `max-w-3xl` 之后，内容宽度必须正好被钳在 768（窗口够宽时）——
-   * 右空白也就等于"可用宽度 − 左内边距 − 768"。960 宽时可用宽度只有 704，768 根本钳不到，
-   * 所以那一档的期望值是"两侧各留 16"；真正的"旧缺陷复现"由 1280/1900 两档给出（各 > 200px）。
+   * 控制实验的判据：人为恢复 `max-w-3xl` 之后，内容宽度必须正好被钳在 768（窗口够宽时），右空白也就等于「可用宽度 − 左内边距 − 768」。
+   * 960 宽时可用宽度只有 704，钳不到 768，那一档期望两侧各留 16；这类缺陷由 1280/1900 两档复现（各 > 200px）。
    */
   const controlMatches = (entry) => {
     const expectedWidth = Math.min(768, entry.control.usableWidth - 32);
@@ -5398,13 +5261,8 @@ async function launchChromium(candidates, log) {
   const failures = [];
   for (const candidate of candidates) {
     /**
-     * R45B fix4：**真画滚动条**。
-     *
-     * Playwright 默认给 Chromium 带 `--hide-scrollbars`：滚动条不画、`offsetHeight - clientHeight == 0`，
-     * 于是"用户拖原生滚动条"这件事在守卫里根本无从发生（fix3 的控制实验：隐藏时 `barSpace 0`、
-     * 拖条不动；去掉之后 `barSpace 12`、RTL 条真能拖）。真窗是 WebView2，滚动条是画出来的，
-     * 所以这里去掉那个默认参数——⑦e 的可达性判定就是靠"按下真条、真拖"。
-     * 副作用为零：本仓只有竖排小窗（xxl）才会溢出出条，其余用例量到的几何不受影响。
+     * **真画滚动条**：Playwright 默认带 `--hide-scrollbars`，滚动条不画、`offsetHeight - clientHeight == 0`，「用户拖原生滚动条」在守卫里无从发生。
+     * 真窗是 WebView2，滚动条是画出来的，所以去掉那个默认参数（⑦e 的可达性判定靠按下真条、真拖）；副作用为零：只有竖排小窗（xxl）才溢出出条。
      */
     const options = { args: ["--enable-unsafe-swiftshader", "--use-angle=swiftshader"], ignoreDefaultArgs: ["--hide-scrollbars"] };
     if (candidate.executablePath) options.executablePath = candidate.executablePath;
@@ -5425,14 +5283,14 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
   const guardDir = path.join(root, GUARD_DIR);
   await mkdir(guardDir, { recursive: true });
 
-  // 沙箱只给工作区内的可删范围（R9 实测）：esbuild 的临时文件也得落在仓内
+  // 沙箱只给工作区内的可删范围，esbuild 的临时文件也得落在仓内
   const temp = path.join(root, ".tmp/temp");
   await mkdir(temp, { recursive: true });
   process.env.TEMP = temp;
   process.env.TMP = temp;
 
   await writeFile(path.join(guardDir, "guard.tsx"), harnessSource(), "utf8");
-  // R45A3 复审：真协议层的夹具模块（假上游 + createMusicApi），由守卫页 import
+  // 真协议层的夹具模块（假上游 + createMusicApi），由守卫页 import
   await writeFile(path.join(guardDir, "protocol-fixture.mjs"), protocolPlaylistFixtureSource(), "utf8");
   const built = await esbuild.build({
     absWorkingDir: root,
@@ -5449,7 +5307,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
   });
   if (built.errors.length > 0) throw new Error(`守卫页面构建失败：${JSON.stringify(built.errors)}`);
 
-  // R45A1 复审：启动三态那一页（挂真 App，单独一个入口）
+  // 启动三态那一页（挂真 App，单独一个入口）
   await writeFile(path.join(guardDir, "startup.tsx"), startupHarnessSource(), "utf8");
   const builtStartup = await esbuild.build({
     absWorkingDir: root,
@@ -5466,7 +5324,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
   });
   if (builtStartup.errors.length > 0) throw new Error(`启动守卫页面构建失败：${JSON.stringify(builtStartup.errors)}`);
 
-  // R51：歌词设置弹出窗那一页（挂真 LyricsSettingsPopup，单独一扇窗 / 单独一份 IPC 夹具）
+  // 歌词设置弹出窗那一页（挂真 LyricsSettingsPopup，单独一扇窗 / 单独一份 IPC 夹具）
   await writeFile(path.join(guardDir, "lyrics-settings.tsx"), lyricsSettingsHarnessSource(), "utf8");
   const builtPopup = await esbuild.build({
     absWorkingDir: root,
@@ -5482,7 +5340,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     logLevel: "warning",
   });
   if (builtPopup.errors.length > 0) throw new Error(`弹出窗守卫页面构建失败：${JSON.stringify(builtPopup.errors)}`);
-  // R57：账号区四态那一页（挂真 App，IPC 只给门禁与空列表）
+  // 账号区四态那一页（挂真 App，IPC 只给门禁与空列表）
   await writeFile(path.join(guardDir, "account.tsx"), accountHarnessSource(), "utf8");
   const builtAccount = await esbuild.build({
     absWorkingDir: root,
@@ -5542,10 +5400,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     checks.push({ id, ok, detail });
     log(`  ${ok ? "PASS" : "FAIL"}  ${id.padEnd(22)} ${detail}`);
   };
-  /**
-   * 单项检查的护栏（R46）：检查自己抛错（选择器不存在、等待超时）时记一条 FAIL 并继续。
-   * 理由：RED 阶段要读到的是"哪一项行为不成立"，而不是整轮守卫崩在第一项上。
-   */
+  /** 单项检查的护栏：检查自己抛错（选择器不存在、等待超时）时记一条 FAIL 并继续——要读到的是「哪一项行为不成立」，而不是整轮守卫崩在第一项上。 */
   const checked = async (id, run) => {
     try {
       await run();
@@ -5576,11 +5431,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       status: 200, contentType: "image/png", body: Buffer.from("invalid image"), headers: { "access-control-allow-origin": "*" },
     }));
     /**
-     * R45A1 复审：启动三态（独立页面 + 独立错误收集）。
-     *
-     * 为什么独立开一页：主守卫页挂的是 `LibraryShell`（登录之后那一块），它根本不经过
-     * `startupViewOf`；而这一项要证的正是"第一帧画什么"。放主页面里跑还会把它导航到炫
-     * 登录页/主界面，污染后面每一项的基线。
+     * 启动三态（独立页面 + 独立错误收集）：主守卫页挂的是 `LibraryShell`（登录之后那一块），根本不经过 `startupViewOf`。
+     * 放主页面里跑还会把它导航到登录页/主界面，污染后面每一项的基线。
      */
     const startupPage = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
     startupPage.setDefaultTimeout(15_000);
@@ -5593,10 +5445,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     add("startup-no-runtime-errors", startupErrors.length === 0, JSON.stringify(startupErrors.slice(0, 3)));
     await startupPage.close();
 
-    /**
-     * R64：保存并恢复上次的播放进度。独立开一页（恢复只发生在**页面加载**时），
-     * 夹具 settings 在页面脚本之前就写好"上次停在 0:05"。
-     */
+    /** 保存并恢复上次的播放进度。独立开一页（恢复只发生在**页面加载**时），夹具 settings 在页面脚本之前就写好「上次停在 0:05」。 */
     await checked("r64-resume-progress", async () => {
       const resumePage = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
       resumePage.setDefaultTimeout(15_000);
@@ -5700,11 +5549,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
         && afterBarToggleBack.length === togglesBeforeBar + 2 && afterBarToggleBack.at(-1) === false,
       JSON.stringify({ barToggleLabel, before: togglesBeforeBar, after: afterBarToggle, back: afterBarToggleBack }));
       /**
-       * R46（有意更改 R45C 的这条几何断言）：传输组回到 mode → previous → play → next，
-       * 歌词开关搬到**尾部工具区**（`player-bar-trailing`，右端）。
-       *
-       * 量的是几何而不是标记：模式/上一首/播放/下一首从左到右严格递增；开关在下一首的**右边**
-       * 且落在尾部工具区的横向范围内（不是"挂在中间某处"）。
+       * 传输组顺序是 mode → previous → play → next，歌词开关在**尾部工具区**（`player-bar-trailing`，右端）。
+       * 量的是几何而不是标记：模式/上一首/播放/下一首从左到右严格递增，开关在下一首的**右边**且落在尾部工具区的横向范围内。
        */
       add(`${theme}-bar-lyrics-toggle-geometry`, await page.evaluate(() => {
         const bar = document.querySelector('[data-testid="player-bar"]');
@@ -5738,10 +5584,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
         document.elementFromPoint(x, y)?.closest('[data-testid="playback-stage"]')));
       add(`${theme}-full-coverage`, box?.x === 0 && box?.y === 0 && box?.width === 1280 && box?.height === 800 && covered, `舞台 ${JSON.stringify(box)}，四角命中舞台=${covered}`);
       add(`${theme}-background`, await stage.locator('[data-testid="amll-background"] canvas').count() > 0, "完整舞台内使用官方背景画布");
-      /**
-       * R45C：收起按钮在**顶部中央**（几何居中而不是靠内容宽度凑），并且不压住官方控件；
-       * 沉浸页与播放栏的歌词开关各点一次只发一次 `core_lyrics_toggle`。
-       */
+      /** 收起按钮在**顶部中央**（几何居中而不是靠内容宽度凑），并且不压住官方控件；沉浸页与播放栏的歌词开关各点一次只发一次 `core_lyrics_toggle`。 */
       const closeGeometry = await stage.evaluate((element) => {
         const button = element.querySelector('button[aria-label="收起歌词"]');
         if (!button) return null;
@@ -5860,16 +5703,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       await stage.getByRole("button", { name: "暂停", exact: true }).click();
       await page.evaluate(() => window.__guard.setTime(3300));
       await page.waitForTimeout(800);
-      /**
-       * R46：这一项的判据从"深色墨迹"改成"**字迹画出来了**"（`changed`）。
-       *
-       * 为什么必须改（有意更改 R44 起的这条口径）：R46 让主窗面板也吃官方逐字时间
-       * （`withKaraokeWords`），官方对"还没唱到"的词用遮罩压到 `--dark-mask-alpha`（0.2~0.4）。
-       * 夹具的第二行结束时间来自 `parseLrc` 的哨兵值（59999999ms），所以 3300ms 时整行都"还没唱到"
-       * ——字是画出来的，但只有四成不透明度，`luminance < 95` 这个"深色"判据必然为 0
-       * （实测 `{"ink":0,"changed":1137}`）。字迹是否真的画出来用 `changed`（可见帧 vs 隐藏帧的差异像素）
-       * 来判，与主题无关；"第二行激活"照旧。
-       */
+      /** 判据改用 `changed`（可见帧 vs 隐藏帧的差异像素）：未唱到的字被 `--dark-mask-alpha` 压暗，`luminance < 95` 必然为 0，且与主题无关。 */
       const progressed = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-seek-line.png`));
       const secondActive = await page.locator(activeLine).first().textContent().catch(() => "");
       add(`${theme}-seek-text-pixels`, progressed.changed > 200 && secondActive?.includes("第二行"),
@@ -6029,36 +5863,21 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     }
 
     await page.evaluate(() => window.__guard.restoreLyrics());
-    /**
-     * R46 的逐字着色 + R52 的**沉浸式歌词禁止改色** + 设置页「歌词」标签的新形态。
-     * 放在两轮主题之后、R45C 开关验收之前：这几项都只碰当前这一页的舞台与设置页，用后各自复位。
-     *
-     * 都经过 `checked()`：单项检查自己抛错（选择器还不存在、等待超时）记一条 FAIL 并继续，
-     * 而不是把整轮守卫打断——RED 阶段要看到的是"哪一项不成立"，不是"脚本崩了"。
-     *
-     * R52 有意删除 R50 的两项（`r50-player-lyrics-separation` 与新卡片上的取色器检查）：
-     * 沉浸式歌词不再有颜色入口，桌面歌词的颜色只在外观弹出窗里改（R51 那两项仍在跑）。
-     */
+    /** 逐字着色 + 沉浸式歌词禁止改色 + 设置页「歌词」标签：只碰当前这一页的舞台与设置页、用后各自复位；都经过 `checked()`，单项抛错只记一条 FAIL 并继续。 */
     await checked("r46-immersive-karaoke", () => checkImmersiveKaraoke(page, guardDir, add));
     await checked("r52-settings-page-lyrics-pane", () => checkSettingsPageLyricsCard(page, guardDir, add));
-    /** R59：任务栏歌词的独立外观（设置页那张卡 → 任务栏歌词窗的实际渲染）。 */
+    /** 任务栏歌词的独立外观（设置页那张卡 → 任务栏歌词窗的实际渲染）。 */
     await checked("r59-taskbar-lyrics-settings", () => checkTaskbarLyricsSettings(page, guardDir, add));
-    /** R60：色块显示主题下的真实颜色（与歌词窗里实际用到的颜色逐个主题对上）。 */
+    /** 色块显示主题下的真实颜色（与歌词窗里实际用到的颜色逐个主题对上）。 */
     await checked("r60-lyrics-color-swatches", () => checkLyricsColorSwatches(page, guardDir, add));
-    /** R56：设置页「日志」标签（日志文件条目 + 级别标识 + 筛选 + 脱敏 + 空态）。 */
+    /** 设置页「日志」标签（日志文件条目 + 级别标识 + 筛选 + 脱敏 + 空态）。 */
     await checked("r56-settings-log-pane", () => checkSettingsLogPane(page, guardDir, add));
     await checked("r72-log-scope", () => checkRunLogScope(page, guardDir, add));
     await checked("r52-immersive-lyrics-color-fixed", () => checkImmersiveLyricsColorIsFixed(page, guardDir, add));
-    /**
-     * R45C：播放栏/沉浸页快捷开关的真行为（延迟 IPC 下的双击、拒绝后恢复、两种模式、菜单层级）。
-     * 放在两轮主题之后、分页之前：它自己重新载入主页，只碰播放栏与沉浸页。
-     */
+    /** 播放栏/沉浸页快捷开关的真行为（延迟 IPC 下的双击、拒绝后恢复、两种模式、菜单层级）；它自己重新载入主页，只碰播放栏与沉浸页。 */
     await checkPlaybackLyricsToggle(page, port, guardDir, add);
     await checkLyricsTargetMenus(browser, port, guardDir, add);
-    /**
-     * R45A3：库列表触底分页（真滚轮 + 真 IPC 计数）。放在两轮主题之后、桌面歌词之前：
-     * 它会把主界面导航到歌单/专辑/歌手/历史/搜索，之后的桌面窗验收本来就要重挂整个壳。
-     */
+    /** 库列表触底分页（真滚轮 + 真 IPC 计数）；它会把主界面导航走，而后面的桌面窗验收本来就要重挂整个壳。 */
     await checkLibraryPagination(page, guardDir, add);
     await page.evaluate(() => window.__guard.desktopBeforeMount());
     await page.getByTestId("lyrics-window").waitFor();
@@ -6068,15 +5887,12 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     const desktop = page.getByTestId("lyrics-window");
     await checkDesktopInteraction(page, guardDir, add);
     await checkDesktopProgressChain(browser, port, guardDir, add);
-    /** R51：歌词窗里只剩齿轮——点它把锚点交给宿主，菜单搬到了另一扇窗（下面那一项量那一页）。 */
+    /** 歌词窗里只剩齿轮——点它把锚点交给宿主，菜单搬到了另一扇窗。 */
     await checked("r51-desktop-settings-gear", () => checkDesktopLyricsSettings(page, guardDir, add));
-    /** R50：透明桌面歌词的令牌衬底（白桌面/深色主题、深桌面/浅色主题都要读得清）。 */
+    /** 透明桌面歌词的令牌衬底（白桌面/深色主题、深桌面/浅色主题都要读得清）。 */
     await checked("r50-desktop-lyrics-scrim", () => checkDesktopLyricsScrim(page, guardDir, add));
     await checkLockedLyricsPointer(browser, port, guardDir, add);
-    /**
-     * 官方演出开关（R44 起的既有覆盖，R45B 保留）：还能真的关掉弹簧/模糊、还能真的做缩放。
-     * 放在交互验收之后：它要一段"播放中"的稳定画面。
-     */
+    /** 官方演出开关：还能真的关掉弹簧/模糊、还能真的做缩放；放在交互验收之后，因为它要一段「播放中」的稳定画面。 */
     await page.evaluate(() => window.__guard.configureDesktop({ enableBlur: false, enableScale: false, enableSpring: false }));
     await page.evaluate(() => window.__guard.desktopPlaying(true));
     await page.waitForTimeout(900);
@@ -6117,12 +5933,9 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       }
     }
     await checkDesktopSurface(page, guardDir, add);
-    /** R58：行内逐字扫亮（桌面横版 clean/panel、任务栏、竖版现状、播放态随进度消息）。 */
+    /** 行内逐字扫亮（桌面横版 clean/panel、任务栏、竖版现状、播放态随进度消息）。 */
     await checked("r58-lyrics-karaoke", () => checkLyricsKaraoke(page, guardDir, add));
-    /**
-     * R51：设置弹出窗那一页（真组件 + 真产物 CSS）。用**另一页**跑：它会改 viewport 与主题类，
-     * 而主页面后面还有几项要用当前的桌面窗状态。
-     */
+    /** 设置弹出窗那一页（真组件 + 真产物 CSS）；用**另一页**跑，因为它会改 viewport 与主题类，而主页面后面还有几项要用当前的桌面窗状态。 */
     await checked("r60-lyrics-settings-popup", async () => {
       const popupPage = await browser.newPage({ viewport: { width: 420, height: 720 }, colorScheme: "light" });
       popupPage.setDefaultTimeout(15_000);
@@ -6134,15 +5947,15 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
         await popupPage.close();
       }
     });
-    /** R62：侧栏「我的歌单」（自己开页、自己收尾；排在 r66b 之前，结束后留下干净的默认页）。 */
+    /** 侧栏「我的歌单」（自己开页、自己收尾；排在 r66b 之前，结束后留下干净的默认页）。 */
     await checked("r62-sidebar-playlists", () => checkSidebarPlaylists(page, port, guardDir, add));
-    /** R63：行的专属右键菜单（自己开页、自己收尾；排在 r66b 之前）。 */
+    /** 行的专属右键菜单（自己开页、自己收尾；排在 r66b 之前）。 */
     await checked("r63-row-context-menu", () => checkRowContextMenus(page, port, guardDir, add));
-    /** R65：侧栏「本地歌曲」（自己开页、自己收尾；假的本地协议由它自己 route 接住）。 */
+    /** 侧栏「本地歌曲」（自己开页、自己收尾；假的本地协议由它自己 route 接住）。 */
     await checked("r65-local-songs", () => checkLocalSongs(page, port, guardDir, add));
-    /** R66b：主内容区宽度。会遍历各主页面并切换窗口尺寸，所以排在倒数第二（下一项自己 goto）。 */
+    /** 主内容区宽度；会遍历各主页面并切换窗口尺寸，所以排在倒数第二（下一项自己 goto）。 */
     await checked("r66b-page-fill", () => checkPageFill(page, guardDir, add));
-    /** R57：账号区四态（另一页，挂真 App；头像的两种结局都用 page.route 造出来）。 */
+    /** 账号区四态（另一页，挂真 App；头像的两种结局都用 page.route 造出来）。 */
     await checked("r57-account-area", async () => {
       const accountPage = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light", deviceScaleFactor: 2 });
       accountPage.setDefaultTimeout(15_000);
@@ -6161,7 +5974,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
         await accountPage.close();
       }
     });
-    /** R45C：没有 lyrics binding 的挂载点（另一页，见 checkNoBindingSurface 的说明）。 */
+    /** 没有 lyrics binding 的挂载点（另一页，见 checkNoBindingSurface 的说明）。 */
     await checkNoBindingSurface(page, port, add);
     add("no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,
       `console error ${consoleErrors.length} 条、pageerror ${pageErrors.length} 条${[...consoleErrors, ...pageErrors].slice(0, 3).map((text) => `\n      ${text.slice(0, 200)}`).join("")}`);

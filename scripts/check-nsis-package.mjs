@@ -1,35 +1,17 @@
 #!/usr/bin/env node
 /**
- * `npm run check:nsis`：对**打包产物**做静态校验（不执行安装包）。
- *
- * ## 为什么只做静态校验
- *
- * 装一次 NSIS 安装包要真写系统目录、注册表、开始菜单，还会触发 WebView2 安装器；
- * 在 CI 里跑等于给每个 PR 装一次应用。所以这里只验"东西在不在、是不是它、脏东西进没进去"：
- *
- * | 检查 | 它挡住的真实故障 |
- * |---|---|
- * | `installer-unique` | 没打包出安装包（或旧安装包没清导致"发了上一个版本"） |
- * | `installer-pe` | 产物是半截文件/空文件，却因为"文件存在"看起来正常 |
- * | `sidecar-triple-name` | externalBin 名字漏了三元组 → Tauri 装包时静默找不到 sidecar |
- * | `sidecar-pe` | sidecar 是文本/占位文件（SEA 注入没做成） |
- * | `staging-enumeration` | 暂存目录读不了却被当成"里面没东西"（下面的检查会全绿） |
- * | `staged-sidecar` | Tauri 复制 externalBin **剥三元组后缀**这件事没发生 |
- * | `bundle-config` | bundle 的输入指向 `.local`/`research`（真实账号凭据、现场笔记进了发布物） |
- * | `staging-sensitive` | 暂存目录里混进了 `.local`/`research` 的文件 |
- *
- * 暂存目录（Tauri 把 exe 与 externalBin 复制进去、再喂给 NSIS 的那一层）就是验证对象：
- * `src-tauri/target/<profile>/`。默认 `release`；`HWMUSIC_BUNDLE_PROFILE=debug` 时可以拿
- * 开发期产物验骨架（本机没跑过正式 `tauri build` 时至少能证明检查本身是通的）。
+ * `npm run check:nsis`：对打包产物做静态校验（不执行安装包）——真装一次要写系统目录、注册表、开始菜单，在 CI 里等于给每个 PR 装一次应用。
+ * 所以只验「东西在不在、是不是它、脏东西进没进去」：安装包与 sidecar 存在且是 PE、sidecar 名没漏三元组、
+ * 暂存目录能枚举、暂存里的 sidecar 剥过三元组后缀、bundle 输入与暂存目录都不许混进 `.local`/`research`（真实凭据与现场笔记不能进发布物）。
+ * 验证对象是暂存层 `src-tauri/target/<profile>/`，默认 `release`，`HWMUSIC_BUNDLE_PROFILE=debug` 时拿开发期产物验骨架。
  */
 import { readdir, readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-// 主程序 exe 名与 dist:win 的新鲜度检查**同一处事实**：都读 Cargo.toml 的 [[bin]] name。
-// 各写一份必然漂移（本文件的上一版按 productName 找 `华为音乐第三方客户端.exe`，
-// 而暂存目录里其实叫 `huawei-music-desktop.exe`）。
+// 主程序 exe 名与 dist:win 的新鲜度检查是同一处事实（都读 Cargo.toml 的 `[[bin]] name`），各写一份必然漂移；
+// productName 只是显示名，暂存目录里的 exe 叫 `huawei-music-desktop.exe`。
 import { appExeName } from "./dist-win.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -62,9 +44,7 @@ const TRIPLE_SUFFIXES = [
 
 /**
  * 剥掉三元组后缀：`hwmusic-core-x86_64-pc-windows-msvc.exe` → `hwmusic-core.exe`。
- *
- * Tauri 复制 externalBin 到应用同目录时会这么做，所以**暂存名不能写死**——
- * 名字推导错了，检查就会在"文件明明在"的时候报失败（或者更糟：在文件不在的时候报成功）。
+ * Tauri 复制 externalBin 到应用同目录时会这么做，所以**暂存名不能写死**；推导错了会在文件明明在时报失败。
  */
 export function stripTripleSuffix(fileName) {
   const ext = path.extname(fileName);
@@ -124,12 +104,7 @@ export function sensitiveStagedPaths(relativePaths) {
   return offenders;
 }
 
-/**
- * 枚举暂存目录：**读不了就报失败**。
- *
- * 这条单独成函数是因为它是"下限枚举"的另一半：把 readdir 的异常吞掉，后面所有
- * "暂存里有没有 X"的检查都会在空列表上通过——那种绿比红更危险。
- */
+/** 枚举暂存目录：**读不了就报失败**——吞掉 readdir 的异常，后面所有「暂存里有没有 X」的检查都会在空列表上通过，那种绿比红更危险。 */
 export async function enumerateStaging(stagingDir) {
   try {
     const entries = await readdir(stagingDir, { withFileTypes: true });

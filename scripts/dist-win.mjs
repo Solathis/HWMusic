@@ -1,27 +1,9 @@
 #!/usr/bin/env node
 /**
- * `npm run dist:win`：**唯一的打包编排入口**。
- *
- * ## 为什么不直接 `tauri build`
- *
- * `tauri.conf.json` 的 `beforeBuildCommand` 是空串（R2 裁决，见该文件注释）。直接跑 `tauri build`
- * 时 Tauri **不会**构建渲染层：它把 `frontendDist`（`out/renderer`）里**已有的**产物原样嵌进 exe——
- * 旧仓的实际故障是"改了界面却发布出旧界面，而且退出码 0"。所以顺序在这里写死：
- *
- * ```
- * build:web     vite build            → out/renderer
- * dist:sidecar  esbuild + SEA         → src-tauri/binaries/hwmusic-core-<triple>.exe
- * tauri:build   cargo + NSIS 打包
- * ```
- *
- * 并且打包**之后再验一遍**（`mtime 新鲜度检查`）：每个被打包进去的输入都必须**不晚于** exe 的
- * mtime。谁晚于 exe，谁就没进这一个 exe（Tauri 复用了旧的 exe，或者产物顺序被绕开），
- * 这时退出码必须非 0——"看起来成功"正是这条检查要防的东西。
- *
- * ## 子进程环境
- *
- * 子进程的 `TEMP`/`TMP` 指到工作区内的 `.tmp/temp`（沙箱只给工作区内的可删范围，R9 实测；
- * 详见 docs/RUN_AND_PACKAGING.md 的"本机环境限制"）。不改用户环境，只改本进程派生的子进程。
+ * `npm run dist:win`：唯一的打包编排入口。不直接 `tauri build`——`beforeBuildCommand` 是空串，
+ * Tauri 会把 `out/renderer` 里已有的产物原样嵌进 exe：改了界面却发布旧界面，退出码照样是 0。
+ * 顺序写死：build:web → dist:sidecar → tauri:build；打包后再验 mtime，输入晚于 exe 就退出码非 0——「看起来成功」正是要防的。
+ * 子进程的 `TEMP`/`TMP` 指到工作区内的 `.tmp/temp`（沙箱只给工作区内的可删范围）。
  */
 import { spawn } from "node:child_process";
 import { mkdir, readdir, readFile, stat } from "node:fs/promises";
@@ -65,10 +47,8 @@ export function backendSteps() {
 export const BACKEND_STEPS = backendSteps();
 
 /**
- * cargo 的 target 目录（唯一真源是 `CARGO_TARGET_DIR`，没有才落回 `src-tauri/target`）。
- *
- * 相对值的基准是 `src-tauri`：cargo 是由 tauri CLI 在 `src-tauri` 下启动的。
- * CI 里给的是绝对路径（`${{ github.workspace }}/src-tauri/target`），这里两种都认。
+ * cargo 的 target 目录：唯一真源是 `CARGO_TARGET_DIR`，没有才落回 `src-tauri/target`。
+ * 相对值的基准是 `src-tauri`（cargo 由 tauri CLI 在 `src-tauri` 下启动），CI 给的绝对路径也认。
  */
 export function resolveTargetDir({ root = ROOT, env = process.env } = {}) {
   const configured = typeof env.CARGO_TARGET_DIR === "string" ? env.CARGO_TARGET_DIR.trim() : "";
@@ -171,14 +151,8 @@ function runStep(step, env) {
 }
 
 /**
- * 主程序 exe 的名字主干：来自 `src-tauri/Cargo.toml` 的 `[[bin]] name`。
- *
- * **不是** `tauri.conf.json` 的 `productName`——那是显示名（`华为音乐第三方客户端`），
- * 用来做快捷方式与安装包文件名；cargo 产出的可执行文件叫 `huawei-music-desktop.exe`。
- * 2026-10-19 实测：`tauri build` 生成的 `installer.nsi` 里写的是
- * `!define MAINBINARYNAME "huawei-music-desktop"`、`File "/oname=hwmusic-core.exe"`，
- * 与 `target/release/` 暂存目录里的文件名一致。按 productName 去 stat 会 ENOENT——
- * 上一版就是这样把一次**成功**的打包判成了失败。
+ * 主程序 exe 名主干来自 `src-tauri/Cargo.toml` 的 `[[bin]] name`，**不是** `tauri.conf.json` 的 `productName`（显示名）。
+ * 按 productName 去 stat 会 ENOENT，把一次**成功**的打包判成失败。
  */
 export async function appBinaryStem(root = ROOT) {
   const cargo = await readFile(path.join(root, "src-tauri/Cargo.toml"), "utf8");

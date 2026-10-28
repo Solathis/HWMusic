@@ -1,39 +1,9 @@
 #!/usr/bin/env node
 /**
- * `npm run dist:sidecar`：把 Node sidecar 打成**单文件 SEA 二进制**
- * （`src-tauri/binaries/hwmusic-core-<triple>.exe`，Tauri 复制 externalBin 时会剥掉三元组后缀）。
- *
- * ## 为什么是两层 esbuild
- *
- * SEA 的嵌入入口**只支持 CJS**（Node 24 实测：`embedderRunCjs` 直接 require 嵌入脚本，
- * ESM 语法会 `SyntaxError: Cannot use import statement outside a module`），
- * 而 `src/sidecar/main.mjs` 用了顶层 await（装配顺序要求：代理必须在业务请求之前装好，见该文件头）。
- * esbuild 的 `--format=cjs` 对顶层 await 直接报错（实测），两条路各堵一半，所以：
- *
- * 1. **第一层**：把入口包成一个"动态 import 真入口"的 shim，`--format=esm` 打包。
- *    esbuild 把真入口变成惰性模块 `__esm(async () => { ... })` —— 顶层 await 落进异步闭包，
- *    输出里**不再有顶层 await**；
- * 2. **第二层**：把这个 ESM 包体转成 CJS（此时 esbuild 不再报错），作为 SEA 的 `main`。
- *
- * 这样入口源码一行都不用改。`import("node:...")` 之类只保留 `node:*` 为外部（undici 必须打进来，
- * 打包后进程里没有 node_modules）。
- *
- * ## 自验证（两个模式各真起一次）
- *
- * 注入成功不等于能跑：`SHA` 与原 node.exe 相同就是"没注入进去"，而"能起来"要靠真执行。
- * 所以注入完必须**真的把产物当 sidecar 跑一遍**，并且两种会话后端各覆盖一条：
- *
- * - `memory-only`：不传 `--data-dir` → 走"会话只留内存"分支；
- * - `secure`：传数据目录 + 预置一个 `session.enc` 信封 → 走宿主 DPAPI 解密那条分支
- *   （这里假装成宿主，对 `host:secure-decrypt` 回一个明文会话，断言恢复出"已登录"）。
- *
- * 自验证的断言只碰"结论"（协议回帧、stderr 结论行、退出码），不碰实现细节。
- *
- * ## 本机环境限制
- *
- * 沙箱只给工作区内的可删范围：esbuild/vite 的子进程用默认 `%TEMP%` 会失败（R9 实测，
- * 清理临时文件 `Access is denied`）。所以脚本**对自己与子进程**把 `TEMP`/`TMP` 指向
- * `.tmp/temp`（不改用户环境，只在进程内）。
+ * `npm run dist:sidecar`：把 Node sidecar 打成单文件 SEA 二进制（`src-tauri/binaries/hwmusic-core-<triple>.exe`）。
+ * 两层 esbuild：SEA 只支持 CJS，入口又用了顶层 await（代理须先于业务请求装好），`--format=cjs` 报错——先包 shim 用 ESM 打包再转 CJS。
+ * 自验证：注入成功不等于能跑（`SHA` 相同就是没注入），须真跑产物，`memory-only`/`secure` 各一条；断言只碰结论。
+ * 只给工作区内可删范围：子进程用默认 `%TEMP%` 会失败（`Access is denied`），故把 `TEMP`/`TMP` 指向 `.tmp/temp`（只在进程内）。
  */
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -54,7 +24,7 @@ export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 export const SIDECAR_STEM = "hwmusic-core";
 /** Tauri 的 externalBin 目录。 */
 export const BINARIES_DIR = "src-tauri/binaries";
-/** sidecar 入口（R3/R6/R7/R8/R9 装配出来的那一个）。 */
+/** sidecar 的入口脚本（SEA 打包的起点）。 */
 export const SIDECAR_ENTRY = "src/sidecar/main.mjs";
 /** 中间产物目录（.gitignore 已含 .tmp/）。 */
 export const WORK_DIR = ".tmp/sidecar";
@@ -125,13 +95,7 @@ export function esbuildPasses() {
   ];
 }
 
-/**
- * 双模式自验证的用例表（纯数据，可单测）。
- *
- * `secure` 模式预置信封：没有 `session.enc` 的话 `loadMusicSession` 会在读文件那一步就返回
- * `null`（`no_session`），DPAPI 解密封装**根本走不到**——那样自验证只证明"能起来"，不证明
- * "宿主桥那条路是通的"。
- */
+/** 双模式自验证的用例表；`secure` 预置信封是因为没有 `session.enc` 时 `loadMusicSession` 在读文件那步就返回 `null`，DPAPI 那条路就走不到。 */
 export function selfCheckModes({ dataDir, cipher = "R14-self-check-cipher", plaintext = '{"musicSession":"r14"}' } = {}) {
   return [
     {
@@ -207,12 +171,7 @@ export function runSync(command, args, options = {}) {
   return { stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
-/**
- * 真跑一次产物，断言"结论"而不是"实现"。
- *
- * 断言项：协议往返（`settings:get` 回 ok）、该模式的 stderr 结论行、宿主通道是否被真的走过、
- * stdin EOF 后干净退出、stderr 没有未捕获异常。
- */
+/** 真跑一次产物，断言「结论」而非「实现」：`settings:get` 回 ok、该模式 stderr 结论行、宿主通道是否真走过、stdin EOF 后干净退出、无未捕获异常。 */
 export async function runSelfCheck({ exePath, mode, root = ROOT, timeoutMs = 15_000 }) {
   const dataDir = mode.args[1] ?? null;
   if (dataDir !== null) {
@@ -281,9 +240,8 @@ export async function runSelfCheck({ exePath, mode, root = ROOT, timeoutMs = 15_
     failures.push(`settings:get 没走通：${cause.message}`);
   }
 
-  // 启动期恢复是**异步**的：它要经宿主要求解一个信封（secure 模式），
-  // 所以在关 stdin 之前必须等到它的结论广播，否则收尸会把在途的宿主要求判成"宿主没答复"，
-  // 自验证就变成了"验收尸"而不是"验解密链路"。
+  // 启动期恢复是**异步**的：它要经宿主解一个信封（secure 模式），所以关 stdin 之前必须等到它的结论广播，
+  // 否则收尸会把在途的宿主要求判成「宿主没答复」，自验证就变成了「验收尸」而不是「验解密链路」。
   const status = await waitFor(
     () => frames.find((frame) => frame.id === undefined && frame.channel === "auth:status" && frame.payload?.busy === false),
     timeoutMs,

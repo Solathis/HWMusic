@@ -1,27 +1,10 @@
 #!/usr/bin/env node
 /**
- * `npm run smoke:build`：把**真的打包产物**起一次，看主窗是不是真建起来了。
- *
- * ## 为什么这条要单独存在
- *
- * 前面几道闸都只证明"东西在、是 PE、产物比 exe 新"——它们都不证明这个 exe **能起来**。
- * 一个 exe 可以完全合格却一启动就死在建窗那一步（WebView2 数据目录不存在时就是 `os error 5`），
- * 而打包链全程退出码 0。所以最后要真跑一次。
- *
- * ## 三种结论，绝不混为一谈
- *
- * | 结论 | 退出码 | 什么时候 |
- * |---|---|---|
- * | `PASS` | 0 | 进程还活着，**且**主窗句柄非 0（真建了窗） |
- * | `FAIL` | 1 | 进程自己死了 / 到超时都没建出窗（这是真故障） |
- * | `UNTESTED` | 2 | 本机根本起不了交互式窗口（沙箱拒绝建窗等），**不是通过** |
- *
- * 退出码 2 是关键：把"本机测不了"写成 0 就是伪造验收。CI（交互式会话）里跑出来必须是 0 或 1。
- *
- * ## 隔离
- *
- * `TEMP`/`TMP` 指到工作区内（沙箱只给工作区内的可删范围），`HWMUSIC_DATA_DIR` 指到
- * `.tmp/smoke-data`——冒烟**不许碰用户真实的设置与会话文件**。
+ * `npm run smoke:build`：把**真的打包产物**起一次，看主窗是不是真建起来了——前面几道闸只证明东西在、是 PE、比 exe 新，
+ * 都不证明这个 exe 能起来（一启动就死在建窗那一步时打包链照样退出码 0）。
+ * 三种结论绝不混为一谈：`PASS`=0（进程活着且主窗句柄非 0）、`FAIL`=1（进程自己死了或超时都没建出窗）、
+ * `UNTESTED`=2（本机起不了交互式窗口，**不是通过**——把「本机测不了」写成 0 就是伪造验收）。
+ * 隔离：`HWMUSIC_DATA_DIR` 指到 `.tmp/smoke-data`，冒烟不许碰用户真实的设置与会话文件。
  */
 import { spawn, spawnSync } from "node:child_process";
 import { mkdir, rm, stat } from "node:fs/promises";
@@ -73,11 +56,8 @@ export async function appExePath({ root = ROOT, profile = "release" } = {}) {
 }
 
 /**
- * 读进程的主窗句柄（Windows：`MainWindowHandle`）。
- *
- * 只有"真建了顶层窗口"才会非 0——进程活着但建窗失败（`os error 5`）时它是 0，
- * 这正是本冒烟要分辨的东西。读不到（没有 powershell）返回 `null`：那时只断言"进程还活着"，
- * 并在结论里写明 window 句柄没能查（不假称查过）。
+ * 读进程的主窗句柄（Windows：`MainWindowHandle`）：只有真建了顶层窗口才非 0，进程活着但建窗失败时它是 0。
+ * 读不到（没有 powershell）返回 `null`：那时只断言进程还活着，并在结论里写明 window 句柄没能查（不假称查过）。
  */
 export function windowHandleOf(pid, { spawnSyncImpl = spawnSync } = {}) {
   const script = `(Get-Process -Id ${Number(pid)} -ErrorAction Stop).MainWindowHandle`;
@@ -91,13 +71,8 @@ export function windowHandleOf(pid, { spawnSyncImpl = spawnSync } = {}) {
 }
 
 /**
- * stderr 里有没有"本机环境拒绝访问"的指纹。
- *
- * 实测（2026-10-19，本机沙箱）：应用起来后 `tauri-plugin-log` 要往
- * `%LOCALAPPDATA%\<identifier>\logs` 写文件，被拒 → `PluginInitialization("log", "拒绝访问。 (os error 5)")`
- * → panic → 退出码 101。**这不是产物坏了**，是这台机器不给写那个目录（沙箱只给工作区内的可删范围），
- * 所以判 UNTESTED 而不是 FAIL；但指纹必须窄（只认拒绝访问这一类），
- * 否则任何崩溃都会被"环境"二字吃掉。
+ * stderr 里有没有「本机环境拒绝访问」的指纹：沙箱拒写 `%LOCALAPPDATA%` 的日志目录 → `os error 5` → panic 退出码 101。
+ * **这不是产物坏了**，所以判 UNTESTED 而不是 FAIL；但指纹必须窄（只认拒绝访问这一类），否则任何崩溃都会被「环境」二字吃掉。
  */
 export function environmentDenial(stderr) {
   const match = /os error 5|拒绝访问|Access is denied|access is denied/.exec(typeof stderr === "string" ? stderr : "");

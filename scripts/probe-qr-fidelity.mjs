@@ -1,33 +1,9 @@
 #!/usr/bin/env node
 /**
- * 二维码全保真探针（R31）：用 **headless Chromium 真开官方二维码页**，把"页面自己发的建单/轮询请求"
- * 逐字节抓下来——URL（查询串有没有）、全部请求头（UA / Referer / Content-Type / Accept / Cookie 名单）、
- * 全部表单字段与值形态（`deviceID`/`deviceType` 长什么样、**从哪来**）。
- *
- * ## 为什么这次要真浏览器（R29 的教训）
- *
- * R29 的探针是 Node `fetch` 手搓链路：它只能证明"我们发的东西服务端收"，永远看不到**页面自己发的是什么**。
- * 于是"deviceID 从哪来"这种问题在那一轮只能是推断（"页面有 localStorage.hwid_cas_sid 时补 deviceID"）。
- * 真浏览器一开，答案当场落地：**建单不在移动页上，而在桌面门户页上**，而 deviceID 是
- * `POST /CAS/IDM_W/ajaxHandler/dev` 用一份**浏览器指纹 fp** 换回来的 `sid`（下面每一步都有实测）。
- *
- * ## 两相位
- *
- * 1. **移动页相位**（手机 UA 开 `/CAS/mobile/standard/login.html`）：它不是二维码页——记录它渲染什么、
- *    以及它**一个 DimensionalCode 请求都不发**（推翻"建单在移动页上"的想当然）；
- * 2. **二维码页相位**（桌面 UA 走 `getLoginWay → CAS → /CAS/portal/loginAuth.html`）：这一张页面上
- *    真的画出了二维码，也真的发了建单与轮询——被拦截的请求就是本探针要的完整形态。
- *
- * ## 纪律（与 R29 同）
- *
- * - **只读公开页面**：不登录账号、不提交任何凭据、不按"确认"；建单产生的那张码用完即弃、不扫不确认；
- * - `qRCode` / `qrToken` / 整串 content 只留长度与 sha256 前 8 位；`deviceID` 同样只留形状
- *   （它是一条**服务端下发的设备标识**，虽不含账号信息，但没必要落盘原值）；
- * - 探针自己的匿名会话（它的 cookie、指纹），与 sidecar 的会话无关。
- *
- * 用法：
- *   node scripts/probe-qr-fidelity.mjs                 # 写 .probe/r31-fidelity.json
- *   node scripts/probe-qr-fidelity.mjs --out .probe/x.json
+ * 真开 headless Chromium 中的官方二维码页，逐字节抓下页面自己发的建单/轮询请求（URL、请求头、表单字段）。
+ * 为什么必须真浏览器：Node `fetch` 手搓只能证明「我们发的东西服务端收」，漏掉页面自己的请求形态。
+ * 两相位：手机 UA 开移动登录页（它一个 DimensionalCode 请求都不发）；桌面 UA 走门户页才真建单与轮询。
+ * 纪律：只读公开页面，不登录、不提交凭据、不按确认；`qrToken`/content 只留长度与 sha256 前 8 位，`deviceID` 只留形状。
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -94,13 +70,7 @@ const shapeOfForm = (body) => {
   return [...form.keys()].map((name) => ({ name, value: isSecretParam(name) ? fingerprint(form.get(name)) : shapeOfValue(form.get(name)) }));
 };
 
-/**
- * 页面那份指纹编码器的**逆运算**。用的是**产品里那一个**（`src/protocols/device-fingerprint.mjs`），
- * 而不是探针再抄一遍——这样"我们的编码器 = 页面的编码器"这件事在探针里也是当场比对的
- * （单测另用探针抓到的原件钉住逐字节一致）。
- *
- * 只用来回答一件事：那份 `fp` 里到底有哪些字段、`cs` 是什么算法——因为 deviceID 是拿它换回来的。
- */
+/** 页面指纹编码器的逆运算，用的是产品里那一个（`src/protocols/device-fingerprint.mjs`），这样「我们的编码器 = 页面的编码器」当场可比。 */
 function describeFingerprint(fp, rawLength) {
   const decoded = decodeProductFingerprint(fp);
   if (!decoded.ok) return { present: false, reason: decoded.reason };
@@ -333,11 +303,7 @@ if (cas.casUrl === null) {
   process.exit(1);
 }
 
-/**
- * 相位一：手机 UA 走一遍。两小步——① CAS 入口（服务端按 UA 把浏览器送到哪张页）；
- * ② 显式打开**移动登录页** `/CAS/mobile/standard/login.html`（R16 起二维码配置就是从这张页读的，
- * 所以"这张页自己画不画二维码、建不建单"必须当场说清）。
- */
+/** 相位一：手机 UA 走两小步——① CAS 入口（服务端按 UA 送到哪张页）；② 显式打开移动登录页 `/CAS/mobile/standard/login.html`，二维码配置就是从这张页读的。 */
 const mobileEntryPhase = await drivePhase({
   browser: launched.browser,
   label: "CAS 入口（手机 UA）",
@@ -462,12 +428,12 @@ step("⑧ 页面自己的轮询请求", {
 // 保真度比对：**今天页面发的东西 vs 我们会发的东西**（用产品代码本身算，不另写一份）
 // ---------------------------------------------------------------------------
 
-/** 建单请求 URL：R31 起产品里就按"去掉查询串"发（没有这个导出时退化成同一规则，探针照样能跑）。 */
+/** 建单请求 URL：产品里按「去掉查询串」发（没有这个导出时退化成同一规则，探针照样能跑）。 */
 const toRequestUrl = typeof protocol.qrCreateRequestUrl === "function" ? protocol.qrCreateRequestUrl : (value) => String(value).split("?")[0];
 const oursCreateUrl = toRequestUrl(HUAWEI_QR_ENDPOINTS.create);
 /** 我们**现在**会发的那一份（模板六参数，没别的） */
 const oursTemplateFields = [...new URLSearchParams(protocol.buildQrCreateBody(HUAWEI_QR_ENDPOINTS.create)).keys()].sort();
-/** R31 B 之后我们会发的那一份（补上设备标识） */
+/** 补上设备标识之后我们会发的那一份。 */
 const oursAlignedFields = [
   ...new URLSearchParams(protocol.buildQrCreateBody(HUAWEI_QR_ENDPOINTS.create, { extra: { deviceID: "X", deviceType: "7" } })).keys(),
 ].sort();
@@ -483,10 +449,10 @@ const fidelity = {
     oursUrl: shapeOfUrl(oursCreateUrl),
     urlSame: shapeOfUrl(oursCreateUrl).path === createRequest.urlShape.path && !shapeOfUrl(oursCreateUrl).hasQueryString,
     pageFields: pageCreateFields,
-    /** R31 B 之前的口径：只发模板六参数（deviceID/deviceType 缺） */
+    /** 补设备标识之前的口径：只发模板六参数（deviceID/deviceType 缺）。 */
     oursFieldsNow: oursTemplateFields,
     missingNow: diff(pageCreateFields, oursTemplateFields).missing,
-    /** R31 B 之后的口径：补上设备标识 */
+    /** 补上设备标识之后的口径。 */
     oursFieldsAligned: oursAlignedFields,
     missingAligned: diff(pageCreateFields, oursAlignedFields).missing,
     extraAligned: diff(pageCreateFields, oursAlignedFields).extra,
@@ -523,12 +489,7 @@ const fidelity = {
     pageDeviceType: deviceTypeField?.value?.sample ?? null,
     devFieldNames: devRequest ? [...(devBody?.keys() ?? [])] : [],
     fingerprint: fingerprintShape,
-    /**
-     * fp 的**原值**（探针自己那份匿名浏览器指纹：画布/WebGL/字体哈希与屏幕尺寸，不含账号信息）。
-     *
-     * 为什么破例留原值：单测要用它钉住"我们的编码器与页面**逐字节**一致"
-     * （`test/fixtures/r31-page-fingerprint.json` 就是从它摘的），而只留长度与指纹做不到这一点。
-     */
+    /** fp 的原值（探针自己那份匿名指纹）；破例留原值是因为单测要用它钉住「与页面逐字节一致」（`test/fixtures/r31-page-fingerprint.json` 即从它摘的）。 */
     rawFingerprint: devRequest ? rawField(devRequest.postData, "fp") : null,
     /** 我们那份字段表（产品代码算出来的）与页面那份逐个比：字段名集合必须完全一致 */
     oursFingerprintFieldNames: Object.keys(deviceFingerprintFields({ now: 0, lang: "zh-cn" })).sort(),

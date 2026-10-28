@@ -1,48 +1,20 @@
 #!/usr/bin/env node
 /**
- * R27 探针：登录 webview 换 **HarmonyOS 移动 UA** 这条路，全链与页面形态到底长什么样。
- *
- * 背景（R26 遗留）：桌面 UA 下服务端 `getBaseSwitchInfo` 只放 {red, huawei, blue, lightred}，
- * `dark` 一律回落 `red` —— "深色档看不到深色官方页"是服务端边界。R26 探针同时实测到
- * **唯一一条能拿到深色的路是 HarmonyOS 移动 UA**（`.probe/r26-theme-render.json` 的 C 行：
- * `index-dark.css` + body/root 背景 `rgb(0,0,0)`），代价是页面按 `isMobileWap()` 换成移动版式。
- * 控制器 R27 裁决：登录 webview 就采用移动 UA。
- *
- * 于是本探针回答四个问题（结论登记在 `docs/API_CONTRACT.md` §1.7 的 R27 段）：
- *
- *  A. **全链**：移动 UA 下 authorize 链的每一跳与桌面 UA 有什么差异？经过的主机有没有
- *     落在现有导航白名单（`login::LOGIN_ALLOWED_ORIGINS`）**之外**的？（白名单漏一个域
- *     就是 R16 那类"登录页停在空壳上"。）
- *  B. **服务端裁决**：移动 UA 下 `getBaseSwitchInfo` 认哪些 `themeName`？浅色档该挂哪个值
- *     （R26 的"浅色档不挂参数"在移动 UA 下站不住：不带参数时页面会拿 prefers-color-scheme
- *     去问服务端，系统深色就会变黑）。
- *  C. **黑底复测**：真 Chromium 里量计算样式，确认哪个值给出 `#000` 真黑底。
- *  D. **页面形态**：移动版登录页有哪些输入、有没有二维码入口（决定"用户在窗里能做什么"）。
- *
- * **只碰公开页面与公开接口**：不登录、不输账号、不提交凭据、不扫码；`state` 与
- * `code_challenge` 都是探针自己的一次性/占位串，因此拿不到任何可用凭据。
- *
- * 用法：
- *   node scripts/probe-login-mobile-ua.mjs                # 全部四段
- *   node scripts/probe-login-mobile-ua.mjs --no-browser   # 只跑 A/B（不起浏览器）
- *   node scripts/probe-login-mobile-ua.mjs --out .probe/xxx.json
+ * 探针：登录 webview 换成 HarmonyOS 移动 UA 会怎样。桌面 UA 下 `getBaseSwitchInfo` 不给 `dark`，深色档看不到深色官方页是服务端边界。
+ * 唯一能拿到深色的是 HarmonyOS 移动 UA（代价：页面按 `isMobileWap()` 换成移动版式）；产品没采用，登录 webview 保持宿主默认 UA。
+ * 四问：链路各跳与导航白名单（`login::LOGIN_ALLOWED_ORIGINS`）差在哪；深色档挂哪个 `themeName`；哪个值给出 `#000`；移动页有哪些输入。
+ * 只碰公开页面与公开接口：不登录、不输账号、不提交凭据、不扫码；`state` 与 `code_challenge` 是探针自造的一次性串，拿不到可用凭据。
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-/** 桌面基线（R26 那一份，用来对比"链路哪几跳变了"）。 */
+/** 桌面基线（用来对比「链路哪几跳变了」）。 */
 const DESKTOP_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-/**
- * 移动 UA 候选。
- *
- * 第一条是 R26 实测出 `#000` 的那一条（`r26-theme-render.json` 的 `harmony`），也是
- * 本任务打算落进 `login::LOGIN_MOBILE_UA` 的那一条；其余几条用来确认"是不是只有它行"
- * （选型要的是"服务端认深色 + 版式可用"，不是碰巧某一条能跑）。
- */
+/** 移动 UA 候选；第一条是实测出 `#000` 的那条，其余几条确认「是不是只有它行」（要的是服务端认深色且版式可用）。 */
 const MOBILE_UA_CANDIDATES = {
-  /** `Mozilla/5.0 (Phone; HarmonyOS 4.0) … Mobile Safari/537.36`（R26 实测出黑底的那一条） */
+  /** `Mozilla/5.0 (Phone; HarmonyOS 4.0) … Mobile Safari/537.36`（实测出黑底的那一条） */
   harmonyPhone:
     "Mozilla/5.0 (Phone; HarmonyOS 4.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36",
   /** 华为浏览器移动版（同一个 HarmonyOS 家族，带 HuaweiBrowser 标识） */
@@ -56,7 +28,7 @@ const MOBILE_UA_CANDIDATES = {
     "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36",
 };
 
-/** 默认落进实现的候选（见 [`MOBILE_UA_CANDIDATES`]）。 */
+/** 探针默认用的候选（见 [`MOBILE_UA_CANDIDATES`]）。 */
 const MOBILE_UA = MOBILE_UA_CANDIDATES.harmonyPhone;
 
 const CLIENT_ID = "101444301";
@@ -121,7 +93,7 @@ function shapeOf(raw) {
   }
 }
 
-/** 授权页查询串（与 R26 探针同一份：只到公开页面为止）。 */
+// 授权页查询串（只到公开页面为止）。
 function authorizeQuery(state) {
   return new URLSearchParams({
     response_type: "code",

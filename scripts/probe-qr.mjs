@@ -1,37 +1,9 @@
 #!/usr/bin/env node
 /**
- * 二维码（DimensionalCode）登录链路探针（R16 / A 部分）。
- *
- * **只请求外网公开页面与公开的二维码建单接口**：不登录任何账号、不提交任何凭据、不扫码。
- * 建立的二维码会话由本脚本自己丢弃（不轮询到 confirm，也就拿不到任何可用凭据）。
- *
- * 协议的来路（可复现）：
- * 1. `oauth-login1.cloud.huawei.com` 的授权页是 Vue3 SPA，它 POST `/oauth2/ajax/getLoginWay`
- *    （头 `interfaceVersion: v3`）后按 `loginType` 决定渲染哪条路；对 client 101444301 返回
- *    `cas.casLoginRedirectUrl` → 302 到 `id1.cloud.huawei.com/CAS/portal/loginAuth.html`；
- * 2. CAS 门户页的页面配置由 `POST /CAS/IDM_W/ajaxHandler/login/getPageInfo` 下发（带 pageToken）；
- *    桌面版门户（`/CAS/mobile/` vs `/CAS/portal/`）**只在移动版登录页**下发二维码配置：
- *    `localInfo.getqrContent`（建单端点，自带 appID/loginChannel/reqClientType/version/appBrand）、
- *    `localInfo.asyncURL`（轮询端点）、`localInfo.qrcodeRequestInterval`（轮询间隔毫秒）；
- * 3. 建单：`POST <getqrContent 的路径部分>`，表单 `{appID, confirmFlag, version, reqClientType,
- *    loginChannel, appBrand}`（可带 `deviceID`/`deviceType`），响应
- *    `{content, qrCode, qrToken, sessionID, qrCodeCreateTime, expiredTime, version}`——
- *    `content` 就是二维码要编码的字符串（指向 `/qrcode/login.jsp?...`）；
- * 4. 轮询：`POST <asyncURL>&t=<随机数>`，表单 `{qrToken}`，响应 `{resultCode, errorDesc}`：
- *    `0` = 已确认（携带 userAccount/code 等，**本探针不会走到**）、`103000202` = 已扫待确认、
- *    `103000201` = 过期、其余按"继续轮询"处理。
- *
- * 落盘只留**形状**：端点、字段名、长度、resultCode 序列；`content`/`qrToken` 一律不入结果。
- *
- * 用法：
- *   node scripts/probe-qr.mjs                     # 默认：建单 + 轮询 3 次（间隔取页面配置）
- *   node scripts/probe-qr.mjs --polls 1           # 只轮询一次
- *   node scripts/probe-qr.mjs --until-expired     # 轮询到档位变化（实测「服务端失效时 poll 返回什么」）
- *   node scripts/probe-qr.mjs --out .probe/qr.json
- *
- * `--until-expired`（R20 增补）：R16 只观测到 `103000200`（未扫），协议表里的 `103000201`（过期）
- * 一直是"未观测"档。这一模式一直轮询到 resultCode 变化（或越过 `expiredTime` + 宽限 / 硬上限），
- * 把每一次采样与"到底观测到没有"如实写进结果——R20 的本地到期回退方案就取决于这个答案。
+ * 二维码（DimensionalCode）登录链路探针（只请求公开页面与公开的建单接口）。
+ * 不登录账号、不提交任何凭据、不扫码，建立的二维码会话由脚本自己丢弃。
+ * 落盘只留形状：端点、字段名、长度、resultCode 序列；`content`/`qrToken` 不入结果。
+ * 用法：`node scripts/probe-qr.mjs`，`--polls`/`--until-expired`/`--out` 见脚本参数。
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -43,7 +15,7 @@ import { redactUrl, summarizeResponse, verdictOf } from "./probe-lib.mjs";
 const DESKTOP_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-/** 协议事实照抄任务书（client_id 是公开标识符，不是凭据）。 */
+/** 协议常量（client_id 是公开标识符，不是凭据）。 */
 const CLIENT_ID = "101444301";
 const REDIRECT_URI = "hms://redirect_uri";
 const DUMMY_CODE_CHALLENGE = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -68,7 +40,7 @@ const pollCount = (() => {
   const value = index === -1 ? 3 : Number(process.argv[index + 1]);
   return Number.isInteger(value) && value >= 0 ? value : 3;
 })();
-/** 轮询到档位变化（R20：实测「服务端失效时 poll 返回什么档位」）。 */
+/** 轮询到档位变化（实测「服务端失效时 poll 返回什么档位」）。 */
 const untilExpired = args.has("--until-expired");
 /** 越过 `expiredTime` 之后还给多久才放弃（过了有效期服务端可能并不立刻改档位）。 */
 const EXPIRY_GRACE_MS = 60_000;
@@ -384,7 +356,7 @@ for (let index = 0; untilExpired || index < pollCount; index += 1) {
   }
 }
 
-/** 观测结论：服务端失效时是否**真的**给出过期档位（R20 的裁决依据）。 */
+/** 观测结论：服务端失效时是否**真的**给出过期档位。 */
 const observedResultCodes = [...new Set(polls.map((entry) => entry.resultCode))];
 const expiredTier = {
   requested: untilExpired,
