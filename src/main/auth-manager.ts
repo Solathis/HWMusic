@@ -689,7 +689,7 @@ export function createAuthManager(deps: AuthManagerDeps) {
     log(sessionExpiryLine(loaded, restoredAt));
     const expiresAt = musicSessionExpiresAt(loaded);
     if (expiresAt !== null && restoredAt >= expiresAt) {
-      // 到期会话验证器验不出来，不发验证请求；盘上的文件不删（时区是推断，留着可挽回）
+      // 到期会话验证器验不出来，不发验证请求；盘上的文件不删（与「验证判失效」那条路一致，重扫会覆盖它）
       session = null;
       const message = musicSessionExpiredText(expiresAt);
       concludeRestore({ busy: false, message });

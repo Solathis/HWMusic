@@ -15,14 +15,15 @@ import {
   createAuthManager,
 } from "../src/main/auth-manager.ts";
 import { LOGIN_PAGE_UNAVAILABLE_MESSAGE, LOGIN_TIMEOUT_MESSAGE } from "../src/main/huawei.ts";
+import { musicSessionExpiredText } from "../src/main/music-session.mjs";
 
 const AUTHORIZE_URL = `${HUAWEI_OAUTH_ENDPOINTS.authorize}?client_id=101444301&state=S`;
 const MUSIC_SESSION = { musicSession: "user$abc", userId: "42" };
 const ACCOUNT_TOKENS = { accessToken: "AT-1", refreshToken: "RT-1", expiresAt: 1_700_000_000_000 };
 
-/** 北京时间 2026-10-28 15:52:23 到期的会话（= UTC 07:52:23）。 */
+/** UTC 2026-10-28 15:52:23 到期的会话（expireTime 是 UTC 墙钟）。 */
 const EXPIRING_SESSION = { musicSession: "user$expiring", userId: "42", expireTime: "20261028155223" };
-const EXPIRES_AT = Date.UTC(2026, 9, 28, 7, 52, 23);
+const EXPIRES_AT = Date.UTC(2026, 9, 28, 15, 52, 23);
 
 /** 造一个真回调 URL：state 必须取自本次 attempt（自编 state 测的是不匹配那条路）。 */
 function callbackUrl(host, code = "CODE-1") {
@@ -754,10 +755,10 @@ test("R75 restore：会话已过 expireTime → 不发验证请求，回未登�
   assert.equal(AUTH_ERROR_KINDS.sessionExpired, "session_expired");
   assert.deepEqual(verified, [], "到期会话验证器验不出来，不发验证请求");
   assert.equal(auth.currentSession().session, null);
-  assert.deepEqual(store.calls, [["load"]], "不删 session.enc（时区是推断，留着可挽回）");
+  assert.deepEqual(store.calls, [["load"]], "不删 session.enc（与验证判失效一致，重扫会覆盖它）");
   assert.deepEqual(broadcasts.at(-1), {
     channel: AUTH_STATUS,
-    payload: { loggedIn: false, busy: false, message: "音乐会话已于 10月28日 15:52 到期，请重新扫码登录。" },
+    payload: { loggedIn: false, busy: false, message: musicSessionExpiredText(EXPIRES_AT) },
   });
   assert.ok(logs.some((line) => /expireTime=20261028155223/.test(line) && /已过 1\.6 小时/.test(line)), logs.join("\n"));
 });
@@ -790,7 +791,7 @@ test("R75 运行中到期：activeSession 收回会话、回到登录页，只�
   assert.deepEqual(broadcasts.at(-1).payload, {
     loggedIn: false,
     busy: false,
-    message: "音乐会话已于 10月28日 15:52 到期，请重新扫码登录。",
+    message: musicSessionExpiredText(EXPIRES_AT),
   });
   assert.ok(auth.currentSession().epoch > epochBefore, "epoch 前移：在途请求的响应作废");
   assert.equal(auth.activeSession(), null);
