@@ -1,14 +1,9 @@
 /**
  * 媒体 URL 安全（渲染层 img/audio 的唯一放行口）。
- *
- * 规则：`https` + CDN 后缀白名单（后缀边界必须是点，`evil-dbankcdn.cn` 不放行）+ 无 userinfo + 无显式端口。
- * 放行列表与 `src-tauri/tauri.conf.json` 的 CSP `img-src`/`media-src` 同源，
- * 一致性由 `test/safe-media-url.test.mjs` 解析 CSP 行钉死——改这里就必须同步改 CSP。
- *
- * R65：多一档**本地曲库协议**（`LOCAL_MEDIA_SCHEME`）。它与 CDN 那一档是两条互不相交的路：
- * 本地协议只认"两种路径形状 + 32 位十六进制 id"，没有后缀白名单这回事（见 `parseLocalMediaUrl`）。
- *
- * 契约：**任何输入都不抛异常**，不合格一律 `null`。渲染层拿不到"半可信"的 URL。
+ * 规则：`https` + CDN 后缀白名单（后缀边界必须是点）+ 无 userinfo + 无显式端口。
+ * 放行列表与 `src-tauri/tauri.conf.json` 的 CSP 同源，改这里就必须同步改 CSP。
+ * 本地曲库协议（`LOCAL_MEDIA_SCHEME`）是另一条独立的路，判定见 `parseLocalMediaUrl`。
+ * 契约：任何输入都不抛异常，不合格一律 `null`。
  */
 import { LOCAL_MEDIA_SCHEME, LOCAL_TRACK_HEX_LENGTH } from "../shared/local-track.ts";
 
@@ -51,11 +46,7 @@ function matchSuffix(host) {
   return MEDIA_URL_HOST_SUFFIXES.find((suffix) => host === suffix || host.endsWith(`.${suffix}`)) ?? null;
 }
 
-/**
- * 本地曲库协议的放行判定（R65）：只认两种宿主形态 + `/<id>`（音频）与 `/<id>/cover`（封面）两种路径，
- * 查询串/片段/userinfo/显式端口/多余路径段一律拒绝——协议只按 id 查索引，放行它们只会让"能不能播"不可预测。
- * 不是本地协议地址回 `null`（交给 CDN 那条规则）。
- */
+/** 本地曲库协议的放行判定：只认 `/<id>`（音频）与 `/<id>/cover`（封面），查询串/片段/userinfo/端口一律拒绝；不是本地协议回 `null`。 */
 export function parseLocalMediaUrl(value) {
   if (typeof value !== "string") return null;
   const raw = value.trim();

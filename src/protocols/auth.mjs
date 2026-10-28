@@ -1,20 +1,8 @@
 /**
  * OAuth/PKCE 协议原型（华为帐号 OAuth，授权码 + PKCE S256）。
- *
- * 端点一律**注入**：本模块不写死任何 URL——端点值由调用方给（生产默认值住在
- * `src/main/auth-manager.ts` 的 `HUAWEI_OAUTH_ENDPOINTS`，登记在 `docs/API_CONTRACT.md` §1）。
- *
- * R32 换血（对齐公开参考实现 `talongao/huawei-music-desktop` 的**实测**事实，见 §1.2/§1.3）：
- * authorize 与 token 是**两个不同的主机**（此前我们都打在 `oauth-login1` 上，授权页能开、
- * 但请求参数集与端点都不是实测那一组）；授权页参数补齐 `countryCode=cn` 与 `ui_locales=zh-cn`；
- * `scope` 换成用户指令给出的**完整清单**（参考实现默认只用 `openid`，那是它自己的最小实验集）。
- *
- * 协议事实（照抄任务书，勿改）：
- * client_id = 101444301（非本项目注册身份）、redirect_uri = hms://redirect_uri、
- * access_type = offline、response_type = code、PKCE S256。
- *
- * 安全约定：返回值里的错误消息**只带端点/HTTP 状态/错误码**，绝不回显 code、code_verifier、
- * access_token、refresh_token（这些值进日志就等于泄漏）。
+ * 端点一律注入，本模块不写死任何 URL（生产默认值在 `src/main/auth-manager.ts`，见 `docs/API_CONTRACT.md` §1）。
+ * 协议事实：client_id = 101444301、redirect_uri = hms://redirect_uri、access_type = offline、response_type = code。
+ * 安全约定：错误消息只带端点/HTTP 状态/错误码，绝不回显 code、code_verifier、access_token、refresh_token。
  */
 import { createHash, randomBytes } from "node:crypto";
 
@@ -22,14 +10,7 @@ import { err, ok } from "../shared/result.ts";
 
 export const OAUTH_CLIENT_ID = "101444301";
 export const OAUTH_REDIRECT_URI = "hms://redirect_uri";
-/**
- * 授权页的 `scope`：**完整清单**（用户指令逐字给出，顺序即此顺序）。
- *
- * 为什么不是参考实现默认的 `['openid']`：参考那份是它做最小实验时用的集合，
- * 而用户指令点名了要这一整串（音乐业务要用到的账号域资料都在里面）。
- * 空格分隔是 OAuth 2.0 的规定形态（`scope` 参数值）；这里存**数组**，
- * 拼串只发生在 `buildAuthorizeUrl` 一处，避免两处各拼一遍拼出两个样子。
- */
+// 授权页 scope 的完整清单（顺序即此顺序）；拼空格分隔串只发生在 `buildAuthorizeUrl` 一处。
 export const OAUTH_SCOPES = Object.freeze([
   "openid",
   "https://www.huawei.com/auth/account/mobile.number",
@@ -50,7 +31,7 @@ export const OAUTH_SCOPE = OAUTH_SCOPES.join(" ");
 
 export const OAUTH_ACCESS_TYPE = "offline";
 export const OAUTH_RESPONSE_TYPE = "code";
-/** 授权页的地区/语言（参考实现实测参数：`countryCode=cn&ui_locales=zh-cn`）。 */
+/** 授权页的地区/语言（实测参数：`countryCode=cn&ui_locales=zh-cn`）。 */
 export const OAUTH_COUNTRY_CODE = "cn";
 export const OAUTH_UI_LOCALES = "zh-cn";
 export const PKCE_CODE_CHALLENGE_METHOD = "S256";
@@ -131,7 +112,7 @@ function messageOf(cause) {
   return "未知错误（详情见日志）";
 }
 
-/** 拼授权页 URL（参数名与取值 = 参考实现实测那一组，端点本身由调用方给）。 */
+/** 拼授权页 URL（参数名与取值 = 实测那一组，端点本身由调用方给）。 */
 export function buildAuthorizeUrl({ authorizeEndpoint, clientId = OAUTH_CLIENT_ID, codeChallenge, state, extraParams = {} }) {
   const endpoint = assertHttpsEndpoint(authorizeEndpoint, "authorizeEndpoint");
   const url = new URL(endpoint);
@@ -143,8 +124,7 @@ export function buildAuthorizeUrl({ authorizeEndpoint, clientId = OAUTH_CLIENT_I
   url.searchParams.set("code_challenge", codeChallenge);
   url.searchParams.set("code_challenge_method", PKCE_CODE_CHALLENGE_METHOD);
   url.searchParams.set("state", state);
-  // 地区与语言：参考实现的授权 URL 里有这两个（少了它们授权页按别的区域渲染，
-  // 后续 CAS 落地页也就跟着换域——R16 那类"窗里停在空壳"的故障与域判定强相关）。
+  // 地区与语言：少了这两个参数，授权页按别的区域渲染，后续 CAS 落地页也跟着换域。
   url.searchParams.set("countryCode", OAUTH_COUNTRY_CODE);
   url.searchParams.set("ui_locales", OAUTH_UI_LOCALES);
   for (const [name, value] of Object.entries(extraParams)) url.searchParams.set(name, String(value));
@@ -152,15 +132,8 @@ export function buildAuthorizeUrl({ authorizeEndpoint, clientId = OAUTH_CLIENT_I
 }
 
 /**
- * 新建一次登录尝试：PKCE 对（verifier/challenge）+ state + 授权页 URL。
- * 消费它的是 login-callback.mjs 的 runLoginFlow（一次性、10 分钟过期）。
- *
- * @param {{authorizeEndpoint: string, random?: Function, now?: number}} [options]
- *        `authorizeEndpoint` 必须由调用方注入（已确认值见 docs/API_CONTRACT.md §1.2）；
- *        `now` 是**这次尝试的创建时刻**（纪元毫秒，**是值不是时钟函数**）——它原样存进
- *        `createdAt`，消费它的是 `consumeCallback`/`runLoginFlow` 的过期判定
- *        （R36 起二维码那条路也把 `attempt.createdAt` 传进 `runLoginFlow`：
- *        attempt 建立在前、登录窗开在后，"过期"必须锚在尝试上）。
+ * 新建一次登录尝试：PKCE 对（verifier/challenge）+ state + 授权页 URL；一次性、10 分钟过期。
+ * @param {{authorizeEndpoint: string, random?: Function, now?: number}} [options] `authorizeEndpoint` 由调用方注入，`now` 是这次尝试的创建时刻（值而非时钟函数）。
  */
 export function createAttempt({ authorizeEndpoint, random = randomBytes, now = Date.now() } = {}) {
   const endpoint = assertHttpsEndpoint(authorizeEndpoint, "authorizeEndpoint");
@@ -244,22 +217,7 @@ function toTokenSet(payload, { now, previousRefreshToken = null }) {
 }
 
 /**
- * `id_token`（OIDC JWT）→ claims 对象（**只解码，不验签**；解不出就是 `null`）。
- *
- * R40 增补。为什么需要它：`loginex` 响应顶层**没有**用户名/头像（真机实证：顶层只有
- * `ageLevel/expireTime/gender/queryAllSubInfoResp/queryAppConfigDetailResp/realNameAuth/
- * realNameLevel/result/snsUserID/token/userFlag/userHC/userID`），而 token 响应里有
- * `id_token`——OIDC 的 claims 段才是账号资料（名字/头像）的标准载体。
- *
- * 四条边界，每条都是刻意的：
- * 1. **不验签**：这是一个刚从 TLS 连接上拿到的响应，不是从不可信来源转发的 token；
- *    验签要 JWKS（另一个端点、另一份缓存），本轮不发明那个端点；
- * 2. **只认三段式**（`header.payload.signature`）且 payload 段是 base64url：别的形状一律
- *    `null`——`id_token` 未必永远是 JWT，猜着解只会得到一个乱码对象；
- * 3. **不抛异常**：坏形状（少段、非法字符、不是 JSON、JSON 不是对象）全部回 `null`，
- *    调用方据此走兜底（登录链不能因为一个诊断字段把整次登录搞崩）；
- * 4. **不记值**：本函数只返回对象，日志一律由调用方只记**键名**（claims 里有 `sub` 这类标识）。
- *
+ * `id_token`（OIDC JWT）→ claims 对象：只解码不验签，坏形状一律 `null`，本函数只返回值、不记值。
  * @param {unknown} idToken
  * @returns {Record<string, unknown> | null}
  */
@@ -284,25 +242,14 @@ export function idTokenClaimsOf(idToken) {
   }
 }
 
-/**
- * `id_token` 的 claims 键名（排序，只键名）——**只给日志用**。
- *
- * 与 `idTokenClaimsOf` 分开的理由：调用方要的是"这次响应里有哪些 claim"，
- * 而不是"claims 里有什么值"；写成两件事，才不会有人在日志里顺手把 claims 打出来。
- */
+/** `id_token` 的 claims 键名（排序，只键名）——只给日志用，避免有人在日志里顺手把值打出来。 */
 export function idTokenClaimKeysOf(idToken, limit = 40) {
   const claims = idTokenClaimsOf(idToken);
   if (claims === null) return [];
   return Object.keys(claims).sort().slice(0, Math.max(1, limit));
 }
 
-/**
- * 令牌响应顶层键名的**键名日志**（R38 诊断；只记键名、绝不记值）。
- *
- * 为什么需要它：`token` 端点的响应里到底有没有用户资料字段（名字/头像/VIP）从来没有实证——
- * 登录链成功后只取了 `access_token`。把键名记下来，下一次真机登录就有真实形状可依，
- * 而不是继续往候选表里加猜测键。回调默认空实现（协议层自己不写日志）。
- */
+/** 令牌响应顶层键名的键名日志（只记键名、绝不记值）；回调默认空实现，协议层自己不写日志。 */
 function reportResponseKeys(payload, onResponseKeys) {
   if (typeof onResponseKeys !== "function") return;
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return;
@@ -312,11 +259,8 @@ function reportResponseKeys(payload, onResponseKeys) {
 }
 
 /**
- * 授权码兑换（token endpoint，带 code_verifier）。
- * @param {{endpoint: string, code: string, codeVerifier: string, redirectUri?: string, clientId?: string,
- *          fetchImpl?: Function, now?: number, signal?: AbortSignal,
- *          onResponseKeys?: (keys: string[]) => void}} params
- *   `onResponseKeys`（R38）：拿到了响应体就把**顶层键名**交出去（只记键名，见 `reportResponseKeys`）。
+ * 授权码兑换（token endpoint，带 code_verifier）；`onResponseKeys` 只交出响应顶层键名。
+ * @param {{endpoint: string, code: string, codeVerifier: string, redirectUri?: string, clientId?: string, fetchImpl?: Function, now?: number, signal?: AbortSignal, onResponseKeys?: (keys: string[]) => void}} params
  * @returns {Promise<{ok: true, data: object} | {ok: false, error: {message: string, kind: string}}>}
  */
 export async function exchangeAuthorizationCode({

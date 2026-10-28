@@ -1,46 +1,9 @@
 /**
- * 华为音乐业务接口（协议原型层）。
- *
- * ## R32 换血：从"端点未知"到"端点形状 = 公开参考实现的实测值"
- *
- * 本模块此前是**纯注入 + 全部待确认**：端点表空着、参数名是占位、响应信封按 `{code:"0"}` 猜。
- * R4 的探针只证明了"那些域名不存在"，于是每个业务请求都老老实实回 `endpoint_unknown`——
- * 诚实，但一条业务链都不通。
- *
- * R32 拿到了一份**可用的协议事实**：公开仓库 `talongao/huawei-music-desktop` 的
- * `src/music.mjs` + `docs/API_CONTRACT.md`（2026-10-14 本人账号的实验记录，含收藏/歌单/搜索/
- * 专辑/歌手/历史/播放地址/歌词的**请求形状与响应形状**）。本模块按它逐字段对齐：
- *
- * | 维度 | 换血前（R4） | 换血后（R32 = 参考实测） |
- * |---|---|---|
- * | 参数位置 | 一律拼进查询串 | `POST` → JSON 体；`GET` → 查询串 |
- * | 分页 | `page`/`size` | `start`/`limit`（`page` 在**通道边界**换算成 `start`） |
- * | 业务成功 | `code === "0"` | HTTP 成功 **且** `result.resultCode === "000000"` |
- * | 收藏容器 | `list`/`items`/…（猜的） | `favoriteInfos[]` |
- * | 歌曲字段 | `id`/`name`（猜的） | `contentID`/`contentName`/… → **归一化**成 `id`/`name` |
- * | 密码头 | 无 | `Authorization: Digest …`（由调用方经 `sessionHeaders` 注入） |
- *
- * **端点仍然注入**（注入式架构没变）：本模块不写任何域名，只登记**路径形状**
- * （`MUSIC_ENDPOINT_PATHS`）。绝对 URL 的默认值住在 `src/main/music-service.mjs`
- * （照抄参考的业务域 + 这些路径），可被设置文档 `data.musicEndpoints` 逐键覆盖或显式关闭。
- *
- * ## 归一化：为什么协议层要重写字段名
- *
- * 真接口的字段是 `contentID`/`contentName`/`singer`…，而渲染层的读取兜底表
- * （`features/library/track-fields.mjs`）只认 `id`/`name`/…。两者对不上时界面不是报错，
- * 而是显示"未知歌曲 / 未命名歌单"——**看起来像数据坏了**。所以线上形状在这里统一翻成
- * 内部形状（`normalizeTrack` / `normalizePlaylist`），渲染层一行都不用改。
- *
- * 三个必须守住的业务语义（旧仓踩过的坑）：
- * 1. 收藏列表没有可信的总数字段 → 总数 = **完整分页后 ID 去重**，与"已加载 N 首"分开；
- *    接口若上报了 total，只作 `reportedTotal` 记录，绝不当真值。
- * 2. playback 响应里**顶层 `fileURL` 才是音频地址**；`fileInfos` 可能是 JSON 字符串
- *    （参考的样本里它甚至根本不是音频，而是辅助描述）。
- * 3. `auditionTime > 0` **不能单独**判定 30 秒试听，必须再有第二个信号（标志位）才算。
- * 另：自建歌单删除必须走 `playlistDelete` 端点，不允许拿收藏端点冒充成功。
- *
- * 安全约定：错误的 message 只带 HTTP 状态/错误码/域名，不回显整段响应体；
- * 会话凭据（音乐 token / 账号 AT）在本模块里只经 `session`/`sessionHeaders` 流过，不进日志。
+ * 华为音乐业务接口（协议原型层）：只登记路径形状，绝对 URL 由调用方注入。
+ * 线上字段（contentID/contentName…）在这里统一归一成渲染层认的 id/name。
+ * 收藏没有可信总数：总数取完整分页后 ID 去重，接口上报值仅作记录。
+ * 播放响应的顶层 fileURL 才是音频地址；试听要 auditionTime 与标志位同时成立。
+ * 报错只带状态码/域名，会话凭据不经日志；自建歌单删除必须走 playlistDelete。
  */
 import { err, ok } from "../shared/result.ts";
 import { isSafeMediaUrl, safeMediaUrl } from "./safe-media-url.mjs";
@@ -65,16 +28,11 @@ export const MUSIC_ENDPOINT_PATHS = Object.freeze({
   artist: "/music-metacontent-service/v2/service/artist/detail/byartistcode",
   history: "/music-userbehavior-service/v1/service/recentlyplayed/query",
   playback: "/music-play-service/v3/service/file/bycontentcode",
-  /**
-   * 歌词：参考实现里**没有独立歌词端点**——歌词从播放响应里取
-   * （`lyricAddress` / `contentExInfo.lyrics`，见 `getLyrics`）。
-   * 这个键留着只是因为设置文档里可能已经写过一个独立歌词端点：写了就用它，
-   * 没写就走"从播放响应推导"这条默认路。
-   */
+  /** 歌词端点：只在设置里显式注入时使用，默认从播放响应推导（见 getLyrics）。 */
   lyrics: null,
 });
 
-/** 每个端点的 HTTP 方法（参考实测；写死在这里而不是让调用方猜）。 */
+/** 每个端点的 HTTP 方法（实测固定）；写死在这里，不让调用方猜。 */
 export const MUSIC_ENDPOINT_METHODS = Object.freeze({
   favorites: "POST",
   playlistList: "POST",
@@ -101,22 +59,19 @@ export const MUSIC_AUTHENTICATED_ENDPOINTS = Object.freeze([
 
 /** 收藏里"歌曲"的内容类型（参考：官方 H5 的 1 = 歌曲）。 */
 export const MUSIC_SONG_CONTENT_TYPES = Object.freeze(["1"]);
-/**
- * "我的歌单"发现用的内容类型（参考实测：`[1,4,5,7]` 一次调用同时返回歌曲与歌单，调用方按
- * `contentType` 分流；官方 H5 的语义是 1=歌曲、4=收藏歌单、5=自建歌单、7=榜单）。
- */
+/** "我的歌单"发现用的内容类型（1=歌曲、4=收藏歌单、5=自建歌单、7=榜单），调用方按 contentType 分流。 */
 export const MUSIC_LIBRARY_CONTENT_TYPES = Object.freeze(["1", "4", "5", "7"]);
 
-/** 音质 → `qualityType`（参考实测：standard="1"、lossless="3"；其余不认，不猜）。 */
+/** 音质 → qualityType（standard="1"、lossless="3"）；其余档位不认，不猜。 */
 export const MUSIC_QUALITY_TYPES = Object.freeze({ standard: "1", lossless: "3" });
 
 /** 业务端点键名（唯一真源；每个键都要由调用方注入，缺一个就少一个可用接口）。 */
 export const MUSIC_ENDPOINT_KEYS = [
   "favorites",
   "playlistList",
-  /** 歌单曲目（R8 增补）：与歌单列表是两件事——列表只有元信息，曲目要单独取 */
+  /** 歌单曲目：歌单列表只有元信息，曲目必须单独取。 */
   "playlistDetail",
-  /** 公开/收藏歌单详情（R32 增补，参考实测的第二条歌单详情路由） */
+  /** 公开/收藏歌单详情的第二条路由，按歌单归属与 playlistDetail 二选一。 */
   "playlistDetailPublic",
   "playlistDelete",
   "search",
@@ -124,7 +79,7 @@ export const MUSIC_ENDPOINT_KEYS = [
   "artist",
   "history",
   "playback",
-  /** 歌词（R12 增补；R32 起默认从播放响应推导，见 `MUSIC_ENDPOINT_PATHS.lyrics`） */
+  /** 独立歌词端点（可选）：默认走播放响应推导，见 MUSIC_ENDPOINT_PATHS.lyrics。 */
   "lyrics",
 ];
 
@@ -144,32 +99,16 @@ export const MUSIC_ERROR_KINDS = {
   apiError: "api_error",
   /** 播放地址不在 CDN 白名单内（渲染层反正也加载不了，早点如实报错） */
   unsafeMediaUrl: "unsafe_media_url",
-  /**
-   * 歌词缓存不可用（R41）：宿主没给数据目录，本地导入/清缓存都无从落盘。
-   *
-   * 为什么不并进 `invalid_response`：那是"这首歌没有歌词"，而这一条是**环境问题**
-   * （数据目录没传对），两件事的下一步完全不同——前者用户换个来源，后者要看宿主怎么起的。
-   */
+  /** 歌词缓存不可用：宿主没给数据目录，属环境问题，而非"这首没有歌词"。 */
   cacheUnavailable: "cache_unavailable",
-  /**
-   * 这次响应**已经过期**（R45A3 fix3）：请求在途时会话换了，或同一张歌单又开了更新的第一页。
-   *
-   * 为什么不并进 `network_error` / `invalid_response`：这两条都是"接口这次不行，重试可能就好了"，
-   * 而这一条是"**这份数据属于过去**"——迟到的旧会话列表绝不能交回调用方，更不能写进缓存
-   * （写进去就是拿上一个人的歌单内容当这个人的）。下一步是重新打开/重新取，不是重试同一份。
-   */
+  /** 响应已过期：请求在途时会话换了或歌单重开，这份数据属于过去，必须丢弃而不是重试。 */
   staleResponse: "stale_response",
 };
 
 /** 能佐证"这是试听片段"的标志位候选（与 auditionTime 齐备才算试听）。 */
 export const DEFAULT_AUDITION_FLAG_KEYS = ["isAudition", "audition", "tryListen", "trialFlag", "isTry"];
 
-/**
- * 列表可能挂在这些字段下（真实容器名在前，旧候选留在后面兼容手工注入的响应）。
- *
- * 真实名来自参考的响应记录：`favoriteInfos`（收藏/歌单发现）、`songSimpleInfos`（搜索/专辑/
- * 公开歌单）、`contentSimpleInfos`（播放历史）。
- */
+/** 列表容器候选名，真实名在前（favoriteInfos 收藏、songSimpleInfos 搜索、contentSimpleInfos 历史）。 */
 export const LIST_CONTAINER_KEYS = [
   "favoriteInfos",
   "songSimpleInfos",
@@ -227,16 +166,7 @@ function positiveInt(value, fallback) {
   return Number.isInteger(number) && number > 0 ? number : fallback;
 }
 
-/**
- * 业务信封解码。
- *
- * 判据按参考契约：**HTTP 成功且 `result.resultCode === "000000"`** 才算成功
- * （`resultCode` 是字符串，且非 000000 时业务失败）。响应体里没有 `result` 时
- * 兼容两种老形态：`{code, data}` 信封（取 `data`）与直给对象。
- *
- * 返回的是**整个响应体**（不是某个 `data` 字段）：真接口把 `favoriteInfos`/`result` 等
- * 平铺在顶层，调用方按各自的容器名取（见 `extractList` 与各操作的 `pick`）。
- */
+/** 解业务信封：HTTP 成功且 result.resultCode === "000000" 才算成功；返回整个响应体，容器由调用方取。 */
 export function decodeEnvelope(raw) {
   if (raw === null || typeof raw !== "object") return err("接口响应不是 JSON 对象", MUSIC_ERROR_KINDS.invalidResponse);
   if (Array.isArray(raw)) return ok(raw);
@@ -326,35 +256,19 @@ function durationSeconds(value) {
   return Number.isFinite(seconds) && seconds > 0 && seconds < TRACK_DURATION_SECONDS_LIMIT ? seconds : null;
 }
 
-/**
- * 资源是否**显式**声明成 MP3：`format`/`mediaFileType` 里出现过的值必须都读作 MP3。
- *
- * 一个都没声明就是 `false`——2026-10-23 真机里有 87 条 `quality="1"` 但 `format=""`，
- * 编码根本没写出来；"标准档大概就是 MP3"是契约推定，不是这条数据说的，所以不取。
- * 两个字段同时在（早期真机样本两个都是 "MP3"）就必须一致：`format:"MP3", mediaFileType:"FLAC"`
- * 是自相矛盾的资源，不认。
- */
+/** 资源是否显式声明 MP3：format/mediaFileType 出现过的值必须全部读作 MP3，都没写则为 false。 */
 function declaresMp3(resource) {
   const formats = [resource.format, resource.mediaFileType].filter((value) => value !== undefined && value !== null && value !== "");
   if (formats.length === 0) return false;
   return formats.every((value) => typeof value === "string" && value.trim().toUpperCase() === "MP3");
 }
 
-/** 音质档是不是标准档：真机里是字符串 `"1"`，也兼容数字 `1`（同一档，不猜别的值）。 */
+/** 是否为标准音质档：真机是字符串 "1"，容忍数字 1，别的值一律不认。 */
 function isStandardQuality(quality) {
   return quality !== undefined && quality !== null && quality !== "" && String(quality) === MUSIC_QUALITY_TYPES.standard;
 }
 
-/**
- * 音质档的**标识形状**（`null` = 没声明档位）：数字，或纯数字字符串（真机是 `"0"`/`"1"`/`"17"`）。
- *
- * 为什么要有这一条（R45A2 fix1）：用户裁定放宽成"任意**明确声明 MP3** 的音质档"，
- * 于是"档位到底有没有被声明"必须判得清楚——放宽的是档位，不是"猜一个档位"。
- * 三种情况因此分开：
- * - 有标识（`"0"`、`2`…）→ 是一档，可以被采纳；
- * - 数组形态里没有 `quality`、对象形态里也借不到 key → **没声明档位**，不取；
- * - 有值但不是音质标识的形状（`"best"`、`true`、`{}`…）→ 认不出，也不取。
- */
+/** 音质档的标识形状：整数或纯数字串，返回档位字符串；没声明或形状认不出则为 null。 */
 function qualityIdOf(quality) {
   if (typeof quality === "number") return Number.isInteger(quality) && quality >= 0 ? String(quality) : null;
   if (typeof quality !== "string") return null;
@@ -366,13 +280,7 @@ function resourceDuration(resource) {
   return durationSeconds(resource.duration);
 }
 
-/**
- * 条目里所有"音质档 → 资源"的候选（`contentExInfo` 可能是 JSON 字符串）。
- *
- * 两种容器都读：`completeFileInfos`（对象 = 档位→资源，数组 = 资源列表）与 `fileInfos`（同两种形态）。
- * 对象形态的 key 就是音质档，资源自己没写 `quality` 时按 key 读。
- * `fileType` 不是编码名（真机是 "1"/"17" 这种数字档位），这里**不看它**。
- */
+/** 条目里所有"音质档 → 资源"候选：completeFileInfos 与 fileInfos 都读，对象 key 即档位；fileType 不参与编码判断。 */
 function resourceCandidates(item) {
   const extra = contentExInfoOf(item);
   const candidates = [];
@@ -396,33 +304,8 @@ function resourceCandidates(item) {
   return candidates;
 }
 
-/**
- * 条目时长（秒）。
- *
- * 顺序即优先级：**可信顶层 `duration`** → `contentExInfo` 里**显式档位的显式 MP3** 资源
- * （**标准档 `quality="1"` 先取**，其余明确声明的档位作为兜底）。
- *
- * 2026-10-23 只读取证（已登录会话，歌单详情一页 1623 条）：条目**没有**顶层 `duration`、
- * **没有** `songInfo`，时长只在 `contentExInfo`（JSON 字符串）的 `fileInfos[]` 里，元素形如
- * `{quality:"1", format:"MP3", fileType:"1", duration:"240"}`；同一首的各档 `duration` **完全相同**
- * （383/383 一致）。
- *
- * 选源口径的三次变化（读这段代码的人必须知道现在为什么是这样）：
- * 1. R45A2：按"显式 MP3 + 标准档优先"取，非标准档也收；
- * 2. R45A2 复审：收回到合同原文"只认显式标准档 `quality="1"` 的 MP3"——选源代码不单方面放宽合同；
- *    代价是真机约 167 条只有 `quality:"0"` 的老歌继续显示「—」；
- * 3. **R45A2 fix1（用户裁定，记录在 progress.md）**：用户要的是"所有歌曲都有时长"，
- *    并明确授权把口径放宽成"**任意明确声明 MP3 的音质档**"。于是：
- *    - 档位必须**显式存在**且形如华为的音质标识（数字 / 数字串，见 `qualityIdOf`）；
- *    - 编码必须是**显式且一致**的 MP3（`declaresMp3`：`format`/`mediaFileType` 都在就必须都读作 MP3）；
- *    - **标准档仍然排第一顺位**（各档同值是实测观察，"哪天不同值"时标准档才是合同里那一档）；
- *    - 标准档坏了（编码不符 / 秒数坏或缺失）→ 退到别的显式 MP3 档，这是 fix1 相对复审版
- *      唯一的行为差异；所有档都不合格时仍然没有时长。
- *
- * 三条硬规则没变：`times` 一个字节都不读（真机每次读取都不一样）；秒数只认有限正数 `18:00:00`
- * 以内，**不按毫秒猜**；视频档是 MKV（15/17，204 秒 ≠ 音频的 203 秒）——MKV/M4A/FLAC/空编码
- * 一律不取，**不因为"档位很明确"就猜它的编码**。
- */
+// 条目时长（秒）：顶层 duration 优先，其次明确声明 MP3 的音质档资源，标准档排第一顺位。
+// 秒数只认有限正数、不读 times、不按毫秒估；非 MP3 编码（MKV/M4A/FLAC/空）一律不取。
 export function durationOfEntry(item) {
   const duration = durationSeconds(item?.duration);
   if (duration !== null) return duration;
@@ -434,7 +317,7 @@ export function durationOfEntry(item) {
     const seconds = resourceDuration(entry.resource);
     if (seconds !== null) return seconds;
   }
-  // ② 其余明确声明的档位兜底（fix1 用户裁定）
+  // ② 其余明确声明 MP3 的档位兜底（标准档已在上面取过）
   for (const entry of candidates) {
     if (isStandardQuality(entry.quality)) continue;
     const seconds = resourceDuration(entry.resource);
@@ -443,20 +326,8 @@ export function durationOfEntry(item) {
   return null;
 }
 
-/**
- * 线上条目 → 内部曲目形状。
- *
- * 字段映射逐条来自参考的 `trackFrom`（`docs/API_CONTRACT.md` §5"曲目归一化"）：
- * `contentID → id`、`contentName → title/name`、`artistNamePairs|artistName → singer`、
- * `albumID/albumName → albumId/albumName`、`picture.* → coverUrl`、顶层或标准 MP3 资源时长 → duration。
- *
- * **没有 id 的条目一律返回 null**（调用方如实丢弃并计数，绝不编一个 id——
- * 列表里出现删不掉的幽灵行比少一行糟得多）。
- *
- * R38：条目自带的歌词地址（`lyricAddress`，真机实测在列表条目上存在）不进曲目投影
- * （渲染层不需要、投影契约不动），而是经 `options.onLyricAddress(id, url)` 交给调用方
- * ——`createMusicApi` 用它填**进程内的地址索引**，供 `getLyrics` 取歌词（见那边的说明）。
- */
+/** 线上条目 → 内部曲目形状；没有 id 的条目返回 null（调用方丢弃并计数，绝不编 id）。
+ *  条目自带的 lyricAddress 不进投影，经 options.onLyricAddress 交给调用方建索引。 */
 export function normalizeTrack(item, options = {}) {
   const isSafeUrl = options.isSafeUrl ?? isSafeMediaUrl;
   if (!isObject(item)) return null;
@@ -505,12 +376,7 @@ export function normalizePlaylist(item, options = {}) {
   return playlist;
 }
 
-/**
- * 单页列表归一（R8 抽出：渐进加载器与"一次一页"的库页面频道共用同一套结论）。
- *
- * 三件事只在这里做一次：取列表（多容器名兼容）、**归一化并丢掉无 ID 的条目**（不编 ID）、
- * 读接口上报的 total（**只作记录**——收藏没有可信总数，真值是完整分页后的 ID 去重）。
- */
+/** 单页列表归一：取列表、归一化并丢掉无 ID 条目、读上报 total（只作记录，真值是分页后 ID 去重）。 */
 export function normalizeListPage(payload, options = {}) {
   const container = isObject(payload) ? payload : {};
   const list = extractList(container);
@@ -547,11 +413,7 @@ export function parseFileInfos(value) {
   }
 }
 
-/**
- * 试听判定：`auditionTime > 0` 记一个信号，标志位记另一个信号，**两个齐备**才算试听。
- * 只看 auditionTime 会把"整曲但带试听字段"误判成 30 秒片段（参考的会员样本实测就是
- * `auditionTime=30000` 却完整可播）。
- */
+/** 试听判定：auditionTime > 0 与标志位两个信号齐备才算 30 秒片段，只看前者会误判整曲。 */
 export function classifyAudition(payload, options = {}) {
   const flagKeys = options.flagKeys ?? DEFAULT_AUDITION_FLAG_KEYS;
   const signals = [];
@@ -646,13 +508,7 @@ export function parsePlaybackPayload(raw, options = {}) {
   });
 }
 
-/**
- * 歌词响应解码（R12；用于"设置里注入了一个独立歌词端点"的那条路）。
- *
- * 独立歌词端点的**响应形状没有实测证据**，所以这里仍按"多个候选键宽容读取"的老办法：
- * 拿到非空字符串就算歌词文本，一个都没有就如实回 `invalid_response`（**不猜**、不把
- * 整段响应体当歌词塞给渲染层——那只会让歌词窗显示一坨 JSON）。
- */
+/** 独立歌词端点响应解码：形状无实测证据，按多个候选键宽容取非空字符串，取不到如实报 invalid_response。 */
 export function parseLyricsPayload(raw) {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     return err("歌词接口响应不是对象", MUSIC_ERROR_KINDS.invalidResponse);
@@ -702,16 +558,7 @@ function contentExInfoOf(raw) {
   return null;
 }
 
-/**
- * 歌词地址/内嵌歌词的**候选容器**（R38 增补）。
- *
- * 为什么不止看响应本体（真机取证，2026-10-21）：曲目条目（`songSimpleInfos[]` 那一档）**自带
- * `lyricAddress`**（实测该批次 3/3 条都有，域在 `safe-media-url.mjs` 的白名单内）；
- * 而播放响应是按音频文件组织的，同一首歌的歌词地址未必平铺在顶层。
- * `songInfo` 正是**同一个曲目条目形状**（`parsePlaybackPayload` 也从它读 `duration`），
- * 所以它里面的 `lyricAddress` / `contentExInfo` 与顶层按同一份候选表读——
- * 这仍然是"读已有字段"，不是发明字段：所有候选都要过 CDN 白名单才算数。
- */
+/** 歌词候选容器：响应本体与内嵌 songInfo（同一曲目条目形状），取出的地址都要过 CDN 白名单。 */
 function lyricContainersOf(raw) {
   const containers = [raw];
   const songInfo = isObject(raw.songInfo) ? raw.songInfo : null;
@@ -730,13 +577,7 @@ function lyricAddressCandidatesOf(container) {
   return values;
 }
 
-/**
- * 歌词资源地址（参考 `lyricAddressFrom` 的字段清单，含历史拼写 `lyricAddres`）。
- * 只认 CDN 白名单内的地址——歌词资源同样走那条白名单。
- *
- * R38：候选容器从"响应本体"扩到"响应本体 + 内嵌曲目对象（`songInfo`）"，
- * 每个容器内部仍按同一份字段清单读（见 `lyricContainersOf`）。
- */
+/** 歌词资源地址（含历史拼写 lyricAddres）；候选容器见 lyricContainersOf，只认白名单内地址。 */
 export function lyricAddressOf(raw, options = {}) {
   const isSafeUrl = options.isSafeUrl ?? isSafeMediaUrl;
   if (!isObject(raw)) return null;
@@ -748,12 +589,7 @@ export function lyricAddressOf(raw, options = {}) {
   return null;
 }
 
-/**
- * 内嵌歌词文本（参考 `inlineLyricsFrom`）：有的播放响应不给地址，直接把歌词塞在
- * `contentExInfo.lyrics` 里，而且**可能再套一层 JSON 字符串**（最多剥两层）。
- *
- * R38：与 `lyricAddressOf` 同一处扩到 `songInfo`（同一份候选表，不另立规则）。
- */
+/** 内嵌歌词文本：contentExInfo.lyrics 可能再套一层 JSON 字符串（最多剥两层）。 */
 export function inlineLyricsOf(raw) {
   if (!isObject(raw)) return null;
   for (const container of lyricContainersOf(raw)) {
@@ -767,14 +603,7 @@ export function inlineLyricsOf(raw) {
   return null;
 }
 
-/**
- * 专辑 id（R40）：**与 `normalizeTrack` 同一份候选表**（`albumID` 是已实证的那个名字——
- * 真机证据：专辑响应的 `$.albumInfoEx.songSimpleInfos[i]` 里有 `albumID`/`albumName`，
- * 见 `.tmp/r38-probe-lyrics.json`；`albumId`/`albumNamePair.id` 是同一处的历史拼写兜底）。
- *
- * 用途只有一个：歌词索引里没有这条曲目时，用专辑 id 去**既有**的专辑端点补一次条目
- * （见 `getLyrics` 的第 ④ 档）。取不到就是 null——**不猜**。
- */
+/** 专辑 id（候选同 normalizeTrack）：只用于歌词索引缺这首时补取专辑条目，取不到即 null，不猜。 */
 export function albumIdOf(raw) {
   if (!isObject(raw)) return null;
   for (const container of lyricContainersOf(raw)) {
@@ -813,7 +642,8 @@ function favoritesHasMore(received, limit) {
 }
 
 /**
- * 业务接口客户端。
+ * 业务接口客户端。端点、会话、缓存端口全部由调用方注入，本层不读设置也不碰 fs。
+ * session 也可传函数（装配时它多半还是 null）；lyricsCache/lyricsFallback 不给即无对应能力。
  *
  * @param {{endpoints?: Record<string, string>, fetchImpl?: Function,
  *          session?: object|Function|null,
@@ -823,16 +653,6 @@ function favoritesHasMore(received, limit) {
  *          discoveryLimit?: number, discoveryPageCap?: number,
  *          lyricIndexLimit?: number, lyricMemoryLimit?: number, log?: Function,
  *          lyricsCache?: object|null, lyricsFallback?: Function|null}} options
- *
- * `session` 是 `{token, snsUserID}`（音乐会话；`snsUserID` 是收藏/歌单发现必需的
- * `targetSnsUserID` 来源）。可以传对象，也可以传函数（会话在运行时才会变——
- * 顶层装配时它多半还是 null）。
- *
- * R41 的两个**可选**端口（不给就是 R40 的行为）：
- * - `lyricsCache`：`src/main/lyrics-cache.mjs` 的产物（`readLocal`/`readCached`/`writeCached`/
- *   `writeLocal`/`info`/`clear`）——协议层自己不碰 fs，盘上的一切都经它；
- * - `lyricsFallback`：`src/main/lyrics-fallback.mjs` 的产物（`(query) => doc|null`）——
- *   华为四档全落空且曲目有标题时的那一次机会。
  */
 export function createMusicApi(options = {}) {
   const endpoints = options.endpoints ?? {};
@@ -846,29 +666,13 @@ export function createMusicApi(options = {}) {
   const isSafeUrl = options.isSafeUrl ?? isSafeMediaUrl;
   const timeoutMs = positiveInt(options.timeoutMs, MUSIC_TIMEOUT_MS);
   const sessionSource = options.session;
-  /**
-   * 诊断口（R40）：**只记键名**的日志（协议层自己不写日志，与 `createHuaweiMusicSessionPort`
-   * 的 `log` 同一条纪律）。目前只有一处用：歌词回落到专辑补索引时，把播放响应的键名记下来
-   * ——"播放响应里到底有没有 `albumID`"这句话没有实证，靠这一行在真机上看到，而不是靠猜。
-   */
+  /** 诊断日志口：只记键名不记值；目前用于在真机上确认播放响应里有没有 albumID。 */
   const log = typeof options.log === "function" ? options.log : () => undefined;
   /** 被设置**显式关闭**的端点（`musicEndpoints: {favorites: null}`）：报错要说得比"尚未确定"更准。 */
   const disabledEndpoints = new Set(options.disabledEndpoints ?? []);
 
-  /**
-   * 曲目条目里的歌词地址**进程内索引**（R38）：`trackId → 白名单内的歌词地址`。
-   *
-   * 为什么需要它（真机取证 2026-10-21）：华为的曲目条目自带 `lyricAddress`（列表/专辑响应
-   * `songSimpleInfos[]` 实测该批次 3/3 有，域在白名单内），而
-   * **播放响应里没有**——`getLyrics` 从前只问播放响应，所以永远拿不到歌词。
-   * 官方 H5 也是拿列表里那条地址，而不是"按曲目 id 再问一次歌词"。
-   *
-   * 三条边界：
-   * 1. **只在进程内存**：不落盘、不进设置、不跨进程（sidecar 重启即空，没有"上次的地址还能用"的假象）；
-   * 2. **只记已经加载过的条目**：用户没在列表里见过的曲目，索引里就没有（那时仍走播放响应那条路）；
-   * 3. **有上限、先进先出**：浏览几千首也不会让这张表无界增长。
-   * 另外地址可能带时效签名——取歌词时**先过一遍白名单**，下载失败就照旧回落到播放响应那条路。
-   */
+  // 曲目条目里的歌词地址进程内索引（trackId → 白名单地址）：播放响应里没有它，只能从加载过的列表条目记下。
+  // 仅内存、先进先出有上限；取用前重过白名单，下载失败仍回落播放入口那条路。
   const lyricAddressIndex = new Map();
   const lyricAddressIndexLimit = positiveInt(options.lyricIndexLimit, 400);
 
@@ -891,23 +695,8 @@ export function createMusicApi(options = {}) {
     return isSafeUrl(value) ? value : null;
   }
 
-  /**
-   * 第 4 档的**会话内负缓存**（R41）：`trackId → 已经试过的 albumId`。
-   *
-   * 为什么必须有（R40 审查遗留）：第 4 档是一次**额外**的专辑请求，而它的失败并不比成功少见
-   * （端点失败、或那张专辑里根本没有这一首 —— `album_without_this_track`）。失败之后调用方
-   * 再取一次同一首（换行、重开歌词面板、歌词窗重连都会），整条链会从第 ② 档重放一遍，
-   * 再打一次注定同样的专辑请求：**同一首、同一张专辑、在同一个进程里被问第二次**，
-   * 而那一次的答案只可能和上一次一样。
-   *
-   * 三条边界（与 `lyricAddressIndex` 同一条纪律）：
-   * 1. **只在进程内存**：不落盘、不进设置、不跨进程（sidecar 重启即空）；
-   * 2. **只记"试过"**，不记"结论"：命中的意思是"这一对 (曲目, 专辑) 本进程已经问过了"；
-   * 3. **有上限、先进先出**：与地址索引同一个上限，浏览几千首也不会无界增长。
-   *
-   * 为什么键是 (trackId, albumId) 这一对而不是只有 trackId：同一个曲目换了专辑 id（例如
-   * 播放响应与列表条目给出了两个不同的 id）时，那是一次**没试过**的请求，不该被旧结论挡住。
-   */
+  // 第 4 档的会话内负缓存（trackId → 试过的 albumId）：同一首在同一进程里不重复打注定同样的专辑请求。
+  // 仅内存、有上限；键是 (trackId, albumId) 一对，换了专辑 id 就是没试过的新请求。
   const lyricAlbumAttempts = new Map();
 
   function albumAttempted(trackId, albumId) {
@@ -929,16 +718,11 @@ export function createMusicApi(options = {}) {
     }
   }
 
-  // —— 歌词的三处缓存端口（R41） ---------------------------------------------------------------
-  //
-  // 协议层**自己不碰 fs**（同一条纪律：这里只认注入进来的端口）。三个端口都是可选的：
-  // 测试与"没有数据目录"的场景下不给，`getLyrics` 就照旧只有华为那四档——行为与 R40 完全一致。
+  // 歌词的三处缓存端口：协议层不碰 fs，三个端口都可选——不给时 getLyrics 只剩华为那几档，行为不变。
 
   /**
-   * 磁盘缓存端口（`src/main/lyrics-cache.mjs` 的 `createLyricsCache()` 产物，sidecar 装配时注入）。
-   *
-   * 只需三个方法：`readLocal` / `readCached` / `writeCached`。**写入一律 best-effort**
-   * （缓存是"下次更快"，不是"这次能不能看"）：端口自己吞掉失败，这里也不再包一层 try。
+   * 磁盘缓存端口（`createLyricsCache()` 产物，sidecar 装配时注入），只需 readLocal/readCached/writeCached 三个方法。
+   * 写入一律 best-effort：缓存只求"下次更快"，端口自己吞掉失败，这里不再包一层 try。
    */
   const lyricsCache = options.lyricsCache ?? null;
 
@@ -946,13 +730,8 @@ export function createMusicApi(options = {}) {
   const lyricsFallback = typeof options.lyricsFallback === "function" ? options.lyricsFallback : null;
 
   /**
-   * **进程内内存缓存**：`trackId → 歌词文档`（R41）。
-   *
-   * 为什么在磁盘缓存之外还要一层内存：同一首歌在一次会话里会被取很多次（切歌回来、开歌词窗、
-   * 主窗面板与歌词窗各推一次），磁盘读虽然快，但每次都读盘 + 每次都过一遍形状校验是白付的
-   * ——而这一层的内存代价只有几首歌词的文本。
-   *
-   * 与 `lyricAddressIndex` 同一条纪律：**只在进程内存、有上限、先进先出**（重启即空）。
+   * 进程内内存缓存 `trackId → 歌词文档`：同一首歌一次会话里会被取很多次，免掉重复读盘与形状校验。
+   * 与 `lyricAddressIndex` 同一条纪律：只在内存、有上限、先进先出，重启即空。
    */
   const lyricMemoryCache = new Map();
   const lyricMemoryLimit = positiveInt(options.lyricMemoryLimit, 200);
@@ -968,10 +747,8 @@ export function createMusicApi(options = {}) {
   }
 
   /**
-   * 读本地导入（端口不在/坏形状一律回 null：这一跳只是"可能更好"，失败不该有副作用）。
-   *
-   * 交回来的文档**带上文件名与导入时间**（它们住在磁盘记录的顶层，不在文档里）：
-   * 界面上要说得出"这一份是你哪天导入的哪个文件"，而这两个值只有读盘那一刻才知道。
+   * 读本地导入；端口不在或形状不对一律回 null——这一跳只是"可能更好"，失败不该有副作用。
+   * 交回的文档带上文件名与导入时间：它们住在磁盘记录顶层，只有读盘那一刻才知道，界面要用来交代来源。
    */
   async function readLocalLyrics(trackId) {
     if (lyricsCache === null || typeof lyricsCache.readLocal !== "function") return null;
@@ -1015,24 +792,8 @@ export function createMusicApi(options = {}) {
   }
 
   /**
-   * 第三方回退那一跳。
-   *
-   * **触发条件**（与简报逐条相同）：只有曲目**有标题**才试——第三方库全靠关键字搜索，
-   * 没标题等于盲搜，那种"命中"不可能可信。艺人/时长有就参与严格匹配
-   * （`src/main/lyrics-provider.mjs` 的匹配器：时长差 > 8 秒或艺人硬错配一律不认）。
-   *
-   * ## 连标题都没有艺人、也没有可用时长时**不发请求**（R41a）
-   *
-   * 这一跳的代价是**两个服务各一次网络往返 + 各 8 秒超时**（最坏 16 秒），而匹配器早就把
-   * 结果定死了：艺人是硬错配判据之一（查询里有艺人时，候选必须至少有一个艺人宽松匹配），
-   * 时长只有在"两边都 > 30 秒"时才构成佐证（`scoreCandidate`）——两者都没有时，
-   * 最高分就是"标题精确"那 `1.3`，**必然低于** `MIN_SCORE = 1.5`。既然答案注定是"没有"，
-   * 就不该让播放链白等那 16 秒（第三方回退是"顺带试一下"，不该有这种量级的代价）。
-   *
-   * 注意短路条件只在这一种组合上：**只有标题**也能过（标题精确 `1.3` + 艺人宽松 `0.6` = `1.9`），
-   * 所以不是"必须三个值齐全"。时长 ≤ 30 秒的样本不构成佐证，与"没有时长"同档处理。
-   *
-   * 端口没注入（测试/未装配）就回 null：整条链的行为与 R40 一模一样。
+   * 第三方回退这一跳：只有曲目有标题才试（第三方全靠关键字搜索），艺人/时长有就参与严格匹配。
+   * 无艺人且时长 ≤ 30 秒时不发请求——两项佐证都没有时最高分必然低于 MIN_SCORE，白等两个 8 秒超时。
    */
   async function thirdPartyLyricsFor(trackId, request = {}) {
     if (lyricsFallback === null) return null;
@@ -1064,15 +825,8 @@ export function createMusicApi(options = {}) {
   }
 
   /**
-   * **导入本地歌词**（R41 的 `lyrics:import` 频道用它）。
-   *
-   * 三件事，按顺序：
-   * 1. 交给磁盘端口写进 `lyrics-local/`（端口自己校验"这段文本算不算歌词"，坏的就抛结构化错误）；
-   * 2. 顺手更新内存缓存（导入要**立刻**生效，而内存里可能正躺着这一首的在线结果）；
-   * 3. 把生效的文档交回调用方（`source: "local"` + 文件名/导入时间）。
-   *
-   * **不清磁盘缓存里那一份在线结果**：本地永远排在它前面（`getLyrics` 的第 ① 跳），
-   * 留着它反而有用——用户哪天删掉本地导入，"原来的在线歌词"就还在。
+   * 导入本地歌词：交给磁盘端口写进 `lyrics-local/`，顺手更新内存缓存，再把生效的文档交回调用方。
+   * 不清磁盘缓存里的在线结果——本地永远排在它前面，留着它，用户删掉本地导入后原词还在。
    */
   async function importLyrics(request = {}) {
     const trackId = request.trackId ?? request.id;
@@ -1117,11 +871,8 @@ export function createMusicApi(options = {}) {
   }
 
   /**
-   * 清歌词缓存（`lyrics:cache-clear`）。
-   *
-   * `options.local === true` 才连本地导入一起删（**用户导入的是他的文件**，默认不碰）。
-   * 清完**顺手清内存缓存**：不清的话"清除缓存"之后这一首仍然命中内存里那份旧文本，
-   * 用户会以为清除没生效（这正是"两处缓存必须一起动"的地方）。
+   * 清歌词缓存；`options.local === true` 才连本地导入一起删——用户导入的是他的文件，默认不碰。
+   * 清完必须顺手清内存缓存，否则这一首仍命中内存里的旧文本，用户会以为清除没生效。
    */
   async function clearLyricsCache(options = {}) {
     const local = options.local === true;
@@ -1257,7 +1008,7 @@ export function createMusicApi(options = {}) {
     return (positiveInt(page, 1) - 1) * positiveInt(pageSize, defaultPageSize);
   }
 
-  /** 收藏一页（R32：`contentTypes` 现在真的会被带上——决定"要歌曲"还是"要歌单"）。 */
+  /** 收藏一页：`contentTypes` 决定"要歌曲"还是"要歌单"。 */
   function favoritesPageBody({ start, limit, contentTypes }) {
     const snsUserID = snsUserIDOf();
     if (snsUserID === null) return null;
@@ -1282,8 +1033,7 @@ export function createMusicApi(options = {}) {
   }
 
   /**
-   * 渐进式收藏加载器（渲染层滚动加载用）。
-   * `total` 只在**完整分页走完**后才有值（= 去重后的 ID 数），否则为 null：
+   * 渐进式收藏加载器（渲染层滚动加载用）；`total` 只在完整分页走完后才有值，否则为 null。
    * "已加载 N 首"用 loadedCount，"共 M 首"只能等走完才敢写。
    */
   function createFavoritesLoader(loaderOptions = {}) {
@@ -1374,9 +1124,8 @@ export function createMusicApi(options = {}) {
   }
 
   /**
-   * 单页收藏读取（R8 的滚动加载走这条）：把**分页结论**在协议层算好——渲染层不必、也不许
-   * 自己猜 "还有没有下一页"。刻意不给 `total`：收藏没有可信总数，"共 M 首"只能等
-   * 完整分页后去重才知道，那是拼页者的结论，不是单页的结论。
+   * 单页收藏读取：分页结论在协议层算好，渲染层不必也不许自己猜"还有没有下一页"。
+   * 刻意不给 `total`——收藏没有可信总数，那是拼页者走完整分页去重后的结论。
    */
   async function readFavoritesPage(request = {}) {
     const page = positiveInt(request.page, 1);
@@ -1395,14 +1144,8 @@ export function createMusicApi(options = {}) {
   }
 
   /**
-   * **我的歌单**（R32 起按参考的发现流程走）。
-   *
-   * 为什么不能"一页拿完就交"：歌单与歌曲**混在同一个分页列表里**（`contentTypes=[1,4,5,7]`），
-   * 首页很可能整页都是歌曲——直接过滤首页就会显示"还没有歌单"，而用户明明有。
-   * 所以这里照参考的做法翻页：翻到短页、翻到"这一页没带来新条目"、或触到保守上限为止，
-   * 再把歌单条目挑出来（`contentType != 1`，按 `contentType:id` 去重）。
-   *
-   * `start` 的起点仍然是通道给的页号（`page=1` 即参考的"从头扫"）。
+   * 我的歌单：歌单与歌曲混在同一分页列表里，首页很可能整页都是歌曲，所以照参考流程翻页。
+   * 翻到短页、没带来新条目或触到保守上限为止，再挑出 `contentType != 1` 的条目按 `contentType:id` 去重。
    */
   async function listPlaylists(request = {}) {
     // 先报"端点没配"，再报"没登录"：两件事按从外到里的顺序说，用户才知道下一步该干什么
@@ -1453,45 +1196,9 @@ export function createMusicApi(options = {}) {
   }
 
   /**
-   * 歌单详情（R45A3 fix1）：**整份响应缓存 + 按页本地切片**。
-   *
-   * 事实（2026-10-23 真机只读取证）：`library:playlist-detail` 一页 `pageSize=50` 拿回 **1623 条**，
-   * 响应里还带 `hasMore=true`——**这个端点不认 `start`/`limit`**，一次就把整张歌单给你。
-   * 所以"触底加载"不能靠它：旧实现把 1623 条整份交给渲染层，首屏一次全渲染，而 `hasMore`
-   * 永远为真（`received >= pageSize`），滚到底还会再问一次同样的 1623 条。
-   *
-   * 修法：**整份只取一次网络**，之后每一页都是这份缓存上的切片。
-   *
-   * 四条边界（与 `lyricAddressIndex` / `lyricMemoryCache` 同一条纪律）：
-   * 1. **只在实例内存**：不落盘、不进设置、不进日志、不跨进程（sidecar 重启即空）；
-   * 2. **键 = 端点 kind + 歌单 id**：自建/收藏是两条端点，同一份 id 在两边的曲目可以不同，
-   *    混在一起就是"收藏歌单里看到自建歌单的歌"；
-   * 3. **一张歌单在同一时刻只留一份解析结果（R45A3 fix2）**：第一页不论解析到哪条 kind、
-   *    不论形状，都先把这张歌单**所有** kind 的旧条目一起失效；后续页只认"最近一次解析到的
-   *    那条 kind"（`activePlaylistKinds`），不再按 `owned` → `collected` 的固定顺序撞运气。
-   *    复审发现的正是这个洞：页 1 这次由公开端点解析、上一轮的 owned 条目还在 → 页 2 切到
-   *    上一轮那份列表，同一张歌单的两页来自两条不同路由；
-   * 4. **有上限、先进先出**（4 张歌单：界面一次只开一张，浏览时来回切几张也就够了——
-   *    整份 1623 条的归一化数组不便宜，缓存不该无界增长）。
-   *
-   * 另外，**会话身份变了（换账号 / 换 token）就整张清空**（`dropPlaylistCacheIfSessionChanged`）：
-   * 上一轮那份属于上一个账号，跨账号复用就是拿别人的歌单内容当自己的。
-   *
-   * **R45A3 fix3（复审 Important）：入口比对拦不住"在途"**。上面那条只在**进入** `getPlaylistDetail`
-   * 时对一次指纹，而 HTTP 可能在途几百毫秒～几十秒；这段时间里会话换了人、或者同一张歌单又开了
-   * 一次第一页，旧响应回来时会把缓存改写成"过去的"那份，而 `playlistCacheSession` 记的已经是新会话 →
-   * 新会话的第 2 页就从那份旧列表里切出来。所以每一次请求都带上"**开始时的会话指纹 + 这张歌单
-   * 第一页的代次**"（`playlistPage1Serials`），`await` 回来后两样都对得上才许写缓存/交回调用方，
-   * 否则整条作废（结构化 `stale_response`）。两样都只是**进程内存里的不透明比较值**：
-   * 指纹是 FNV-1a 散列（不是 token 原文），代次是自增序号，都不进缓存数据、不进日志、不进设置、不落盘。
-   *
-   * 同时（同一条复审）：第一页的失效点从"拿到响应之后"挪到"**发起之前**"——失败与空响应
-   * 也算"这一轮已经问过"，旧缓存一样失效；只有 `page > 1` 的读才允许用旧缓存（且它仍受
-   * "会话没换 + 解析到的端点还是那一条"两道约束）。
-   *
-   * `hasMore` 的唯一判据是 `end < total`（`end = page*pageSize`，`total` = 这份响应的条数），
-   * 所以页 1 的 `hasMore` 与页 2 的 `hasMore` 说的是同一件事，不会"滚到底还说还有"。
-   * 例外是**恰好一整页**这一档（分不清服务端是真分页还是忽略窗口）——见 `serverPageSignatures`。
+   * 歌单详情：整份响应缓存 + 按页本地切片——该端点不认 start/limit，一次就回整张歌单（实测 1623 条）。
+   * 缓存只在实例内存，键为 kind+id，一张歌单只留最近一次解析到的 kind，有上限；请求带会话指纹与第一页代次，
+   * 对不上的迟到响应整条作废。
    */
   const playlistDetailCache = new Map();
   const playlistDetailCacheLimit = positiveInt(options.playlistCacheLimit, 4);
@@ -1500,11 +1207,8 @@ export function createMusicApi(options = {}) {
   const activePlaylistKinds = new Map();
 
   /**
-   * 这张歌单"第一页尝试"的代次（R45A3 fix3）：`playlistId → 自增序号`。
-   *
-   * 每开一次第一页（不论成败、空响应、哪条端点）就 +1；在途的旧请求回来时对不上就作废。
-   * 有上限（与整表缓存同一档的 4 倍，至少 8）：被挤掉的只是"作废判据"，最坏结果是一次
-   * 多余的网络请求，**绝不会**把旧数据写进缓存。值里只有序号，不含会话内容。
+   * 这张歌单"第一页尝试"的代次（`playlistId → 自增序号`）：每开一次第一页就 +1，在途旧请求回来对不上即作废。
+   * 有上限，被挤掉的只是作废判据，最坏多一次网络请求，绝不会把旧数据写进缓存。
    */
   const playlistPage1Serials = new Map();
   let playlistPage1Seed = 0;
@@ -1515,20 +1219,8 @@ export function createMusicApi(options = {}) {
   const serverPlaylistRouteLimit = Math.max(playlistDetailCacheLimit * 4, 8);
 
   /**
-   * 服务端分页里"整页重复"的指纹（R45A3 fix3，复审 Minor）。
-   *
-   * 背景：响应条数**恰好等于 `pageSize`** 时，两种完全不同的服务端行为长得一样——
-   * ① 真的按 `start`/`limit` 分页（每页内容不同）；② 忽略窗口、每次都回同一份。
-   * ② 会让触底加载反复取同一页、永远滚不完（复审点名的"本地分页停滞"）。
-   *
-   * 做法只做一件保守的事：整页响应的**归一化 ID 序列**（含顺序）记下来，下一次整页响应的
-   * 序列**完全相同**而窗口起点不同 → 认定"它在重复同一份"，这一页收敛成"没有更多"
-   * （`pageSource: "server-repeat"`、`songs: []`，`available` 只说这一份响应的条数）。
-   * ① 那种每页不同的服务端不会撞上（序列不同），所以"120 首 → 三页"的行为原样保留。
-   * 不猜总数、也不把"恰好一整页"直接当成"到底了"。
-   *
-   * 键 = `kind + 歌单 id + pageSize`（不含会话内容）；值 = `{playlistId, start, signature, repeated}`；
-   * 有上限、先进先出；重新打开歌单（新的第一页）或会话/缓存清空时一起丢掉。
+   * 服务端分页"整页重复"的指纹：恰好一整页时两种服务端行为长得一样，重复回同一份会让触底加载永远滚不完。
+   * 只做保守判定——整张页的归一化 ID 序列相同而窗口起点不同，就收敛成"没有更多"，不猜总数。
    */
   const serverPageSignatures = new Map();
   const serverPageSignatureLimit = Math.max(playlistDetailCacheLimit * 4, 8);
@@ -1570,9 +1262,7 @@ export function createMusicApi(options = {}) {
     forgetServerPageSignatures(id);
   }
 
-  // -------------------------------------------------------------------------
-  // 在途请求的"身份证"（R45A3 fix3）
-  // -------------------------------------------------------------------------
+  // —— 在途请求的"身份证"（会话指纹 + 这张歌单第一页的代次） ——
 
   /** 这张歌单新开一次第一页（不论成败/空）：代次 +1，返回新代次。 */
   function beginPlaylistPage1(id) {
@@ -1614,10 +1304,7 @@ export function createMusicApi(options = {}) {
     return songs.map((song) => song.id).join("\u0000");
   }
 
-  /**
-   * 迟到/过期响应的人话（R45A3 fix3）：只说"这次请求过期了"，不写会话、不写 token、
-   * 不写上一个账号的任何东西（错误会进运行日志与界面）。
-   */
+  /** 迟到/过期响应的人话：只说这次请求过期了，不写会话、不写 token、不写上一个账号的任何信息（错误会进日志与界面）。 */
   function stalePlaylistDetailResult() {
     return err(
       "歌单详情：这次请求已经过期（会话已切换，或同一张歌单已有更新的一次请求），迟到的响应已丢弃——请重新打开歌单",
@@ -1642,13 +1329,8 @@ export function createMusicApi(options = {}) {
   }
 
   /**
-   * 取一份**整表**缓存（`null` = 这一页只能去问网络）。
-   *
-   * 只有"能确定它就是整张歌单"的响应才进缓存（见 `getPlaylistDetail` 的判定），
-   * 所以命中即意味着任意页都能从这份缓存切出来。`kind` 显式给了就只读那一条；
-   * `kind='auto'` **只认这张歌单最近一次解析到的那条**——固定顺序（owned 优先）会让
-   * "这次其实解析到公开端点"的第 2 页切到上一轮那份 owned 列表（R45A3 fix2 的复审发现）。
-   * 记不住解析结果（没有指针）时宁可不命中：多取一次网络，好过切错一份歌单。
+   * 取一份整表缓存；`null` 表示这一页只能去问网络。只有能确定是整张歌单的响应才进缓存，命中即可切任意页。
+   * `kind='auto'` 只认这张歌单最近一次解析到的端点，记不住时宁可不命中——多取一次网络好过切错一份歌单。
    */
   function cachedPlaylistDetail(id, kind) {
     if (kind !== "auto") {
@@ -1660,10 +1342,8 @@ export function createMusicApi(options = {}) {
   }
 
   /**
-   * 会话指纹（R45A3 fix2）：只用于"**会话换了就把缓存清掉**"，不落盘、不进设置、不进日志、
-   * 不参与任何请求。用 FNV-1a 32 位散列而不是原文——`token` 是凭据，进程内存里没必要再留
-   * 一份可读副本，而"换没换人"只需要**变更检测**（真撞了碰撞，后果也只是这次没清，下一轮
-   * 第一页同样会重建缓存）。`token` 与 `snsUserID` 分开散列，避免拼串后错位相等。
+   * 会话指纹：只用于"会话换了就把缓存清掉"，不落盘、不进日志、不参与请求。
+   * 用 FNV-1a 散列而非 token 原文，进程内不留可读凭据；token 与 snsUserID 分开散列，避免拼串错位。
    */
   function fingerprintOf(text) {
     let hash = 0x811c9dc5;
@@ -1724,16 +1404,8 @@ export function createMusicApi(options = {}) {
   }
 
   /**
-   * 歌单曲目：自建（type=5，`playlistDetail`）与收藏（type=4，`playlistDetailPublic`）
-   * 是**两个不同的端点**，而通道只带 `playlistId`（渲染层不知道 kind）。
-   *
-   * 所以默认 `kind='auto'` = 先自建、拿不到歌单元信息再试公开那条；`kind` 显式给了就只走那一条。
-   * 这不是"猜"：两条路由都是参考实测存在且形状明确的，响应用 `playListInfoEx` / `musicListInfoEx`
-   * 自证身份——哪条路真的回了歌单，就从哪条路取。
-   *
-   * R45A3 fix1：整表响应的端点在这里被"收边"— 见 `playlistDetailCache` 的说明。
-   * R45A3 fix3：每一次请求都带上"开始时的会话指纹 + 这张歌单第一页的代次"，`await` 回来后
-   * 两样都对得上才许写缓存/交回调用方（否则 `stale_response`）；第一页的失效点挪到发起之前。
+   * 歌单曲目：自建与收藏是两个不同端点，而通道只带 `playlistId`，所以默认先试自建、拿不到歌单元信息再试公开。
+   * 响应靠 `playListInfoEx` / `musicListInfoEx` 自证身份，哪条路真的回了歌单就从哪条取。
    */
   async function getPlaylistDetail(playlistId, request = {}) {
     if (!isNonEmptyString(playlistId)) return err("歌单曲目接口需要 playlistId", MUSIC_ERROR_KINDS.missingParam);
@@ -1743,22 +1415,17 @@ export function createMusicApi(options = {}) {
     const start = startOf(page, pageSize);
     const kind = request.kind ?? "auto";
 
-    // R45A3 fix2：会话换了人/换了 token → 上一轮那份整表缓存属于别人的账号，先清再查
+    // 会话换了人或 token 就清掉整表缓存——上一轮那份属于别人的账号。
     dropPlaylistCacheIfSessionChanged();
 
     /**
-     * 这一次请求的"身份证"（R45A3 fix3）：开始时的会话指纹 + 这张歌单第一页的代次。
-     *
-     * 入口那次比对只能拦住"**进入时**会话已经变了"，拦不住"HTTP 在途时会话换了人 / 又开了
-     * 一次第一页"。旧响应迟到时若不复查，它会把「过去那份」写进缓存，而 `playlistCacheSession`
-     * 记的已经是新会话 → 新会话的第 2 页就从那份属于别人的列表里切（复审点名的洞）。
-     * 两样都只是内存内的不透明比较值，不含 token 原文，不进缓存数据/日志/设置/磁盘。
+     * 这一次请求的"身份证"：开始时的会话指纹 + 这张歌单第一页的代次。
+     * 入口那次比对拦不住 HTTP 在途时会话换人或又开一次第一页，迟到的旧响应必须复查才许写缓存。
      */
     const sessionMark = sessionFingerprint();
     if (page === 1) {
-      // 第一页一开就把这张歌单所有 kind 的旧条目失效——**失败/空响应同样算"这一轮已经问过"**
-      // （R45A3 fix3：旧实现在失败/空时提前 return，上一轮的整表缓存还留着，页 2 于是读出旧内容）。
-      // 失效点必须在网络之前：放到"拿到响应之后"就等于让失败这一档继续沿用旧缓存。
+      // 第一页一开就把这张歌单所有 kind 的旧条目失效——失败/空响应同样算"这一轮已经问过"。
+      // 失效点必须在网络之前，放到拿到响应之后就等于让失败这一档继续沿用旧缓存。
       forgetPlaylistDetail(id);
       beginPlaylistPage1(id);
     }
@@ -1824,8 +1491,8 @@ export function createMusicApi(options = {}) {
     for (const attempt of order) {
       const found = await attempt();
 
-      // R45A3 fix3：`await` 回来先复查"身份证"——会话在途换了人，或同一张歌单又开了更新的
-      // 一次第一页，这份响应属于**过去**：整条作废（不写缓存、不交回调用方、也不再试下一条端点）。
+      // `await` 回来先复查身份证：会话在途换了人或同一张歌单又开了新的第一页，这份响应属于过去，
+      // 整条作废（不写缓存、不交回调用方、也不再试下一条端点）。
       if (!attemptIsCurrent()) return stalePlaylistDetailResult();
 
       if (found.failure) {
@@ -1835,24 +1502,8 @@ export function createMusicApi(options = {}) {
       if (found.empty) continue;
 
       /**
-       * ② 这一份响应的形状决定要不要进缓存。旧条目在第一页**发起之前**就失效过了（见上面的
-       * `forgetPlaylistDetail`）：第一页不论成败都算"这一轮已经问过"，失败/空响应一样不许留旧缓存。
-       *
-       * 为什么是"所有 kind"而不是"解析到的那个 kind"：同一份 `playlistId` 在自建/公开两条
-       * 端点上的曲目可以不同，只失效一条等于给另一条留了个"上一轮的答案"——页 1 这次由公开
-       * 端点解析、页 2 却从上一轮那份自建列表切，界面上就是同一张歌单的两页来自两条路由。
-       *
-       * 这份响应**能确定它就是整张歌单**吗？两种形状能确定：
-       * 1. `received > pageSize`：请求只要 50 条，它给了更多——它根本不看窗口（真接口的实测行为）；
-       * 2. 第一页 `received !== pageSize`：首页不满一页 = 没有下一页；首页多于（不可能，见 1）——
-       *    总之"首页给出的条数"就是全部。
-       *
-       * 判断不了的两种形状**不进缓存**，原样交出（那是服务端自己在分页的证据）：
-       * 首页正好一整页；或后续页只给了一小段（可能只是这一页的尾巴）。
-       * 这一档的 `hasMore` 仍用老规矩 `received >= pageSize`——与改动前完全一致，
-       * 所以"服务端真的认 start/limit"那种形状不会因为本地切片被吞掉。
-       * 唯一的例外是"整页重复"（R45A3 fix3，见 `serverPageSignatures`）：恰好一整页 + 下一份
-       * 整页的归一化 ID 序列完全相同（窗口起点不同）→ 收敛成"没有更多"，免得反复取同一页。
+       * 这份响应的形状决定要不要进缓存：`received > pageSize`，或首页不满一页，才能确定它就是整张歌单。
+       * 判断不了的原样交出（那是服务端自己在分页）；整页重复见 `serverPageSignatures`，收敛成没有更多。
        */
       const wholeList = found.received > pageSize || (page === 1 && found.received !== pageSize);
       if (!wholeList) {
@@ -1990,9 +1641,8 @@ export function createMusicApi(options = {}) {
   }
 
   /**
-   * 播放地址（R32 换血：`contentCode`/`contentType`/`qualityType` 进 JSON 体；
-   * 音质只认 standard/lossless 两个值，别的一律如实回 `quality_unsupported`——不猜也不用别的音质顶替）。
-   */
+   * 播放地址：`contentCode`/`contentType`/`qualityType` 进 JSON 体。
+   * 音质只认 standard/lossless，别的一律如实回 `quality_unsupported`——不猜也不用别的音质顶替。 */
   async function getPlayback(request = {}) {
     const trackId = request.trackId ?? request.id;
     if (!isNonEmptyString(trackId)) return err("播放地址接口需要 trackId", MUSIC_ERROR_KINDS.missingParam);
@@ -2009,44 +1659,8 @@ export function createMusicApi(options = {}) {
   }
 
   /**
-   * 歌词文本（R12；R32 起默认**从播放响应推导**；R38 起先看列表条目里那条地址；
-   * R40 增补"按专辑补条目索引"的第四档）。
-   *
-   * 四条路，按"最可能有、最便宜"排序：
-   * 1. 设置里显式注入过 `musicEndpoints.lyrics` → 直接打那个端点（形状按候选键宽容读取）；
-   * 2. **已加载过的曲目条目里那条 `lyricAddress`**（见 `lyricAddressIndex`）：官方 H5 走的就是
-   *    列表里这条地址；命中就省掉一次播放请求。地址可能带时效签名——下载失败不算结论，继续往下走；
-   * 3. 播放响应：`lyricAddress`（白名单内，含内嵌的 `songInfo`）→ 下载文本；
-   *    没有地址就看内嵌的 `contentExInfo.lyrics`。
-   * 4. **专辑补索引**（R40）：播放响应里既没有地址也没有内嵌歌词时，用它给的专辑 id 去
-   *    **既有**的专辑端点拉一次详情——那条响应的条目自带 `lyricAddress`（真机实测 3/3 有），
-   *    归一化时顺手进索引，于是"本次运行从没在任何列表里加载过"的曲目（典型：重启后直接播
-   *    恢复出来的队列，见 docs/KNOWN_LIMITATIONS.md B23）也还有一次机会。
-   *    **代价与边界**：多一次专辑请求（只在前面几档全落空时才发生）；专辑 id 只能来自**播放响应
-   *    自己承认的字段**（`albumID`，与 `normalizeTrack` 同一份候选表）——它没给就没有这一档，
-   *    仍然如实回 `invalid_response`（不猜 id、不编地址）。
-   *
-   * 四条都没有才回 `invalid_response`，且**不把整段响应体当歌词**塞给渲染层。
-   *
-   * ## R41：这一条现在是**六跳**的编排（上面四条仍是"华为那一侧"的实现）
-   *
-   * | 跳 | 来源 | 命中后 |
-   * |---|---|---|
-   * | ① | **本地导入**（磁盘 `lyrics-local/`，见 `options.lyricsCache` 端口） | 立即返回（`source: "local"`）——**永远压过任何在线结果** |
-   * | ② | **进程内内存缓存**（`lyricMemoryCache`，本进程取过的文本） | 立即返回（`cached: "memory"`） |
-   * | ③ | **90 天磁盘缓存**（`lyrics-cache/`） | 立即返回（`cached: "disk"`），并顺手进内存 |
-   * | ④ | 华为四档（本函数下半部分） | 写内存 + 写磁盘（`source: "huawei"`） |
-   * | ⑤ | **第三方回退**（Kugou / lrclib，`options.lyricsFallback`） | 写内存 + 写磁盘（`source: "kugou"｜"lrclib"`） |
-   * | ⑥ | 都没有 → 回**第 ④ 跳那一次的真实失败** | 界面按那个 kind 说人话（不是笼统的"没有歌词"） |
-   *
-   * 三条边界：
-   * - **本地导入排在最前**：用户亲手导入的词必须立刻生效，且不能被缓存里的在线结果盖住
-   *   （所以导入不"改写"缓存，而是**压过**它）；
-   * - **失败不缓存**：只有真的拿到了歌词才写盘（见 `src/main/lyrics-cache.mjs` 纪律 4）；
-   * - **第 ⑥ 跳回的是华为那次的失败**而不是"第三方也失败了"：第三方是**额外的机会**，
-   *   它的失败不该把"为什么华为没给词"这个更有用的结论盖掉。
-   *
-   * 拿到的文本**不进日志**（`log` 只记键名）：它只经这一帧交给渲染层，落盘的副本在磁盘缓存模块里。
+   * 歌词文本：按"最可能有、最便宜"排序取——显式端点、已加载条目的 `lyricAddress`、播放响应、专辑补条目索引。
+   * 之后依次试本地导入、进程内存、磁盘缓存与第三方回退；都没有就回华为那次真实失败，不把响应体当歌词。
    */
   async function getLyrics(request = {}) {
     const trackId = request.trackId ?? request.id;
@@ -2093,10 +1707,8 @@ export function createMusicApi(options = {}) {
   }
 
   /**
-   * 华为侧四档（R38 三档 + R40 第 4 档）的**实现**：从内存/磁盘缓存的角度看，它只是第 ④ 跳。
-   *
-   * 返回 `ok({text, format, warnings})` 或 `err(...)`——**不带 source**：那是编排层的事
-   * （这一层只知道"从华为拿到了文本"）。
+   * 华为侧四档的实现：从缓存编排的角度看，它只是第 ④ 跳。
+   * 返回 `ok({text, format, warnings})` 或 `err(...)`，不带 source——source 是编排层的事。
    */
   async function huaweiLyricsOnce(id, request = {}) {
     if (isNonEmptyString(endpoints.lyrics)) {
@@ -2132,17 +1744,12 @@ export function createMusicApi(options = {}) {
     const inline = inlineLyricsOf(result.data);
     if (inline !== null) return ok({ text: inline, format: "lrc", warnings });
 
-    // ④ 专辑补索引（R40）：播放响应里没有歌词地址，就用它给的专辑 id 去**既有**的专辑端点
-    //    拉一次详情——`getAlbum` 走的是同一套归一化（`trackOptions`），条目自带的 `lyricAddress`
-    //    会顺手进索引，于是"从没在任何列表里加载过的曲目"（典型：重启后直接播恢复出来的队列）
-    //    也还有一次机会。取不到专辑 id 就照旧如实回下面那个 `invalid_response`（不猜、不编地址）。
-    //
-    //    R41：这一档带**会话内负缓存**（见 `lyricAlbumAttempts`）——同一对 (曲目, 专辑) 本进程
-    //    已经问过一次（无论成败）就不再问第二次：重复取词不该把一次注定同样的专辑请求重放一遍。
+    // ④ 专辑补索引：播放响应里没有歌词地址，就用它给的专辑 id 去既有专辑端点拉一次详情，
+    // 归一化时条目自带的 lyricAddress 顺手进索引；本进程同一对 (曲目, 专辑) 只问一次，不重复取词。
     const albumId = albumIdOf(result.data);
     if (albumId !== null && !albumAttempted(id, albumId)) {
-      // 只记键名（不记值，**连专辑 id 的值也不记**）：这条路的成败取决于"播放响应里到底有没有
-      // albumID"，而那个形状一直没有实证——下一台真机跑一次就能从这一行看出来（协议层不自造事实）。
+      // 只记键名不记值（连专辑 id 的值也不记）：这条路的成败取决于播放响应里到底有没有 albumID，
+      // 而那个形状一直没有实证——协议层不自造事实，留这一行给下一次真机取证。
       log(
         "歌词回落：播放响应里没有歌词地址，按专辑补一次条目索引" +
           `（只记键名，不记值）｜播放响应顶层键名：${objectKeysOf(result.data).join(", ")}` +
@@ -2215,7 +1822,7 @@ export function createMusicApi(options = {}) {
     getHistory,
     getPlayback,
     getLyrics,
-    /** R41：本地导入 / 缓存占用 / 清缓存（三条 `lyrics:*` 频道用它们）。 */
+    /** 本地导入 / 缓存占用 / 清缓存（三条 `lyrics:*` 频道用它们）。 */
     importLyrics,
     lyricsCacheInfo,
     clearLyricsCache,

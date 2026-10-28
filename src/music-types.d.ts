@@ -1,10 +1,7 @@
 /**
  * 华为业务接口的数据形状（协议层的类型说明，供 TS 侧消费）。
- *
- * R32 换血：字段名不再"待联调"——线上形状来自公开参考实现的实测记录
- * （`docs/API_CONTRACT.md` §2 有逐端点的对照表），协议层负责把它翻成下面这些**内部形状**
- * （`contentID → id`、`contentName → name`、`picture.* → coverUrl`…）。
- * 运行时实现是 src/protocols/music.mjs（.mjs，Node 侧直接跑；这里只做类型声明，不含逻辑）。
+ * 线上形状见 `docs/API_CONTRACT.md` §2，协议层负责翻成这些内部形状（`contentID → id`、`contentName → name`…）。
+ * 运行时实现是 src/protocols/music.mjs；这里只做类型声明，不含逻辑。
  */
 import type { CoreResult } from "./shared/result.ts";
 
@@ -113,7 +110,7 @@ export type MusicEndpoints = Partial<Record<
   string | null
 >>;
 
-/** 单页收藏读取（R8 的滚动加载走这条）：**没有 total**——总数只能来自完整分页后的 ID 去重。 */
+/** 单页收藏读取：**没有 total**——总数只能来自完整分页后的 ID 去重。 */
 export interface FavoritesPage {
   page: number;
   pageSize: number;
@@ -126,7 +123,7 @@ export interface FavoritesPage {
   hasMore: boolean;
 }
 
-/** 会话注入：协议层不知道凭据长什么样，头由主进程按 R17 实测的 Digest 形状造。 */
+/** 会话注入：协议层不知道凭据长什么样，头由主进程按实测的 Digest 形状造。 */
 export type SessionHeadersFactory = (context: { key: string; authenticated: boolean }) => Record<string, string>;
 
 /** 收藏加载器。 */

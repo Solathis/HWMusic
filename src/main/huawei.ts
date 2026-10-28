@@ -1,23 +1,7 @@
 /**
- * 登录宿主端口（Node 侧）：把"开官方登录窗 / 取消 / 收尾"包成 R4 `runLoginFlow` 的宿主，
- * 并把 Rust 交给我们的**宿主结论**翻译成流程能消费的形状。
- *
- * 线上契约（Rust `src-tauri/src/login.rs` ↔ 本模块，两侧由 `test/login-parity.test.mjs` 互钉）：
- *
- * ```
- * host:open-login  入 {url, partition}                     → 出 {status, url?, message?}
- * host:cancel-login 入 {}                                  → 出 {cancelled: boolean}
- * ```
- *
- * R25：`topInset` 从 `host:open-login` 的载荷里**退休**（登录页铺满整窗，不再让出顶部那一条）。
- *
- * 三条要点：
- * 1. **`host:open-login` 是长轮询**：答复发生在登录窗**收场之后**（扫码可能要好几分钟），
- *    所以调用超时必须覆盖整段登录等待 + 拆窗余量——用默认的 60 秒会把"还在扫码"判成超时。
- * 2. **结论不认识就说出来**：`status` 不在词表里、`callback` 缺 `url`——一律结构化
- *    `invalid_host_conclusion`，绝不猜一个结论出来（猜错就是"扫码成功却报关窗"）。
- * 3. **回调 URL 原样带出**：Rust 侧拦下 `hms://` 后把 URL 原样交回，判真伪是
- *    `consumeCallback` 的唯一职责（本模块不预滤、不改写）。
+ * 登录宿主端口（Node 侧）：把开官方登录窗、取消、收尾包成 `runLoginFlow` 的宿主。
+ * `host:open-login` 是长轮询，答复发生在登录窗收场之后，超时必须覆盖整段登录等待。
+ * 不认识的结论一律报 `invalid_host_conclusion`，绝不猜；回调 URL 原样带出，判真伪交给 `consumeCallback`。
  */
 import { randomBytes } from "node:crypto";
 
@@ -26,12 +10,7 @@ import { CORE_ERROR_KINDS, err, ok } from "../shared/result.ts";
 
 import type { CoreResult } from "../shared/result.ts";
 
-/**
- * 宿主结论的 `status` 词表（Rust `login.rs` 的 `LoginConclusion::status` 镜像，parity 互钉）。
- *
- * 刻意**不含 R4 的 `failed`**：那是流程内部状态，宿主不该拿它当结论说事——
- * 宿主认定的失败（例如打不开官方页）走 `load_failed` + 文案，其余情况由流程自己判。
- */
+/** 宿主结论的 `status` 词表（Rust `login.rs` 的 `LoginConclusion::status` 镜像，parity 互钉）；刻意不含流程内部的 `failed`。 */
 export const HOST_LOGIN_STATUS = {
   /** 拿到 `hms://` 回调（`url` 原样带出） */
   callback: "callback",
@@ -118,12 +97,7 @@ export function kindOf(cause: unknown): string | undefined {
   return typeof kind === "string" && kind !== "" ? kind : undefined;
 }
 
-/**
- * 一次性登录分区：走 Rust 的 `[A-Za-z0-9_-]{1,64}` 校验（Rust 侧再验一遍是防"绕过 Node 直调"）。
- *
- * 16 字节随机 → base64url 22 字符，落在字符集内且足够短；每次登录一个新值 = 一个全新的
- * webview 数据目录（上次登录的 cookie/缓存不跨次残留）。
- */
+/** 一次性登录分区：16 字节随机 → base64url 22 字符，落在 Rust 的 `[A-Za-z0-9_-]{1,64}` 校验内；每次登录一个新值，不残留上次的 cookie/缓存。 */
 export function createPartition(random: (size: number) => Buffer = randomBytes): string {
   return random(16).toString("base64url");
 }
@@ -134,13 +108,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const STATUS_WORDS: readonly string[] = Object.values(HOST_LOGIN_STATUS);
 
-/**
- * 解析宿主结论：`CoreResult<HostConclusion>`。
- *
- * - 宿主回的是结构化错误 → 原样透出（类别保留：`login_in_progress` / `core_gone` …）；
- * - `ok` 但形状不认识 → `invalid_host_conclusion`（**不猜**）；
- * - `timed_out` / `load_failed` 缺文案 → 回落到本模块的常量（宿主只回 status 也要能出人话）。
- */
+/** 解析宿主结论：结构化错误原样透出，`ok` 但形状不认识一律 `invalid_host_conclusion`，缺文案回落到本模块常量。 */
 export function parseHostConclusion(reply: unknown): CoreResult<HostConclusion> {
   if (!isRecord(reply)) {
     return err("宿主没有返回可识别的答复", INVALID_HOST_CONCLUSION_KIND);
@@ -190,7 +158,7 @@ const defaultLog = (message: string) => console.error("[hwmusic-core]", message)
  * 造登录宿主端口。
  *
  * @param options.hostServices 宿主要求封装（`openLogin` / `cancelLogin`）
- * @param options.partition    分区工厂（测试替换随机源用）
+ * @param options.partition 分区工厂（测试替换随机源用）
  * @param options.openTimeoutMs 开窗调用超时（默认覆盖整段登录等待）
  */
 export function createLoginHost({
@@ -213,9 +181,7 @@ export function createLoginHost({
 
   return {
     async openLoginPage(params: OpenLoginParams) {
-      // R25：`topInset` 从载荷里退休——官方登录页**铺满整个主窗**（用户四项之 3），
-      // "返回扫码登录"与主题控件改成浮在网页之上的两个小 webview（`login.rs`），
-      // 不再从客户区里挖掉一条 header。留一个永远只能是 0 的旋钮只会让下一个人摆错页面。
+      // `topInset` 从载荷里退休——官方登录页铺满整个主窗，返回扫码与主题控件改成浮在网页之上的小 webview，不再从客户区挖掉一条 header。
       const payload = {
         url: params.url,
         partition: params.partition ?? partition(),
@@ -242,13 +208,7 @@ export function createLoginHost({
       return ok({ cancelled: isRecord(reply.data) && reply.data.cancelled === true });
     },
 
-    /**
-     * 关窗兜底（`runLoginFlow` 的清理钩子）。
-     *
-     * 正常路径上 Rust 自己收场就会拆窗（清浏览数据 + 删临时目录），这一路是防止
-     * **Node 先结算**（例如自己的 10 分钟计时器先到）而窗还开着——那时必须有人去把窗关掉。
-     * 失败只记日志：兜底失败不该改写登录结论（R4 的清理语义），何况宿主可能已经收尸。
-     */
+    /** 关窗兜底（`runLoginFlow` 的清理钩子）：防止 Node 先结算而窗还开着；失败只记日志，不改写登录结论。 */
     cleanup() {
       Promise.resolve()
         .then(() => hostServices.cancelLogin({}, { timeoutMs: LOGIN_CANCEL_TIMEOUT_MS }))

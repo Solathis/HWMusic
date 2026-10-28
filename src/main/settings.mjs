@@ -1,23 +1,8 @@
 /**
  * `settings.json`：设置的单一真源（读/清洗/归一/落盘）。
  *
- * 磁盘形状（简报钉死，Rust `webview_proxy.rs` 读同一份）：
- *
- * ```json
- * { "schemaVersion": 1, "data": { "proxy": { "enabled", "host", "port", "username", "password", "bypass" },
- *                                 "closeBehavior": "tray" | "quit", ... } }
- * ```
- *
- * 三条不猜的规矩：
- * 1. **形状不认识就成了"没配"**：非 JSON、`schemaVersion ≠ 1`、缺 `data`、`proxy` 不是对象、host 可疑、
- *    port 越界 —— 一律当没配（代理直连），而不是"尽力猜一个"。`closeBehavior` 不认识则回默认，
- *    但**从不猜的边界上不静默写回**（见第 3 条）。
- * 2. **凭据原样保留、绝不改写**（不 trim：空格可能是密码的一部分），也**绝不进日志/错误文案**——
- *    `settings.json` 本身含代理密码，所以写盘按 `session.enc` 同口径尽力收到 0600。
- * 3. **认不出的文件不覆盖**：读的时候当没配，写的时候直接报结构化错误并保留原文件。
- *    宁可不写，也不能砸掉新版（或手工编辑）写的文件。
- *
- * `closeBehavior` 本任务**只存不消费**（R11 的托盘读它）；R10 的表单经 `settings:set` 写它。
+ * 磁盘形状由简报钉死（Rust `webview_proxy.rs` 读同一份），三条不猜的规矩：
+ * 形状不认识就当没配；凭据原样保留且绝不进日志；认不出的文件不覆盖（写时报结构化错误并保留原文件）。
  */
 import * as nodeFs from "node:fs/promises";
 import { isIPv6 } from "node:net";
@@ -33,7 +18,7 @@ export const SETTINGS_SCHEMA_VERSION = 1;
 export const SETTINGS_FILE_MODE = 0o600;
 /** 数据目录权限（`mkdir` 时用；已存在则不改）。 */
 export const SETTINGS_DIR_MODE = 0o700;
-/** 关窗行为枚举（R11 消费）；第一个是默认值。 */
+/** 关窗行为枚举；第一个是默认值。 */
 export const CLOSE_BEHAVIORS = ["tray", "quit"];
 export const DEFAULT_CLOSE_BEHAVIOR = CLOSE_BEHAVIORS[0];
 /** 代理默认值 = "没配"：`enabled:false`、端口 `null`、例外列表空。 */
@@ -81,13 +66,8 @@ const BRACKETED_IPV6 = /^\[[0-9A-Fa-f:.]+\]$/;
 const HOST_CHARSET = /^[A-Za-z0-9._-]+$/;
 
 /**
- * host 清洗：只接受"主机名/裸 IPv4/带方括号的 IPv6"。
- *
- * 拒绝协议前缀、路径、查询串、片段、userinfo（凭据只走 auth 字段）、多冒号（`host:port` 写法与裸 IPv6
- * 都无法与端口区分）、任何空白、非 ASCII（不做 IDN 猜测）。方括号那段还要**结构上是 IPv6**：
- * 字符集合格但结构不合法的 `[1.2.3.4]` / `[::::]` 同样拒绝（它们拼不出可解析的代理 URL）。
- * **不确定就返回 `null`（= 没填）**。
- * 规则与 Rust `webview_proxy::clean_host` 逐条对齐，由 `test/fixtures/proxy-host-cases.json` 跨语言钉住。
+ * host 清洗：只接受主机名/裸 IPv4/带方括号的 IPv6，拒绝协议前缀、路径、凭据、空白与非 ASCII；
+ * 方括号那段还要求结构上是 IPv6。与 Rust `clean_host` 逐条对齐，不确定就返回 `null`（= 没填）。
  */
 export function cleanHost(raw) {
   if (typeof raw !== "string") return null;
@@ -98,9 +78,7 @@ export function cleanHost(raw) {
   if (/\s/.test(trimmed)) return null;
   if (trimmed.startsWith("[")) {
     if (!BRACKETED_IPV6.test(trimmed)) return null;
-    // 字符集合法 ≠ 结构合法：`[1.2.3.4]`、`[::::]` 能过正则，却拼不出可解析的代理 URL ——
-    // 放行它们会让 Rust 建窗时 Url::parse 失败（主窗建不起来）。结构闸门用标准库 isIPv6，
-    // 与 Rust 侧 std::net::Ipv6Addr 解析对齐，两侧由 test/fixtures/proxy-host-cases.json 钉住。
+    // 字符集合法 ≠ 结构合法：`[1.2.3.4]`、`[::::]` 能过正则却拼不出可解析的代理 URL，结构闸门用标准库 isIPv6。
     return isIPv6(trimmed.slice(1, -1)) ? trimmed : null;
   }
   if (trimmed.includes(":")) return null;
@@ -142,10 +120,7 @@ export function normalizeBypass(raw) {
 }
 
 /**
- * 代理对象归一：只认 `enabled === true`，其余字段各自清洗（坏值 = 没填）。
- *
- * `proxy` 里的未知子字段会被丢掉（本层只认 enabled/host/port/username/password/bypass 六个）：
- * 这一层的形状由简报钉死，R10 的表单不会写别的；`data` 层的未知键则原样保留（见下）。
+ * 代理对象归一：只认 `enabled === true`，其余字段各自清洗（坏值 = 没填）；未知子字段会被丢掉。
  */
 export function normalizeProxy(raw) {
   const source = isPlainObject(raw) ? raw : {};
@@ -160,9 +135,7 @@ export function normalizeProxy(raw) {
 }
 
 /**
- * 设置文档归一。认不出（非对象 / schemaVersion ≠ 1 / data 不是对象）时**整份当没配**：
- * 代理回默认、`closeBehavior` 回默认，绝不从"看不懂的东西"里猜值。
- * 认得出时，`data` 里的未知键原样带过（R10/R11 各自的字段不被吃掉）。
+ * 设置文档归一。认不出（非对象 / schemaVersion ≠ 1 / data 不是对象）时整份当没配；认得出时未知键原样带过。
  */
 export function normalizeSettingsDocument(raw) {
   const source = isPlainObject(raw) ? raw : {};
@@ -182,11 +155,7 @@ export function normalizeSettingsDocument(raw) {
 }
 
 /**
- * 把 `patch` 合进当前文档（`settings:set` 的语义）。
- *
- * - 只碰给出的键；`null` = 该键回默认（`proxy: null` 就是"恢复默认代理"）；
- * - 未知键原样写入（前向兼容：将来加字段不必改这里）；
- * - `proxy` 给了非对象非 null → 结构化错误（写路径不替调用方猜）；`closeBehavior` 不在枚举里同理。
+ * 把 `patch` 合进当前文档（`settings:set` 的语义）：`null` = 该键回默认，未知键原样写入；类型不对则结构化报错。
  */
 export function mergeSettings(document, patch) {
   if (!isPlainObject(patch)) {
@@ -229,11 +198,8 @@ export function mergeSettings(document, patch) {
 }
 
 /**
- * rename 的可重试错误码（R50）。
- *
- * Windows 上 `MoveFileEx` 替换目标时，只要目标还有**任何一个打开的句柄**（本进程的读、
- * 杀毒软件扫描、索引服务、另一个渲染进程的回执）就会 `EPERM`/`EACCES`/`EBUSY`。
- * 实测这种占用常常只持续几毫秒，所以有限重试是最小、最可解释的修复。
+ * rename 的可重试错误码：Windows 上目标还有打开的句柄时替换会 `EPERM`/`EACCES`/`EBUSY`。
+ * 这种占用常只持续几毫秒，所以有限重试是最小、最可解释的修复。
  */
 const RETRYABLE_RENAME_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
 
@@ -245,8 +211,8 @@ export const DEFAULT_RENAME_RETRY_DELAYS_MS = Object.freeze([20, 50, 100]);
  *
  * @param {object} options
  * @param {string|null} options.dir 数据目录（宿主的 `--data-dir`，绝对路径；`null` = 没有数据目录）
- * @param {object} [options.fs]     `node:fs/promises` 的子集（测试注入用）
- * @param {Function} [options.log]  日志落点（默认 stderr）
+ * @param {object} [options.fs] `node:fs/promises` 的子集（测试注入用）
+ * @param {Function} [options.log] 日志落点（默认 stderr）
  * @param {number[]} [options.renameRetryDelaysMs] rename 的重试间隔（测试注入 0 = 不等）
  */
 export function createSettingsStore({
@@ -275,7 +241,7 @@ export function createSettingsStore({
   };
 
   /**
-   * 读磁盘 + 判定"能不能写回去"。
+   * 读磁盘 + 判定能否写回去。
    *
    * @returns {Promise<{document: object, blocked: {kind: string, message: string}|null}>}
    *   `blocked` 非空 = 原文件不该被覆盖（坏 JSON / 读不了 / schemaVersion 不认识）。
@@ -323,11 +289,8 @@ export function createSettingsStore({
   }
 
   /**
-   * rename 替换目标，对 Windows 的**瞬时占用**重试（R50）。
-   *
-   * 只重试 `EPERM`/`EACCES`/`EBUSY`（其它错误一次都不多试：重试只会拖长时间并掩盖原因）。
-   * 每次重试之间等 `renameRetryDelaysMs` 里对应的那一档——真实日志里那种占用只持续几毫秒，
-   * 20/50/100ms 足够；注入 `[0,0,0]` 的测试不真的等。
+   * rename 替换目标，对 Windows 的瞬时占用重试：只重试 `EPERM`/`EACCES`/`EBUSY`，其余错误一次都不多试。
+   * 每次重试之间等 `renameRetryDelaysMs` 里对应的那一档（20/50/100ms 足够）；注入 `[0,0,0]` 的测试不真的等。
    */
   async function renameInto(from, to) {
     for (let attempt = 0; ; attempt += 1) {
@@ -370,14 +333,8 @@ export function createSettingsStore({
   }
 
   /**
-   * 读写**共用**的同一条 promise 队列（R50）。
-   *
-   * 旧版只有写在这一条队列上（`writeTail`），读只 `await` 调用那一刻的旧尾链，
-   * 两者之间有一条缝：`read()` 让出事件循环之后，插进来的 `save()` 会带着新的读 + 写并发跑。
-   * Node 的读句柄在 Windows 上会阻止 `MoveFileEx` 替换目标，于是 `rename` 报
-   * `EPERM`（真实日志 `.tmp/run/app-20261025-160445.log:19`）。
-   * 读也排进队尾之后，"读句柄"与"替换目标"在结构上不可能同时存在。
-   *
+   * 读写共用的同一条 promise 队列。读也让出事件循环的话，插进来的 `save()` 会带并发读写，
+   * 而 Node 的读句柄在 Windows 上会阻止 `MoveFileEx` 替换目标（`rename` 报 `EPERM`）。
    * 队列本身已 `catch` 过（一次失败不该毒化后面所有请求），失败的那一笔由调用方收结构化错误。
    */
   let queueTail = Promise.resolve();
@@ -388,15 +345,9 @@ export function createSettingsStore({
   }
 
   /**
-   * 读设置。**读不到、读坏了都回默认文档**（代理当没配），并把原因记一条日志——不抛、不砸文件。
-   *
-   * R44e：本函数是**排空屏障**——排在已受理的写之后读盘。原子 rename 只保证"不会读到半个文件"，
-   * 不保证"读到的是刚受理的那一笔"：`set` 刚返回接受、副本还在排队时来一个 `get`，
-   * 没有这道屏障就会读回旧文档（主题/歌词的退出校验正是这样被骗过）。
-   *
-   * R50：屏障从"等旧尾链"升级成"自己也排进同一条队列"（原因见上面 `enqueue` 的注释）。
-   * 屏障仍然**只在 `read` 上排队**：`save`/`reset` 内部继续直接 `load()`，否则会等自己那条
-   * 还没落定的尾链（自等死锁）。
+   * 读设置。读不到、读坏了都回默认文档，并把原因记一条日志——不抛、不砸文件。
+   * 本函数是排空屏障：排在已受理的写之后读盘，所以刚受理的写不会被读回旧文档骗过。
+   * 屏障只在 `read` 上排队：`save`/`reset` 内部继续直接 `load()`，否则会等自己那条尾链（自等死锁）。
    */
   function read() {
     return enqueue(load).then((loaded) => loaded.document);
@@ -429,13 +380,8 @@ export function createSettingsStore({
 }
 
 /**
- * `settings:get` / `settings:set` 的处理器（注册进 dispatcher；频道名由调用方从共享常量给）。
- *
- * 答复形状（R10 照这个接）：
- * - `settings:get` → `{ok:true, data:{settings: <归一后的完整文档>}}`；
- * - `settings:set` → `{ok:true, data:{settings: <保存后的文档>, restartRequired: boolean}}`
- *   （`restartRequired`：改动里带了 `proxy` 就要重启 sidecar 才生效，R10 用它写生效说明）；
- * - 失败 → `{ok:false, error:{message, kind}}`，message 里**不含凭据**。
+ * `settings:get` / `settings:set` 的处理器；答复 `{ok:true, data:{settings}}`，`set` 另带 `restartRequired`。
+ * 失败回 `{ok:false, error:{message, kind}}`，message 里不含凭据。
  */
 export function createSettingsHandlers({ store } = {}) {
   if (store === undefined || typeof store.read !== "function") {
@@ -460,9 +406,7 @@ export function createSettingsHandlers({ store } = {}) {
 }
 
 /**
- * `settings:set` 载荷 → 写入计划（纯函数）。
- *
- * 载荷形状只有两种，二选一：`{patch:{...}}`（合并）或 `{reset:true}`（已知键回默认）。
+ * `settings:set` 载荷 → 写入计划（纯函数）：`{patch:{...}}` 或 `{reset:true}`，两者二选一。
  * 两个都给、都不给、类型不对 → 结构化 `invalid_payload`，不写盘。
  */
 export function planSettingsWrite(payload) {

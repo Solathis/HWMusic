@@ -7,7 +7,7 @@
 
 /** 已知错误类别（两侧共用；Rust 侧为同名字符串字面量）。 */
 export const CORE_ERROR_KINDS = {
-  /** 通道已留、实现留待后续任务（R5/R6/R7） */
+  /** 通道已留、实现留待后续任务。 */
   unimplemented: "unimplemented",
   /** 频道不在白名单内 */
   unknownChannel: "unknown_channel",
@@ -25,11 +25,11 @@ export const CORE_ERROR_KINDS = {
   forbiddenSource: "forbidden_source",
   /** 帧本身不合法 */
   invalidFrame: "invalid_frame",
-  /** 安全存储后端不可用（非 Windows / DPAPI 拒绝加密）：会话只留内存，绝不写明文（R5） */
+  /** 安全存储后端不可用（非 Windows / DPAPI 拒绝加密）：会话只留内存，绝不写明文。 */
   secureStoreUnavailable: "secure_store_unavailable",
-  /** 密文不合法：不是本机本用户的 DPAPI 信封、或被破坏（R5） */
+  /** 密文不合法：不是本机本用户的 DPAPI 信封、或被破坏。 */
   invalidCipher: "invalid_cipher",
-  /** 落盘信封不合法：不是合法 JSON / schemaVersion 不认识 / 缺 cipher 字段（R5） */
+  /** 落盘信封不合法：不是合法 JSON / schemaVersion 不认识 / 缺 cipher 字段。 */
   invalidEnvelope: "invalid_envelope",
 } as const;
 

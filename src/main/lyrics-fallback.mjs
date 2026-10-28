@@ -1,36 +1,8 @@
 /**
- * 第三方歌词**回退**（R41；移植自参考实现 `.tmp/reference-repo/src/main/lyrics-fallback.ts`）。
- *
- * ## 什么时候会用到这里
- *
- * 华为那条链四档全部取不到歌词、**且曲目有标题**时（见 `src/protocols/music.mjs` 的 `getLyrics`）。
- * 华为侧对相当一部分曲目确实没有词，而"没有词"与"这首歌本来就没词"是两件事——
- * 这是**再试一个来源**，不是"编一份歌词出来"。
- *
- * ## 三条硬边界
- *
- * 1. **失败静默**：任何一个第三方服务的超时/5xx/坏 JSON 都不抛、不打断播放、**不缓存**
- *    （缓存一份"这次没有"就等于把这个来源永久关掉，见 `src/main/lyrics-cache.mjs` 纪律 4）。
- *    "静默"指**不打扰用户**（没有弹窗、没有播放中断）：每条失败路径仍在运行日志里留一行
- *    结论级的话（服务名 + 阶段，R41a 补上），否则真机上没人说得清"为什么没取到词"。
- * 2. **匹配严格**：候选必须过 `lyrics-provider.mjs` 的严格匹配器（标题 + 艺人 + 时长），
- *    宁可回 null 也不显示一首别的歌的词。
- * 3. **出口克制**：`user-agent` 只报"这是什么客户端"，**不带任何本项目凭据**（没有令牌、
- *    没有账号标识、没有会话头）；请求走 **sidecar 的全局 fetch**，所以设置里的代理照常生效。
- *
- * ## 出口域是新的（要说不清楚的那件事）
- *
- * `songsearch.kugou.com` / `krcs.kugou.com` / `lyrics.kugou.com` / `lrclib.net` 是**第三方公开
- * 歌词库**，不是华为 CDN。这里**不需要动任何白名单**，理由是查过的：
- * - sidecar 侧的出口**没有域名白名单**（`src/main/proxy.mjs` 只管代理与例外列表）；
- * - `tauri.conf.json` 的 CSP `connect-src` 只约束**渲染层**的 fetch，而这两个请求都发生在
- *   sidecar 进程里，歌词文本经 IPC 回来——渲染层一次网络请求都不发（与 `playback:lyrics` 同路）；
- * - 媒体白名单（`safe-media-url.mjs`）管的是 `<audio>`/`<img>` 能加载哪些域，与这里无关。
- *
- * ## 超时与体积
- *
- * 8 秒超时（蓝本同值：歌词回退是"顺带试一下"，不该让取词拖到华为接口那样的 25 秒）、
- * 单响应 512 KiB 上限（`content-length` 声明与实读各查一次）、不跟随跳转。
+ * 第三方歌词回退：华为那条链四档全取不到、且曲目有标题时，再试一个来源。
+ * 三条硬边界：失败静默（不抛、不打断播放、不缓存）、匹配严格（标题 + 艺人 + 时长）、
+ * 出口克制（不带任何本项目凭据，请求走 sidecar 的全局 fetch，代理照常生效）。
+ * 8 秒超时、单响应 512 KiB 上限、不跟随跳转。
  */
 import {
   decodeKugouLyrics,
@@ -68,12 +40,8 @@ export function createThirdPartyLyrics({
   const maxBytes = LYRICS_TEXT_MAX_BYTES;
 
   /**
-   * 读一个 JSON 响应；**任何问题一律回 null**（超时、非 2xx、坏 JSON、过大）。
-   *
-   * 每条失败路径各留**一行结论级**日志（R41a）：以前这里全是 `catch { return null }`，
-   * 真机上"第三方歌词为什么没取到"只能靠猜（服务挂了？接口改了？被墙了？）。日志里
-   * **不带凭据、不带响应体、不带请求 URL 的查询串**——只带服务名与结论（状态码/阶段），
-   * 那正是排障要的那个信息，而别的都属于"不该进日志的东西"。
+   * 读一个 JSON 响应；任何问题一律回 null（超时、非 2xx、坏 JSON、过大），每条失败路径留一行结论级日志。
+   * 日志不带凭据、响应体与查询串，只带服务名与结论（状态码 / 阶段）。
    */
   async function readJson(service, url, headers = {}) {
     let response;
@@ -141,10 +109,7 @@ export function createThirdPartyLyrics({
 
   /**
    * 酷狗：搜索 → （按哈希）问歌词索引 → 下载 → base64 解码。
-   *
-   * 索引那一步的挑选按蓝本那条注释办：**哈希已经锁定了录音**，所以即使索引里的标题带着
-   * `(Live)`/`(remaster)` 之类的后缀、过不了严格匹配，第一个条目仍然是同一首歌——
-   * 严格匹配优先，匹配不上才退到第一个（这是唯一一处"不严格"，理由是哈希）。
+   * 哈希已锁定录音，所以严格匹配优先，匹配不上才退到索引里的第一个条目。
    */
   async function fromKugou(query) {
     const headers = { referer: "https://www.kugou.com/" };
@@ -163,10 +128,7 @@ export function createThirdPartyLyrics({
 
   /**
    * lrclib：搜索 → 严格匹配 → 取**同步**歌词。
-   *
-   * 只有 `syncedLyrics` 一条路：`plainLyrics`（没有时间戳的纯文本）**暂不支持**——
-   * 落盘判据要求"至少一行带时间戳"，纯文本必然被判空（见 `lrclibCandidates` 的说明），
-   * 所以候选那一层就把它丢掉了，这里也就不必再退。
+   * 只走 `syncedLyrics`：`plainLyrics` 必然被判空，候选那一层就丢掉了。
    */
   async function fromLrclib(query) {
     const search = await readJson("lrclib", lrclibSearchUrl(query));

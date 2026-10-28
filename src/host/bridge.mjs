@@ -1,13 +1,7 @@
 /**
- * R3 sidecar 桥 · 帧协议 + pending 表 + 传输接线。
- *
- * 线上只有两种帧（NDJSON：一行一帧、UTF-8、`\n` 结尾）：
- * - 请求：`{id, channel, payload}`
- * - 响应：`{id, ok, data}` 或 `{id, ok, error: {message, kind?}}`
- *
- * 本模块不认业务频道（那是 dispatcher/rpc 的事），只保证协议面的确定结论：
- * 分帧跨 read() 分片存活、半帧在 EOF 有归属、在途调用被结清、同一 id 只答复一次、
- * core 退出后调用立刻失败而不是再等超时。
+ * sidecar 桥 · 帧协议 + pending 表 + 传输接线。
+ * 线上只有两种帧（NDJSON：一行一帧、UTF-8）：请求 `{id, channel, payload}`，响应 `{id, ok, data}` 或 `{id, ok, error}`。
+ * 本模块不认业务频道，只保证协议面的确定结论：分帧跨 read() 分片存活、半帧在 EOF 有归属、在途调用被结清、同一 id 只答复一次、core 退出后调用立刻失败。
  */
 import { asCoreError, CORE_ERROR_KINDS, err, ok } from "../shared/result.ts";
 
@@ -27,15 +21,7 @@ export const FRAME_EXCERPT_BYTES = 64;
 
 const utf8Decoder = new TextDecoder("utf-8", { fatal: false });
 
-/**
- * 帧摘要：日志与 `onInvalidFrame` 报告里**只给前 [`FRAME_EXCERPT_BYTES`] 字节 + 总字节数**。
- *
- * 为什么不是"原样带上那一行"：截断帧/非法行是**唯一**会把未解析的字节原样交出来的地方，
- * 而它可能正是一帧带着凭据的 JSON（比如负载里躺着一个密码字段的那条安全存储请求——频道名
- * 在 src/shared 是唯一真源，这里不写第二份）。日志会落盘、会被贴进 issue，所以这里按裁决取
- * 64 字节上限：够认出"是哪个频道、坏在哪一段"，又保证第 64 字节之后的凭据进不了日志。
- * 按 UTF-8 字符边界切，不产生半个汉字。
- */
+/** 帧摘要：日志与 `onInvalidFrame` 里只给前 `FRAME_EXCERPT_BYTES` 字节 + 总字节数（按 UTF-8 字符边界切），绝不带那一行原文。 */
 export function frameExcerpt(text) {
   const value = typeof text === "string" ? text : String(text);
   const bytes = Buffer.byteLength(value, "utf8");
@@ -46,17 +32,7 @@ export function frameExcerpt(text) {
   return `${head}…（已截断，共 ${bytes} 字节）`;
 }
 
-/**
- * 分帧状态机。
- * - 完整行立即吐出（吞掉 CRLF 与空行）；
- * - 残余（半帧）留在内部等下一片；
- * - `end()` 交出残余：非空即截断帧，必须报出来而不是静默丢弃。
- *
- * 报告给 `onInvalidFrame` 的**只有摘要**（[`frameExcerpt`]），绝不带原文：
- * 这个回调的默认去向是宿主 stderr 日志。
- * `cause` 也不带原始 Error：V8 的 `JSON.parse` 报错会把出错的**原文片段**写进 message，
- * 那是同一条凭据的第二个出口（只留 `causeName`，细节看摘要就够）。
- */
+/** 分帧状态机：完整行立即吐出、残余留到下一片、`end()` 交出残余（非空即截断帧，必须报出来）；报告只给摘要与 `causeName`，绝不带原文。 */
 export function createFrameDecoder({ onInvalidFrame = () => {} } = {}) {
   let buffer = "";
   return {
@@ -100,12 +76,7 @@ export function createFrameDecoder({ onInvalidFrame = () => {} } = {}) {
   };
 }
 
-/**
- * pending 表：id → 结清函数。
- * - 同一 id 不能登记两次（id 冲突）；
- * - 同一 id 第二次结清被拒绝（返回 false），原值不被覆盖；
- * - 关闭后不再接受登记。
- */
+/** pending 表：id → 结清函数；同一 id 不能登记两次，第二次结清返回 false 且不覆盖原值，关闭后不再接受登记。 */
 export function createPendingTable() {
   const entries = new Map();
   let closed = false;
@@ -169,13 +140,7 @@ function createAnsweredGuard(limit = MAX_ANSWERED_IDS) {
   };
 }
 
-/**
- * 一条双向桥。
- *
- * 入向：`readable`（sidecar stdout）→ 分帧 → 响应结清 pending / 请求交给 `onRequest`。
- * 出向：`call()` 写请求帧并登记 pending；`respond()` 写响应帧（同一 id 只写一次）。
- * 收尾：`readable` 的 end/error 或 `close()` → 结清全部在途调用、标记已收尸，之后调用立刻失败。
- */
+/** 一条双向桥：入向 `readable` → 分帧 → 结清 pending / 交给 `onRequest`；出向 `call()` / `respond()`；收尾结清全部在途调用，之后调用立刻失败。 */
 export function createBridge({
   readable = null,
   writable,
@@ -250,11 +215,7 @@ export function createBridge({
     return write(isOk ? { id, ok: true, data: result.data ?? null } : { id, ok: false, error: failureOf(result) });
   }
 
-  /**
-   * 广播帧：`{channel, payload}` —— **没有 `id`、没有 `ok`**（Rust `classify_line` 的广播分支只认这个形状；
-   * 带上 id 就会被当成宿主要求，带上 ok 就会被当成响应帧）。
-   * 频道白名单校验在 rpc 层（本模块不认业务频道）。
-   */
+  // 广播帧：`{channel, payload}` —— 没有 `id`、没有 `ok`；频道白名单校验在 rpc 层。
   function broadcast(channel, payload = null) {
     if (pending.closed) return false;
     return write({ channel, payload });

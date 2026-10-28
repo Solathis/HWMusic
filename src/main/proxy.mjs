@@ -1,21 +1,9 @@
 /**
  * 统一 HTTP 代理：设置/环境变量 → undici 全局 dispatcher → 业务请求。
- *
- * 分工：
- * - `settings.json` 是**唯一真源**（`src/main/settings.mjs` 读写它），这里只做"配置 → 装配"；
- * - 装配必须发生在**任何业务请求之前**（R7 的 AuthManager.restore 也在其内）：`main.mjs` 在建桥/建调度器
- *   之前调用 [`applyStartupProxy`]，`test/proxy.test.mjs` 用源码顺序扫描把这条钉死；
- * - 环境变量兜底（HTTP(S)_PROXY / ALL_PROXY / NO_PROXY）只在设置**没配**代理时生效，且**必须发一条
- *   可见提示**——用户有权知道"为什么走了代理"（谁把流量引出去了不能是个谜）。
- *
- * 凭据纪律（硬要求）：用户名/密码**只进 undici 的 `auth`**（它最终是 `proxy-authorization` 头）。
- * 我们自己拼的 URI 只有 `scheme://host:port`，日志、提示、错误文案里只有 `host:port`。
- *
- * 为什么用 `EnvHttpProxyAgent` 而不是裸 `ProxyAgent`：只有它认"例外列表"（`noProxy`）。
- * 它接受显式覆盖（`httpProxy`/`httpsProxy`/`noProxy`），所以设置路径**不会**回头去读环境变量，
- * 两条来源彼此不串味。这里核对过 undici 7.30 的实现（`lib/dispatcher/env-http-proxy-agent.js` +
- * `lib/dispatcher/proxy-agent.js`）：`auth` 只被 ProxyAgent 用作 `proxy-authorization`，
- * 直连分支的 `Agent` 忽略它——所以凭据不会漏给目标站点（`test/proxy.test.mjs` 用本地服务器实测钉住）。
+ * `settings.json` 是唯一真源；装配必须发生在任何业务请求之前。
+ * `main.mjs` 在建桥/建调度器前调用 `applyStartupProxy`，`test/proxy.test.mjs` 用源码顺序扫描钉住。
+ * 环境变量兜底（HTTP(S)_PROXY / ALL_PROXY / NO_PROXY）只在设置没配代理时生效，且必须发一条可见提示。
+ * 凭据只进 undici 的 `auth`；自拼 URI、日志与文案里只有 `host:port`。
  */
 import { EnvHttpProxyAgent, ProxyAgent, setGlobalDispatcher as installGlobalDispatcher } from "undici";
 
@@ -38,11 +26,8 @@ const defaultLog = (message) => console.error("[hwmusic-core]", message);
 
 const base64 = (text) => Buffer.from(text, "utf8").toString("base64");
 
-/**
- * 归一后的代理计划：`{host, port, auth, noProxy, scheme, source}`。
- * `auth` 是 **base64 的 `user:password`**（undici 的 `auth` 就是这个语义）；没凭据时是 `null`。
- * `source` 只在环境变量兜底时才有值（写进提示，好让用户知道是哪个变量把流量引出去的）。
- */
+/** 归一后的代理计划：`{host, port, auth, noProxy, scheme, source}`。
+ * `auth` 是 base64 的 `user:password`；`source` 只在环境变量兜底时有值。 */
 function plan(parts) {
   return Object.freeze({
     scheme: parts.scheme ?? "http:",
@@ -58,12 +43,7 @@ function authFor(username, password) {
   return username === "" && password === "" ? null : base64(`${username}:${password}`);
 }
 
-/**
- * 设置里的代理对象 → 代理计划；**没填全或没开一律 `null`**（= 当没配，直连）。
- *
- * `enabled` 与"字段齐全"是两回事：`enabled:true` 但 host/port 不合法，结果同样是 `null`。
- * 这里再清洗一遍 host/port（防调用方绕过 `normalizeProxy` 直接喂表单值）。
- */
+/** 设置里的代理对象 → 代理计划；没开或没填全一律 `null`（当没配，直连），host/port 这里再清洗一遍。 */
 export function proxyPlan(proxy) {
   if (proxy === null || typeof proxy !== "object" || Array.isArray(proxy)) return null;
   if (proxy.enabled !== true) return null;
@@ -113,15 +93,7 @@ export function createProxyDispatcher(options, { agentFactory = defaultAgentFact
   return agentFactory(options);
 }
 
-/**
- * 坏值回显：**绝不把原文拼进日志/提示**，只给"剥离后的形态"。
- *
- * 为什么连"看不出凭据"的值也不回显：用户把 `user:pass` 整串误贴进 `HTTP_PROXY` 时，
- * `new URL` 会把它当成 scheme（`user:`）+ 路径解析成功，一个 `@` 都没有——可那里面就是密码。
- * 所以只有两个出口：
- * - 能解析出主机 → `「scheme://host:port」`（userinfo 已被 URL 解析器剥掉，端口按 URL 规范归一）；
- * - 其余 → 固定短语（明说"不回显"，而不是把原文糊上去）。
- */
+/** 坏值回显：绝不把原文拼进日志/提示——能解析出主机就给 `scheme://host:port`（userinfo 已被剥掉），其余给固定短语。 */
 export function redactProxyValue(raw) {
   if (typeof raw === "string") {
     try {
@@ -255,14 +227,11 @@ export function applyStartupProxy({
 export const PROXY_TEST_TIMEOUT_MS = 10_000;
 
 /**
- * 测试连接：**用独立的 `ProxyAgent`**（绝不换掉全局 dispatcher）向给定 URL 发一次请求。
- *
- * 结果里只有状态与错误摘要，**不回显凭据**。`kind`：`not_configured` / `invalid_url` /
- * `proxy_auth_required`（407：代理要认证，多半是用户名密码不对）/ `timeout` / `network` / `http_status`。
+ * 测试连接：用独立的 `ProxyAgent`（绝不换掉全局 dispatcher）向给定 URL 发一次请求；结果只有状态与错误摘要，不回显凭据。
  *
  * @param {object} options
  * @param {object} options.proxy 设置里的代理对象（表单原样）
- * @param {string} options.url   被请求的 URL（由调用方给，本模块不猜目标）
+ * @param {string} options.url 被请求的 URL（由调用方给，本模块不猜目标）
  */
 export async function testProxyConnection({
   proxy,
@@ -322,9 +291,7 @@ export async function testProxyConnection({
     if (signal.aborted) {
       return { ok: false, ms, error: { kind: "timeout", message: `测试连接超时（${timeoutMs} 毫秒）` } };
     }
-    // undici 的 ProxyAgent 把代理回的 407 拦成错误（`lib/dispatcher/proxy-agent.js`：
-    // `statusCode === 407` → `onError(new InvalidArgumentError('Proxy Authentication Required (407)'))`），
-    // 所以"代理要认证"这条通常走这里，而不是上面的 status 分支（那条兜住别的 dispatcher / 注入的 fetch）。
+    // undici 的 ProxyAgent 把代理回的 407 拦成错误，所以「代理要认证」通常走这里，而不是上面的 status 分支。
     if (isProxyAuthFailure(cause)) {
       return {
         ok: false,

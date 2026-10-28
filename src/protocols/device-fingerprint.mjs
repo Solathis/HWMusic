@@ -1,51 +1,12 @@
 /**
- * 设备指纹编码器（R31）：把"页面用浏览器指纹换 deviceID"那一步的**编码格式**抄准。
- *
- * ## 为什么需要它（真源是探针，不是推测）
- *
- * R29 只知道"页面在 `isUsedDeviceFingerSite` 为真时会带 `deviceID`/`deviceType`"，不知道
- * `deviceID` 从哪来。R31 的探针（`scripts/probe-qr-fidelity.mjs`，headless Chromium 真开官方
- * 二维码页）把它抓下来了：页面先发
- *
- * ```
- * POST /CAS/IDM_W/ajaxHandler/dev?reflushCode=…&cVersion=…
- * 正文：pageToken=…&pageTokenKey=…&reqClientType=…&loginChannel=…&clientID=…&lang=…&languageCode=…&state=…&fp=<这一段>
- * 响应：{"isSuccess":1,"sid":"204937…（84 位 hex）"}
- * ```
- *
- * 然后把这个 `sid` 写进 `localStorage.hwid_cas_sid` 与同名 cookie，建单时作为
- * `deviceID=<sid>&deviceType=7` 发给 `/DimensionalCode/getqrInfo`。所以 **deviceID = 服务端下发的 sid**，
- * 不是页面本地算出来的哈希。
- *
- * `fp` 的编码在页面 bundle 里是三步（本模块逐字节复刻，`test/device-fingerprint.test.mjs`
- * 用探针抓到的那份真值钉住"解回来再编回去完全相同"）：
- *
- * 1. `k=v` 逐个 percent-encode，**丢掉空值**，再按字段名排序拼成 `a=1&b=2`；
- * 2. 尾部挂 `&cs=<sha1(上面那半截)>`（40 位 hex。探针实测：`cs` 写错、不写、或写成别的东西，
- *    服务端一律回 `{"isSuccess":1,"sid":""}`——**空 sid 就是拒绝**）；
- * 3. 从种子 211 起做**滚动 XOR**（`b = 255 & (ch ^ (prev - 1))`，`prev = b`），再整体 base64。
- *
- * ## 我们发出去的那份指纹：哪些是真值，哪些是同形状的固定值（如实写在下面）
- *
- * - **真值**：`ett`（采集时刻）、`etz`（时区偏移）、`nlg`（语言）、屏幕/视口尺寸（调用方注入）、
- *   浏览器名/平台（调用方注入）。
- * - **同形状的固定值**：`canvas`/`webgl`/`fonts`/`ep`——页面在真浏览器里画一遍 canvas、跑一段
- *   WebGL、量一遍字体表算出来的哈希。sidecar 是 Node 进程，**没有浏览器引擎**，算不出这些；
- *   探针实测服务端**按形状收**（把 canvas 换成一个别的 40 位 hex 照样发 sid），所以这里给
- *   sha1 出来的固定值，并且**同一台设备每次报同一份**（设备标识要稳定才谈得上"同一台设备"）。
- *   这不假装成某台真机：除了上面那些真值，我们没有任何浏览器侧的熵可报。
- * - `ips`/`devs`：页面那份里是**空数组**（不是空串）——数组是"真值"，所以编码时**照样进**
- *   （`devs=&ips=`），这一点是从探针抓到的那份真值上读出来的（`test/fixtures/r31-page-fingerprint.json`），
- *   这里跟着用 `[]`，否则我们会比页面少两个字段。
+ * 设备指纹编码器：把页面用浏览器指纹换 deviceID 那一步的编码格式抄准。`deviceID` 是服务端下发的 sid，不是本地哈希。
+ * `fp` 的编码是三步：1. `k=v` 逐个 percent-encode、丢掉空值、按字段名排序拼成 `a=1&b=2`；
+ * 2. 尾部挂 `&cs=<sha1(上面那半截)>`（40 位 hex，cs 写错或不写服务端一律回空 sid，空 sid 就是拒绝）；
+ * 3. 从种子 211 起做滚动 XOR（`b = 255 & (ch ^ (prev - 1))`），再整体 base64。
  */
 import { createHash } from "node:crypto";
 
-/**
- * 页面那份指纹的字段表（探针实测的 19 个，一个不多一个不少）。
- *
- * 顺序就是页面对象里的声明顺序；编码时按字段名排序，所以这里保留原顺序只为"读起来像页面"，
- * 以及给测试一个可比对的完整清单。
- */
+/** 页面那份指纹的字段表（探针实测的 19 个，一个不多一个不少）；顺序只为读起来像页面，编码时按字段名排序。 */
 export const DEVICE_FINGERPRINT_FIELDS = [
   "bsh",
   "bsw",
@@ -88,15 +49,7 @@ export function fingerprintChecksum(body) {
   return createHash("sha1").update(String(body ?? ""), "utf8").digest("hex");
 }
 
-/**
- * 指纹字段 → `k=v&…`（页面 `s()` 的逐字复刻）。
- *
- * 两条细节都是页面定的，不能改：**空值不进**（`""`/`0`/`null` 全丢），**按字段名排序**
- * （所以字段顺序变了不影响结果）。
- *
- * @param {Record<string, unknown>} fields
- * @returns {string}
- */
+/** 指纹字段 → `k=v&…`（页面 `s()` 的逐字复刻）：空值不进、按字段名排序。 @param {Record<string, unknown>} fields @returns {string} */
 export function serializeFingerprint(fields) {
   const parts = [];
   for (const name of Object.keys(fields ?? {})) {
@@ -134,7 +87,6 @@ function base64ThenUnxor(value) {
 
 /**
  * 指纹字段 → 服务端收的那一串（页面 `l(s(n))` 的逐字复刻）。
- *
  * @param {Record<string, unknown>} fields
  * @returns {string} base64 文本
  */
@@ -144,14 +96,9 @@ export function encodeFingerprint(fields) {
 }
 
 /**
- * 编码的逆运算（诊断与测试用；探针也用它把页面那份 fp 读出来）。
- *
- * `ok: false` 的三种情形：不是字符串/空串、base64 解不出东西、解出来**没有 `&cs=`**
- * （服务端对这种一律回空 sid，所以"认不出"就是认不出，不猜半份）。
- *
+ * 编码的逆运算（诊断与测试用）：非字符串、base64 解不出、缺 `&cs=` 一律算认不出，不猜半份。
  * @param {unknown} value 线上那一串
- * @returns {{ok: true, body: string, checksum: string, fields: Record<string, string>} |
- *           {ok: false, reason: string}}
+ * @returns {{ok: true, body: string, checksum: string, fields: Record<string, string>} | {ok: false, reason: string}}
  */
 export function decodeFingerprint(value) {
   if (typeof value !== "string" || value.trim() === "") return { ok: false, reason: "empty" };
@@ -179,13 +126,8 @@ export function decodeFingerprint(value) {
 }
 
 /**
- * 我们能诚实给出的那份指纹（字段表与页面**完全一致**，值见文件头的分工说明）。
- *
- * @param {{
- *   now?: number, lang?: string, width?: number, height?: number,
- *   browserName?: string, browserAppName?: string, platform?: string,
- *   timezoneOffsetMinutes?: number,
- * }} [overrides]
+ * 我们能诚实给出的那份指纹（字段表与页面完全一致，值见文件头的分工说明）。
+ * @param {{ now?: number, lang?: string, width?: number, height?: number, browserName?: string, browserAppName?: string, platform?: string, timezoneOffsetMinutes?: number, }} [overrides]
  * @returns {Record<string, string>}
  */
 export function deviceFingerprintFields(overrides = {}) {

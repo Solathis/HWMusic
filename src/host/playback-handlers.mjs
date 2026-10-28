@@ -1,20 +1,6 @@
 /**
- * `playback:resolve-url` 与 `playback:lyrics` 两个频道的处理器（R9 / R12）：把请求翻成协议层的调用。
- *
- * 这两条与 `library:*` 有三处不同（都是刻意的），两条频道共享同一套纪律：
- * - **结果里带"当次"的东西**——播放地址与歌词文本。处理器只把它们放进这一次的应答里：
- *   不写日志（`console.*` 在这个文件里一个都没有）、不碰设置/磁盘（没有任何持久化出口）。
- *   音频地址的持久化禁令落在队列那边（只存标识、索引与安全展示快照）；歌词文本只在渲染层的内存里，
- *   由歌词窗与主窗面板共用。
- * - **不做二次校验**：白名单（CDN 后缀）在协议层 `parsePlaybackPayload` 里查，未配置端点
- *   在那里回 `endpoint_unknown`。这里只做"载荷够不够"，不重写协议层的结论——
- *   两处各判一次，早晚会判出两个不同的答案。
- * - **不缓存**：播放地址是**当次**的（可能带时效签名），缓存它等于把"这一次能用"变成
- *   "以后也能用"；歌词文本同理不缓存（换歌就该换词，缓存只会让歌词窗显示上一首的）。
- *
- * 为什么 `playback:lyrics` 返回**原始文本**而不是解析好的行：逐行滚动必须来自 AMLL 官方组件，
- * 而"文本 → 行"是官方 `parseLrc` 的职责（`features/lyrics/amll-adapter.ts` 在它之上补 offset
- * 与翻译行）。解析放在这里，渲染层拿到的就是一份"别人解析好的东西"，官方版本一变就对不上。
+ * `playback:resolve-url` 与 `playback:lyrics` 两个频道的处理器：把请求翻成协议层的调用。
+ * 播放地址与歌词文本是当次的：不写日志、不落盘、不缓存，校验只做载荷形状。
  */
 import { PLAYBACK_LYRICS, PLAYBACK_RESOLVE_URL } from "../shared/request-channels.ts";
 import { isLocalTrackId } from "../shared/local-track.ts";
@@ -35,10 +21,7 @@ function textOf(value) {
 
 /**
  * 造 `playback:resolve-url` / `playback:lyrics` 的处理器表（`dispatcher.register` 直接消费）。
- *
- * @param {{api: object, localLyrics?: Function|null}} options `api` = src/protocols/music.mjs 的
- *   `createMusicApi()` 产物；`localLyrics` = 本地曲目的取词口（`createLocalLyricsResolver` 的产物）。
- *   后者缺了就只有"本地曲目没有歌词"这一档（不回落去问在线接口——那会把本地曲目当在线曲目查）。
+ * @param {{api: object, localLyrics?: Function|null}} options `api` = music api 产物；`localLyrics` = 本地曲目的取词口。
  * @returns {Record<string, (request: object) => Promise<object>|object>}
  */
 export function createPlaybackHandlers({ api, localLyrics = null } = {}) {
@@ -53,17 +36,7 @@ export function createPlaybackHandlers({ api, localLyrics = null } = {}) {
   }
 
   /**
-   * 第三方歌词回退要用的曲目元信息（R41）：`title` / `artist` / `durationSeconds`。
-   *
-   * 为什么由**渲染层**给而不是 core 自己去查：这三个值就在渲染层手里那份曲目投影里
-   * （`features/library/track-fields.mjs` 已经归一好），而 core 为了拿它们得再问一次曲目接口
-   * ——多一次请求、多一份可能过期的缓存，还可能问到别的曲目上。
-   *
-   * 三条边界：
-   * - **全部可选**：一个都不给，`getLyrics` 就只是少掉第三方那一跳（没有标题的回退等于盲搜）；
-   * - **认不出就不给**（不是字符串 / 不是正数 → 省略该字段），绝不编一个默认值——
-   *   一个编出来的时长会把严格匹配器带偏（它可是"宁可不显示"的那一侧）；
-   * - **只用于匹配**：这三个值不进日志、不落盘（落盘的是匹配到的那个候选的标题/艺人）。
+   * 第三方歌词回退要用的曲目元信息：`title` / `artist` / `durationSeconds`，全部可选且只用于匹配。
    */
   function metadataOf(request) {
     const payload = payloadOf(request);

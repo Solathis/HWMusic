@@ -16,14 +16,7 @@ export const DATA_DIR_ARG = "--data-dir";
 /** 开发期兜底旋钮（手跑 `node src/sidecar/main.mjs` 用；生产路径永远由 argv 决定）。 */
 export const DATA_DIR_ENV = "HWMUSIC_DATA_DIR";
 
-/**
- * 从 `process.argv.slice(2)` 解析数据目录。
- *
- * - 有 `--data-dir <绝对路径>` → 用它；
- * - 参数在但值缺失/是相对路径 → **抛 TypeError**（宁可不启动，也不用一个会漂移的目录）；
- * - 没有该参数 → 环境旋钮兜底，坏值（空白/相对）一律当作未设置；
- * - 都没有 → `null`（调用方据此决定"只留内存会话"，绝不回退到 cwd）。
- */
+/** 从 `process.argv.slice(2)` 解析数据目录：参数在但值缺失或相对时抛 TypeError，没有参数走环境旋钮兜底，都没有则回 `null`。 */
 export function dataDirFromArgv(argv = [], { env = process.env } = {}) {
   const index = argv.indexOf(DATA_DIR_ARG);
   if (index !== -1) {

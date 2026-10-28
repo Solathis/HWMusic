@@ -1,14 +1,8 @@
 /**
- * `library:*` 频道的处理器（R8）：把渲染层的库页面请求翻成 src/protocols/music.mjs 的调用。
- *
- * 三条边界：
- * - **不猜端点**：处理器只调注入进来的 music api；端点没配就是协议层的结构化
- *   `endpoint_unknown`，这里原样转达。绝不把"接口没配"改写成空列表——那是把
- *   "读不到"说成"确实没有"，用户会以为收藏是空的。
- * - **坏载荷在边界被拒**：必填参数（歌单 id / 关键字 / 专辑 id / 歌手 id）在这里校验，
- *   `invalid_payload` 结构化返回，不把坏参数透给协议层（那里只会拼出一个必然失败的请求）。
- * - **分页结论不在这一层**：`hasMore` 由 music.mjs 的同一规则给出，渲染层不自己猜；
- *   收藏的"总数"更不在这一层——它只能来自完整分页后的 ID 去重。
+ * `library:*` 频道的处理器：把渲染层的库页面请求翻成 src/protocols/music.mjs 的调用。
+ * 不猜端点：端点没配就把协议层的结构化 `endpoint_unknown` 原样转达，绝不改写成空列表。
+ * 必填参数在这里校验，坏载荷回 `invalid_payload`，不透给协议层。
+ * 分页结论不在这一层：`hasMore` 与收藏总数由协议层和完整分页去重给出。
  */
 import {
   LIBRARY_ALBUM,
@@ -40,7 +34,7 @@ function positiveOf(value) {
   return Number.isInteger(number) && number > 0 ? number : undefined;
 }
 
-/** 三个分页频道的共同入参形状（R32：`page` 由协议层换算成真接口的 `start`）。 */
+/** 三个分页频道的共同入参形状（`page` 由协议层换算成真接口的 `start`）。 */
 function pageRequest(payload) {
   return { page: positiveOf(payload.page), pageSize: positiveOf(payload.pageSize) };
 }
@@ -57,7 +51,6 @@ function requireId(payload, field, message) {
 
 /**
  * 造 library 频道的处理器表（`dispatcher.register` 直接消费）。
- *
  * @param {{api: object}} options `api` = music.mjs 的 `createMusicApi()` 产物（测试注入桩）
  * @returns {Record<string, (request: object) => Promise<object>|object>}
  */

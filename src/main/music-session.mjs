@@ -1,32 +1,7 @@
 /**
  * 音乐会话兑换（旧仓称 `loginex`）：账号 AT → 音乐会话凭据。
- *
- * ## 这次凭什么敢写端点（R17）
- *
- * R4 起这条链的最后一环一直是**结构化「待联调」**，理由是"端点 URL、请求形状、Digest 细节
- * 均无公开证据"。R17 的 bundle/公开源挖掘把三件事都找到了，并且**本机实测**了其中能实测的部分：
- *
- * 1. **端点与请求形状**：来自公开仓库 `talongao/huawei-music-desktop` 的
- *    `docs/API_CONTRACT.md`（2026-10-14 的本人账号实验记录）与 `src/auth.mjs`：
- *    `POST /music-odpapp-service/v5/service/userinfo/loginex`，体 `{"accessToken":"<账号 AT>"}`，
- *    头 `Authorization: Digest username=app-music-baseline, nonce=<随机>, created=<UTC ISO8601 无毫秒>`
- *    （**不带** token 段）。业务成功 = HTTP 2xx 且 `result.resultCode === "000000"`。
- * 2. **端点存在性**：R17 本机无凭据实测（`.tmp/r17-loginex-live.mjs`，结果记在
- *    `docs/API_CONTRACT.md` §1.5）：业务域 `api-drcn.music.dbankcloud.cn` 可解析；
- *    `GET` 该路径 **405 Method Not Allowed**（路径存在、只收 POST），而同一域下一个故意写错的
- *    对照路径回 **404**；`POST` 一个无效 AT 回 **200 + `result.resultCode = "990000"`**
- *    （请求被业务受理并拒绝）。
- * 3. **没有实测的**（如实登记，见报告 untested 清单）：拿**有效** AT 换到真会话的往返
- *    （需要用户授权扫码 → 只有用户在场才可能）。所以本模块的"形状"来自公开证据，
- *    "端点存在"来自本机实测，**"兑换成功"仍然未实测**。
- *
- * ## 纪律
- *
- * - **凭据绝不进日志/错误**：`accessToken`、音乐 `token` 都不出现在 message 里；
- *   错误只带 HTTP 状态、业务码、以及一句人话。
- * - **端点仍由调用方注入**：默认值住在 `auth-manager.ts`（与 authorize/token 同一处），
- *   本模块只认参数里的 `endpoint`。`endpoint` 为空时由调用方在发请求**之前**收口
- *   （见 auth-manager 的 `LOGINEX_PENDING_MESSAGE` 分支）——本模块不发这种请求。
+ * 端点与请求形状来自公开契约，端点存在性本机实测；兑换成功仍未实测。
+ * 纪律：凭据不进日志/错误，端点由调用方注入。
  */
 import { randomBytes } from "node:crypto";
 
@@ -69,10 +44,7 @@ export const MUSIC_SESSION_TIMEOUT_MS = 25_000;
 
 /**
  * 构造 `Authorization: Digest …` 头。
- *
- * `created` 必须是 **UTC ISO8601 且不带毫秒**（公开契约明写；带毫秒服务端认不认未实测，
- * 所以按已证形状去掉毫秒）；`nonce` 每请求随机（契约："不要从日志或抓包中硬编码旧头信息"）。
- *
+ * `created` 必须是无毫秒的 UTC ISO8601，`nonce` 每请求随机。
  * @param {{nonce: string, created: string, token?: string|null}} params
  */
 export function buildMusicDigestHeader({ nonce, created, token = null }) {
@@ -80,7 +52,7 @@ export function buildMusicDigestHeader({ nonce, created, token = null }) {
   if (typeof created !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(created)) {
     throw new TypeError("Digest created 必须是「无毫秒的 UTC ISO8601」（YYYY-MM-DDTHH:MM:SSZ）");
   }
-  // 头注入防护：token 里出现换行/逗号就能往头里塞第二段（与旧仓 musicHeaders 同一条判据）
+  // 头注入防护：token 里出现换行或逗号就能往头里塞第二段。
   if (token !== null && /[\r\n,]/.test(String(token))) throw new TypeError("音乐会话令牌格式无效");
   const suffix = token === null ? "" : `, token=${token}`;
   return `Digest username=${MUSIC_SESSION_DIGEST_USERNAME}, nonce=${nonce}, created=${created}${suffix}`;
@@ -109,40 +81,26 @@ function textOf(value) {
 }
 
 /**
- * profile（名字/头像/VIP）的**候选键**（R38；防御式取键，取到才存）。
- *
- * 为什么是"候选 + 认不出就不显示"而不是写死三个字段名：`loginex` 端点的**响应形状没有实测
- * 证据**（公开契约只登记了 `token`/`snsUserID`/`expireTime` 三项，参考实现也只取 token）。
- * 唯一一条真机线索是参考仓库的功能验证里那句"本人资料接口返回 `memberShip=6`，H5 代码把含 6
- * 的值映射为会员类别"——所以会员标记只认 `memberShip` 这一个**有证据**的数值规则，
- * `vipLevel`/`vipType` 之类**没有枚举证据的数值字段不猜**（猜错会把非会员标成会员）。
- *
- * 名字/头像取到就用；类型不对、不在媒体白名单内、认不出的值一律**不存**——
- * 界面宁可显示兜底（头像占位 + "已登录"），也不显示一个编出来的名字。
+ * profile（名字/头像/VIP）的候选键，防御式取键，取到才存。
+ * 会员只认有证据的数值规则，认不出的值一律不存，宁可显示兜底。
  */
 export const MUSIC_PROFILE_NAME_KEYS = ["userName", "nickName", "nickname"];
 export const MUSIC_PROFILE_AVATAR_KEYS = ["headUrl", "headImage", "avatarUrl", "avatar", "head"];
 /** 明确的布尔/0-1 标志位（`true`/`1`/`"1"`/`"true"` → 会员）。 */
 export const MUSIC_PROFILE_VIP_FLAG_KEYS = ["vipFlag", "isVip", "memberFlag", "vip"];
-/** 会员类别字段（实测证据：`memberShip`，官方 H5 把"含 6"的值当会员类别）。 */
+/** 会员类别字段（有证据：`memberShip`，官方 H5 把含 6 的值当会员类别）。 */
 export const MUSIC_PROFILE_MEMBER_KEYS = ["memberShip"];
 export const MUSIC_PROFILE_MEMBER_MARK = "6";
 /** profile 可能挂在这些容器下（候选容器；都取不到就看顶层）。 */
 export const MUSIC_PROFILE_CONTAINER_KEYS = ["data", "userInfo", "userInfoEx"];
 /**
- * R40：`loginex` 响应里两个**有名字的容器**（真机实证的顶层键名里就有它们，
- * 见 `.tmp/dev-visible.log` 15:52 那行）：`queryAllSubInfoResp` / `queryAppConfigDetailResp`。
- *
- * 顶层没有用户名/头像（R38 的候选键因此全扑空），账号资料最可能就在这两个容器**里面**
- * ——所以 R40 对它们做**一层**读取（容器自己、它的一层子对象、一层数组里的对象元素），
- * 并把键名记进日志。这是**简报指定的防御式接线，不是证据**：读到什么算什么，读不到就兜底。
+ * `loginex` 响应里两个有名字的容器：`queryAllSubInfoResp` / `queryAppConfigDetailResp`。
+ * 对它们做一层读取并把键名记进日志，属于防御式接线而非证据。
  */
 export const MUSIC_PROFILE_NESTED_CONTAINER_KEYS = ["queryAllSubInfoResp", "queryAppConfigDetailResp"];
 /**
- * id_token claims 里的名字/头像候选（R40；简报点名的四个键）。
- *
- * 只认这四个：OIDC 标准里还有 `preferred_username`/`given_name` 之类，但**没有证据**说明
- * 华为的 id_token 里有它们——少认一个键的代价是暂时不显示，多认一个猜错的键的代价是显示错人。
+ * id_token claims 里的名字/头像候选，只认这四个键。
+ * 没有证据的键不猜：猜错就会显示错人。
  */
 export const MUSIC_PROFILE_CLAIM_NAME_KEYS = ["name", "nickname"];
 export const MUSIC_PROFILE_CLAIM_AVATAR_KEYS = ["picture", "avatar"];
@@ -170,7 +128,7 @@ function profileContainersOf(payload) {
     const nested = payload[key];
     if (isObject(nested)) containers.push(nested);
   }
-  // R40：两个有名字的容器再做**一层**（容器自己 + 一层子对象 + 一层数组元素）
+  // 两个有名字的容器再做一层（容器自己 + 一层子对象 + 一层数组元素）
   for (const key of MUSIC_PROFILE_NESTED_CONTAINER_KEYS) {
     const container = payload[key];
     if (!isObject(container)) continue;
@@ -186,18 +144,10 @@ function profileContainersOf(payload) {
 }
 
 /**
- * `queryAllSubInfoResp` / `queryAppConfigDetailResp` 的**一层嵌套键名**（R40 诊断）。
- *
- * 只报键名、**不报值**：这两个容器里可能就有账号资料（名字/头像/会员档位），
- * 值是用户的个人信息，键名才是"下一步该读哪个字段"的证据。
- *
- * R41 补一处盲区：**数组元素里的键名**。`profileContainersOf` 早就把"一层数组里的对象元素"
- * 当候选容器读（账号资料很可能挂在 `xxxList[0]` 这种形状下），而这份键名日志此前只走对象分支
- * ——于是"读得到却看不见"：日志里永远只有那个数组名，看不出元素里到底有哪些键。
- * 现在对数组取**首个对象元素**记一行（`容器.键[0]: ...`），与读取侧的一层口径对齐。
- *
+ * 两个容器的**一层嵌套键名**诊断。
+ * 只报键名不报值，数组元素里的键名也记一行。
  * @param {unknown} payload loginex 响应
- * @returns {string[]} 每个容器/子容器一行（`容器名: a, b, c` / `容器名.键[0]: a, b, c`）
+ * @returns {string[]} 每个容器/子容器一行
  */
 export function nestedContainerKeyNamesOf(payload) {
   if (!isObject(payload)) return [];
@@ -221,11 +171,10 @@ export function nestedContainerKeyNamesOf(payload) {
 }
 
 /**
- * 从响应里抠 profile（**取到才存**）。
- *
+ * 从响应里抠 profile（取到才存）。
  * @param {object} payload loginex 响应
  * @param {{isSafeUrl?: (url: string) => boolean}} [options] 头像 URL 的白名单校验（默认 `isSafeMediaUrl`）
- * @returns {{userName?: string, avatarUrl?: string, vip?: boolean}} 可能为空对象（空对象 = 认不出任何一项）
+ * @returns {{userName?: string, avatarUrl?: string, vip?: boolean}} 可能为空对象（= 认不出任何一项）
  */
 export function profileFromResponse(payload, options = {}) {
   const isSafeUrl = options.isSafeUrl ?? isSafeMediaUrl;
@@ -285,13 +234,8 @@ export function hasProfileContent(profile) {
 }
 
 /**
- * id_token 的 claims → profile（R40；**取到才存**，与 `profileFromResponse` 同一份纪律）。
- *
- * 只取名字与头像：
- * - 头像同样**必须过媒体白名单**（白名单外的地址渲染层画不出来，存了也只是个死地址）；
- * - **VIP 不从 claims 取**：claims 里没有"有证据"的会员字段（`memberShip` 那条规则属于
- *   loginex 响应），猜一个 `vip`/`is_premium` 出来就是拿用户的会员身份开玩笑——宁可少显示。
- *
+ * id_token 的 claims → profile（取到才存，与 `profileFromResponse` 同一份纪律）。
+ * 只取名字与头像，头像需过媒体白名单；VIP 不从 claims 取。
  * @param {unknown} claims `idTokenClaimsOf` 的产物
  * @param {{isSafeUrl?: (url: string) => boolean}} [options]
  * @returns {{userName?: string, avatarUrl?: string}} 可能为空对象
@@ -319,11 +263,8 @@ export function profileFromClaims(claims, options = {}) {
 }
 
 /**
- * 合并两份 profile：**前者优先**，后者只补空缺（R40）。
- *
- * 为什么 loginex 优先于 id_token：前者是音乐业务自己的账号数据（VIP 规则也在那边），
- * 后者是账号域的 OIDC claims——同一件事有两个来源时，业务域那份更贴近"这个应用里显示谁"。
- * claims 的价值在于**补空缺**（loginex 顶层根本没有名字/头像）。
+ * 合并两份 profile：前者优先，后者只补空缺。
+ * 业务域数据比 OIDC claims 更贴近「这个应用里显示谁」。
  */
 export function mergeProfiles(primary, fallback) {
   const base = isObject(primary) ? primary : {};
@@ -336,14 +277,8 @@ export function mergeProfiles(primary, fallback) {
 }
 
 /**
- * 把 id_token claims 里认出的 profile **补进**会话记录（R40）。
- *
- * 只补空缺、只多一个 `profile` 键：其余字段（音乐 token、userId、expireTime）原样带过。
- * 认不出任何东西时返回**原来的对象**（不制造"多了一个空 profile"的假变化）。
- *
- * **不落盘原始 token**：`claims` 本身不进记录，只有从里面提取出的名字/头像/vip 三个键进
- * ——会话记录会随 DPAPI 信封落盘，凭据与 claims 原文都不该在那里。
- *
+ * 把 id_token claims 里认出的 profile 补进会话记录。
+ * 只补空缺、只多一个 `profile` 键；claims 原文不落盘，认不出就返回原对象。
  * @param {unknown} record `parseMusicSessionResponse` 的产物
  * @param {unknown} claims id_token 的 claims（null 就是没有）
  * @param {{isSafeUrl?: (url: string) => boolean}} [options]
@@ -358,11 +293,8 @@ export function attachClaimProfile(record, claims, options = {}) {
 }
 
 /**
- * 会话记录里的 profile → `auth:status` 载荷里的可选 profile（R38）。
- *
- * 只搬**白名单内那三个键**（名字/头像/VIP），其余一律不带：载荷是渲染层的输入，
- * 不该把整份会话记录（里面有音乐 token）之类的东西递出去。旧会话（R38 之前建的）没有
- * `profile` 这一格 → 返回 null，界面照旧显示兜底（头像占位 + "已登录"），**不造假数据**。
+ * 会话记录里的 profile → `auth:status` 载荷里的可选 profile。
+ * 只搬名字/头像/VIP 三个键，旧记录没有这一格则返回 null，不造假数据。
  */
 export function profileOfSessionRecord(value) {
   if (!isObject(value)) return null;
@@ -374,7 +306,7 @@ export function profileOfSessionRecord(value) {
   const avatarUrl = textOf(raw.avatarUrl);
   if (avatarUrl !== null) profile.avatarUrl = avatarUrl;
   if (raw.vip === true) profile.vip = true;
-  // R57：到期日是本项目自己的字段（不是服务端键名），只搬**认得出那一天**的值
+  // 到期日是本项目自己的字段，只搬认得出那一天的值
   const vipExpiresOn = normalizeVipExpiry(raw.vipExpiresOn);
   if (vipExpiresOn !== null) profile.vipExpiresOn = vipExpiresOn;
   return Object.keys(profile).length === 0 ? null : profile;
@@ -387,17 +319,8 @@ export function topLevelKeysOf(payload, limit = 40) {
 }
 
 /**
- * loginex 响应 → 本项目的会话形状。
- *
- * 映射（公开契约 §2.3 的"响应关注"三项 + 本仓既有会话形状）：
- * - `token`      → `musicSession`（**会话凭据**，进 DPAPI 信封，不进日志）
- * - `snsUserID`  → `userId`
- * - `expireTime` → 原样保留为 14 位 `yyyyMMddHHmmss` 字符串
- * - profile（R38）→ `profile`（名字/头像/VIP，**取到才存**：见 `profileFromResponse`）
- *
- * **刻意不把它换算成 `expiresAt` 毫秒**：契约明写"时区尚未完全确认"，换算错了就是一个
- * 看起来精确、实际偏 8 小时的时间戳；而这个项目的续期本来就没打通（失效要重扫）。
- * 原始串留下，等真机联调确认时区后再决定怎么用。
+ * loginex 响应 → 本项目的会话形状（token / userId / expireTime / profile）。
+ * 刻意不换算成 `expiresAt` 毫秒：时区未确认，保留 14 位原始串。
  */
 export function parseMusicSessionResponse(payload, options = {}) {
   if (payload === null || typeof payload !== "object") {
@@ -430,14 +353,13 @@ export function parseMusicSessionResponse(payload, options = {}) {
 
 /**
  * 造一个真发请求的音乐会话端口（`auth-manager` 的 `exchangeMusicSession` 插座）。
- *
  * @param {object} [options]
- * @param {Function} [options.fetchImpl]  注入 fetch（测试用；默认全局 fetch）
- * @param {Function} [options.random]     注入随机源（测试用；默认 node:crypto）
- * @param {Function} [options.now]       注入时钟（测试用；默认 `() => new Date()`）
- * @param {number}   [options.timeoutMs]  单次请求超时
- * @param {Function} [options.log]        只记**键名**的诊断口（R38；默认不记）
- * @param {Function} [options.isSafeUrl]  头像 URL 的白名单校验（默认 `isSafeMediaUrl`）
+ * @param {Function} [options.fetchImpl] 注入 fetch（默认全局 fetch）
+ * @param {Function} [options.random] 注入随机源（默认 node:crypto）
+ * @param {Function} [options.now] 注入时钟（默认 `() => new Date()`）
+ * @param {number} [options.timeoutMs] 单次请求超时
+ * @param {Function} [options.log] 只记**键名**的诊断口（默认不记）
+ * @param {Function} [options.isSafeUrl] 头像 URL 的白名单校验（默认 `isSafeMediaUrl`）
  * @returns {(params: {accessToken: string, endpoint: string}) => Promise<import("../shared/result.ts").CoreResult<unknown>>}
  */
 export function createHuaweiMusicSessionPort({
@@ -498,11 +420,9 @@ export function createHuaweiMusicSessionPort({
     } catch {
       return err("音乐会话端点响应不是 JSON", MUSIC_SESSION_ERROR_KINDS.invalidResponse);
     }
-    // R38：**只记键名**（不记任何值）——这条链的响应形状一直没有实证，
-    // 下一次真机登录就能从这一行看出"profile 到底叫什么名字"，而不是继续猜候选键。
+    // 只记键名（不记任何值）：下一次真机登录就能看出 profile 到底叫什么名字。
     log(`loginex 响应顶层键名（只记键名，不记值）：${topLevelKeysOf(payload).join(", ")}`);
-    // R40：顶层已经证实没有名字/头像（真机 15:52 那次的键名日志），所以再看一层——
-    // 两个"容器"对象的键名（含一层子容器）。同样只记键名：里面是账号资料，值是用户的个人信息。
+    // 顶层已证实没有名字/头像，所以再看一层容器键名；同样只记键名不记值。
     for (const line of nestedContainerKeyNamesOf(payload)) {
       log(`loginex 容器一层键名（只记键名，不记值）：${line}`);
     }

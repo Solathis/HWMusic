@@ -1,21 +1,6 @@
 /**
- * `lyrics:*` 三条频道的处理器（R41）：把渲染层的"管理歌词存放"的请求翻成音乐服务的调用。
- *
- * 三条频道对应三个**用户动作**（与 `library:*` / `playback:*` 同一套处置纪律）：
- *
- * | 频道 | 载荷 | 应答 `data` |
- * |---|---|---|
- * | `lyrics:import` | `{trackId, text, fileName?}` | 生效的歌词文档（`source: "local"`） |
- * | `lyrics:cache-info` | `null` | `{available, bytes, entries, localBytes, localEntries}` |
- * | `lyrics:cache-clear` | `{local?: boolean}` | 清完之后的**新**占用（同上形状） |
- *
- * 三条边界：
- * 1. **坏载荷在这一层拒**（缺 trackId / text 不是字符串 / 文本超上限），结构化 `invalid_payload`
- *    ——不把一份 8 MB 的字符串递给磁盘模块再指望它在里面报错；
- * 2. **歌词内容不进日志**：这里 `console.*` 一个都没有（与 `playback-handlers.mjs` 同一条纪律）。
- *    磁盘模块自己的日志只记"写入失败"这类结论，不记文本；
- * 3. **不做二次校验**：文本"算不算歌词"的判定在磁盘模块（`sanitizeLyricsDoc`）一处，
- *    这里只做"载荷形状够不够"——两处各判一次，早晚会判出两个不同的答案。
+ * `lyrics:*` 三条频道的处理器：把渲染层「管理歌词存放」的请求翻成音乐服务的调用。
+ * 坏载荷在这一层拒（结构化 `invalid_payload`），歌词内容不进日志，文本算不算歌词由磁盘模块一处判定。
  */
 import { LYRICS_CACHE_CLEAR, LYRICS_CACHE_INFO, LYRICS_IMPORT } from "../shared/request-channels.ts";
 import { CORE_ERROR_KINDS, err } from "../shared/result.ts";
@@ -38,9 +23,7 @@ function textOf(value) {
 
 /**
  * 造 `lyrics:*` 三条频道的处理器表（`dispatcher.register` 直接消费）。
- *
  * @param {{api: object}} options `api` = `src/protocols/music.mjs` 的 `createMusicApi()` 产物
- *   （三件事都走它：协议层是唯一碰"缓存端口"的地方，处理器不自己拿 fs）
  */
 export function createLyricsHandlers({ api } = {}) {
   if (api === null || typeof api !== "object") {

@@ -1,20 +1,7 @@
 /**
- * 音乐会话的加密持久化（`session.enc`）。
- *
- * 分工：**加密/解密不是这个模块的事**——它通过注入的 `secureEncrypt`/`secureDecrypt`
- * （`src/host/host-services.mjs` 的两个封装，最终走宿主的 DPAPI）拿密文，自己只管落盘：
- *
- * 1. 先加密，**再**碰磁盘：加密失败就抛错并保持磁盘原样——绝不"降级"成明文写下去；
- * 2. 写临时文件（创建时即 0600）→ `rename` 原子替换。旧会话要么完整，要么被新会话完整替换，
- *    不会出现半个文件；失败时旧会话原封不动；
- * 3. 0600 是**尽力而为**：Windows 上 `chmod` 常常无效，此时记一条日志并在返回值里如实上报，
- *    不谎报"已收紧权限"，也不因此判定保存失败（用户目录 ACL 才是真正的边界）；
- * 4. 读回来的每一步失败都如实抛结构化错误：绝不把"损坏"当成"没有会话"吞掉。
- *
- * 错误类别（`SessionStoreError.kind`，与 `src/shared/result.ts` 的 `CORE_ERROR_KINDS` 同源）：
- * `invalid_payload`（调用方给的会话不是普通对象）、`secure_store_unavailable`（后端不可用）、
- * `invalid_envelope`（落盘信封坏了/版本不认识）、`invalid_cipher`（密文解不开）、
- * `internal`（读写文件的 IO 失败）。错误里**不带会话内容，也不带密文**。
+ * 音乐会话的加密持久化（`session.enc`）：加密/解密由注入的 `secureEncrypt` / `secureDecrypt` 负责，本模块只管落盘。
+ * 先加密再碰磁盘（失败就抛错，绝不降级成明文），写临时文件后 `rename` 原子替换。
+ * 读回来的每一步失败都如实抛结构化 `SessionStoreError`，不把损坏当成没有会话。
  */
 import * as nodeFs from "node:fs/promises";
 import { basename, dirname, isAbsolute, join } from "node:path";
@@ -58,13 +45,12 @@ const defaultLog = (message) => console.error("[hwmusic-core]", message);
 
 /**
  * 造一个会话存储。
- *
  * @param {object} options
- * @param {string} options.dir            数据目录（必须绝对路径）
+ * @param {string} options.dir 数据目录（必须绝对路径）
  * @param {Function} options.secureEncrypt host-services 的 DPAPI 加密：`({plaintext}) -> CoreResult<{cipher}>`
  * @param {Function} options.secureDecrypt host-services 的 DPAPI 解密：`({cipher}) -> CoreResult<{plaintext}>`
- * @param {object} [options.fs]           `node:fs/promises` 的子集（测试注入用）
- * @param {Function} [options.log]        尽力而为的记录的落点（默认 stderr）
+ * @param {object} [options.fs] `node:fs/promises` 的子集（测试注入用）
+ * @param {Function} [options.log] 尽力而为的记录的落点（默认 stderr）
  */
 export function createSessionStore({
   dir,
@@ -198,7 +184,6 @@ export function createSessionStore({
 
   /**
    * 保存音乐会话：加密 → 写临时文件 → rename 原子替换。
-   *
    * @returns {Promise<{path: string, modeApplied: boolean, modeNote: string|null}>}
    * @throws {SessionStoreError} 加密失败或落盘失败——**此时旧会话保持原样**
    */
@@ -227,7 +212,6 @@ export function createSessionStore({
 
   /**
    * 读回音乐会话。
-   *
    * @returns {Promise<object|null>} 没有会话文件时是 `null`（这不是错误）
    * @throws {SessionStoreError} 文件读不了 / 信封坏了 / 解不开——都不吞
    */

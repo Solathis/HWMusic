@@ -29,11 +29,7 @@ export function createDispatcher({ onHandlerError = logHandlerError } = {}) {
 
   const isResult = (value) => value !== null && typeof value === "object" && typeof value.ok === "boolean";
 
-  /**
-   * 一次请求 → 一次答复。
-   * 处理器可以 return 结果（普通值收成 ok，`{ok,...}` 原样），也可以自己调用 respond 后 return undefined
-   * （= 已有人负责答复，dispatch 不再写第二帧；R7 的长轮询登录就靠这个）。
-   */
+  /** 一次请求 → 一次答复：处理器可以 return 结果，也可以自己 respond 后 return undefined（不再写第二帧）。 */
   async function dispatch(request, respond) {
     const channel = request.channel;
     if (!isRequestChannel(channel)) {

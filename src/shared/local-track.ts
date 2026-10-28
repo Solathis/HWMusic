@@ -1,7 +1,6 @@
 /**
- * 本地曲目标识的形状（R65）：渲染层、sidecar 与文档共用这一份，别处不再抄第二份。
- * id 是 128 位随机数的十六进制（32 位小写），**与文件路径无关**；渲染层的 id 带 `local:` 前缀，
- * 那只是分流标记而不是安全边界（边界在 Rust 侧的协议与来源守卫）。
+ * 本地曲目标识的形状：渲染层、sidecar 与文档共用这一份。
+ * id 是 128 位随机数的十六进制（32 位小写），与文件路径无关；渲染层的 `local:` 前缀只是分流标记，不是安全边界。
  */
 
 /** 渲染层的本地曲目 id 前缀。 */
@@ -13,12 +12,7 @@ export const LOCAL_TRACK_HEX_LENGTH = 32;
 /** 自定义 URI 协议的 scheme（Rust 侧 `local_library::PROTOCOL_SCHEME` 是它的镜像副本）。 */
 export const LOCAL_MEDIA_SCHEME = "hwlocal";
 
-/**
- * 能导入的格式：WebView2/Chromium 能原生播放的那一档。
- *
- * 不在表里的（ape / wma / dff / tak …）在**导入时**就拒绝并说明原因——导进来再让它播不了，
- * 用户只会以为播放器坏了。
- */
+/** 能导入的格式：WebView2/Chromium 能原生播放的那一档；不在表里的在导入时就拒绝并说明原因。 */
 export const LOCAL_AUDIO_FORMATS = Object.freeze(["mp3", "flac", "m4a", "aac", "ogg", "opus", "wav"]);
 
 const HEX_ID = new RegExp(`^[0-9a-f]{${LOCAL_TRACK_HEX_LENGTH}}$`);

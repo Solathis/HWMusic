@@ -1,24 +1,7 @@
 /**
- * 启动诊断：**登录态持久化为什么不生效**一条日志看明白（R27 用户三项之 3）。
- *
- * 用户感觉"每次重启都要重登"，而链路本身（R5 `session-store` 的 DPAPI 信封 → `auth-manager.restore`
- * → `auth:get-status`）单测全绿。排查清单里最可能的一条是**数据根漂移**：
- *
- * ```
- *   控制器调试：HWMUSIC_DATA_DIR=.tmp/live-data  → 会话落在 .tmp/live-data/session.enc
- *   用户自跑：  npm run dev（不带该变量）         → 会话落在 %APPDATA%\<bundle>\
- * ```
- *
- * 两个根互不相通 → "调试时登录过、用户那边还是未登录"。要一眼看穿它，那一行里必须同时有：
- * **数据根是哪个路径**、**它是哪来的**、**那个根里有没有 `session.enc`**、**恢复走到了哪一档**。
- * 四样少一样，读日志的人就要再去翻别的行（那正是 R27 之前的状态：只有一句"登录状态恢复：
- * 未登录（no_session）"，看不出那个"未登录"读的是**哪个根**）。
- *
- * 三条纪律：
- * 1. **只查存在性，不读内容**：`session.enc` 里是凭据密文，诊断只需要"在不在、多大、什么时候写的"；
- * 2. **读不到 ≠ 不存在**：`ENOENT` 是"这个根里没有会话"（正常的第一次启动），而 `EACCES` 之类
- *    是"查不了"——两件事的处置完全不同，不许合并成一句"未登录"；
- * 3. **日志是一行**：stdout 是 NDJSON 协议通道（日志一律走 stderr），且换行会把一行日志拆成两条。
+ * 启动诊断：**登录态持久化为什么不生效**一条日志看明白。
+ * 那一行里必须同时有：数据根路径、它是哪来的、根里有没有 `session.enc`、恢复走到哪一档。
+ * 三条纪律：只查存在性不读内容；读不到 ≠ 不存在（`ENOENT` 与 `EACCES` 分开）；日志是一行。
  */
 import * as nodeFs from "node:fs/promises";
 import { join } from "node:path";
@@ -30,12 +13,7 @@ import { SESSION_FILE_NAME } from "./session-store.mjs";
 export const SESSION_DIAG_LABEL = "登录态持久化诊断";
 
 /**
- * 数据目录的三个来源。
- *
- * 与 `data-dir.mjs` 的解析逐档对应：宿主 `--data-dir` 参数 → 环境旋钮兜底 → 都没有
- * （**没有就不落盘**，登录只活在内存里，见那一份的注释）。优先级只有一处真源：
- * 本模块的 [`dataDirSource`] 判的是"参数在不在"，而"参数合法不合法"仍归 `dataDirFromArgv`
- * （它不合法时会抛错，走不到这里）。
+ * 数据目录的三个来源，与 `data-dir.mjs` 的解析逐档对应：`--data-dir` 参数 → 环境旋钮 → 都没有。
  */
 export const DATA_DIR_SOURCE = {
   /** 宿主传的 `--data-dir`（正常路径：Rust 侧三级回退做完之后交给 sidecar） */
@@ -59,12 +37,8 @@ export function dataDirSourceLabel(source) {
 }
 
 /**
- * 数据目录的来源判定（只看"参数在不在 / 旋钮有没有值"，**不校验合法性**）。
- *
- * 为什么另写一个而不是让 `dataDirFromArgv` 回一个结构：那个函数的返回值已经被两处调用方
- * 按"字符串或 null"用着，改成结构是一次无谓的波及。而这里的判据极窄（`includes` + 空白裁剪），
- * 与它同一套常量、同一套优先级，漂移的窗口只有"有人改了参数名却只改一处"——那种情况
- * `test/session-diagnostic.test.mjs` 里那条逐档对照用例会当场红。
+ * 数据目录的来源判定（只看「参数在不在 / 旋钮有没有值」，**不校验合法性**）。
+ * 判据极窄、与 `dataDirFromArgv` 同一套常量，逐档对照用例会兜住漂移。
  */
 export function dataDirSource(argv = [], { env = process.env } = {}) {
   if (Array.isArray(argv) && argv.includes(DATA_DIR_ARG)) return DATA_DIR_SOURCE.argv;
@@ -83,12 +57,8 @@ function reasonOf(cause) {
 }
 
 /**
- * 查 `session.enc` 的**存在性**（`stat` 可注入，测试用得上）。
- *
- * 三档，语义各不相同：
- * - `exists: true` → 这个根里**有**会话（大小 + 写入时刻，够判断"是不是刚登录过的那一份"）；
- * - `exists: false` → 这个根里**没有**（`ENOENT`：正常的第一次启动，或者登录时用的是**另一个**根）；
- * - `exists: null` → **不知道**（没有数据根可查 / `stat` 因为权限等原因失败，`error` 里是原因）。
+ * 查 `session.enc` 的存在性（`stat` 可注入）。
+ * 三档语义不同：`true` 有会话；`false` 这个根里没有（`ENOENT`）；`null` 不知道（没数据根或 `stat` 失败）。
  */
 export async function readSessionFileState(dir, { stat = nodeFs.stat } = {}) {
   if (typeof dir !== "string" || dir.trim() === "") {
@@ -149,10 +119,10 @@ function restoreSegment(restore) {
  * 那一行启动诊断（**一行**，见文件头第 3 条纪律）。
  *
  * @param {object} facts
- * @param {string|null} facts.dataDir       宿主给的数据目录（`null` = 没有）
- * @param {string} facts.source             [`DATA_DIR_SOURCE`] 之一
- * @param {object|null} facts.sessionFile   [`readSessionFileState`] 的结果
- * @param {object|null} facts.restore       `auth-manager.restore()` 的结果（没跑就是 `null`）
+ * @param {string|null} facts.dataDir 宿主给的数据目录（`null` = 没有）
+ * @param {string} facts.source [`DATA_DIR_SOURCE`] 之一
+ * @param {object|null} facts.sessionFile [`readSessionFileState`] 的结果
+ * @param {object|null} facts.restore `auth-manager.restore()` 的结果（没跑就是 `null`）
  * @returns {string} 落 stderr 的那一行
  */
 export function sessionDiagnosticLine({ dataDir = null, source = DATA_DIR_SOURCE.none, sessionFile = null, restore = null } = {}) {

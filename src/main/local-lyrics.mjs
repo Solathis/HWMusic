@@ -1,7 +1,7 @@
 /**
- * 本地曲目的歌词来源（R65）：用户导入的本地歌词 → 同目录 `.lrc`/`.txt`/内嵌标签 → 如实回 `null`。
- * **sidecar 不接触任何路径**（载荷只有曲目 id）；解码复用 `decodeLyricsBuffer`（中文 `.lrc` 野外多是 GBK）。
- * 字节上限 512 KiB 在这里再判一次：宿主侧那道闸挡不住"两边各自以为对方挡了"。
+ * 本地曲目的歌词来源：用户导入的本地歌词 → 同目录 `.lrc`/`.txt`/内嵌标签 → 如实回 `null`。
+ * sidecar 不接触任何路径（载荷只有曲目 id）；解码复用 `decodeLyricsBuffer`（中文 `.lrc` 野外多是 GBK）。
+ * 字节上限 512 KiB 在这里再判一次。
  */
 import {
   LYRICS_TEXT_MAX_BYTES,
@@ -33,7 +33,7 @@ function bytesOf(value) {
 }
 
 /**
- * 造本地歌词解析器（缺 `localLyricsSource` 就只剩"用户导入的本地歌词"这一跳）。
+ * 造本地歌词解析器（缺 `localLyricsSource` 就只剩「用户导入的本地歌词」这一跳）。
  * @param {{cache?: object, localLyricsSource?: Function, log?: Function}} [options]
  * @returns {(trackId: string) => Promise<object|null>} 一份可用的歌词文档，或 `null`
  */
