@@ -18,7 +18,7 @@ import {
 import { Button } from "./components/ui/button"
 import { Skeleton } from "./components/ui/skeleton"
 import { coreCall, isCoreError, onCoreEvent, rendererReady } from "./host-api"
-import { profileFromStatusPayload } from "./features/auth/account.mjs"
+import { profileFromStatusPayload, sessionExpiresAtFromStatusPayload } from "./features/auth/account.mjs"
 
 /**
  * 账号资料的渲染层形状（与 `features/auth/account.mjs` 的投影同形；`null` = 认不出任何一项）。
@@ -70,6 +70,8 @@ export interface AuthStatusPayload {
   loggedIn: boolean
   busy: boolean
   message?: string
+  /** 当前会话的到期时刻（UTC 毫秒），没有就不带这个键。 */
+  sessionExpiresAt?: number
   profile?: {
     userName?: string
     avatarUrl?: string
@@ -93,6 +95,8 @@ export interface AuthGate {
    * 账号资料：名字/头像/VIP 三项的可渲染投影，认不出任何一项就是 `null`。
    */
   profile: AccountProfile
+  /** 当前会话的到期时刻（UTC 毫秒）；没有 expireTime 时是 null。 */
+  sessionExpiresAt: number | null
   /** 发起 / 重新发起二维码（自动开始、二维码容器点击、"重试"都走这一条） */
   startQr: () => void
   /**
@@ -125,6 +129,7 @@ export function useAuthGate(): AuthGate {
   const [state, setState] = useState(initialGateState)
   /** 账号资料：与登录状态来自同一份 `auth:status` 载荷，只是各存一份投影。 */
   const [profile, setProfile] = useState<AccountProfile>(null)
+  const [sessionExpiresAt, setSessionExpiresAt] = useState<number | null>(null)
   /** 自动开始只发起一次（StrictMode 会重复跑 effect：两次建单 = 白白换掉一张用户正在扫的码） */
   const qrStartedRef = useRef(false)
 
@@ -134,6 +139,7 @@ export function useAuthGate(): AuthGate {
   const applyStatusPayload = useCallback((payload: AuthStatusPayload | null | undefined) => {
     setState((current) => reduceGateState(current, statusEventOf(payload)))
     setProfile(profileFromStatusPayload(payload))
+    setSessionExpiresAt(sessionExpiresAtFromStatusPayload(payload))
   }, [])
 
   /**
@@ -291,7 +297,7 @@ export function useAuthGate(): AuthGate {
     return () => clearInterval(timer)
   }, [expiresAt])
 
-  return { state, profile, startQr, startLogin, refreshStatus }
+  return { state, profile, sessionExpiresAt, startQr, startLogin, refreshStatus }
 }
 
 /** 二维码画布：内容换一张就重画（编码与纠错全交给库，这里不碰二维码算法）。 */

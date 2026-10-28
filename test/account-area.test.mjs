@@ -15,6 +15,7 @@ import {
   ACCOUNT_LOGOUT_DESCRIPTION,
   ACCOUNT_LOGOUT_FAILED_TEXT,
   ACCOUNT_LOGOUT_TITLE,
+  ACCOUNT_SESSION_TICK_MS,
   accountAvatarFallbackText,
   accountAvatarUrl,
   accountFullName,
@@ -23,6 +24,8 @@ import {
   accountNameText,
   accountVipText,
   profileFromStatusPayload,
+  sessionExpiresAtFromStatusPayload,
+  sessionRemainingText,
 } from "../src/renderer/features/auth/account.mjs";
 import { normalizeVipExpiry } from "../src/shared/vip-expiry.mjs";
 
@@ -138,8 +141,8 @@ test("R57 头像兜底：有名字就取首字（拉丁字母大写），没名�
   assert.equal(accountAvatarFallbackText(null), null);
   assert.equal(accountAvatarFallbackText({}), null);
   assert.equal(accountAvatarFallbackText({ userName: "   " }), null);
-  assert.equal(accountFullName({ userName: "听歌的人" }), "听歌的人", "悬停显示的是全名");
-  assert.equal(accountFullName(null), null, "兜底那句「已登录」不值得悬停（没有更多信息）");
+  assert.equal(accountFullName({ userName: "听歌的人" }), "听歌的人", "全名（头像首字也从它取）");
+  assert.equal(accountFullName(null), null, "兜底那句「已登录」不是真名字");
   assert.equal(accountFullName({}), null);
 });
 
@@ -152,20 +155,47 @@ test("R57 载荷：到期时间跟着 profile 一起进来（旧载荷没有这�
   assert.deepEqual(profileFromStatusPayload({ profile: { vipExpiresOn: "2026-12-31" } }), { vipExpiresOn: "2026-12-31" });
 });
 
-test("R57 接线：账号区用官方组件（头像可回退、名称截断+悬停全名、徽标用 Badge、折叠只剩头像）", () => {
+test("R57/R79 接线：账号区用官方组件（头像可回退、名称截断 + 悬停剩余时间、徽标用 Badge、折叠只剩头像）", () => {
   const app = read("src/renderer/App.tsx");
+  const tooltip = read("src/renderer/account-name-tooltip.tsx");
   // 头像：图片 + 兜底两档都在（图片挂了要落到首字/图标）
   assert.match(app, /<AvatarImage/, "头像走 AvatarImage");
   assert.match(app, /ACCOUNT_AVATAR_TESTID/, "头像要有锚点");
   assert.match(app, /accountAvatarFallbackText\(/, "兜底用 accountAvatarFallbackText");
-  // 名称：截断 + 悬停显示全名（Tooltip 是官方组件）
-  assert.match(app, /accountFullName\(/, "悬停全名来自 accountFullName");
-  assert.match(app, /<TooltipTrigger asChild>[\s\S]{0,400}?ACCOUNT_NAME_TESTID/, "名称悬停提示用 Tooltip");
-  assert.match(app, /truncate/, "名称要截断");
+  // 名称：截断 + 悬停显示会话剩余时间（Tooltip 是官方组件）
+  assert.match(app, /<AccountNameTooltip name=\{accountName\} sessionExpiresAt=\{sessionExpiresAt\} \/>/, "名称交给 AccountNameTooltip");
+  assert.match(tooltip, /<TooltipTrigger asChild>[\s\S]{0,400}?ACCOUNT_NAME_TESTID/, "名称悬停提示用 Tooltip");
+  assert.match(tooltip, /truncate/, "名称要截断");
+  assert.match(tooltip, /sessionRemainingText\(sessionExpiresAt, nowMs\)/, "提示文案来自 sessionRemainingText");
+  assert.match(tooltip, /if \(!open\) return undefined/, "只在提示打开时刷新");
   // 会员：官方 Badge 承载文案
   assert.match(app, /const accountVipLabel = accountVipText\(profile\)/, "徽标文案来自 accountVipText");
   assert.match(app, /accountVipLabel === null \? null : \(/, "没有会员事实就不渲染徽标");
   assert.match(app, /<Badge/, "会员标识用 Badge");
   // 折叠成图标时只剩头像（名字那一列、主题、退出一起藏）
-  assert.match(app, /group-data-\[collapsible=icon\]:hidden">\s*\{accountFullNameText/, "名字整列在窄轨里隐藏");
+  assert.match(app, /group-data-\[collapsible=icon\]:hidden">\s*<AccountNameTooltip/, "名字整列在窄轨里隐藏");
+});
+
+test("R79 悬停剩余时间：天 / 小时 / 分 / 秒，前导的零单位省略；到期与未知各一句", () => {
+  const now = Date.UTC(2026, 9, 28, 12, 0, 0);
+  const second = 1_000;
+  assert.equal(sessionRemainingText(now + (6 * 86_400 + 5 * 3_600 + 9 * 60 + 8) * second, now), "距登录过期还剩 6 天 5 小时 9 分 8 秒");
+  assert.equal(sessionRemainingText(now + 7 * 86_400 * second, now), "距登录过期还剩 7 天 0 小时 0 分 0 秒");
+  assert.equal(sessionRemainingText(now + (2 * 3_600 + 5) * second, now), "距登录过期还剩 2 小时 0 分 5 秒");
+  assert.equal(sessionRemainingText(now + 59 * second, now), "距登录过期还剩 59 秒");
+  assert.equal(sessionRemainingText(now + 1, now), "距登录过期还剩 1 秒", "不足一秒向上取整，不提前说过期");
+  assert.equal(sessionRemainingText(now, now), "登录已过期，请重新扫码登录");
+  assert.equal(sessionRemainingText(now - 5_000, now), "登录已过期，请重新扫码登录");
+  for (const bad of [null, undefined, Number.NaN, "1", Number.POSITIVE_INFINITY]) {
+    assert.equal(sessionRemainingText(bad, now), "登录有效期未知", `认不出：${String(bad)}`);
+  }
+  assert.notEqual(sessionRemainingText(now + 90 * second, now), sessionRemainingText(now + 90 * second, now + second), "每秒变化");
+  assert.equal(ACCOUNT_SESSION_TICK_MS, 1_000);
+});
+
+test("R79 载荷：sessionExpiresAt 只认有限正数，别的一律当没有", () => {
+  assert.equal(sessionExpiresAtFromStatusPayload({ loggedIn: true, sessionExpiresAt: 1_793_000_000_000 }), 1_793_000_000_000);
+  for (const bad of [{}, { sessionExpiresAt: 0 }, { sessionExpiresAt: -1 }, { sessionExpiresAt: "1793000000000" }, { sessionExpiresAt: Number.NaN }, null, undefined]) {
+    assert.equal(sessionExpiresAtFromStatusPayload(bad), null, JSON.stringify(bad));
+  }
 });

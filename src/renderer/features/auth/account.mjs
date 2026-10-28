@@ -12,6 +12,9 @@ export const ACCOUNT_AREA_TESTID = "account-area";
 export const ACCOUNT_NAME_TESTID = "account-name";
 export const ACCOUNT_VIP_TESTID = "account-vip";
 export const ACCOUNT_AVATAR_TESTID = "account-avatar";
+/** 账号名悬停提示（会话剩余时间）的测试锚点与刷新间隔。 */
+export const ACCOUNT_SESSION_TOOLTIP_TESTID = "account-session-tooltip";
+export const ACCOUNT_SESSION_TICK_MS = 1_000;
 
 /** VIP 徽标的可达名称（图标本身不给读屏信息）。 */
 export const ACCOUNT_VIP_LABEL = "会员";
@@ -49,17 +52,38 @@ export function profileFromStatusPayload(payload) {
   return Object.keys(profile).length === 0 ? null : profile;
 }
 
+/**
+ * 会话到期时刻（UTC 毫秒）：只认有限正数，认不出就是 null。
+ * @param {unknown} payload
+ * @returns {number | null}
+ */
+export function sessionExpiresAtFromStatusPayload(payload) {
+  const value = isObject(payload) ? payload.sessionExpiresAt : null;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * 账号名悬停提示：距会话到期的实时剩余时间（天 / 小时 / 分 / 秒，前导的零单位省略）。
+ * @param {unknown} expiresAt UTC 毫秒
+ * @param {number} nowMs
+ * @returns {string}
+ */
+export function sessionRemainingText(expiresAt, nowMs) {
+  if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt) || !Number.isFinite(nowMs)) return "登录有效期未知";
+  const total = Math.ceil((expiresAt - nowMs) / 1000);
+  if (total <= 0) return "登录已过期，请重新扫码登录";
+  const units = [[Math.floor(total / 86_400), "天"], [Math.floor(total / 3_600) % 24, "小时"], [Math.floor(total / 60) % 60, "分"], [total % 60, "秒"]];
+  const first = units.findIndex(([value]) => value > 0);
+  return `距登录过期还剩 ${units.slice(first).map(([value, unit]) => `${value} ${unit}`).join(" ")}`;
+}
+
 /** 显示名：有名字用名字，没有就是"已登录"（不显示 userId——那不是给人看的东西）。 */
 export function accountNameText(profile) {
   const name = isObject(profile) ? textOf(profile.userName) : null;
   return name ?? ACCOUNT_FALLBACK_NAME;
 }
 
-/**
- * 悬停时给出的全名（`null` = 不值得悬停：没有真名字，或者名字根本没被截断）。
- *
- * 兜底那句"已登录"不弹：它背后没有更多信息，弹出来只是噪音。
- */
+/** 真名字（没有就是 null）：头像首字从它取，兜底那句「已登录」不算名字。 */
 export function accountFullName(profile) {
   return isObject(profile) ? textOf(profile.userName) : null;
 }

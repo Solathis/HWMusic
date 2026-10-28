@@ -272,7 +272,7 @@ test("端到端：会话有效 → 登录链走完（换码 → loginex → 收�
   assert.equal(result.ok, true, `登录必须能走完（用户报的就是卡在这一步）：${JSON.stringify(result)}`);
   assert.deepEqual(saved, [SESSION], "验过的会话才落盘");
   assert.equal(auth.status().loggedIn, true);
-  assert.deepEqual(broadcasts.at(-1).payload, { loggedIn: true, busy: false }, "收口广播：已登录 + 空闲");
+  assert.deepEqual(broadcasts.at(-1).payload, { loggedIn: true, busy: false, sessionExpiresAt: Date.UTC(2099, 0, 1) }, "收口广播：已登录 + 空闲（会话记录带 expireTime，所以带到期时刻）");
   assert.equal(calls[0].url, MUSIC_ENDPOINT_DEFAULTS.favorites, "验证打的就是收藏端点");
 });
 

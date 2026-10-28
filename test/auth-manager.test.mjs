@@ -808,6 +808,20 @@ test("R75 运行中到期：auth:get-status 的快照也先判到期（渲染层
   assert.match(broadcasts.at(-1).payload.message, /到期，请重新扫码登录/);
 });
 
+test("R79 auth:status 带会话到期时刻：有 expireTime 才有这个键，广播与快照一致", async () => {
+  const withExpiry = managerOf({ sessionStore: fakeSessionStore({ loaded: EXPIRING_SESSION }), now: () => EXPIRES_AT - 60_000 });
+  await withExpiry.auth.restore();
+  assert.equal(withExpiry.broadcasts.at(-1).payload.sessionExpiresAt, EXPIRES_AT);
+  assert.equal(withExpiry.auth.statusSnapshot().sessionExpiresAt, EXPIRES_AT);
+
+  const plain = managerOf({ sessionStore: fakeSessionStore({ loaded: MUSIC_SESSION }) });
+  await plain.auth.restore();
+  assert.ok(!("sessionExpiresAt" in plain.broadcasts.at(-1).payload), "没有 expireTime 就不带这个键");
+
+  await withExpiry.auth.logout();
+  assert.ok(!("sessionExpiresAt" in withExpiry.broadcasts.at(-1).payload), "登出后不再带");
+});
+
 test("R75 登录成功：日志记一行新会话的到期时刻（事后核对时区用），不带令牌", async () => {
   const { result, logs } = await loginWith(realCallback, {
     exchangeMusicSession: async () => ({ ok: true, data: EXPIRING_SESSION }),

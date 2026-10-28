@@ -762,6 +762,7 @@ const PROFILES = {
   vip: { userName: LONG_NAME, avatarUrl: AVATAR_BROKEN, vip: true, vipExpiresOn: "20261231235959" },
 };
 const profile = PROFILES[variant] === undefined ? PROFILES.profile : PROFILES[variant];
+const SESSION_EXPIRES_AT = Date.now() + (6 * 86_400 + 5 * 3_600 + 10 * 60) * 1_000;
 window.__accountGuard = { variant, longName: LONG_NAME, avatarOk: AVATAR_OK, avatarBroken: AVATAR_BROKEN };
 window.__noop = () => {};
 
@@ -776,7 +777,7 @@ mockIPC(async (command, args) => {
   if (command === "core_call") {
     switch (args.channel) {
       case "auth:get-status":
-        return profile === null ? { loggedIn: true, busy: false } : { loggedIn: true, busy: false, profile };
+        return profile === null ? { loggedIn: true, busy: false } : { loggedIn: true, busy: false, profile, sessionExpiresAt: SESSION_EXPIRES_AT };
       case "auth:cancel-qr": return { cancelled: true };
       case "settings:get": return { settings: { schemaVersion: 1, data: {} } };
       case "library:favorites": return { songs: [], hasMore: false, skipped: 0, reportedTotal: 0 };
@@ -883,9 +884,12 @@ export async function checkAccountArea(page, port, guardDir, add) {
   await page.getByTestId("account-name").hover();
   const tooltip = page.getByRole("tooltip");
   await tooltip.waitFor({ timeout: 5_000 });
-  const fullName = (await tooltip.textContent())?.trim() ?? "";
-  const expectedName = await page.evaluate(() => window.__accountGuard.longName);
-  add("r57-account-name-tooltip", fullName === expectedName, JSON.stringify({ fullName: fullName.length, expected: expectedName.length }));
+  const remainingFirst = (await tooltip.textContent())?.trim() ?? "";
+  await page.waitForTimeout(1_200);
+  const remainingLater = (await tooltip.textContent())?.trim() ?? "";
+  add("r79-account-session-remaining",
+    /^距登录过期还剩 6 天 5 小时 [0-9]+ 分 [0-9]+ 秒$/.test(remainingFirst) && remainingLater !== remainingFirst,
+    JSON.stringify({ remainingFirst, remainingLater }));
   await shot("r57-account-profile.png", "r57-account-profile-sidebar.png");
 
   // ——— ② 无资料（旧会话）：兜底"已登录" + 图标占位，徽标一个都不许有 ———

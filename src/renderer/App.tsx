@@ -51,12 +51,13 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "./components/ui/sidebar"
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
+import { TooltipProvider } from "./components/ui/tooltip"
 import { EmptyState, PlayerBar, QueuePanel } from "./components"
 import { Toaster } from "./components/ui/sonner"
 import { SidebarPlaylists } from "./sidebar-playlists.tsx"
 import { PlaybackStage } from "./playback-stage.tsx"
 import { ThemeToggle } from "./theme-toggle.tsx"
+import { AccountNameTooltip } from "./account-name-tooltip.tsx"
 import { FavoritesPage } from "./favorites-page.tsx"
 import { useNoticeLog } from "./log-terminal.tsx"
 import {
@@ -76,11 +77,9 @@ import {
   ACCOUNT_LOGOUT_CONFIRM,
   ACCOUNT_LOGOUT_DESCRIPTION,
   ACCOUNT_LOGOUT_TITLE,
-  ACCOUNT_NAME_TESTID,
   ACCOUNT_VIP_TESTID,
   accountAvatarFallbackText,
   accountAvatarUrl,
-  accountFullName,
   accountLogoutFailureText,
   accountNameText,
   accountVipText,
@@ -121,7 +120,7 @@ export function App() {
     /* TooltipProvider 包在最外层：侧栏收起成图标轨后导航项只剩图标，radix Tooltip 没有 Provider 会直接抛错。 */
     <TooltipProvider>
       <div className="h-full w-full" data-shell="app-shell">
-        <LibraryShell profile={gate.profile} />
+        <LibraryShell profile={gate.profile} sessionExpiresAt={gate.sessionExpiresAt} />
       </div>
       {/* 一句话提示的唯一出口：shadcn 的 Toaster，样式全走主题变量。 */}
       <Toaster position="bottom-center" />
@@ -205,7 +204,7 @@ function SidebarSearch({
   )
 }
 
-export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
+export function LibraryShell({ profile = null, sessionExpiresAt = null }: { profile?: AccountProfile; sessionExpiresAt?: number | null }) {
   const [view, setView] = useState(() => createView(VIEW.favorites))
   const [stageOpen, setStageOpen] = useState(false)
   /**
@@ -343,7 +342,6 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
   const accountName = accountNameText(profile)
   const accountAvatar = accountAvatarUrl(profile)
   const accountInitial = accountAvatarFallbackText(profile)
-  const accountFullNameText = accountFullName(profile)
   const accountVipLabel = accountVipText(profile)
 
   /** 退出登录：确认框防误触，调用走 `host-api` 的 `coreLogout`，不做任何跳转。 */
@@ -446,20 +444,7 @@ export function LibraryShell({ profile = null }: { profile?: AccountProfile }) {
               </AvatarFallback>
             </Avatar>
             <div className="flex min-w-0 flex-1 flex-col group-data-[collapsible=icon]:hidden">
-              {accountFullNameText === null ? (
-                <span className="min-w-0 truncate text-sm" data-testid={ACCOUNT_NAME_TESTID}>
-                  {accountName}
-                </span>
-              ) : (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="min-w-0 truncate text-sm" data-testid={ACCOUNT_NAME_TESTID}>
-                      {accountName}
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent side="top">{accountFullNameText}</TooltipContent>
-                </Tooltip>
-              )}
+              <AccountNameTooltip name={accountName} sessionExpiresAt={sessionExpiresAt} />
               {accountVipLabel === null ? null : (
                 <Badge variant="secondary" className="mt-0.5 w-fit" data-testid={ACCOUNT_VIP_TESTID}>
                   {accountVipLabel}

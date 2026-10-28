@@ -180,7 +180,7 @@ export interface RestoreStatus {
 export type AuthProfile = { userName?: string; avatarUrl?: string; vip?: boolean; vipExpiresOn?: string };
 
 /** `auth:status` 的载荷形状（**广播与 `auth:get-status` 应答共用，唯一一处定义**）。
- * `message` 只有真有事说的时候才出现（没有这个键 ≠ 值是 undefined）；`profile` 同理。 */
+ * `message` 只有真有事说的时候才出现（没有这个键 ≠ 值是 undefined）；`profile` 与 `sessionExpiresAt` 同理。 */
 export type AuthStatusPayload = {
   loggedIn: boolean;
   busy: boolean;
@@ -191,6 +191,8 @@ export type AuthStatusPayload = {
   restoring?: true;
   message?: string;
   profile?: AuthProfile;
+  /** 当前会话的到期时刻（UTC 毫秒）：会话记录里有 `expireTime` 才有这个键。 */
+  sessionExpiresAt?: number;
 };
 
 const defaultLog = (message: string) => console.error("[hwmusic-core]", message);
@@ -286,6 +288,8 @@ export function createAuthManager(deps: AuthManagerDeps) {
     if (typeof extra.message === "string" && extra.message !== "") payload.message = extra.message;
     const profile = profileOfSession();
     if (profile !== null) payload.profile = profile;
+    const sessionExpiresAt = musicSessionExpiresAt(session);
+    if (sessionExpiresAt !== null) payload.sessionExpiresAt = sessionExpiresAt;
     return payload;
   }
 
