@@ -1,15 +1,9 @@
-# Windows 安装包流水线（NSIS）。
-#
-# 口径（与本地打包链同一处事实，见 docs/RUN_AND_PACKAGING.md）：
-#   - 依赖安装 → 单元测试（fail 0 / skipped 0）→ 类型检查 → 验收六路径 → 浏览器守卫
-#     （PASS N / SKIP 0 / FAIL 0）→ Rust 测试 → 打包 → 安装包静态校验 → 校验和；
-#   - **每个 run 块都显式查 $LASTEXITCODE**：pwsh 不会因为原生命令非 0 就自动失败，
-#     不查的话"步骤全绿"可能只是没人看退出码；
-#   - 命令之间**不串 &&**（npm 的 script-shell 可能是 PowerShell，语义会变且失败容易被吞）；
-#   - 所有工具都走仓内 `node node_modules/...` 直接路径，不用包管理器自带的临时执行器
-#     （本机 PowerShell 也会拒它：SecurityError）。
-#
-# 触发：推 main = 构建 + 留 artifact（不发布）；推 v* 标签 = 额外打 GitHub Release。
+# Windows 安装包流水线（NSIS）。触发：推 main = 构建 + 留 artifact（不发布）；推 v* 标签额外打 Release。
+# 口径（见 docs/RUN_AND_PACKAGING.md）：依赖安装 → 单元测试（fail 0 / skipped 0）→ 类型检查 → 验收六路径
+# → 浏览器守卫（PASS N / SKIP 0 / FAIL 0）→ Rust 测试 → 打包 → 安装包静态校验 → 校验和。
+# 每个 run 块都显式查 $LASTEXITCODE：pwsh 不会因原生命令非 0 自动失败，不查的话「步骤全绿」只是没人看退出码。
+# 命令之间不串 &&（npm 的 script-shell 可能是 PowerShell，语义会变且失败容易被吞）；
+# 工具都走仓内 `node node_modules/...` 直接路径（本机 PowerShell 也会拒包管理器的临时执行器：SecurityError）。
 name: windows-nsis
 
 on:
@@ -65,9 +59,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path .tmp/ci | Out-Null
-          # 计数从稳定的 reporter 里读：NODE_OPTIONS 传 --test-reporter=tap。
-          # 不用 `npm run test -- --test-reporter=tap`：npm 把追加参数放在位置参数**之后**，
-          # 而 node 从第一个位置参数起就不再解析自己的选项（实测：会把 test 当模块去 require）。
+          # 计数从稳定的 reporter 里读：NODE_OPTIONS 传 --test-reporter=tap。不用 `npm run test -- --test-reporter=tap`：
+          # npm 把追加参数放在位置参数之后，而 node 从第一个位置参数起就不再解析自己的选项（实测会把它当模块 require）。
           $env:NODE_OPTIONS = "--test-reporter=tap"
           npm run test 2>&1 | Tee-Object -FilePath .tmp/ci/npm-test.tap
           if ($LASTEXITCODE -ne 0) { Write-Error "npm run test 失败（退出码 $LASTEXITCODE）"; exit 1 }
@@ -140,9 +133,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "npm run release:checksums 失败（退出码 $LASTEXITCODE）"; exit 1 }
           if (-not (Test-Path "$env:CARGO_TARGET_DIR/release/bundle/nsis/SHA256SUMS")) { Write-Error "SHA256SUMS 没写出来"; exit 1 }
 
-      # 注：真窗冒烟（npm run smoke:build）**不进 CI**——它要一个交互式桌面会话，
-      # 在无人值守的运行器上只会得到 UNTESTED，把"没测"写进绿色流水线比不写更糟。
-      # 它是本地/发布前的人工步骤，口径见 docs/RUN_AND_PACKAGING.md。
+      # 注：真窗冒烟（npm run smoke:build）不进 CI——它要一个交互式桌面会话，在无人值守的运行器上只会得到
+      # UNTESTED，把「没测」写进绿色流水线比不写更糟。它是本地/发布前的人工步骤，口径见 docs/RUN_AND_PACKAGING.md。
 
       - name: 上传产物（main 推送与标签都留 artifact）
         uses: actions/upload-artifact@v4

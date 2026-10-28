@@ -12,9 +12,8 @@ export default defineConfig({
     // outDir 相对 root 解析，故回退两级落到仓库根下的 out/renderer
     outDir: "../../out/renderer",
     emptyOutDir: true,
-    // 四入口显式声明：主窗 index.html、桌面歌词窗 lyrics.html、
-    // R51 的歌词设置弹出窗 lyrics-settings.html、
-    // R25 的登录浮动控件 login-chrome.html（返回 / 主题两个 kind 共用一个入口）
+    // 四入口显式声明：主窗 index.html、桌面歌词窗 lyrics.html、歌词设置弹出窗 lyrics-settings.html、
+    // 登录浮动控件 login-chrome.html（返回 / 主题两个 kind 共用一个入口）
     rollupOptions: {
       input: {
         index: fileURLToPath(new URL("./src/renderer/index.html", import.meta.url)),

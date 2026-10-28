@@ -6,7 +6,7 @@ license = "AGPL-3.0-only"
 edition = "2021"
 
 [lib]
-# R3+ 的集成测试与 R11 的托盘 mock 测试都按这个 lib 名引用
+# 集成测试与托盘 mock 测试都按这个 lib 名引用
 name = "huawei_music_desktop_lib"
 crate-type = ["lib"]
 
@@ -18,12 +18,8 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# `unstable`（R23 起）：官方登录页宿主是**主窗里的第二个 webview**，而多 webview 那一套 API
-# （`tauri::webview::WebviewBuilder`、`Window::add_child`）在 tauri 2.12.4 里由这个 feature 把关
-# （`src/webview/mod.rs:261-271`、`src/window/mod.rs:1224`；`Cargo.toml` 里它转发给
-# `tauri-runtime-wry/unstable`）。副作用如实登记在 `src/login.rs` 模块头：所有窗口的内容 webview
-# 变成 `WindowChild`（tauri-runtime-wry `src/lib.rs:4596-4615`），主窗/歌词窗由"自动铺满父窗"
-# 改成"显式 bounds + 比例跟随"（同文件 `4922-4933` / `4273-4293`）。
+# `unstable`：官方登录页宿主是**主窗里的第二个 webview**，多 webview API（`WebviewBuilder`、
+# `Window::add_child`）由它把关；副作用是内容 webview 变 `WindowChild`，主窗/歌词窗改显式 bounds + 比例跟随。
 tauri = { version = "2.12.4", features = ["tray-icon", "image-png", "image-ico", "unstable"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
@@ -31,20 +27,20 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-log = "2"
-# R65 本地曲库：选文件的**只有一个** Rust 侧调用点（`local_library::pick_files`），
-# capabilities 里没有 `dialog:*` 权限，渲染层调不到它。版本与其余插件同一主版本。
+# 本地曲库：选文件的**只有一个** Rust 侧调用点（`local_library::pick_files`），capabilities 里没有
+# `dialog:*` 权限，渲染层调不到它。版本与其余插件同一主版本。
 tauri-plugin-dialog = "=2.8.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
 base64 = "0.22"
-# R65 本地曲库：读音频文件的标签（标题/歌手/专辑/时长/内嵌封面/内嵌歌词）。
+# 本地曲库：读音频文件的标签（标题/歌手/专辑/时长/内嵌封面/内嵌歌词）；只读标签，不解码音频，封面按原字节透传。
 # 只读标签、不做音频解码，也不带图像处理（封面按原字节透传）。
 lofty = "=0.25.5"
-# R65 本地曲库：曲目 id 必须是不可猜的 128 位随机数（用它而不是 uuid：只要随机字节）。
+# 本地曲库：曲目 id 必须是不可猜的 128 位随机数（用它而不是 uuid：只要随机字节）。
 getrandom = "=0.3.4"
 
-# DPAPI（CryptProtectData）与本地内存 API 仅 Windows 编译，由 R5 消费
+# 仅 Windows 编译：会话加密存储（DPAPI）与任务栏歌词等用到的 Win32 API。
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_Foundation",
@@ -61,7 +57,7 @@ windows = { version = "0.61", features = [
     "Win32_System_Com",
 ] }
 
-# webview 的 --proxy-server 需要 macOS 14+，由 R6 消费
+# macOS 14+ 才支持 webview 的 --proxy-server（webview 代理要用）。
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri = { version = "2.12.4", features = ["macos-proxy"] }
 
