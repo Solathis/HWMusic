@@ -1443,7 +1443,7 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 
 | 项 | 修正前 | 修正后 | 为什么 |
 |---|---|---|---|
-| **页面加载是"一锤子买卖"** | 页面只在建窗那一刻加载一次：`toggle` 只 hide/show、`configure` 只改几何、模块里没有 destroy——**任何一次没加载完的页面会被永久保留**。实测现场：dev server 在 16:27:50 挂掉，歌词窗恰好在那一刻建出来（JS 模块没到、React 从未挂载），窗口全透明 ⇒ 屏幕上什么都看不到，开关多少次都一样，**只有重启应用能救**（品红背板实验：那块 960×120 里非品红像素 **0**） | 显示**已有**窗口之前先 `reload()`（新建那条分支不动，它本来就在加载）；**重新加载之后那一份歌词由宿主重发**——`core_lyrics_document` 留一份最后发出去的文档，页面加载完成（`on_page_load(Finished)`）时 `replay_document` 重发（**R41a**：R41 曾让主窗在"窗刚可见"时重推，那一次必然落在新页 `listen()` 之前，已删），所以打开就能看到这一首的词 | "加载失败 = 永久空白且无路可退"这条性质与触发原因无关：慢盘、杀软拦一下、渲染进程崩一次都会落到同一状态 |
+| **页面加载是"一锤子买卖"** | 页面只在建窗那一刻加载一次：`toggle` 只 hide/show、`configure` 只改几何、模块里没有 destroy——**任何一次没加载完的页面会被永久保留**。实测现场：dev server 在 16:27:50 挂掉，歌词窗恰好在那一刻建出来（JS 模块没到、React 从未挂载），窗口全透明 ⇒ 屏幕上什么都看不到，开关多少次都一样，**只有重启应用能救**（品红背板实验：那块 960×120 里非品红像素 **0**） | 显示**已有**窗口之前先 `reload()`（新建那条分支不动，它本来就在加载）；**重新加载之后那一份歌词由宿主重发**——`core_lyrics_document` 留一份最后发出去的文档，页面加载完成（`on_page_load(Finished)`）时 `replay_after_page_load` 重发（**R41a**：R41 曾让主窗在"窗刚可见"时重推，那一次必然落在新页 `listen()` 之前，已删），所以打开就能看到这一首的词 | "加载失败 = 永久空白且无路可退"这条性质与触发原因无关：慢盘、杀软拦一下、渲染进程崩一次都会落到同一状态 |
 | **歌词窗不跟随主题** | `lyrics-main.tsx` 里没有 `installThemeSync`（也用不了：那条路要经 `core_login_chrome` 读档位，而该命令的来源守卫只放行主窗与两个浮动控件）。于是歌词窗永远停在 `:root` 的**浅色**令牌上——深色主题下用近黑的字浮在深色桌面上，"有歌词但看不见" | 主题作为**查询串参数**随建窗同步到位（`lyrics_window_url(config, theme)`，`theme` 取自 `theme::current_theme(app)`），到窗之后跟随 `theme:changed` 广播（订阅不需要任何权限、不新增命令） | 与"配置走查询串"同一条纪律（订阅是异步的，建窗那一刻可能还没 listen）；颜色令牌（`foreground`/`muted`/`primary`/`contrast`）本来就是主题令牌，不跟随主题时那张表没有意义 |
 | **Alt+Tab 里叫 "Tauri App"** | 建窗没给 `.title()`，tao 的默认标题就是 `"Tauri App"`；`skip_taskbar(true)` 在 Windows 上只做 `ITaskbarList::DeleteTab`（tao 0.37.1 `set_skip_taskbar`）——删了任务栏条目，**没碰** `WS_EX_TOOLWINDOW`（实测 exStyle `0x40118`） | `.title(LYRICS_WINDOW_TITLE)` = `"桌面歌词"` | 一个无边框透明条在 Alt+Tab 里显示成 "Tauri App"，用户没有任何线索知道那是什么 |
 
@@ -1453,13 +1453,14 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 |---|---|---|---|
 | `playback:lyrics` | `{trackId, title?, artist?, durationSeconds?}` | `{text, format, source, cached?, warnings}` | 歌词**文本**来源（原始 LRC 文本，不是解析结果）。为什么返回文本：逐行滚动必须来自 AMLL 官方组件，而"文本 → 行"是官方 `parseLrc` 的职责（`features/lyrics/amll-adapter.ts` 在它之上补 `[offset:]` 与翻译行）。端点仍是**注入**的（`data.musicEndpoints.lyrics`，与其余业务端点同一张表）：注入过就打它（候选键宽容读取，读到的键名进 `warnings`），没注入就走 §2.3.2 那条链。**R41**：三个可选元信息只用于第三方回退的严格匹配（缺 `title` 就没有那一跳）；`source` ∈ `local`/`huawei`/`kugou`/`lrclib`，`cached` 只在命中内存/磁盘缓存时出现。文本**不进日志**（落盘的副本见 §2.10） |
 
-**广播频道增补三条**（唯一真源 `src/shared/channels.ts`，Rust 镜像 `bridge.rs`，parity 钉住）：
+**广播频道增补四条**（唯一真源 `src/shared/channels.ts`，Rust 镜像 `bridge.rs`，parity 钉住）：
 
 | 频道 | 方向 | 载荷 | 语义 |
 |---|---|---|---|
 | `lyrics:document` | 主窗 → 歌词窗 | `{lines, status}` | 歌词文档。歌词窗**没有业务频道权限**（`core_call` 只收主窗），所以广播是它唯一的数据来源；主窗面板与歌词窗共用**同一份行数组**，两处不可能显示两首歌 |
-| `lyrics:progress` | 主窗 → 歌词窗 | `{timeMs, playing, seekGeneration}` | 进度。歌词窗里没有音频元素，进度只能由主窗推；**节流在桥里**（`shouldPushProgress`：≥100ms 或播放/跳转变化才发），且只在窗真的开着时跑 |
+| `lyrics:progress` | 主窗 → 歌词窗 | `{timeMs, playing, seekGeneration}` | 进度。歌词窗里没有音频元素，进度只能由主窗推；**节流在桥里**（`shouldPushProgress`：≥100ms 或播放/跳转变化才发）；R68 起主窗进度泵订阅播放器通知（不再用 rAF，也不看窗口是否可见：主窗最小化、被遮挡、收进托盘都照推），歌词窗不存在时宿主只缓存最新一帧、不广播，页面加载完成先补发文档再补发进度（播放中按经过时间前推） |
 | `lyrics:state` | 宿主 → 两窗 | `{config, visible, revision, dirty, saveError, requestedVisible, taskbar:{supported,attached,reason}}` | Rust 原子 config/revision；保存完成/失败也推进 `runtimeRevision`（同 config revision 的持久化状态可更新、不落盘）。D 的 taskbar 状态同理。另有 `{ready:true}` 握手，不当作配置消费 |
+| `lyrics:pointer` | 宿主 → 歌词窗 | `{inside: boolean}` | R69：桌面歌词**锁定**时宿主每 100ms 读一次光标位置（Tauri `cursor_position`），光标进出窗口才广播；歌词窗据此显隐解锁键。光标落在解锁区时宿主临时关掉鼠标穿透，让那一下能点到 |
 
 **Tauri 歌词专命令**（名字唯一真源 `src/shared/commands.ts`，均 async，按 webview label 守卫）：
 
@@ -1470,11 +1471,12 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 | `core_lyrics_control` | `{payload:{action:'toggle'|'previous'|'next'}}` | `null` | **main/lyrics**；非法动作/extra 字段拒绝；转既有 `player:command {command}`，只在唯一主窗播放器执行 |
 | `core_lyrics_document` | `{document:{lines,status}}` | `null` | **main-only**；归一、缓存并广播文档 |
 | `core_lyrics_progress` | `{progress:{timeMs,playing,seekGeneration}}` | `null` | **main-only**；主窗 ≥100ms / 播放或 seek 变化节流 |
+| `core_lyrics_unlock_zone` | `null` 或 `{x, y, width, height}`（有限非负数，CSS 像素） | `null` | **lyrics-only**（R69）；歌词窗用 ResizeObserver 上报解锁键矩形，宿主据此判断光标是否在解锁区；形状不对回 `invalid_payload` |
 
 `core_call` 与 `core_login_chrome` 的既有来源守卫不放宽。歌词窗没有任意业务 HTTP、登录、文档写入或进度写入权限。
 歌词页先订阅 document/config/progress/theme，再 `configure({})` 回读权威配置，最后 signalReady；主窗补读最新配置、补文档/进度/主题。
 
-**几何**：desktop 横版默认 **800×128 DIP**、竖版默认 **260×520 DIP**（R51 收紧，原 960×160 / 320×620；用户拖过的尺寸优先，切换方向/模式会丢弃上一方向的尺寸）；竖版**不再使用官方 AMLL 组件**，由渲染层自渲染单列（`VerticalLyricColumn` + `features/lyrics/vertical-lyrics.mjs`，R61：一句一列、`writing-mode: vertical-rl` + `text-orientation: mixed`、字号随窗口宽度、按演唱进度沿书写方向平移）；横版、任务栏与沉浸页仍走官方 `LyricPlayer`。taskbar 最多 **1200×44 DIP**，实际尺寸由安全空白决定，不能走 desktop 几何/样式分支。
+**几何**：desktop 横版默认 **800×128 DIP**、竖版默认 **240×600 DIP**（R51 收紧，原 960×160 / 320×620；R70 竖版由 260×520 改为 240×600；用户拖过的尺寸优先，切换方向/模式会丢弃上一方向的尺寸）；竖版**不再使用官方 AMLL 组件**，由渲染层自渲染单列（`VerticalLyricColumn` + `features/lyrics/vertical-lyrics.mjs`，R61：一句一列、`writing-mode: vertical-rl` + `text-orientation: mixed`、字号与横版同档位（R70）、按演唱进度沿书写方向平移）；横版、任务栏与沉浸页仍走官方 `LyricPlayer`。taskbar 最多 **1200×44 DIP**，实际尺寸由安全空白决定，不能走 desktop 几何/样式分支。
 只 mode/layout 变化重新计算 size/position，颜色、字号、锁、点透、演出选项不重定位。已有用户位置保留并夹入当前歌词窗显示器工作区；首次优先主窗显示器，退主屏。
 window-state 不自动恢复 lyrics 的旧尺寸/坐标，避免异步覆盖配置几何或 Taskbar。拖柄与非交互歌词宿主通过官方 `startDragging()` 拖动，排除按钮/输入/滑块等交互节点。
 
@@ -1484,12 +1486,13 @@ window-state 不自动恢复 lyrics 的旧尺寸/坐标，避免异步覆盖配�
 > 由 `a_monitor_left_of_the_primary_keeps_its_negative_origin` 与
 > `every_monitor_keeps_the_window_inside_its_own_work_area` 两条用例钉住。
 
-**配置**：`{mode:'desktop'|'taskbar', layout:'horizontal'|'vertical', style:'clean'|'panel', size, color, locked, clickThrough, enableBlur, enableScale, enableSpring, showControls, taskbarSize, taskbarColor, taskbarCustomColor, taskbarKaraoke}`。
-默认 desktop/horizontal/clean/lg/foreground，locked/clickThrough=false，四个演出/控件布尔=true。AMLL 官方 props 控制模糊/缩放/弹簧，panel 使用 shadcn Card 语义 surface；宿主隔离 AMLL 合成以保证浅暗文字可见。panel+contrast 的有效字色使用既有 foreground 令牌，配置仍保留 contrast，切回 clean 还原。
+**配置**：`{mode:'desktop'|'taskbar', layout:'horizontal'|'vertical', style:'clean'|'panel'|'bare', size, color, locked, enableBlur, enableScale, enableSpring, showControls, taskbarSize, taskbarColor, taskbarCustomColor, taskbarKaraoke}`。
+默认 desktop/horizontal/clean/lg/foreground，locked=false，四个演出/控件布尔=true。R69 起没有 clickThrough 配置（落盘键 18→17，旧盘上的键被忽略）：鼠标穿透由 `mode=taskbar || locked` 推导；锁定时衬底更淡（clean 为 `bg-background/35`，panel 为 `bg-card/65`），`bare`（纯透明）不画衬底、字加 `drop-shadow-md`。AMLL 官方 props 控制模糊/缩放/弹簧，panel 使用 shadcn Card 语义 surface；宿主隔离 AMLL 合成以保证浅暗文字可见。panel+contrast 的有效字色使用既有 foreground 令牌，配置仍保留 contrast，切回 clean 还原。
 字号档位为 **桌面 16/20/28/40/56px**（`sm|md|lg|xl|xxl`）与 **任务栏 12/14/16/18/20px**（`tsm|tmd|tlg|txl|txxl`）两张表，id 不重叠、互不通用（`taskbarSize` 收桌面档位一律 `invalid_payload`）。颜色只认 foreground/muted/primary/contrast 令牌。
-**竖版字号（R61）**：竖版字号由**窗口宽度**决定（`clamp(1rem, 26cqw, 6rem)`，纯函数 `verticalFontPx` 同常数），`size` 档位在竖版下不生效，设置气泡面板的「字号」项因此禁用并附一句说明；配置字段与档位值本身不变（切回横版立即恢复）。
+**竖版字号（R70）**：竖版与横版用同一套字号档位——竖版 CSS 读 `amll-theme.css` 里的别名 `--vertical-lyric-font-size`（= 横版 `--amll-lp-font-size`），不随窗口宽度和拖放变化，设置气泡面板的「字号」项在竖版下照常可用。正在唱的字按 `--vertical-word-progress`（0–1，每帧由 `setProperty` 写在视口上）由上往下连续扫亮；减少动效时不扫。R61 的 `clamp(1rem, 26cqw, 6rem)` 与对应纯函数已删除。
 **任务栏外观独立（R59）**：`taskbarSize`（默认 `txxl` = 20px）、`taskbarColor`（默认 `foreground`）、`taskbarCustomColor`（`#RRGGBB` 或空串，默认空）、`taskbarKaraoke`（逐字高亮，默认 `true`）。`mode=taskbar` 时歌词窗**只读**这四个字段（字号/颜色/自定义色/逐字），`mode=desktop` 只读 `size`/`color`/`customColor` 且逐字恒开；两套值各存一份，改一边不动另一边。逐字关闭 = 不经逐字词推导（行级数组直接交给官方 `LyricPlayer`，按行渐变），仍是同一个官方组件。任务栏模式强制横条点透；clean/panel 均不渲染任何控件带，showControls 不改变 44px 歌词可用高度。
 任务栏这张卡只在**宿主回报 `taskbar.supported === true`**（Windows）时渲染，配置入口在主窗设置页「任务栏歌词（Beta）」卡（窄命令 `core_lyrics_configure`），不出现在桌面歌词的齿轮弹出窗里。
+**快捷切换（R71）**：播放栏与沉浸页的歌词开关旁各有一个下拉（shadcn `DropdownMenu` 单选：关闭 / 桌面歌词 / 任务栏歌词（Beta）），两处共用 `LyricsTargetMenu`。选择经 `selectTarget` 交给纯函数 `lyricsTargetPlan(on, mode, target)` 决定动作：「关闭」只在窗开着时关窗；选桌面或任务栏时，模式不同才改模式，窗没开才打开。齿轮气泡面板另有「位置」单选（桌面 / 任务栏（Beta）），直接改 `mode`。宿主回报 `taskbar.supported !== true` 时，任务栏项禁用并写「仅支持 Windows」。
 锁定仅禁拖，解锁/媒体仍可点击；点透整窗不接鼠标，须在主窗设置恢复。
 
 **恢复/保存（R44e：唯一写者是 sidecar）**：Rust 持有本次运行的权威配置与 revision，**启动时只读**恢复
@@ -1504,7 +1507,7 @@ window-state 不自动恢复 lyrics 的旧尺寸/坐标，避免异步覆盖配�
 
 **歌词数据流**：主窗在曲目变化时调 `playback:lyrics` → 官方 `parseLrc` 适配
 （`features/lyrics/amll-adapter.ts`）→ `player.setLyrics(lines, status)`（主窗面板）
-**与** `core_lyrics_document`（歌词窗）共用同一份行；进度由主窗 rAF 读播放状态机 → 节流 →
+**与** `core_lyrics_document`（歌词窗）共用同一份行；进度由主窗进度泵订阅播放器通知（R68 起不再用 rAF） → 节流 →
 `core_lyrics_progress`。歌词状态五档（`unavailable`/`loading`/`empty`/`ready`/`failed`）：
 端点没配说"尚未配置"，别的失败说"暂时取不到"——**两句不同的话**（R9 的"尚未接入"在 R12
 之后不再成立，因为频道已经接上了，缺的是端点）。
@@ -1587,6 +1590,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
    ③ 设置页「日志」的数据源 `core_read_run_log`：只允许主窗（`require_main_webview`），回日志文件
    **最后 500 条** `{time,level,source,message}`，返回前逐条脱敏（`run_log::redact`：`Bearer` /
    `Authorization`·`Cookie` 类头部 / `token`·`code`·`ticket`·`sign` 等键的值一律 `***`）。
+   **R72 补齐的三件事**：① 宿主每次启动先写一行「运行日志：本次启动（pid N）」，设置页「日志」默认只显示本次启动（可切「全部」），旧启动留下的警告不再混进当前视图；② 快捷键主组合被占用、改用备选组合成功记 INFO，一个都没注册上才记 WARN；③ sidecar 被宿主按请求收尸后退出记 INFO「按请求退出」，非主动退出仍记 WARN。
 6. **快捷键 ↔ 托盘兜底 ✓**：全废时提示里指路托盘菜单；托盘不可用则指应用窗口入口（同一句话
    不指两个地方）。歌词键与托盘勾选的联动走 `tray::revert_lyrics_checked`（同一个"把勾选改成
    某个确定状态"的动作；R12 用它翻回事实，R13 用它镜像目标态），失败收口仍归 R12。
@@ -1725,7 +1729,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 **必须有**时长佐证（`|Δ| ≤ 8 秒`，两边都要 > 30 秒才参与）；分数门槛 `MIN_SCORE = 1.5`。
 理由一句话：**显示错歌的词比没有词更糟**。
 
-### 2.13 向**已有**歌单加歌：**没有可用证据（R63 结论：不实现）**
+### 2.13 向**已有**歌单加歌：**没有可用证据（R63 结论：不实现；R73 实测确认没有追加语义）**
 
 用户要的是"右键曲目 → 加入歌单 → 选一张本人的歌单"。这需要一个**追加**语义的写端点。
 R63 按下面四条标准逐条查过，**一条都没满足**，所以 `src/renderer/features/shell/track-menu.mjs`
@@ -1764,6 +1768,8 @@ R63 按下面四条标准逐条查过，**一条都没满足**，所以 `src/ren
 **什么时候可以翻这个闸门**：拿到满足四条标准的端点证据（路径/方法/参数/成功判据/**追加语义**）
 → 写进本节的逐端点表 → 协议层加一条写通道（不自动重试）→ 再把
 `ADD_TO_PLAYLIST_SUPPORTED` 改成 `true`（菜单项、子菜单、提示都在那一处之后才出现）。
+
+**R73 实测（2026-10-27，用户授权，只动临时歌单）**：一次性脚本只在内存里持有会话、不打印不落盘，共 15 次请求（预算 30）。`playlist/create` 带 `songCodes` 回 `000000`，读回正好 1 首（首次在用户账号上实测通过）；`playlist/update {actionType, playListID, songCodes}`：`actionType=2` 回 `000000` 但曲目不变（noop），`3/4/5` 回 HTTP 400——**没有任何一个值是追加**。清理：建 1 删 1（`playlist/delete`），以歌单列表核对临时歌单已不在；注意 `playlist/detail/all` 对已删 id 仍回 ok + 0 首，删除只能以列表为准。结论：第 ④ 条仍不满足，按用户裁决暂不做，`ADD_TO_PLAYLIST_SUPPORTED` 保持 `false`。
 
 ### 2.14 本地曲库（R65）：四条命令、`hwlocal` 协议与 `host:local-lyrics-source`
 
@@ -1826,13 +1832,15 @@ R63 按下面四条标准逐条查过，**一条都没满足**，所以 `src/ren
 | `MENU_SLOTS`（9 槽位/7 项/2 分隔线） | 见 `src-tauri/src/tray.rs` | `src-tauri/src/tray.rs` | R11：托盘菜单的唯一真源（顺序与文案由 Rust 内联单测 + `test/tray.test.mjs` 双向钉住） |
 | `PLAYBACK_LYRICS` | `"playback:lyrics"` | `src/shared/request-channels.ts` | R12：歌词文本来源（Rust 镜像由 `test/channel-parity.test.mjs` 钉住） |
 | `LYRICS_DOCUMENT` / `LYRICS_PROGRESS` / `LYRICS_STATE` | `"lyrics:document"` / `"lyrics:progress"` / `"lyrics:state"` | `src/shared/channels.ts` | 文档/进度只由主窗转发，配置由 Rust 广播并携 revision |
+| `LYRICS_POINTER` | `"lyrics:pointer"` | `src/shared/channels.ts` | R69：锁定桌面歌词时宿主广播光标进出窗 `{inside}`，歌词窗据此显隐解锁键 |
 | `CORE_LYRICS_TOGGLE` / `_CONFIGURE` / `_CONTROL` / `_DOCUMENT` / `_PROGRESS` | `core_lyrics_*` 五条具名命令 | `src/shared/commands.ts` | 名字、Rust 注册、来源守卫与最小 capability 一次补齐 |
+| `CORE_LYRICS_UNLOCK_ZONE` | `"core_lyrics_unlock_zone"` | `src/shared/commands.ts` | R69：第六条歌词专命令，歌词窗上报解锁键矩形（只接受歌词窗调用） |
 | `LYRICS_WINDOW_LABEL` | `"lyrics"` | `src-tauri/src/lib.rs` | 歌词窗 label、来源守卫、window-state 与几何接管 |
-| `TASKBAR_SIZE` / `DESKTOP_SIZE` / `DESKTOP_VERTICAL_SIZE` / `DESKTOP_LIFT` | `1200×44` / `800×128` / `260×520` / `120` DIP | `src-tauri/src/lyrics_window.rs` | R51 收紧桌面默认尺寸；按 scale 与工作区夹限（最小 240×120 不变） |
+| `TASKBAR_SIZE` / `DESKTOP_SIZE` / `DESKTOP_VERTICAL_SIZE` / `DESKTOP_LIFT` | `1200×44` / `800×128` / `240×600` / `120` DIP | `src-tauri/src/lyrics_window.rs` | R51 收紧桌面默认尺寸、R70 竖版由 260×520 改为 240×600；按 scale 与工作区夹限（最小 240×120 不变） |
 | `LYRICS_SETTINGS_WINDOW_LABEL` / `CORE_LYRICS_SETTINGS_OPEN` / `_RESIZE` / `_CLOSE` | `"lyrics-settings"` / `core_lyrics_settings_*` 三条命令 | `src-tauri/src/lib.rs` ↔ `src/shared/commands.ts` | R51：设置弹出窗（独立小窗；尺寸/位置/关闭全由 Rust 定，窗口没有任何 window 权限）。R60 起回执多一个 `geometry: { side: "bottom"\|"top", arrow, pad }`（CSS 像素）：`_RESIZE` 与已量过尺寸的 `_OPEN` 都带，页面按它摆箭头 |
 | `LYRICS_FONT_STEPS` / `TASKBAR_MAX_FONT_PX` | `sm16/md20/lg28/xl40/xxl56` / `20` | `src/renderer/features/lyrics/lyrics-window.mjs` ↔ `src-tauri/src/lyrics_window.rs` | R12：字号档位与任务栏模式上限（两侧一张表，由 `test/lyrics-window.test.mjs` 逐条钉住；CSS 的 rem 规则在 `amll-theme.css`） |
 | `LYRICS_COLOR_TOKENS` | `foreground`/`muted`/`primary`/`contrast` | 同上（TS 为真源、Rust 为镜像） | R12：歌词颜色的令牌档位（只认设计令牌，绝不接受任意色值） |
-| `MIN_PROGRESS_INTERVAL_MS` | `100` | `src/renderer/features/lyrics/lyrics-window.mjs` | R12：进度节流窗口（rAF 每帧调 `pushProgress`，只有该推的才出 IPC） |
+| `MIN_PROGRESS_INTERVAL_MS` | `100` | `src/renderer/features/lyrics/lyrics-window.mjs` | R12：进度节流窗口（R68 起进度泵收到播放器通知才调 `pushProgress`，只有该推的才出 IPC） |
 | `SHORTCUT_BINDINGS` | 5 动作 / 主组合 + 备选链 | `src-tauri/src/shortcuts.rs` | R13：全局快捷键的唯一真源（媒体三键无备选；两条提示型组合各有 2 条备选）。每个组合都必须能被 `global-hotkey` 解析、且不许两个动作抢同一个组合（内联单测钉住） |
 | `ShortcutState` | 生效组合快照 | `src-tauri/src/shortcuts.rs` | R13：`setup` 里登记成托管状态（设置页后续可读；本任务只记 + 提示，不做 UI） |
 | `HUAWEI_QR_ENDPOINTS` | 见 §1.8（建单/轮询/CAS 换码三条 + **R31 的两条**：`deviceFingerPath`、`portalLoginPath`） | `src/main/qr-login.mjs` | R16 立、**R31 增补两条**：二维码登录的端点表（探针确认值；协议层 `src/protocols/qr-login.mjs` 仍只收注入，不写死 URL）。R31 增补的两条来自新探针：`/CAS/IDM_W/ajaxHandler/dev`（指纹换 `sid` = deviceID 的来源）与 `/CAS/portal/loginAuth.html`（画着二维码的那张页，也是建单/轮询的 Referer） |

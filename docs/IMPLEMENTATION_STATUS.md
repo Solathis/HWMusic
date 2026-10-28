@@ -21,6 +21,8 @@
 
 ## 0. 全局测试基线（终审修复波实测，全绿；真窗冒烟除外，见末行）
 
+**当前基线（R74 收尾，截至 `86afbe9`；下方表格是终审修复波的历史基线，保留作证据）**：`npm test` 1252 pass / 0 fail / 0 skipped；`npm run typecheck` exit 0；`npm run build:web` 通过；`npm run test:acceptance` PASS 6 / SKIP 0 / FAIL 0（无注入扫描 20 类 token × 176 个文件 → 0 命中）；`npm run test:browser` PASS 304 / SKIP 0 / FAIL 0；`cargo test` 411 passed / 0 failed / 1 ignored（lib 353 + 集成 58：`frame_log_redaction` 4、`login_policy` 19、`taskbar_lyrics_test` 35），无 warning。sidecar 自验证、NSIS 静态校验、真窗冒烟本轮未重跑。
+
 | 链路 | 命令 | 结果 |
 |---|---|---|
 | Node 单元/契约测试 | `npm run test`（`node --test test/*.test.mjs`） | **528 pass / 0 fail / 0 skipped** |
@@ -145,6 +147,13 @@
 | R65 | 应用内右键菜单，屏蔽网页默认菜单；**加入歌单未实现（无追加端点证据）**（`4525ce3`） | **代码级 verified（Node + 无头浏览器守卫）**；「加入歌单」**untested（刻意不做）** | `test/context-menu-guard.test.mjs` +215、`test/track-menu.test.mjs` +109、`test/playback-player.test.mjs` +77、`test/sidebar-playlists.test.mjs` +11/−18；缺项原因见 KNOWN_LIMITATIONS **A8** |
 | R66 | 保存并恢复上次播放进度（恢复后暂停）（`28189c9`） | **代码级 verified（Node + 无头浏览器守卫）** | `test/playback-player.test.mjs` +278/−5、`test/playback-queue.test.mjs` +52、`test/playback-runtime.test.mjs` +72/−1 |
 | R67 | 左侧栏本地歌曲，本地导入自动识别歌词（`7f502ff`） | **代码级 verified（Node + 无头浏览器守卫）** | `test/local-library.test.mjs` +172、`test/local-lyrics.test.mjs` +157、`test/local-queue.test.mjs` +106、`test/local-views.test.mjs` +69、`test/safe-media-url.test.mjs` +52、`test/dispatcher.test.mjs` +8/−4、`test/channel-parity.test.mjs` +2、`test/library-views.test.mjs` +2/−1 |
+| R68 | 桌面歌词进度改为订阅播放器通知；宿主缓存最新一帧，窗口不存在不广播，页面加载后补发文档与进度（`73e6967` `78bd3ef`） | **代码级 verified（Node + 无头浏览器守卫 + Rust 单测）**；真实窗口未验（KNOWN_LIMITATIONS B29） | `test/progress-pump.test.mjs`、`test/lyrics-window.test.mjs`；`npm test` 1247/0、`test:browser` 289/0、`cargo test` 404 passed |
+| R69 | 锁定后鼠标穿透与解锁键、锁定衬底更淡、新增「纯透明」样式；删掉 clickThrough 配置与设置页两个开关（`2ed9074`） | **代码级 verified（Node + 无头浏览器守卫 + Rust 单测）**；真实窗口未验（B30） | `test:browser` 295/0（新增 r69 六项）、`npm test` 1249/0、`cargo test` 407 passed |
+| R70 | 竖版字号与横版同档位、逐字连续扫亮、竖版默认 240×600（`d0cf6c9`） | **代码级 verified（Node + 无头浏览器守卫 + Rust 单测）**；真实窗口未验（B31） | `test:browser` 297/0（r70 四项）、`npm test` 1249/0、`cargo test` 407 passed |
+| R71 | 播放栏与沉浸页的「桌面歌词 / 任务栏歌词」快捷切换，气泡面板加「位置」（`892ff3b`） | **代码级 verified（Node + 无头浏览器守卫）**；真实窗口未验（B32） | `test:browser` 303/0（新增 r71 六项）、`npm test` 1251/0 |
+| R72 | 日志：快捷键回退记 INFO、sidecar 按请求退出记 INFO、设置页日志按启动分段（`ec50567`） | **verified（代码级 + 真实后台实例）** | `test:browser` 304/0（新增 r72-log-scope）、`npm test` 1252/0、`cargo test` 411 passed；真实后台实例里快捷键回退记 INFO、不再出现误报的 WARN |
+| R73 | 「加入已有歌单」端点实测：没有追加语义，按用户裁决不做（无代码改动） | **verified（负结论）** | 临时歌单实测 15 次请求，建 1 删 1、以列表核对已清理（API_CONTRACT §2.13） |
+| R74 | 全仓注释精简：去掉修改编号与修复经过（`9982396` `f1213da` `aaa0b04` `538fd51` `0eb2873` `118e096` `894a175` `86afbe9`） | **verified（只改注释）** | 每个提交 esbuild 去注释后与改前一致（模板字符串里的生成源另核）；Rust / toml / yml / html 非注释行改动 0；`npm test` 1252/0、`test:browser` 304/0、`cargo test` 411 passed |
 
 ---
 
@@ -169,10 +178,10 @@
 | 12 | 播放器状态机 + 队列持久化 | **verified**（+R50–R67：整表播放/入队、底栏总时长、上次播放进度保存与恢复后暂停） | untested（无真实音源） | `test/playback-state.test.mjs`、`test/playback-queue.test.mjs`、`test/playback-runtime.test.mjs`、`test/playback-player.test.mjs` |
 | 13 | 播放地址纪律（不日志/不落盘/不缓存/不进状态） | **verified** | untested | `test/playback-channel.test.mjs`；断言状态快照序列化后不含 `http`/CDN 域 |
 | 14 | `<audio>` 真实播放 | untested | untested | 端点未配置 → 无法验（B10） |
-| 15 | 歌词解析适配（`[offset:]` + 翻译行）+ 逐行滚动 | **verified**（+R50–R67：竖版单列竖排、逐字按字切换、字号随窗口宽度） | untested | `test/lyrics.test.mjs`、`test/amll-adapter.test.mjs`、`test/lyric-sync.test.mjs`；AMLL 官方组件真实挂载冒烟 23/23 |
+| 15 | 歌词解析适配（`[offset:]` + 翻译行）+ 逐行滚动 | **verified**（+R50–R70：竖版单列竖排、字号与横版同档位、逐字连续扫亮） | untested | `test/lyrics.test.mjs`、`test/amll-adapter.test.mjs`、`test/lyric-sync.test.mjs`；AMLL 官方组件真实挂载冒烟 23/23 |
 | 16 | 歌词文本通道（`playback:lyrics`） | **verified（频道）** | untested（端点未配） | `test/lyrics-window.test.mjs`、`test/channel-parity.test.mjs` |
 | 17 | Media Session 系统媒体控件 | **verified（映射逻辑）** | untested | `test/media-session.test.mjs` |
-| 18 | 桌面歌词窗（五条 async 专命令、锁/媒体、横竖/样式、配置持久化） | **verified**（+R50–R67：设置弹出窗与齿轮气泡面板、紧凑默认尺寸、独立颜色/字号/逐字、逐字扫亮恢复） | **R44c Windows 已验拖锁、一次媒体、几何与重启配置；R44e 持久化改由 Rust 保存任务拥有（登出/退出不丢），真机退出重启复验未做；其余平台/多屏待验** | `test/lyrics-window.test.mjs`、`playback-runtime`、`proxy-settings`；Rust 原子 revision/来源/几何注入测试；browser 面板像素；`.tmp/r44c-native-evidence.json`、`.tmp/r44c-restart-evidence.json` |
+| 18 | 桌面歌词窗（六条 async 专命令、锁/媒体、横竖/样式、配置持久化） | **verified**（+R50–R71：设置弹出窗与齿轮气泡面板、紧凑默认尺寸、独立颜色/字号/逐字、逐字扫亮恢复、进度不依赖主窗可见、锁定后鼠标穿透、纯透明样式、桌面/任务栏快捷切换） | **R44c Windows 已验拖锁、一次媒体、几何与重启配置；R44e 持久化改由 Rust 保存任务拥有（登出/退出不丢），真机退出重启复验未做；其余平台/多屏待验；R68–R71 新增行为未在真实窗口验证（KNOWN_LIMITATIONS B29–B32）** | `test/lyrics-window.test.mjs`、`playback-runtime`、`proxy-settings`；Rust 原子 revision/来源/几何注入测试；browser 面板像素；`.tmp/r44c-native-evidence.json`、`.tmp/r44c-restart-evidence.json` |
 | 19 | Windows 任务栏歌词（Beta，精确自窗原生内嵌） | **verified**（+R50–R67：逐字扫亮恢复、独立颜色/字号/逐字设置） | **verified（Windows 单屏 1920×1080 / dpi 96；多屏 `Shell_SecondaryTrayWnd`、高 DPI、自动隐藏、`TaskbarCreated` 重建、长时间 z-order 未验）** | R47 `a62a0ad` 的真实 Explorer 验证：`attached:true`、`GetParent(歌词 HWND) == Shell_TrayWnd (0x20072)`、子窗 `8,1034 680×44`（visible / enabled=false）、槽位像素差分 5235–5394 px 而空段与任务栏按钮区 0、`WindowFromPoint` 17 点全归 Explorer、切回 desktop 后 `underTaskbar=0`、退出无残留（`task-47-report.md`）；`taskbar_lyrics.rs` 的 parent-client/UIA/单在途/代次/退出纯测试 35 条；acceptance 仅新模块限定例外，DLL/全局 Hook 仍禁 |
 | 20 | 托盘（9 槽位菜单 / 勾选镜像 / 失败提示） | **verified** | untested | `test/tray.test.mjs`；Rust `tray.rs` 内联测试 |
 | 21 | 关窗 fail-safe（托盘真装上才藏窗口） | **verified** | untested | `src-tauri/src/tray.rs` 的 `decide_close` 矩阵；`scripts/acceptance.mjs` 的 `tray` 路径（锚点要求现场查 `tray_by_id`） |
