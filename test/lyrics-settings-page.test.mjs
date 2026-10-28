@@ -162,7 +162,8 @@ test("R52 颜色只剩桌面歌词窗一个使用者（AmllLyricsPanel 落到主
   assert.match(css, /\.amll-lyrics-stage\s*\{[^}]*--amll-lp-color:\s*var\(--foreground\)/,
     "舞台基线就是前景色令牌（沉浸页没有 data-lyrics-color 时就落这条）");
   const window_ = read("src/renderer/LyricsWindow.tsx");
-  assert.match(window_, /data-lyrics-color=\{config\./, "桌面歌词窗仍按自己的配置写令牌档位");
+  assert.match(window_, /const appearance = useMemo\(\(\) => lyricsAppearance\(config\)/, "桌面歌词窗按自己的配置算外观");
+  assert.match(window_, /data-lyrics-color=\{[^}]*appearance\.color\}/, "桌面歌词窗仍按自己的配置写令牌档位");
   assert.match(window_, /applyCustomColor\(/, "桌面歌词窗仍支持自定义颜色（本任务不动它）");
 });
 

@@ -48,6 +48,7 @@ import {
   lyricsAppearance,
   lyricsBackdrop,
   lyricsConfigFromSearch,
+  lyricsPanelCard,
   lyricsStatusFromFailure,
   lyricsTargetOf,
   lyricsTargetPlan,
@@ -931,6 +932,22 @@ test("配置纯逻辑：衬底深浅（锁定的桌面歌词更淡，纯透明�
   assert.equal(lyricsBackdrop({ ...DEFAULT_LYRICS_CONFIG, mode: "desktop", style: "panel", locked: true }), "light");
   assert.equal(lyricsBackdrop({ ...DEFAULT_LYRICS_CONFIG, mode: "desktop", style: "bare" }), "none");
   assert.equal(lyricsBackdrop({ ...DEFAULT_LYRICS_CONFIG, mode: "taskbar" }), "none");
+});
+
+test("R77 配置纯逻辑：卡片面板只属于桌面歌词，任务栏不套卡片底色与边框", () => {
+  assert.equal(lyricsPanelCard({ ...DEFAULT_LYRICS_CONFIG, mode: "desktop", style: "panel" }), true);
+  assert.equal(lyricsPanelCard({ ...DEFAULT_LYRICS_CONFIG, mode: "desktop", style: "panel", locked: true }), true);
+  assert.equal(lyricsPanelCard({ ...DEFAULT_LYRICS_CONFIG, mode: "taskbar", style: "panel" }), false, "任务栏沿用桌面的 panel 样式也不套卡片");
+  assert.equal(lyricsPanelCard({ ...DEFAULT_LYRICS_CONFIG, mode: "desktop", style: "clean" }), false);
+  assert.equal(lyricsPanelCard({ ...DEFAULT_LYRICS_CONFIG, mode: "desktop", style: "bare" }), false);
+});
+
+test("R77 歌词窗：卡片与反差色改写都按 lyricsPanelCard，不再只看样式", () => {
+  const code = stripComments(read("src/renderer/LyricsWindow.tsx"));
+  assert.match(code, /const panelCard = lyricsPanelCard\(config\)/, "要不要卡片交给纯逻辑");
+  assert.match(code, /\{panelCard \? <Card /, "只有桌面 panel 才渲染 Card");
+  assert.match(code, /data-lyrics-color=\{panelCard && appearance\.color === "contrast"/, "反差色只在卡片底上改成前景色");
+  assert.doesNotMatch(code, /config\.style === "panel"/, "不再有只看样式的判断");
 });
 
 test("歌词窗：锁定时按光标位置显形解锁按钮，并把解锁区上报给 Rust", () => {

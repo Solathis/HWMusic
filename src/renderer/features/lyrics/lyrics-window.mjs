@@ -285,6 +285,12 @@ export function lyricsBackdrop(config) {
   return normalized.locked ? "light" : "normal";
 }
 
+/** 卡片面板只属于桌面歌词：任务栏要透出系统栏，不套卡片底色与边框。 */
+export function lyricsPanelCard(config) {
+  const normalized = normalizeLyricsConfig({}, config);
+  return normalized.mode === "desktop" && normalized.style === "panel";
+}
+
 /** 歌词窗的初值来自 URL 查询串：渲染层订阅事件是异步的，查询串同步到位没有这个缝。 */
 export function lyricsConfigFromSearch(search) {
   const params = new URLSearchParams(typeof search === "string" ? search : "");

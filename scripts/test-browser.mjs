@@ -1868,6 +1868,39 @@ export async function checkDesktopSurface(page, guardDir, add) {
           JSON.stringify({ box, buttons: await desktop.locator("button").count() }));
       }
     }
+    // 任务栏那一条只画字：从歌词播放器到舞台每一层都不许有底色、边框或阴影描边
+    const surfaceRuns = [];
+    for (const style of ["clean", "panel"]) {
+      await page.evaluate((config) => window.__guard.configureDesktop(config), { mode: "taskbar", style, showControls: false, color: "foreground" });
+      await page.waitForTimeout(120);
+      surfaceRuns.push({ style, ...await page.evaluate(() => {
+        const stage = document.querySelector('[data-testid="lyrics-window"]');
+        const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+        const alphaOf = (color) => {
+          probe.clearRect(0, 0, 1, 1);
+          probe.fillStyle = "#000";
+          probe.fillStyle = color;
+          probe.fillRect(0, 0, 1, 1);
+          return probe.getImageData(0, 0, 1, 1).data[3];
+        };
+        const layers = [];
+        for (let node = stage?.querySelector(".amll-lyric-player") ?? null; node !== null && stage?.contains(node); node = node.parentElement) {
+          const style = getComputedStyle(node);
+          layers.push({
+            slot: node.getAttribute("data-slot") ?? node.getAttribute("data-testid") ?? node.className.toString().slice(0, 40),
+            alpha: alphaOf(style.backgroundColor),
+            border: ["Top", "Right", "Bottom", "Left"].reduce((sum, side) => sum + (Number.parseFloat(style[`border${side}Width`]) || 0), 0),
+            shadow: style.boxShadow,
+          });
+        }
+        return { cards: stage?.querySelectorAll('[data-slot="card"]').length ?? -1, player: Boolean(stage?.querySelector(".amll-lyric-player")), layers };
+      }) });
+    }
+    await page.screenshot({ path: path.join(guardDir, `${theme}-taskbar-surface.png`) });
+    add(`${theme}-taskbar-surface-transparent`,
+      surfaceRuns.length === 2 && surfaceRuns.every((run) => run.player && run.cards === 0 && run.layers.length > 0
+        && run.layers.every((layer) => layer.alpha === 0 && layer.border === 0 && layer.shadow === "none")),
+      JSON.stringify(surfaceRuns));
   }
   await page.setViewportSize({ width: 800, height: 128 });
   await page.evaluate(() => window.__guard.configureDesktop({ mode: "desktop", style: "clean", color: "foreground", showControls: true }));

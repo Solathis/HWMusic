@@ -21,6 +21,7 @@ import {
   lyricsAppearance,
   lyricsBackdrop,
   lyricsConfigFromSearch,
+  lyricsPanelCard,
   normalizeLyricsConfig,
   reanchorProgress,
   resizableEnabled,
@@ -326,6 +327,7 @@ export function LyricsWindow() {
   /** 透明窗的可读性衬底：clean 用令牌底色、锁定时更淡；panel 锁定时卡片更淡；bare 不加衬底，只给歌词加阴影。 */
   const backdrop = lyricsBackdrop(config)
   const scrim = config.style === "clean" && backdrop !== "none"
+  const panelCard = lyricsPanelCard(config)
 
   return <TooltipProvider>
     <div
@@ -340,15 +342,15 @@ export function LyricsWindow() {
       data-lyrics-mode={config.mode}
       data-lyrics-layout={config.mode === "taskbar" ? "horizontal" : config.layout}
       data-lyrics-style={config.style} data-lyrics-size={size}
-      data-lyrics-color={config.style === "panel" && appearance.color === "contrast" ? "foreground" : appearance.color}
+      data-lyrics-color={panelCard && appearance.color === "contrast" ? "foreground" : appearance.color}
       data-lyrics-karaoke={appearance.karaoke ? "on" : "off"}
       data-lyrics-locked={config.locked ? "on" : "off"}>
-      {config.style === "panel" ? <Card size="sm" className={cn("h-full min-h-0 gap-0 py-0", backdrop === "light" && "bg-card/65")}>
-        {config.mode === "desktop" ? <CardHeader className={config.locked ? "shrink-0 px-1.5 py-0" : "shrink-0 px-1.5 py-0.5"}>
+      {panelCard ? <Card size="sm" className={cn("h-full min-h-0 gap-0 py-0", backdrop === "light" && "bg-card/65")}>
+        <CardHeader className={config.locked ? "shrink-0 px-1.5 py-0" : "shrink-0 px-1.5 py-0.5"}>
           <CardTitle className="sr-only">桌面歌词</CardTitle>
           <CardDescription className="sr-only">媒体控制与歌词滚动区（竖版为逐字竖排）</CardDescription>
           {controls}
-        </CardHeader> : null}
+        </CardHeader>
         <CardContent className="flex min-h-0 flex-1 flex-col px-0">{content}</CardContent>
       </Card> : <>{config.mode === "desktop" ? <div className="shrink-0 px-0.5 pt-0.5">{controls}</div> : null}{content}</>}
       {/* 右下角缩放拖柄（未锁的桌面窗才有） */}
