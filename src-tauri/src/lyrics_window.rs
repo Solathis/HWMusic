@@ -45,7 +45,7 @@ pub struct Point {
     pub y: f64,
 }
 
-/// 任务栏模式的窗口尺寸（简报给的口径：如 1200×44 —— 一条单行显示带）。
+/// 任务栏模式的窗口尺寸：如 1200×44，一条单行显示带。
 pub const TASKBAR_SIZE: Size = Size {
     width: 1200.0,
     height: 44.0,
@@ -145,7 +145,7 @@ pub const LYRICS_FONT_STEPS: &[(&str, u32)] =
 pub const TASKBAR_FONT_STEPS: &[(&str, u32)] =
     &[("tsm", 12), ("tmd", 14), ("tlg", 16), ("txl", 18), ("txxl", 20)];
 
-/// 任务栏模式的字号上限（简报钉死：≤ 20）。
+/// 任务栏模式的字号上限（≤ 20）。
 pub const TASKBAR_MAX_FONT_PX: u32 = 20;
 
 /// 颜色令牌表（唯一真源在渲染层的 `LYRICS_COLOR_TOKENS`，这里是镜像副本）：
@@ -172,7 +172,7 @@ pub fn encode_custom_color(value: &str) -> String {
     format!("%23{}", &value[1..])
 }
 
-/// 桌面窗的最小尺寸（DIP）：比这更小就没法显示一行/一列歌词了（简报：240×120）。
+/// 桌面窗的最小尺寸（DIP）：比这更小就没法显示一行/一列歌词了（240×120）。
 pub const MIN_WINDOW_WIDTH_DIP: f64 = 240.0;
 pub const MIN_WINDOW_HEIGHT_DIP: f64 = 120.0;
 /// 尺寸的绝对上限（DIP）：真正的上限是工作区，这里只是拦掉"明显是坏值"的数。
@@ -2016,7 +2016,7 @@ mod tests {
         let vertical = horizontal.apply_patch(&json!({"layout": "vertical"}));
         let (size, _) = geometry_plan(area, &vertical, 1.0, None);
         assert_eq!(size, DESKTOP_VERTICAL_SIZE, "竖版默认走 DESKTOP_VERTICAL_SIZE");
-        // 用户保存过的自定义尺寸不受影响（简报：不碰已保存的尺寸）
+        // 用户保存过的自定义尺寸不受影响
         let custom = horizontal.apply_patch(&json!({"windowWidth": 640.0, "windowHeight": 200.0}));
         assert_eq!(
             geometry_plan(area, &custom, 1.0, None).0,

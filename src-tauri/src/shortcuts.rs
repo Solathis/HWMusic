@@ -55,7 +55,7 @@ impl ShortcutAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShortcutBinding {
     pub action: ShortcutAction,
-    /// 主组合（简报钉死的那一条）。
+    /// 主组合（首选的那一条）。
     pub primary: &'static str,
     /// 主组合被占用时**按顺序**试的备选。空 = 没有备选（媒体三键）。
     pub fallbacks: &'static [&'static str],
@@ -460,7 +460,7 @@ mod tests {
     // 组合清单
     // -----------------------------------------------------------------------
 
-    /// 简报的组合清单：媒体三键（无备选）、歌词与设置（各有备选链）。
+    /// 组合清单：媒体三键（无备选）、歌词与设置（各有备选链）。
     #[test]
     fn every_action_has_a_binding_with_the_agreed_primary_combo() {
         assert_eq!(SHORTCUT_BINDINGS.len(), 5, "五个动作各一条：{SHORTCUT_BINDINGS:?}");
@@ -681,7 +681,7 @@ mod tests {
         assert!(shortcut_notices(&ShortcutReport::default(), true).is_empty());
     }
 
-    /// 全废的动作要指路托盘菜单（简报第 6 项），并带上真实原因。
+    /// 全废的动作要指路托盘菜单，并带上真实原因。
     #[test]
     fn a_dead_media_key_points_at_the_tray_menu() {
         let report = report_of(vec![plan_binding(binding(ShortcutAction::PlayPause), free_nothing())]);

@@ -226,7 +226,7 @@ mod tests {
         assert!(!CONSERVATIVE_CLOSE_BEHAVIOR.hides_on_close());
     }
 
-    /// schema 闸门：形状不认识一律 `quit`，绝不猜 `tray`（简报的退化方向）。
+    /// schema 闸门：形状不认识一律 `quit`，绝不猜 `tray`（退化只往保守那边走）。
     #[test]
     fn parse_close_behavior_refuses_to_guess_on_bad_shapes() {
         let good_data = json!({ "closeBehavior": "tray" });

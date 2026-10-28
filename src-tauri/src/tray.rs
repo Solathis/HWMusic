@@ -48,7 +48,7 @@ pub enum MenuSlot {
 
 /// 菜单槽位表（**唯一真源**）：9 槽位 / 7 项 / 2 条分隔线。
 ///
-/// 顺序是契约（简报逐项列出），由单测钉住；建菜单时按这张表翻译成 tauri 的菜单项。
+/// 顺序是契约，由单测钉住；建菜单时按这张表翻译成 tauri 的菜单项。
 pub const MENU_SLOTS: &[MenuSlot] = &[
     MenuSlot::Item {
         id: ID_SHOW,
@@ -428,7 +428,7 @@ fn dispatch<R: Runtime>(app: &AppHandle<R>, lyrics_item: &CheckMenuItem<R>, id: 
 mod tests {
     use super::*;
 
-    /// 简报的槽位契约：9 槽位 / 7 项 / 2 条分隔线。
+    /// 槽位契约：9 槽位 / 7 项 / 2 条分隔线。
     #[test]
     fn menu_slots_are_nine_with_seven_items_and_two_separators() {
         let items: Vec<&MenuSlot> = MENU_SLOTS
@@ -441,7 +441,7 @@ mod tests {
         assert_eq!(separators, 2, "2 条分隔线：{MENU_SLOTS:?}");
     }
 
-    /// 顺序与文案都是契约（简报逐项列出）：显示窗口 / — / 播放·暂停 / 上一首 / 下一首 /
+    /// 顺序与文案都是契约：显示窗口 / — / 播放·暂停 / 上一首 / 下一首 /
     /// 桌面歌词 / 设置… / — / 退出程序。
     #[test]
     fn menu_slots_keep_the_agreed_order_and_copy() {

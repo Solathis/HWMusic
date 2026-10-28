@@ -312,7 +312,7 @@ test("R44d native 写扫描只允许以 ensure_own 包裹的显式受核 HWND，
   );
 
   // Rust raw 字面量里的引号、括号、逗号都是内容，只有同 hash 数的引号才收尾。
-  // 下面断言 brief 那条表达式必须被点名，补平衡的同形表达式钉 raw 解析完整。
+  // 下面断言那条 raw 兜底表达式必须被点名，补平衡的同形表达式钉 raw 解析完整。
   assert.equal(
     taskbarWriteViolations('ShowWindow(ensure_own(policy, make_own(r#"" )?, hwnd(foreign))"#).unwrap_or(hwnd(foreign)), SW_HIDE)').length,
     1,
@@ -1758,7 +1758,7 @@ test("R44d fix2 1：守卫体必须是 canonical token 控制流（闭包吞 ret
   }
   assert.deepEqual(accepted, [], `控制流判据必须拒绝这两条绕过（旧判据全部接受）：${JSON.stringify(accepted)}`);
 
-  // brief 点名的其余负控：条件被短路、来源被换、假检查、成功后加料——全部必须红。
+  // 其余负控：条件被短路、来源被换、假检查、成功后加料——全部必须红。
   const others = [
     ["四项之间改成 && 连接", FIX2_CANON.replaceAll(" || ", " && ")],
     ["外面套 `false && (…)`", FIX2_CANON.replace(`if ${FIX2_COND} {`, `if false && (${FIX2_COND}) {`)],

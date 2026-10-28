@@ -1,7 +1,7 @@
 /**
  * `settings.json`：设置的单一真源（读/清洗/归一/落盘）。
  *
- * 磁盘形状由简报钉死（Rust `webview_proxy.rs` 读同一份），三条不猜的规矩：
+ * 磁盘形状是固定契约（Rust `webview_proxy.rs` 读同一份），三条不猜的规矩：
  * 形状不认识就当没配；凭据原样保留且绝不进日志；认不出的文件不覆盖（写时报结构化错误并保留原文件）。
  */
 import * as nodeFs from "node:fs/promises";

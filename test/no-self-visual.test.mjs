@@ -142,7 +142,7 @@ test("组件契约：TrackTable / PlayerBar / QueuePanel 都在 components.tsx �
   for (const name of ["TrackTable", "PlayerBar", "QueuePanel", "EmptyState"]) {
     assert.match(source, new RegExp(`export function ${name}\\(`), `components.tsx 必须导出 ${name}`);
   }
-  // 表格用 shadcn 的 Table 原语，交互按简报：双击播放 + 键盘可达 + 收藏切换
+  // 表格用 shadcn 的 Table 原语，交互：双击播放 + 键盘可达 + 收藏切换
   assert.match(source, /from\s+"\.\/components\/ui\/table"/, "TrackTable 必须用 shadcn 的 Table");
   assert.match(source, /onDoubleClick=/, "双击播放是简报要求的交互");
   assert.match(source, /onKeyDown=/, "键盘可达是简报要求的交互");
