@@ -120,7 +120,7 @@ bundle（`/static_rss_vue3/js/index-legacy-*.js`，213575 B）里逐个列出 `"
 | 授权码 → 账号 AT/RT（token 端点，带 `code_verifier`） | 已确认（§1.3） | — |
 | 账号 AT → **音乐会话**（旧仓称 `loginex`，请求带 Digest 头） | **端点已确认（R17）；兑换往返仍未实测** | 见下方 §1.5.1：端点 URL、请求形状、Digest 头形状都有公开证据，且**端点存在性经本机实测**（405 / 对照 404 / 无效 AT → 200 + 业务码）；但"有效 AT 换到真会话"要用户授权扫码，本仓**没跑过** |
 | 账号 AT 有效期 | 审计事实 ≈ 1 小时 | 未实测；`isTokenExpired` 默认提前 60 秒判过期 |
-| 音乐会话有效期 | 审计事实 ≈ 7 天（到期字段提示） | R75 起按 `expireTime`（按北京时间解读，推断）判到期：到期回登录页并说明原因；自动续期未打通，到期需重扫 |
+| 音乐会话有效期 | **7 天**（R78 实测：`expireTime` = session.enc 写入时刻（UTC）+ 7 天） | R75 起按 `expireTime`（UTC 墙钟，R78 实测）判到期：到期回登录页并说明原因；自动续期未打通，到期需重扫 |
 | 刷新账号 AT | 已实现（注入端点） | 华为是否轮换 RT 未知；实现按"响应不发新 RT 就沿用旧 RT"处理 |
 
 #### 1.5.1 `loginex`（R17 补全）：证据分三级，逐级如实标注
@@ -156,20 +156,20 @@ DNS  api-drcn.music.dbankcloud.cn                  → 2407:c080:1400:61:40a0:d5
   （**不带** token 段；带音乐会话的业务调用才追加 `, token=<音乐 token>`）
 - **成功判据**：HTTP 2xx **且** `result.resultCode === "000000"`
 - **响应关注**：`result.resultCode`、`token`（音乐会话凭据）、`snsUserID`（音乐用户标识）、
-  `expireTime`（已见 14 位 `yyyyMMddHHmmss`；**时区尚未确认**）
+  `expireTime`（14 位 `yyyyMMddHHmmss`；R78 实测为 **UTC** 墙钟）
 
 本项目据此接线的落点：`src/main/music-session.mjs`（端点常量 + Digest 构造 + 响应解析 + 可注入 fetch），
 默认值经 `src/main/auth-manager.ts` 的 `HUAWEI_OAUTH_ENDPOINTS.loginex` 注入。
-`expireTime` 在会话记录里仍保留 14 位原始串；R75 起读取时由 `musicSessionExpiresAt` 按北京时间（`MUSIC_EXPIRE_TIME_UTC_OFFSET_MINUTES = 480`）换算成到期时刻。这是推断：session.enc 写于 2026-10-21T07:52:23Z，按北京时间算 7 天后的到期时刻（10-28 15:52）早于用户看到空列表的 17:30，按 UTC 算（23:52）则矛盾；官方未确认（KNOWN_LIMITATIONS B33）。
+`expireTime` 在会话记录里仍保留 14 位原始串；读取时由 `musicSessionExpiresAt` 按 UTC（`MUSIC_EXPIRE_TIME_UTC_OFFSET_MINUTES = 0`）换算成到期时刻，给人看的到期时刻与诊断行按本机时区显示。R78 实测：真机启动日志记 `expireTime=20261028075221`，session.enc 写于 2026-10-21T07:52:23.943Z，按 UTC 解读恰好是写入时刻加 7 天（差 2 秒）；R75 曾按北京时间解读（偏移 480），会把每个会话提前 8 小时判到期，已改正（KNOWN_LIMITATIONS B33）。
 
 **③ 仍未实测（本仓 untested，一条不漏）**
 
 | # | 项 | 为什么没验 |
 |---|---|---|
 | 1 | 用**有效** AT 换到真音乐会话（业务码 `000000` 那一档） | 需要用户授权扫码（用户在场的授权动作），本仓不代扫 |
-| 2 | `snsUserID` / `expireTime` 的真实取值与**时区** | 依赖第 1 条 |
+| 2 | `snsUserID` / `expireTime` 的真实取值与**时区** | R78 实测：`expireTime` 是 UTC 墙钟（见上文 `expireTime` 那一段） |
 | 3 | 该 AT 是否被本客户端（`client_id=101444301`）签发的会被受理 | 依赖第 1 条 |
-| 4 | 音乐会话有效期与失效行为 | 依赖第 1 条；自动续期本来就没打通 |
+| 4 | 音乐会话有效期与失效行为 | R75/R78 实测：有效期 7 天；到期后服务端照样回 200 + `000000`、只是不给数据；自动续期没打通 |
 
 **顺带记录的音乐业务端点**（同为上述公开来源）**R32 起已经接进代码**：逐端点的路径 / 方法 /
 参数 / 响应容器 / 归一化规则见 §2（那里是业务接口的唯一真源）。R17 时它们只是"记录在案、不接线"，
@@ -378,7 +378,7 @@ auth:status → {loggedIn: boolean, busy: boolean, message?: string,
   **结论**（画登录页并自动建码）。带 `restoring:true` 的载荷渲染层当 `checking`：中性启动屏、不发码。
   恢复期间除 `concludeRestore()` 之外的广播（取消、失败……）都不是结论，因此也带这一格；
   只有恢复落定那条播出去时不带（清位之后构造载荷）。
-- **会话到期（R75）**：恢复读到会话后先按 `expireTime` 判到期；已到期就不发验证请求（到期会话服务端照样回 200 + `000000`、只是不给数据，验证器验不出来），恢复档位记 `session_expired`，`auth:status` 带「音乐会话已于 X月X日 HH:mm 到期，请重新扫码登录。」，session.enc 不删。sidecar 的业务会话来源是 `activeSession()`，`auth:get-status` 的快照也先判一次：运行中到期就收回会话、epoch 前移并广播同一句话。渲染层把它存进 `sessionNote`，新码准备中与等待扫码时一直显示，扫码后让位、登录后清掉；会话从已登录转未登录时复位 `qrAttempted`，二维码重新自动出现。恢复与登录成功各记一行「会话到期：expireTime=…（按北京时间 …），已过/还剩 … 小时」。
+- **会话到期（R75）**：恢复读到会话后先按 `expireTime` 判到期；已到期就不发验证请求（到期会话服务端照样回 200 + `000000`、只是不给数据，验证器验不出来），恢复档位记 `session_expired`，`auth:status` 带「音乐会话已于 X月X日 HH:mm 到期，请重新扫码登录。」，session.enc 不删。sidecar 的业务会话来源是 `activeSession()`，`auth:get-status` 的快照也先判一次：运行中到期就收回会话、epoch 前移并广播同一句话。渲染层把它存进 `sessionNote`，新码准备中与等待扫码时一直显示，扫码后让位、登录后清掉；会话从已登录转未登录时复位 `qrAttempted`，二维码重新自动出现。恢复与登录成功各记一行「会话到期：expireTime=…（按 UTC 解读 = …，本机时间 …），已过/还剩 … 小时」。
 - **登录态确立即停二维码（R53）**：每一份"已登录"的 `auth:status` 播出去之前，sidecar 会停掉在跑的
   二维码会话（停轮询 + 作废待兑换的尝试）。这一处是所有来源的收口：restore 成功 / 扫码确认收尾成功 /
   网页登录成功。渲染层另有 `auth:cancel-qr`（见 §2.11）在门禁收场时停一次。
@@ -1874,7 +1874,7 @@ R63 按下面四条标准逐条查过，**一条都没满足**，所以 `src/ren
 | `LOGIN_QUIET_WINDOW_MS` | `1_500` | `src-tauri/src/login.rs` | **R28 新增**：摆进内容区之前的**静默窗**（毫秒）。每次加载 `Finished` 起窗、窗内出现新导航就撤窗，窗内没有新导航才摆进（R27 那一版是"首载 `Finished` 就摆"，而首载多半只是 authorize 中间页）。30 秒首载期限那条兜底不变。时序矩阵见 §1.7 的 R28 段 |
 | `LOGIN_OPENING_TEXT` / `LOGIN_OPENING_TESTID` | `"正在打开华为官方登录页…"` / `"login-opening"` | `src/renderer/features/auth/login-gate-logic.mjs` | **R27 新增**：官方页还在**屏外加载**那一刻，门禁状态行那一句（旁边带一个 `Loader2Icon animate-spin`）。R20 那句「已在网页中打开登录。」保留给**另一档**：渲染层 reload 之后只剩 `busy:true`（`path` 丢了），那一刻页多半早画好了——说"正在打开"是编造（判定见 `loginOpeningIndicator`） |
 | `SESSION_DIAG_LABEL` | `"登录态持久化诊断"` | `src/main/session-diagnostic.mjs` | **R27 新增**：启动诊断那一行的开头（grep 用）。内容是"数据根 + 它是哪来的 + 那个根里有没有 `session.enc` + 恢复档位"——`数据根漂移`（调试根 vs `%APPDATA%` 根）一眼可判。Rust 侧另有一行 `数据根：<路径>（来源：…）`（`lib.rs::data_root_note`） |
-| `MUSIC_EXPIRE_TIME_UTC_OFFSET_MINUTES` | `480` | `src/main/music-session.mjs` | R75：`expireTime` 按北京时间（UTC+8）解读，到期判定、到期文案与诊断行同一口径；推断，官方未确认（KNOWN_LIMITATIONS B33） |
+| `MUSIC_EXPIRE_TIME_UTC_OFFSET_MINUTES` | `0` | `src/main/music-session.mjs` | R75 立（当时按北京时间推断为 `480`），**R78 按真机证据改为 `0`**：`expireTime` 是 UTC 墙钟；到期文案与诊断行另按本机时区显示 |
 | `QR_TTL_DIFF` / `QR_TTL_LEGACY`（内部两条路，不是导出常量） | `expiredTime − qrCodeCreateTime` / `expiredTime − now()` | `src/protocols/qr-login.mjs` 的 `resolveExpiresInMs` | R22：有效期换算。两条都是**服务端值**相减时免疫本地时钟偏差；`qrCodeCreateTime` 缺失/非法才回退老公式——**已知偏差风险**：本地钟快 1 小时，倒计时就早归零 1 小时（用户看到的是"卡在正在确认过期…"）。两值矛盾或 `expiredTime` 不可信 → `null`（不猜，界面少一行倒计时） |
 | `MAX_URL_LOG_CHARS` | `160` | `src-tauri/src/login.rs` | R16：登录窗导航/加载日志里 URL 的截断上限（查询值一律不进日志） |
 | `HUAWEI_MUSIC_LOGINEX_ENDPOINT` | `https://api-drcn.music.dbankcloud.cn/music-odpapp-service/v5/service/userinfo/loginex` | `src/main/music-session.mjs`（默认值经 `auth-manager.ts` 的 `HUAWEI_OAUTH_ENDPOINTS.loginex` 注入） | R17：音乐会话兑换端点（证据分级见 §1.5.1）。协议层 `auth.mjs`/`music.mjs` 仍只收注入；`test/auth-manager.test.mjs` 拿本文件反查这串字面量 |
