@@ -9,8 +9,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import {
+  KARAOKE_PACE_MIN_LINES,
   LRC_OFFSET_PATTERN,
   lyricLineText,
+  karaokePaceMs,
   mergeTranslationLines,
   parseAmllLyrics,
   readLrcOffsetMs,
@@ -257,6 +259,33 @@ test("坏时间/空行不伪造逐字：不是有限区间就原样留给 AMLL",
     const [karaoke] = withKaraokeWords([line]);
     assert.deepEqual(karaoke.words, line.words.map((word) => ({ ...word })), `不该伪造逐字：${JSON.stringify(partial.words)}`);
   }
+});
+
+const PACE_LRC = ["[00:00.00]一二三四", "[00:01.20]五六七八", "[00:02.40]九十百千", "[00:03.60]东西南北", "[00:04.80]春夏秋冬天地", "[00:14.80]完了", "[00:16.00]"].join("\n");
+
+test("R81 逐字扫亮按唱速封顶：句后停顿再长，扫亮也按「字数 × 唱速」走完（行时间不动）", () => {
+  const { lines } = parseAmllLyrics(PACE_LRC);
+  assert.equal(lines.length, 6);
+  assert.equal(karaokePaceMs(lines), 300, "唱速取下四分位：句后停顿长的那几句不把它拉慢");
+  const karaoke = withKaraokeWords(lines);
+  assert.deepEqual(wordTable(karaoke[0]), [["一", 0, 300], ["二", 300, 600], ["三", 600, 900], ["四", 900, 1200]], "正常的句子与原来一样");
+  assert.equal(karaoke[4].words[0].startTime, 4800);
+  assert.equal(karaoke[4].words.at(-1).endTime, 6600, "6 字 × 300ms：扫亮在 6.6s 唱完，不再拖到 14.8s");
+  assert.equal(karaoke[4].endTime, 14800, "行时间不动：这一行照旧亮到下一句开始");
+  for (let index = 1; index < karaoke[4].words.length; index += 1) {
+    assert.equal(karaoke[4].words[index].startTime, karaoke[4].words[index - 1].endTime, "相邻字首尾相接");
+  }
+  assert.deepEqual(wordTable(karaoke[5]), [["完", 14800, 15100], ["了", 15100, 15400]]);
+});
+
+test("R81 样本不够就不封顶；词级源不受唱速影响", () => {
+  assert.equal(KARAOKE_PACE_MIN_LINES, 4);
+  const few = parseAmllLyrics(["[00:00.00]一二三四", "[00:01.20]五六七八", "[00:02.40]九十百千", "[00:10.00]完", "[00:12.00]"].join("\n")).lines;
+  assert.equal(karaokePaceMs(few), null, "只有 3 句两字以上的行：不估唱速");
+  assert.equal(withKaraokeWords(few)[2].words.at(-1).endTime, 10000, "不封顶时照旧按整行时长");
+  const timed = { words: [{ word: "逐", startTime: 0, endTime: 300 }, { word: "字", startTime: 300, endTime: 5000 }], translatedLyric: "", romanLyric: "", isBG: false, isDuet: false, startTime: 0, endTime: 5000 };
+  const out = withKaraokeWords([...parseAmllLyrics(PACE_LRC).lines, timed]);
+  assert.deepEqual(out.at(-1).words, timed.words, "词级源原样保留（封顶只管推导出来的逐字）");
 });
 
 test("不修改入参：AMLL 的铁律（传进去的数组与内容不得再改）", () => {

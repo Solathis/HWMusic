@@ -155,32 +155,55 @@ function finiteMs(value: unknown): number | null {
   return value;
 }
 
-/** 逐字高亮：把行级歌词按行时长线性推导出逐字词数组；已有词级时间原样保留，坏时间不伪造。 */
-export function withKaraokeWords(lines: LyricLine[]): LyricLine[] {
-  if (!Array.isArray(lines)) return [];
-  return lines.map((line) => karaokeLine(line));
-}
+/** 估计唱速至少要这么多句样本；不够就不设上限。 */
+export const KARAOKE_PACE_MIN_LINES = 4;
 
-function karaokeLine(line: LyricLine): LyricLine {
+/** 能按行时长推导逐字的行：拆好的字与行的起止（不能推导就是 `null`）。 */
+function karaokeCharsOf(line: LyricLine): { chars: string[]; lineStart: number; lineEnd: number } | null {
   const words = Array.isArray(line?.words) ? line.words : [];
-  const cloned = words.map((word) => ({ ...word }));
-  const next: LyricLine = { ...line, words: cloned };
-  if (cloned.length !== 1) return next;
-
-  const first = cloned[0];
-  const text = typeof first.word === "string" ? first.word : "";
-  const chars = Array.from(text);
-  if (chars.length === 0) return next;
-
+  if (words.length !== 1) return null;
+  const first = words[0];
+  const chars = Array.from(typeof first.word === "string" ? first.word : "");
+  if (chars.length === 0) return null;
   const wordStart = finiteMs(first.startTime);
   const wordEnd = finiteMs(first.endTime);
   // AMLL 自己会把 (0,0) 的词时间按行时间补齐（`resetLineTimestamps`），所以那也是"没写"而不是坏值
   const wordTimingOk = (wordStart === 0 && wordEnd === 0) || (wordStart !== null && wordEnd !== null && wordStart < wordEnd);
   const lineStart = finiteMs(line.startTime);
   const lineEnd = finiteMs(line.endTime);
-  if (!wordTimingOk || lineStart === null || lineEnd === null || lineStart >= lineEnd) return next;
+  if (!wordTimingOk || lineStart === null || lineEnd === null || lineStart >= lineEnd) return null;
+  return { chars, lineStart, lineEnd };
+}
 
-  const total = lineEnd - lineStart;
+/** 一首歌的唱速（毫秒/字）：两字以上可推导行的「行时长 ÷ 字数」取下四分位（行时长含句后停顿，偏快那一档才接近真唱速）；样本不够就是 `null`。 */
+export function karaokePaceMs(lines: LyricLine[]): number | null {
+  if (!Array.isArray(lines)) return null;
+  const samples: number[] = [];
+  for (const line of lines) {
+    const derivable = karaokeCharsOf(line);
+    if (derivable === null || derivable.chars.length < 2) continue;
+    samples.push((derivable.lineEnd - derivable.lineStart) / derivable.chars.length);
+  }
+  if (samples.length < KARAOKE_PACE_MIN_LINES) return null;
+  samples.sort((left, right) => left - right);
+  return samples[Math.floor(samples.length / 4)];
+}
+
+/** 逐字高亮：行级歌词按行时长线性推导逐字，扫亮时长不超过「字数 × 唱速」（句后停顿不再拉慢扫亮）；已有词级时间原样保留，坏时间不伪造。 */
+export function withKaraokeWords(lines: LyricLine[]): LyricLine[] {
+  if (!Array.isArray(lines)) return [];
+  const pace = karaokePaceMs(lines);
+  return lines.map((line) => karaokeLine(line, pace));
+}
+
+function karaokeLine(line: LyricLine, pace: number | null): LyricLine {
+  const words = Array.isArray(line?.words) ? line.words : [];
+  const next: LyricLine = { ...line, words: words.map((word) => ({ ...word })) };
+  const derivable = karaokeCharsOf(line);
+  if (derivable === null) return next;
+  const { chars, lineStart, lineEnd } = derivable;
+  const first = next.words[0];
+  const total = pace === null ? lineEnd - lineStart : Math.min(lineEnd - lineStart, pace * chars.length);
   next.words = chars.map((char, index) => ({
     ...first,
     word: char,
