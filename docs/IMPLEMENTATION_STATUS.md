@@ -21,7 +21,7 @@
 
 ## 0. 全局测试基线（终审修复波实测，全绿；真窗冒烟除外，见末行）
 
-**当前基线（R78 收尾，截至 `06a6555`；下方表格是终审修复波的历史基线，保留作证据）**：`npm test` 1266 pass / 0 fail / 0 skipped；`npm run typecheck` exit 0；`npm run build:web` 通过；`npm run test:acceptance` PASS 6 / SKIP 0 / FAIL 0（无注入扫描 20 类 token × 176 个文件 → 0 命中）；`npm run test:browser` PASS 307 / SKIP 0 / FAIL 0；`cargo test` 412 passed / 0 failed / 1 ignored（lib 354 + 集成 58：`frame_log_redaction` 4、`login_policy` 19、`taskbar_lyrics_test` 35），无 warning。sidecar 自验证、NSIS 静态校验、真窗冒烟本轮未重跑。
+**当前基线（R79–R82 收尾，截至 `de60272`；下方表格是终审修复波的历史基线，保留作证据）**：`npm test` 1275 pass / 0 fail / 0 skipped；`npm run typecheck` exit 0；`npm run build:web` 通过；`npm run test:acceptance` PASS 6 / SKIP 0 / FAIL 0（无注入扫描 20 类 token × 179 个文件 → 0 命中）；`npm run test:browser` PASS 312 / SKIP 0 / FAIL 0；`cargo test` 414 passed / 0 failed / 1 ignored（lib 356 + 集成 58：`frame_log_redaction` 4、`login_policy` 19、`taskbar_lyrics_test` 35），无 warning。sidecar 自验证、NSIS 静态校验、真窗冒烟本轮未重跑。
 
 | 链路 | 命令 | 结果 |
 |---|---|---|
@@ -158,6 +158,10 @@
 | R76 | 竖版桌面歌词默认收窄到 112×600（lg 档正好两列），最小尺寸按布局取，窄窗工具栏换行（`cad109e`） | **代码级 verified（Rust + Node + 无头浏览器守卫）**；真实窗口未验（B34） | 守卫 `r76-vertical-default-two-columns`：改前 240 宽左侧空白 158px、译文夹具出现第三列，改后两列、空白 30/36px；`cargo test` 412 passed |
 | R77 | 任务栏歌词不再套卡片底色与边框（`b67c358`） | **代码级 verified（Node + 无头浏览器守卫）**；真机任务栏观感未验（B35） | 守卫 `light-/dark-taskbar-surface-transparent`：改前 panel 组多一层 card（alpha 255 + 1px 描边），改后与 clean 组四层一致、全透明 |
 | R78 | `expireTime` 改按 UTC 解读，到期时刻按本机时间显示（`06a6555`） | **verified（Node；证据来自真机启动日志）** | 真机启动日志：`expireTime=20261028075221`，session.enc 写于 2026-10-21T07:52:23.943Z，按 UTC 解读恰好加 7 天；R75 按北京时间解读会提前 8 小时判到期。`npm test` 1266/0（新增真机证据用例）、`test:browser` 307/0 |
+| R79 | 账号名悬停显示登录会话的实时剩余时间（`7b35f38`） | **代码级 verified（Node + 无头浏览器守卫）**；真机未验（KNOWN_LIMITATIONS B36） | `auth:status` 在会话记录带 `expireTime` 时多带 `sessionExpiresAt`（UTC 毫秒，广播与快照同源）；守卫 `r79-account-session-remaining`：悬停文案「距登录过期还剩 6 天 5 小时 10 分 0 秒」，1.2 秒后变成「… 9 分 59 秒」。`npm test` 1269/0、`test:browser` 307/0 |
+| R80 | 沉浸页收起行悬停改淡色半透明；Windows 上进沉浸页收起系统标题栏，页面画拖动区与窗口按钮，退出与重载前装回（`de60272`） | **代码级 verified（Rust + Node + 无头浏览器守卫）**；真实窗口未验（KNOWN_LIMITATIONS B37） | 守卫 `r80-immersive-chrome-*`：悬停底色浅色 alpha 76、深色 alpha 26（改前 ghost 的 `hover:bg-muted` 在浅色主题不透明）；打开与关闭成对发 immersive、normal；窗口按钮贴右上角、不压收起箭头、三个动作各发一次；拖动不收起、点击收起。`npm test` 1275/0、`cargo test` 414/0、`test:browser` 312/0 |
+| R81 | 逐字扫亮按唱速封顶，句后停顿不再拉慢扫亮（`aaf0c81`） | **代码级 verified（Node）**；真机听感未验（KNOWN_LIMITATIONS B38） | 同一份歌词：第 5 句（6 字、句后停 8 秒）扫亮终点 14800 → 6600ms，最后一句 16000 → 15400ms，其余句不变。`npm test` 1271/0、`test:browser` 307/0 |
+| R82 | 桌面歌词控件行加关闭键，走托盘「关闭桌面歌词」同一条路（`609e8ac`） | **代码级 verified（Rust + Node + 无头浏览器守卫）**；真机未验（KNOWN_LIMITATIONS B39） | `core_lyrics_control` 动作表加 `close`：先改托盘勾选、再发 `lyrics:toggle {checked:false}`；守卫 `r82-desktop-close-key`：图标 `lucide-x`、在控件行里、一击只多一条 `close`。`npm test` 1272/0、`cargo test` 413/0、`test:browser` 308/0 |
 
 ---
 

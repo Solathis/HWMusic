@@ -322,9 +322,11 @@ core_login_chrome {action:"theme", theme:"light"|...}     → {theme: ..., revis
 ```
 auth:status → {loggedIn: boolean, busy: boolean, message?: string,
                profile?: {userName?: string, avatarUrl?: string, vip?: boolean,
-                          vipExpiresOn?: string}}
+                          vipExpiresOn?: string},
+               sessionExpiresAt?: number}
 ```
 
+- `sessionExpiresAt`（R79）：会话记录带 `expireTime` 时才有，是按 UTC 解读后的到期时刻（UTC 毫秒）；广播与 `auth:get-status` 快照同源（`statusPayload`）。渲染层据此在账号名悬停提示里显示实时剩余时间，没有这个键就显示「登录有效期未知」。
 - 为什么结论走广播而不是 `core_call` 的返回值：渲染层那条调用链（Rust `core_call`）有 60 秒上限，
   而扫码要等好几分钟。`auth:login` **立刻回 `{started:true,...}`**，真正的结论经 `auth:status` 送达。
 - 启动期恢复也会广播一条（`{loggedIn:false, busy:false}`）：渲染层还没订阅时由 Rust 的
@@ -1469,13 +1471,15 @@ R11 起托盘真的在（见 §2.8），可用性的**真值**来自 `core_get_t
 |---|---|---|---|
 | `core_lyrics_toggle` | `{checked}` | 同 lyrics:state 状态载荷 | **main-only**；desktop 显示已有窗前 reload，普通关闭只隐藏；Beta 不走 tao show/hide |
 | `core_lyrics_configure` | `{config, retrySave?}` | 同 lyrics:state 状态载荷 | **main/lyrics**；只收合同配置字段，未知字段/非法值拒绝；空补丁=纯读（不改配置），当前 lyrics 文档 generation 的订阅后空读同时确认 native ready。`retrySave:true` **只能与空 config 同用**（重存当前运行配置，不是又改一次值）。**`restoreIfPristine` 已取消**：启动配置由宿主只读恢复，传旧参数一律 `invalid_payload` |
-| `core_lyrics_control` | `{payload:{action:'toggle'|'previous'|'next'}}` | `null` | **main/lyrics**；非法动作/extra 字段拒绝；转既有 `player:command {command}`，只在唯一主窗播放器执行 |
+| `core_lyrics_control` | `{payload:{action:'toggle'|'previous'|'next'|'close'}}` | `null` | **main/lyrics**；非法动作/extra 字段拒绝；toggle/previous/next 转既有 `player:command {command}`，只在唯一主窗播放器执行；`close`（R82）与托盘「关闭桌面歌词」同一条路：先把托盘勾选改成不勾，再广播 `lyrics:toggle {checked:false}`，由主窗关歌词窗 |
 | `core_lyrics_document` | `{document:{lines,status}}` | `null` | **main-only**；归一、缓存并广播文档 |
 | `core_lyrics_progress` | `{progress:{timeMs,playing,seekGeneration}}` | `null` | **main-only**；主窗 ≥100ms / 播放或 seek 变化节流 |
 | `core_lyrics_unlock_zone` | `null` 或 `{x, y, width, height}`（有限非负数，CSS 像素） | `null` | **lyrics-only**（R69）；歌词窗用 ResizeObserver 上报解锁键矩形，宿主据此判断光标是否在解锁区；形状不对回 `invalid_payload` |
 
 `core_call` 与 `core_login_chrome` 的既有来源守卫不放宽。歌词窗没有任意业务 HTTP、登录、文档写入或进度写入权限。
 歌词页先订阅 document/config/progress/theme，再 `configure({})` 回读权威配置，最后 signalReady；主窗补读最新配置、补文档/进度/主题。
+
+**沉浸页的主窗外框（R80）**：`core_main_chrome`（`src-tauri/src/main_chrome.rs`，**main-only**，不进 capabilities），载荷 `{payload:{action}}`，动作为 `immersive` / `normal`（收起或装回系统标题栏）、`read`（只读）、`minimize` / `toggle-maximize` / `close`（窗口按钮）；回执 `{frameless, maximized}` 是做完之后的实际状态。只有 Windows（`FRAMELESS_SUPPORTED = cfg!(windows)`）的 `immersive` 真的收起标题栏，其他平台保留原生标题栏、回执 `frameless:false`。`close` 走 `window.close()`，先触发 CloseRequested，由关窗行为决定进托盘还是退出。标题栏状态不持久化：`commit_exit` 在 `app.exit(0)` 之前、主窗 `on_page_load(Started)` 时都把它装回去（window-state 退出时存的是内尺寸，无框时存下会让下次启动高出一条标题栏）。渲染层 `use-main-chrome.ts` 让打开与关闭沉浸页成对地发 `immersive` / `normal`，请求排队；标题栏收起时沉浸页右上角画最小化、最大化或还原、关闭窗口三枚 shadcn 按钮，收起行兼作拖动区（移动超过 4px 走官方 `startDragging()`，否则仍是点击收起）。
 
 **几何**：desktop 横版默认 **800×128 DIP**、竖版默认 **112×600 DIP**（R51 收紧，原 960×160 / 320×620；R70 竖版由 260×520 改为 240×600；R76 收窄到 lg 档正好两列，最小尺寸按布局取：桌面竖版 96×120、横版与任务栏 240×120，运行中切换布局先下发 `WindowEffect::MinSize` 再改几何；用户拖过的尺寸优先，切换方向/模式会丢弃上一方向的尺寸）；竖版**不再使用官方 AMLL 组件**，由渲染层自渲染单列（`VerticalLyricColumn` + `features/lyrics/vertical-lyrics.mjs`，R61：一句一列、`writing-mode: vertical-rl` + `text-orientation: mixed`、字号与横版同档位（R70）、按演唱进度沿书写方向平移）；横版、任务栏与沉浸页仍走官方 `LyricPlayer`。taskbar 最多 **1200×44 DIP**，实际尺寸由安全空白决定，不能走 desktop 几何/样式分支。
 只 mode/layout 变化重新计算 size/position，颜色、字号、锁、点透、演出选项不重定位。已有用户位置保留并夹入当前歌词窗显示器工作区；首次优先主窗显示器，退主屏。
@@ -1491,6 +1495,7 @@ window-state 不自动恢复 lyrics 的旧尺寸/坐标，避免异步覆盖配�
 默认 desktop/horizontal/clean/lg/foreground，locked=false，四个演出/控件布尔=true。R69 起没有 clickThrough 配置（落盘键 18→17，旧盘上的键被忽略）：鼠标穿透由 `mode=taskbar || locked` 推导；锁定时衬底更淡（clean 为 `bg-background/35`，panel 为 `bg-card/65`），`bare`（纯透明）不画衬底、字加 `drop-shadow-md`。AMLL 官方 props 控制模糊/缩放/弹簧，panel 使用 shadcn Card 语义 surface（R77 起只在桌面模式：任务栏只画歌词文字，不套卡片底色与边框，判定在 `lyricsPanelCard`）；宿主隔离 AMLL 合成以保证浅暗文字可见。桌面 panel+contrast 的有效字色使用既有 foreground 令牌，配置仍保留 contrast，切回 clean 还原；任务栏没有卡片底，字色按 `taskbarColor` 原样取。
 字号档位为 **桌面 16/20/28/40/56px**（`sm|md|lg|xl|xxl`）与 **任务栏 12/14/16/18/20px**（`tsm|tmd|tlg|txl|txxl`）两张表，id 不重叠、互不通用（`taskbarSize` 收桌面档位一律 `invalid_payload`）。颜色只认 foreground/muted/primary/contrast 令牌。
 **竖版字号（R70）**：竖版与横版用同一套字号档位——竖版 CSS 读 `amll-theme.css` 里的别名 `--vertical-lyric-font-size`（= 横版 `--amll-lp-font-size`），不随窗口宽度和拖放变化，设置气泡面板的「字号」项在竖版下照常可用。正在唱的字按 `--vertical-word-progress`（0–1，每帧由 `setProperty` 写在视口上）由上往下连续扫亮；减少动效时不扫。R61 的 `clamp(1rem, 26cqw, 6rem)` 与对应纯函数已删除。
+**逐字扫亮按唱速封顶（R81）**：歌词源只有整句时间时，`withKaraokeWords` 推导逐字的扫亮总时长取 `min(行时长, 字数 × 唱速)`；唱速由 `karaokePaceMs` 取两字以上、可推导逐字的行「行时长 ÷ 字数」的下四分位，样本不足 `KARAOKE_PACE_MIN_LINES`（4 句）就不封顶。行时间不动（换行时刻不变），词级源原样保留；沉浸页与桌面歌词（横版、竖版、任务栏）共用这一处。
 **任务栏外观独立（R59）**：`taskbarSize`（默认 `txxl` = 20px）、`taskbarColor`（默认 `foreground`）、`taskbarCustomColor`（`#RRGGBB` 或空串，默认空）、`taskbarKaraoke`（逐字高亮，默认 `true`）。`mode=taskbar` 时歌词窗**只读**这四个字段（字号/颜色/自定义色/逐字），`mode=desktop` 只读 `size`/`color`/`customColor` 且逐字恒开；两套值各存一份，改一边不动另一边。逐字关闭 = 不经逐字词推导（行级数组直接交给官方 `LyricPlayer`，按行渐变），仍是同一个官方组件。任务栏模式强制横条点透；clean/panel 均不渲染任何控件带，showControls 不改变 44px 歌词可用高度。
 任务栏这张卡只在**宿主回报 `taskbar.supported === true`**（Windows）时渲染，配置入口在主窗设置页「任务栏歌词（Beta）」卡（窄命令 `core_lyrics_configure`），不出现在桌面歌词的齿轮弹出窗里。
 **快捷切换（R71）**：播放栏与沉浸页的歌词开关旁各有一个下拉（shadcn `DropdownMenu` 单选：关闭 / 桌面歌词 / 任务栏歌词（Beta）），两处共用 `LyricsTargetMenu`。选择经 `selectTarget` 交给纯函数 `lyricsTargetPlan(on, mode, target)` 决定动作：「关闭」只在窗开着时关窗；选桌面或任务栏时，模式不同才改模式，窗没开才打开。齿轮气泡面板另有「位置」单选（桌面 / 任务栏（Beta）），直接改 `mode`。宿主回报 `taskbar.supported !== true` 时，任务栏项禁用并写「仅支持 Windows」。
@@ -1636,7 +1641,7 @@ R12 只补**失败路径**：窗命令失败时 → 一句 `app:notice`（带原
 | `auth:logout` | 无 | `{sessionCleared, cacheCleared, notes[]}` | 清不干净**不改写成成功**，原因进 `notes` | R4/R7 |
 | `auth:cancel-login` | 无 | `{cancelled}`（`false` = 本来就没有进行中的登录，**不是错误**） | — | R7（R25 起渲染层不再直接调它：浮动控件的「返回扫码登录」走 `core_login_chrome`，落到**同一个结论槽**） |
 | `auth:qr-start` | 无 | `{content, expiresInMs}`（二维码内容 + 有效期；之后的状态变化走 `auth:qr` 广播） | 建单失败 → 结构化类别 + `auth:qr{failed}` | R16 |
-| `auth:get-status` | 无 | `{loggedIn, busy, restoring?}`（**与 `auth:status` 广播同形状**；`restoring` 只在恢复落定前出现，恢复期间的广播也带它、结论广播不带） | 频道不可用即结构化错误（渲染层**不据此猜档位**，只把原因说到状态行上） | R19（R53 加 `restoring`） |
+| `auth:get-status` | 无 | `{loggedIn, busy, restoring?, sessionExpiresAt?}`（**与 `auth:status` 广播同形状**；`restoring` 只在恢复落定前出现，恢复期间的广播也带它、结论广播不带） | 频道不可用即结构化错误（渲染层**不据此猜档位**，只把原因说到状态行上） | R19（R53 加 `restoring`；R79 加 `sessionExpiresAt`） |
 | `auth:cancel-qr` | 无（`null`） | `{cancelled:true}`（幂等：没有在跑的会话也回已停） | 端口取消失败只记日志，仍回已停 | R53 |
 | `settings:get` | 无 | `{settings}` = 归一后的完整文档 | 读不到/读坏了 → 回默认文档（代理当没配）+ 一条日志，**不抛、不砸文件** | R6 |
 | `settings:set` | 二选一：`{patch:{...}}`（合并）或 `{reset:true}`（已知键回默认） | `{settings, restartRequired}` | `invalid_payload`（两个都给 / 都不给 / 类型不对，**不写盘**）；文件认不出 → 结构化错误并**保留原文件** | R6 |
@@ -1836,6 +1841,7 @@ R63 按下面四条标准逐条查过，**一条都没满足**，所以 `src/ren
 | `LYRICS_POINTER` | `"lyrics:pointer"` | `src/shared/channels.ts` | R69：锁定桌面歌词时宿主广播光标进出窗 `{inside}`，歌词窗据此显隐解锁键 |
 | `CORE_LYRICS_TOGGLE` / `_CONFIGURE` / `_CONTROL` / `_DOCUMENT` / `_PROGRESS` | `core_lyrics_*` 五条具名命令 | `src/shared/commands.ts` | 名字、Rust 注册、来源守卫与最小 capability 一次补齐 |
 | `CORE_LYRICS_UNLOCK_ZONE` | `"core_lyrics_unlock_zone"` | `src/shared/commands.ts` | R69：第六条歌词专命令，歌词窗上报解锁键矩形（只接受歌词窗调用） |
+| `CORE_MAIN_CHROME` | `"core_main_chrome"` | `src/shared/commands.ts` | R80：沉浸页的主窗外框命令（收起与装回标题栏、窗口按钮），只接受主窗调用 |
 | `LYRICS_WINDOW_LABEL` | `"lyrics"` | `src-tauri/src/lib.rs` | 歌词窗 label、来源守卫、window-state 与几何接管 |
 | `TASKBAR_SIZE` / `DESKTOP_SIZE` / `DESKTOP_VERTICAL_SIZE` / `DESKTOP_LIFT` | `1200×44` / `800×128` / `112×600` / `120` DIP | `src-tauri/src/lyrics_window.rs` | R51 收紧桌面默认尺寸、R70 竖版由 260×520 改为 240×600、R76 收窄到 112×600（lg 档正好两列）；按 scale 与工作区夹限（最小尺寸见下一行） |
 | `MIN_WINDOW_WIDTH_DIP` / `MIN_VERTICAL_WINDOW_WIDTH_DIP` / `MIN_WINDOW_HEIGHT_DIP` | `240` / `96` / `120` DIP | `src-tauri/src/lyrics_window.rs` 的 `min_window_size` | R76：最小尺寸按布局取，桌面竖版 96×120（xxl 档也放得下一列），横版与任务栏 240×120；建窗、尺寸补丁夹紧与运行中切换布局同一口径 |
@@ -1881,6 +1887,9 @@ R63 按下面四条标准逐条查过，**一条都没满足**，所以 `src/ren
 | `MUSIC_SESSION_DIGEST_USERNAME` | `"app-music-baseline"` | `src/main/music-session.mjs` | R17：音乐业务请求 Digest 头的固定 `username`（不是凭据；只在请求头里出现，不进日志） |
 | `MUSIC_BUSINESS_OK` | `"000000"` | `src/main/music-session.mjs` | R17：业务成功码（HTTP 2xx **且** `result.resultCode === "000000"` 才算成功） |
 | `LOG_DIR_NAME` | `"logs"` | `src-tauri/src/lib.rs` | R17：日志目录在数据根下的一级子目录名；`HWMUSIC_DATA_DIR` 可用时日志写 `<数据根>/logs`（`log_plugin_targets` 的唯一构造点） |
+| `ACCOUNT_SESSION_TOOLTIP_TESTID` / `ACCOUNT_SESSION_TICK_MS` | `"account-session-tooltip"` / `1_000` | `src/renderer/features/auth/account.mjs` | R79：账号名悬停的会话剩余时间提示（只在打开时每秒刷新）；三档文案为「距登录过期还剩 …」「登录已过期，请重新扫码登录」「登录有效期未知」 |
+| `KARAOKE_PACE_MIN_LINES` | `4` | `src/renderer/features/lyrics/amll-adapter.ts` | R81：估计唱速至少要的样本句数（两字以上、可推导逐字的行）；不够就不给扫亮设上限 |
+| `FRAMELESS_SUPPORTED` | `cfg!(windows)` | `src-tauri/src/main_chrome.rs` | R80：进沉浸页时是否收起系统标题栏；只有 Windows 收，macOS 与 Linux 保留原生标题栏 |
 
 ## 4. 红线（任何后续任务不得越过）
 

@@ -35,6 +35,7 @@
 `src-tauri/capabilities/main.json` 只作用于 main：event、start-dragging、三项 global-shortcut。
 `src-tauri/capabilities/lyrics.json` 只给 lyrics **event + start-dragging**，不授快捷键/HTTP/fs/login。
 配置与媒体专命令按 webview label 只放行 main/lyrics；core_call、document/progress/toggle 仍 main-only。
+沉浸页的窗口按钮与收起标题栏（R80）走专命令 `core_main_chrome`（主窗来源守卫），主窗**没有**为此新增任何 window 权限；拖动区复用已有的 `start-dragging`。
 
 | 权限 | 为什么需要 | 被谁消费 |
 |---|---|---|
@@ -114,6 +115,7 @@ webview 仍走代理——这是两套网络栈的行为不一致，如实记（
 | 窗口状态持久化 | `StateFlags = SIZE \| POSITION \| MAXIMIZED`，只记录 main/lyrics；lyrics 跳过自动恢复，避免覆盖配置几何 | verified（代码级），R44c Windows 首开几何已验 |
 | 登录子窗 | 无边框、不进任务栏、独立数据目录、独立 partition、不共享会话 | verified（代码级）；真窗未验 |
 | 歌词窗 | 无边框 / 透明 / 无阴影 / 置顶 / 不进任务栏 / 不可缩放 / 不抢焦点 / 先建后 `show` | verified（代码级）；真窗未验 |
+| 沉浸页的标题栏（R80） | **Windows**：进沉浸页收起系统标题栏，页面画拖动区与最小化、最大化或还原、关闭窗口三枚按钮，退出与重载前装回；**macOS / Linux**：保留原生标题栏（窗口按钮与拖动习惯不同），页面不画窗口按钮 | verified（代码级 + 无头浏览器守卫）；真窗未验（KNOWN_LIMITATIONS B37） |
 | webview 数据目录 | `<数据根>/webview2/{main,login/<partition>,lyrics}` | verified（代码级） |
 | macOS 菜单栏 | **仅最小角色**（本项目不加自定义菜单栏） | 计划约束，未实测 |
 
@@ -211,6 +213,7 @@ webview 仍走代理——这是两套网络栈的行为不一致，如实记（
 |---|---|---|
 | **NSIS 安装包** | **仅 Windows** | `bundle.targets = ["nsis"]`；`check:nsis` 校验的也是 NSIS 暂存目录。Linux/macOS 未配任何 target，**未打包过** |
 | **DPAPI（`CryptProtectData`）** | **仅 Windows** | `#[cfg(windows)]` 用 `windows` crate；非 Windows 是**一行 stub**（`Err(unavailable_error())`），本机不参与编译，只在 Linux/macOS 构建时才会被编译器检查 |
+| **沉浸页收起标题栏**（R80） | 仅 Windows | `FRAMELESS_SUPPORTED = cfg!(windows)`；macOS 与 Linux 走原生标题栏，本机从未在这两端编译验证 |
 | **多尺寸 `.ico` 托盘图标** | 仅 Windows | 非 Windows 用 32×32 PNG |
 | **`icon_as_template`** | 仅 macOS | 编译期分支，本机从未编译 |
 | **`macos-proxy` feature** | 仅 macOS，且**只编到 14+** | Cargo.toml 已配；本机不参与编译 |
