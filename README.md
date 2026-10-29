@@ -1,296 +1,270 @@
-# 华为音乐第三方桌面客户端
+# 华为音乐第三方桌面客户端（HWMusic）
 
-> ## ⚠️ 非官方声明（先读这一段）
+基于 Tauri 2 + React 的华为音乐 Windows 桌面客户端：扫码登录、音乐库与播放、AMLL 歌词与沉浸页、桌面歌词、Windows 任务栏歌词（Beta）、托盘与全局快捷键、HTTP 代理。
+
+项目地址：https://github.com/Solathis/HWMusic
+
+> **先读这三句**
 >
-> 本项目是**第三方独立实现**，与华为及其关联公司**没有任何隶属、合作或代理关系**，
-> **不是官方发布物**。华为音乐、华为帐号等一切官方权利归官方所有。
->
-> 本项目的登录环节打开的是**华为官方的授权页面**，用的是**上游项目注册的** OAuth client id
-> （`101444301`，见 [OAuth 身份声明](#oauth-身份声明必须读)）——本项目不持有任何官方凭据，
-> 也不代表官方立场。请自行评估使用风险。
-
-Tauri v2 + React 的桌面客户端外壳：官方授权页扫码登录、音乐库浏览、播放器与歌词、
-桌面歌词窗与 Windows 任务栏歌词 Beta、托盘与全局快捷键、统一 HTTP 代理设置。
-
-**当前交付状态的准确说法**：代码级与纯函数级已验收（Node 528 / Rust 194 / 验收六路径 6 / 真 Chromium 7 项 / NSIS 静态校验 8 项，全绿）；
-**但真实账号扫码、真实音乐业务端点、真实窗口视觉与 Linux/macOS 平台都还没有实测**。
-逐项档位见 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)，
-逐项限制见 [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md)。
-**本 README 不宣称任何未验证的平台或功能。**
+> 1. **非官方**：本项目是第三方独立实现，与华为及其关联公司没有任何隶属、合作或代理关系，不是官方发布物；华为音乐、华为帐号等一切官方权利归官方所有。
+> 2. **未签名**：安装包没有代码签名，Windows SmartScreen 会提示「未知发布者」。请用同一 Release 里的 `SHA256SUMS` 自己核对文件。
+> 3. **OAuth 身份不属于本项目**：登录打开的是华为官方授权页，用的 client id（`101444301`）沿用自参考实现，本项目不持有任何官方凭据，详见下文「OAuth 身份声明」。
 
 ---
 
-## 1. 快速开始（开发）
+## 下载与安装
 
-### 前置条件
+安装包只经 [GitHub Releases](https://github.com/Solathis/HWMusic/releases) 发布，不另设网盘或其它下载渠道。
+
+1. 从 Release 下载 `华为音乐第三方客户端_<版本>_x64-setup.exe` 与 `SHA256SUMS`。
+2. 核对哈希：`certutil -hashfile 华为音乐第三方客户端_<版本>_x64-setup.exe SHA256`，结果应与 `SHA256SUMS` 里对应的那一行一致。
+3. 运行安装包。SmartScreen 拦下时点「更多信息」→「仍要运行」。机器上没有 WebView2 运行时的话，安装程序会联网下载安装。
+
+只在 Windows x64 上构建和验证过；Linux 与 macOS 没有构建过，本项目不宣称支持。
+
+---
+
+## 功能
+
+**登录**
+
+- 未登录时启动即显示扫码引导页：二维码下方显示剩余有效时间，过期后遮住二维码，点击刷新。
+- 也可以在应用内打开华为官方网页登录。
+- 登录态用 Windows DPAPI 加密保存在本机，重启后保持登录；音乐会话约 7 天到期，到期后回到扫码页并说明原因。
+- 左下角账号区显示头像、名称与会员信息（取得到时才显示），悬停名称显示登录剩余时间；退出登录也在这里。
+
+**音乐库与播放**
+
+- 收藏、我的歌单（左侧栏，带封面、名称与曲目数）、搜索、专辑、歌手、播放历史、本地歌曲（导入时自动识别同名歌词）。
+- 歌单可整表播放或加入队列；列表触底加载更多。
+- 播放队列、播放模式、音量；启动时恢复上次播放的歌曲与进度（暂停状态）。
+- 应用内右键菜单（屏蔽网页默认菜单）。
+
+**歌词**
+
+- 歌词用 AMLL 官方组件渲染，支持逐字高亮与翻译行；只有整句时间的歌词，逐字扫亮按演唱速度设了上限。
+- 沉浸式歌词页：左侧封面、右侧歌词，背景取自封面。Windows 上进入时收起系统标题栏、铺满整个窗口，页面自带拖动区与最小化、最大化、关闭按钮。
+- 歌词来源依次为：本地导入 → 本地缓存（90 天，设置里可查看占用、一键清除）→ 华为音乐 → 第三方回退（酷狗音乐、LRCLIB）。
+- 可导入本地 `.lrc` / `.txt`，自动识别 UTF-8、UTF-16 与 GBK 编码；本地导入优先于任何在线结果。
+
+**桌面歌词与任务栏歌词**
+
+- 桌面歌词：横版与竖排两种布局，置顶、透明、可拖动与缩放；锁定后鼠标穿透，悬停只显示解锁键；字号、颜色、逐字高亮等样式在气泡面板里设置；控件行有播放/暂停、上一首、下一首与关闭。
+- 任务栏歌词（Beta，仅 Windows）：嵌在任务栏的安全空白区，颜色、字号与逐字高亮单独设置；权限不符、占用未知或任务栏自动隐藏时停止显示并说明原因。
+
+**系统集成**
+
+- 托盘菜单：显示窗口、桌面歌词开关、播放/暂停、上一首、下一首、设置、退出；关闭主窗口可选择退出应用或最小化到托盘。
+- 全局快捷键：媒体键三键、`Ctrl+Alt+L`（桌面歌词）、`Ctrl+Alt+S`（设置）；组合键被占用时自动改用备用组合并提示。
+- 单实例运行、窗口位置与大小记忆、开机自启、浅色 / 深色 / 跟随系统三种主题。
+- 设置页：HTTP 代理（主机、端口、用户名密码、例外列表、测试连接）；运行日志用编辑器样式展示，可按级别和关键字筛选。
+
+**明确不做**：每日推荐、移动端、云同步、自动更新服务、其它平台音源、绕过付费或 DRM、「加入已有歌单」（没有官方追加接口的证据）。
+
+---
+
+## 从源码运行
 
 | 项 | 要求 | 说明 |
 |---|---|---|
-| Node.js | **≥ 22.18.0** | `package.json` 的 `engines` 硬约束；SEA 打包与 `node --test` 都用它。**22.18 起 type stripping 默认开启**：22.15–22.17 跑 `npm test` 会失败（`.ts` 直接 import） |
-| Rust 工具链 | stable（实测 rustc/cargo 1.99.1） | `rustup` 安装，Windows 目标 `x86_64-pc-windows-msvc` |
-| MSVC Build Tools | 需含 `VC.Tools.x86.x64` | Windows 上 `cargo` 的链接器；实测 VS 18 Community 满足 |
-| WebView2 Runtime | Windows 上由安装包 `downloadBootstrapper` 引导 | 开发机通常已随 Edge 装好（实测 155.0.4283.62） |
-
-### 跑起来
+| Node.js | **≥ 22.18.0** | `package.json` 的 `engines` 硬约束；22.18 起默认开启 type stripping，更早的版本跑 `npm test` 会失败 |
+| Rust | stable，目标 `x86_64-pc-windows-msvc` | 用 `rustup` 安装 |
+| MSVC Build Tools | 含 `VC.Tools.x86.x64` | Windows 上 `cargo` 的链接器 |
+| WebView2 Runtime | Windows 10/11 通常已随 Edge 安装 | 安装包会按需引导下载 |
 
 ```powershell
 npm ci
-npm run dev          # tauri dev：起 vite（devUrl http://localhost:1420）+ 编译 Rust + 开窗
-npm run dev:web      # 只起渲染层（改界面时更快，但没有宿主能力：window.desktop 不存在）
+npm run dev        # tauri dev：起 vite（http://localhost:1420）+ 编译 Rust + 开窗
+npm run dev:web    # 只起渲染层（没有宿主能力，适合改界面）
 ```
 
-> ⚠️ **`npm run dev` 不会重建 sidecar**：改了 `src/main/**`（含 `src/host/**`、`src/sidecar/**`）
-> 或 `src/protocols/**` 之后先跑 `npm run dist:sidecar` 并把新产物复制到
-> `src-tauri\target\debug\hwmusic-core.exe`，否则跑的是上一次的 sidecar（门禁页会显示
-> "未知请求频道：`auth:qr-start`"，而退出码一切正常）。细节与两个排障旋钮见
-> [docs/RUN_AND_PACKAGING.md](docs/RUN_AND_PACKAGING.md) §1。
-
-### 启动即扫码门禁（这不是 bug）
-
-应用起来后**看到的第一屏是二维码**，不登录就进不了主界面。这是设计（R16 起按用户指令调整，
-R18 重排过一次版面）：
-
-- 未登录时 `App.tsx` 渲染的是登录门禁（`shouldShowLoginGate` 在渲染之前拦），主界面根本不挂载；
-- 引导页自上而下居中一列：**标题**"华为账号登录"（在二维码正上方，全页只出现一次）→
-  **带边框的二维码**（令牌工具类，零自定义 CSS）→ **提示文字**（"手机「控制中心」>「扫一扫」
-  或者系统「设置」>「华为账号」>「扫一扫」。"）→ **一行状态** → **常驻次要入口**
-  "在网页中打开登录"；
-- 进页面**自动**发起二维码会话（`auth:qr-start`），日常路径上只有"在网页中打开登录"这一个
-  可点元素；出错时才多出一个"重试"；
-- 二维码内容由 sidecar 向华为公开的二维码接口建单取得，**由 `qrcode`（MIT）渲染到 canvas**——
-  本项目不手写二维码编码（协议与端点见 [docs/API_CONTRACT.md](docs/API_CONTRACT.md) §1.8，可用
-  `node scripts/probe-qr.mjs` 复现）；轮询在 sidecar 里跑（2 秒一次），状态经 `auth:qr` 广播，
-  过期由 sidecar **自动换新**（界面只换画面，不自己再发一次请求）；
-- 次要入口走的是登录窗那条路（**独立子 webview**：无边框、不进任务栏、独立数据目录、
-  不与主窗共享会话），导航白名单放行、回调只拦 `hms://`，**不给官方页注入任何脚本**；
-  它与二维码流**互斥**：开窗之前 sidecar 先停掉二维码会话，窗关掉/失败之后界面自动回到
-  二维码态并重新发起一张新码；
-- 登录结论走 `auth:status` 广播（扫码要好几分钟，而 IPC 那条链有 60 秒上限）。
-- 排查登录窗空白：debug 构建给登录窗开了 devtools，并在 stderr/日志里记
-  `登录窗创建 / 开始加载 / 加载完成 / 拦下一次不在白名单里的导航`（URL 只留 origin+path+参数名，凭据不进日志）。
-
-数据目录不可写（受限沙箱、`%APPDATA%` 被策略锁）时用环境旋钮排障：
-
-```powershell
-$env:HWMUSIC_DATA_DIR = "E:\hwmusic-data"    # 必须是绝对路径；空值/相对路径等同未设置
-npm run dev
-```
+- `npm run dev` **不会**重建 sidecar：改了 `src/main/**`、`src/host/**`、`src/sidecar/**` 或 `src/protocols/**` 之后，先 `npm run dist:sidecar`，再把产物复制到 `src-tauri\target\debug\hwmusic-core.exe`，否则跑的是上一次的 sidecar。细节与两个排障旋钮见 [docs/RUN_AND_PACKAGING.md](docs/RUN_AND_PACKAGING.md)。
+- 默认数据目录不可写时，用环境变量指定一个可写的绝对路径：`$env:HWMUSIC_DATA_DIR = "E:\hwmusic-data"`。
 
 ---
 
-## 2. 功能范围
+## 构建安装包
 
-### 已提供（各自档位见 IMPLEMENTATION_STATUS）
-
-- **登录**：PKCE S256 扫码登录（`state` 一次性 + 常量时间比对 + 10 分钟过期）、四收场结论、
-  双期限（首载 30 秒 / 总 10 分钟）文案、取消、登出；**引导页直显二维码**（`qrcode` 库渲染，
-  提交单/轮询/过期自动换新全在 sidecar，见契约 §1.8）。
-- **会话存储**：Windows DPAPI（`CryptProtectData`）加密信封，`0600` + 临时文件 + rename 原子写。
-- **音乐库**：收藏（分页 + 去重得出总数）、自建歌单列表与曲目、搜索、专辑/歌手、播放历史。
-  六个页面共用一套「加载 / 失败 / 空」三态纪律。
-- **播放器**：状态机、队列（持久化只存曲目标识 + 索引）、播放模式、音量、
-  Media Session 系统媒体控件对接。
-- **歌词**：AMLL 官方组件渲染、`[offset:]` 补偿与翻译行合并、逐行滚动、面板与独立歌词窗。
-- **桌面歌词窗**：官方拖柄、只禁拖动的锁定、受限媒体控制、横版/窄高竖版、透明/面板 surface，字号颜色令牌与 AMLL 模糊/缩放/弹簧选项；配置由**宿主的保存任务**（与界面生命周期无关）写入 settings 并重启恢复，登出、渲染层崩溃、正常退出都不会丢最后一笔（失败明确提示未保存/未确认，可手动重试）。
-- **任务栏歌词（Beta）**：Windows 实验原生自窗内嵌；仅使用 UIA 确认的任务栏安全空白，权限不符/占用未知/自动隐藏时停显并说明原因。已在本机单屏 1920×1080 / dpi 96 用正常完整性副本真实验证：`GetParent(歌词窗) == Shell_TrayWnd`、歌词只画在安全槽位内（任务栏按钮区 0 像素变化、`WindowFromPoint` 不命中本应用）、切回桌面与退出无残留；多屏、高 DPI、自动隐藏、`TaskbarCreated` 重建、长时间 z-order 未验；Linux/macOS 不支持，不以贴边浮窗冒充。
-- **托盘与关窗行为**：9 槽位菜单、关窗 fail-safe（托盘真的装上才藏窗口，否则真退出）。
-- **全局快捷键**：媒体三键 + `Ctrl+Alt+L` 等，逐条注册、失败回退并有提示。
-- **设置**：HTTP 代理（含凭据与例外列表、测试连接）、开机自启、关窗行为、歌词窗配置。
-- **打包**：SEA sidecar + NSIS 安装包 + `SHA256SUMS` + GitHub Actions 流水线。
-
-### 明确不做（范围外，不是"还没做完"）
-
-- **旧仓数据迁移**：本仓没有旧数据（旧仓已整体删除），`migrate` 不做。
-- **每日推荐 / 移动端 / 云同步 / 自动更新服务 / 其它平台音源**。
-- **音频解密、绕过任何付费或 DRM**：只播官方接口给出的地址。
-- **主题手动切换**：亮暗只跟随系统 `prefers-color-scheme`，不做切换开关（有意裁决）。
-- **任务栏文字注入**：绝不做（见第 8 节）。
-- **签名分发**：不签名，不另开分发渠道，二进制只经 GitHub Release。
-
----
-
-## 3. 构建与打包
-
-**顺序是硬要求**，见 [docs/RUN_AND_PACKAGING.md](docs/RUN_AND_PACKAGING.md)（那里是完整说明，本节只给命令表）：
-
-```
-build:web  →  dist:sidecar  →  tauri build
-vite build    esbuild + SEA     cargo + NSIS
-→ out/renderer → src-tauri/binaries/hwmusic-core-<triple>.exe → src-tauri/target/release/bundle/nsis/*.exe
-```
-
-`tauri.conf.json` 的 `beforeBuildCommand` 是**空串**（有意为之）：Tauri 不会替你构建渲染层，
-它把 `frontendDist` 里已有的东西原样嵌进 exe —— 改了界面却发布出旧界面，而且**退出码 0**。
-所以编排写在 `scripts/dist-win.mjs` 里，并在打包**之后**做 mtime 新鲜度检查：
-任何被打包进去的输入比主程序 exe 新，`dist:win` 直接非 0 退出并点名是哪个产物。
+顺序是硬要求：先构建渲染层，再打包 sidecar，最后 `tauri build`。`npm run dist:win` 把三步串起来，并在打包之后做 mtime 新鲜度检查：任何被打包进去的输入比主程序新，就非 0 退出并点名那个产物。
 
 | 命令 | 做什么 |
 |---|---|
-| `npm run build:web` | `vite build` → `out/renderer`（双入口：`index.html` + `lyrics.html`） |
-| `npm run dist:sidecar` | esbuild（ESM→CJS）→ Node SEA + postject → `src-tauri/binaries/hwmusic-core-<triple>.exe` |
-| `npm run dist:win` | 上面三步的编排 + mtime 新鲜度检查 |
-| `npm run check:nsis` | 对打包产物做**静态**校验（8 项：PE 头、三元组命名、暂存目录内容、不含 `.local`/`research`） |
-| `npm run release:checksums` | 写 `SHA256SUMS`（按文件名排序，重跑无意义 diff 为零） |
-| `npm run smoke:build` | 起一次真产物：`PASS`(0) / `FAIL`(1) / `UNTESTED`(2) |
+| `npm run build:web` | `vite build` → `out/renderer`（主窗、桌面歌词窗、歌词设置弹出窗、登录浮动控件四个入口） |
+| `npm run dist:sidecar` | esbuild → Node SEA + postject → `src-tauri/binaries/hwmusic-core-<triple>.exe` |
+| `npm run dist:win` | 上面两步 + `tauri build`（NSIS）+ mtime 新鲜度检查，产物在 `src-tauri/target/release/bundle/nsis/` |
+| `npm run check:nsis` | 对安装包与暂存目录做静态校验（不执行安装包） |
+| `npm run release:checksums` | 写 `SHA256SUMS` |
 
-为什么 `beforeBuildCommand` 空串、mtime 检查怎么算、sidecar 为什么要两层 esbuild、CI 的 17 个步骤与
-几条不能改的规矩、`smoke:build` 三种结论分别意味着什么 —— 全部在
-[docs/RUN_AND_PACKAGING.md](docs/RUN_AND_PACKAGING.md)。
+`tauri.conf.json` 的 `beforeBuildCommand` 有意留空，原因、mtime 检查的口径与 CI 的规矩见 [docs/RUN_AND_PACKAGING.md](docs/RUN_AND_PACKAGING.md)。
+
+**CI**（`.github/workflows/windows-nsis.yml`，windows-latest）：依赖安装 → 单元测试 → 类型检查 → 验收六路径 → 浏览器守卫 → Rust 测试 → 打包 → 安装包静态校验 → 校验和。推 `main` 只保留构建产物；推 `v*` 标签额外创建 GitHub Release，附安装包与 `SHA256SUMS`，发布说明写明未签名、非官方、OAuth 身份不属于本项目，并给出对应提交的完整源码地址。
 
 ---
 
-## 4. 测试
+## 测试
 
 | 命令 | 验什么 | 口径 |
 |---|---|---|
-| `npm run test` | Node 侧功能与契约测试 | `528 pass / 0 fail / 0 skipped`（**跳过的测试不算验过**） |
-| `npm run typecheck` | `tsc --noEmit` | exit 0 |
-| `npm run test:acceptance` | 六条关键路径（登录门禁/代理/托盘/桌面歌词/任务栏降级无注入/设置持久化） | `PASS 6 / SKIP 0 / FAIL 0`；引用既有测试与源码锚点，**不复制断言逻辑** |
-| `npm run test:browser` | AMLL 面板/背景在**真 Chromium** 里的 DOM 与像素断言 | `PASS 7 / SKIP 0 / FAIL 0`；无 Chromium = **FAIL**，不静默跳过 |
-| `cd src-tauri; cargo test` | Rust 侧单元 + 集成测试 | `194 passed / 0 failed / 1 ignored` |
+| `npm test` | Node 侧功能与契约测试 | fail 0 / skipped 0（跳过的测试不算验过） |
+| `npm run typecheck` | `tsc --noEmit` | 退出码 0 |
+| `npm run test:acceptance` | 六条关键路径（登录门禁、代理、托盘、桌面歌词、任务栏歌词降级与无注入、设置持久化） | PASS 6 / SKIP 0 / FAIL 0 |
+| `npm run test:browser` | 界面在真 Chromium 里的 DOM 与像素断言 | PASS N / SKIP 0 / FAIL 0；没有 Chromium 判 FAIL，不静默跳过 |
+| `cd src-tauri; cargo test` | Rust 单元与集成测试 | 0 failed（1 条 DPAPI 端到端用例默认 ignored） |
 
-`cargo test` 的 **1 个 ignored** 是 R5 那条半程端到端 DPAPI 用例（sidecar 发起方在 R7，
-当前形态不是完整端到端）；用 `cargo test -- --ignored` 手动跑。
-
-### TEMP 环境说明（本机沙箱限制，不是代码问题）
-
-受限会话里 `%TEMP%` 落在不可删的目录下，esbuild/vite/tauri 清理自己的临时文件时会报
-`Access is denied`。打包脚本**对子进程**把 `TEMP`/`TMP` 指向仓内 `.tmp/temp`（已 gitignore），
-**不改用户环境变量**；手动跑 `vite build` 时如果撞上同一个报错，照这个方向处理即可。
-CI 的 runner 自带可写 TEMP，不受影响。
+浏览器守卫用的是合成账号与夹具数据，不能当作个人账号的验证证据。当前基线数字见 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)。
 
 ---
 
-## 5. 架构与四条安全边界
+## 项目结构
+
+| 目录 | 职责 |
+|---|---|
+| `src/renderer/` | 渲染层（React + shadcn/ui + AMLL）。只经 `host-api.ts` 的白名单封装调用宿主，拿不到任何凭据 |
+| `src/sidecar/` | sidecar 入口（打包为 Node SEA：`hwmusic-core`） |
+| `src/main/` | sidecar 业务：登录与会话、音乐接口、歌词、设置、代理 |
+| `src/host/` | sidecar 与宿主之间的帧协议与频道分发 |
+| `src/protocols/` | 协议层：OAuth、二维码登录、播放地址白名单等 |
+| `src/shared/` | 命令名、频道名与常量的唯一真源（Rust 侧是镜像副本，由 parity 测试互钉） |
+| `src-tauri/` | Rust 外壳：窗口、托盘、桌面歌词窗、任务栏歌词、登录子窗、DPAPI、代理装配 |
+| `test/` | Node 测试（`node --test`） |
+| `scripts/` | 构建、打包、验收、浏览器守卫与只读探针脚本 |
+| `docs/` | 接口契约、实现状态、已知限制、平台差异、打包说明 |
+| `build/` | 应用与托盘图标（由 `scripts/make-icon.mjs` 从 Lucide 生成） |
+
+---
+
+## 架构与安全边界
 
 ```
-┌─ 渲染层（WebView2 / React）───────── 无凭据、无对外 fetch、CSP 收紧
-│    window.desktop.core_call(channel, payload)   ← 唯一业务通道（频道白名单）
+┌─ 渲染层（WebView2 / React）─────────── 无凭据、不对外发请求、CSP 收紧
+│    host-api.ts（白名单方法）
 └──────────────┬──────────────────────────────────────────────
-               │ Tauri IPC（core_call / core_renderer_ready / core_* 命令）
-┌──────────────▼─ Rust 外壳（src-tauri）── 建窗、托盘、歌词窗、登录窗、DPAPI、代理装配
-│    require_main_window 来源守卫 + 频道准入 + 事件信封唯一构造点
+               │ Tauri IPC（core_call 与具名 core_* 命令，按 webview label 守卫）
+┌──────────────▼─ Rust 外壳（src-tauri）── 窗口、托盘、歌词窗、登录子窗、DPAPI、代理装配
 └──────────────┬──────────────────────────────────────────────
-               │ NDJSON 帧（stdin/stdout；日志一律 stderr）
-┌──────────────▼─ sidecar `hwmusic-core`（Node SEA）─ 设置、代理、OAuth、业务 HTTP
-│    undici ProxyAgent；凭据只活在这里的内存与 DPAPI 信封里
+               │ NDJSON 帧（stdin / stdout；日志走 stderr）
+┌──────────────▼─ sidecar hwmusic-core（Node SEA）── 设置、代理、OAuth、业务 HTTP
 └─────────────────────────────────────────────────────────────
 ```
 
-| # | 边界 | 落点（可核对） |
-|---|---|---|
-| 1 | **凭据只在 sidecar / Rust** | 渲染层拿不到 Token；业务 HTTP 只在 sidecar 侧；`auth:status` 载荷里没有账号标识（不为显示扩协议） |
-| 2 | **登录页零权限、零注入** | 登录窗独立子 webview + 独立数据目录；`capabilities/main.json` 只给 main，`lyrics.json` 只给 lyrics 事件/自窗拖动；不订阅 `initialization_script`/`eval`，白名单与回调只靠导航事件观测 |
-| 3 | **不放宽任何安全开关** | `tauri.conf.json` 的 CSP 收紧（`connect-src` 只有 `'self' ipc: http://ipc.localhost`；`object-src 'none'`；`base-uri 'none'`；`frame-ancestors 'none'`）；不关 webSecurity、不放宽 TLS、不注册全局 `hms://` 协议、不改系统代理 |
-| 4 | **不注入 DLL、不装全局 Hook、不改 Explorer 按钮** | 托盘用 Tauri `tray-icon`；Windows Beta 仅新原生模块可对精确自窗 SetParent，foreign HWND 只读。全树扫描仍禁 DLL/Hook，例外钉死到文件与符号集合 |
-
-关键实现事实：
-
-- **sidecar 生命周期**：stdin EOF → 收尸并 `exit(0)`；双向收尸不依赖单侧 kill。
-- **建窗必须 async**：`WebviewWindowBuilder::build` 内部要走一趟主线程往返，同步命令自己站在主线程上等它 = 死锁（旧仓结论，沿用）。
-- **启动期提示必须排队**：Rust 的 `NoticeQueue` 等到 `core_renderer_ready` 才冲刷，否则「已登录」「代理来自环境变量」这类事实会发进空气。
-- **单一真源 + 跨语言互钉**：频道名、命令名、常量（`LOGIN_VIEW_TOP_INSET`、期限、字号档位…）各有唯一真源文件，Rust 侧是**刻意的镜像副本**，由 parity 测试扫源码钉住集合相等。
+1. **凭据只在 sidecar 与 Rust**：渲染层拿不到 Token，业务 HTTP 只在 sidecar 里发；凭据只活在 sidecar 内存与 DPAPI 信封里。
+2. **登录页零权限、零注入**：官方登录页在独立子 webview 里（独立数据目录，不进任何 capability），不给官方页注入脚本，白名单与回调只靠导航事件观测。
+3. **不放宽安全开关**：CSP 的 `connect-src` 只有 `'self' ipc: http://ipc.localhost`，`object-src`、`base-uri`、`frame-ancestors` 均为 `'none'`；不关 webSecurity，不放宽 TLS 校验，不注册全局 `hms://` 协议，不改系统代理。
+4. **不注入、不 Hook**：不注入 DLL、不装全局 Hook、不改 Explorer 按钮；任务栏歌词只对本应用自己的窗口调用 `SetParent`，对其它窗口只读。全源码扫描禁用系统钩子与注入类 API，例外钉死到文件与符号。
 
 ---
 
-## 6. 数据与隐私
+## 数据与隐私
 
 | 落点 | 内容 | 保护 |
 |---|---|---|
-| 应用数据目录 | `<数据根>/` | 数据根三级解析：`HWMUSIC_DATA_DIR` 旋钮 → 应用数据目录 → 应用缓存目录；**绝不回退 cwd**（打包后当前目录不可预测） |
-| `<数据根>/settings.json` | 设置（含**代理密码明文**） | 0600 尽力而为 + 用户目录 ACL；形状不认识就当「没配」，**认不出的文件绝不覆盖** |
-| `<数据根>/session.enc` | 音乐会话（唯一的落盘凭据） | Windows DPAPI 加密信封；0600 + 临时文件 + rename 原子写；且**跨用户/跨机器必然解不开**（DPAPI 的设计意图） |
-| `<数据根>/webview2/{main,login/<partition>,lyrics}` | 各窗独立 webview 数据目录 | 主窗与子窗**不共用**（共用会被 WebView2 的库锁互相踩） |
-| 内存 | 账号 AT/RT、音乐会话 | 只在 sidecar 内存与 DPAPI 信封里；**不落盘、不进日志** |
+| 数据目录 | 默认 `%APPDATA%\org.hwmusicdesktop.unofficial.internal`；可用 `HWMUSIC_DATA_DIR` 覆盖 | 只按「旋钮 → 应用数据目录 → 应用缓存目录」解析，绝不回退当前目录 |
+| `session.enc` | 音乐会话（唯一落盘的凭据） | Windows DPAPI 加密信封，换用户或换机器解不开；临时文件 + rename 原子写 |
+| `settings.json` | 设置，**含代理密码明文** | 0600 尽力而为 + 用户目录 ACL；认不出的文件绝不覆盖 |
+| `lyrics-cache/`、`lyrics-local/` | 在线歌词缓存（90 天）与本地导入的歌词 | 设置页可查看占用、一键清除 |
+| `webview2/` | 各窗口独立的 WebView2 数据目录 | 主窗与登录子窗不共用 |
+| 运行日志 | 设置页可查看；Info 级，单文件 4MB | 不记播放地址、登录 URL 与代理凭据；界面只显示必要提示，调试信息只进日志 |
 
-**日志红线（`tauri-plugin-log`，Info / KeepOne / 4MB）**：
-
-- 播放地址**不写日志、不落盘、不缓存、不进状态**（可能带时效签名）；
-- 代理凭据**绝不进日志/错误文案**；webview 侧只允许出现 `host:port`（Chromium 的 `--proxy-server` 不接受内联凭据，凭据在那里就被丢弃并报告）；
-- 登录 URL 不进日志（旧仓把整段 URL 打进日志 = 把一次性凭据抄进日志文件）；
-- 面内错误只带域名或结构化类别，不回显整段响应体；
-- 界面提示克制：调试信息、请求细节、堆栈进日志，**不进 UI**。
-
-**探针（`scripts/probe-*.mjs`）**：只碰公开资源，**不登录任何账号、不读取任何私人凭据、不写 cookie**；
-两条红线（不落响应正文、敏感参数值打码）由 `test/probe-lib.test.mjs` 钉住；产物落 `.probe/`（已 gitignore）。
-
-**不打包、不提交**：`.local/`（真实账号凭据/音乐库数据）、`.tmp/`、`.probe/`、`research/`、`out/`、`src-tauri/target/`、`src-tauri/binaries/`。
-`check:nsis` 里有一条专门校验：bundle 配置与暂存目录都不得含 `.local`/`research`。
+- **第三方歌词回退**：华为音乐取不到歌词时，会把歌名、歌手与时长发给酷狗音乐与 LRCLIB 检索歌词，不带任何本项目的凭据、账号标识或会话。
+- **只读探针**（`scripts/probe-*.mjs`）：只访问公开资源，不登录任何账号、不读取私人凭据。
+- 真实账号凭据与音乐库数据（`.local/`）、本地研究材料（`research/`）不提交、不打包；`check:nsis` 有一条专门校验安装包里不含它们。
 
 ---
 
-## 7. 已知限制（摘要，完整清单见 KNOWN_LIMITATIONS）
+## 已知限制（摘要）
 
-**一切未实测的项都在 [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) 逐条列着，共 62 条**（分七组：授权与联调、真窗与运行期、平台、功能边界、设计口径、工具链、文档交付）。最要紧的几条：
+完整清单逐条列在 [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md)。最要紧的几条：
 
-1. **真实账号扫码登录没有实测**（需要真实账号 + 用户在场授权）。回调成功链只在注入式测试里验过。
-2. **真实音乐业务端点全部未知**（K1 风险未消除）。所以收藏/搜索/歌单/专辑/歌手/历史/播放地址/歌词
-   在真实环境里回的都是结构化的「接口尚未配置（待联调确认）」——**这是如实，不是坏了**。
-   代码坚持**端点注入式**，不写任何猜测 URL。
-3. **`loginex`（账号 AT → 音乐会话）端点已确认（R17），但「有效 AT 换到真会话」的往返仍未实测**
-   （要真人授权扫码）。端点 URL / 请求体 / Digest 头形状有公开证据，端点存在性经本机实测
-   （405 / 对照 404 / 无效 AT → 200 + 业务码）；证据分级见 `docs/API_CONTRACT.md` §1.5.1。
-   实现落点 `src/main/music-session.mjs`；端点被显式注入 `null` 时仍回结构化「待联调」，**一次请求都不发**。
-4. **真实窗口视觉在 R17 起已自动验收**：`HWMUSIC_DATA_DIR` + `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`
-   起真窗，`npm run verify:live` 经 CDP 断言门禁页（二维码墨迹/定位图案/恰一个常驻入口/零 console error）。
-   R19 起守卫在断言前先**等门禁进 QR 档**（轮询画布与状态行）：渲染层挂载时会主动查一次
-   `auth:get-status`，所以重新加载之后门禁也能回到二维码那一档。
-   **仍未人工目视**：托盘点击、歌词窗透明/置顶/点透、媒体键手感。
-5. **Linux / macOS 未实测，本仓不宣称支持**。Windows 之外的构建在本机不参与编译（`#[cfg(windows)]`/`#[cfg(target_os)]` 分支），
-   Linux 打包未做过，macOS 只配了 `macos-proxy`（且仅 14+ 生效）。差异细节见 [docs/PLATFORM_DIFFERENCES.md](docs/PLATFORM_DIFFERENCES.md)。
-6. **Windows 任务栏歌词为 Beta**：自窗内嵌依赖 Shell 私有窗口结构；已在本机单屏 1920×1080 / dpi 96 用正常完整性副本真实验证父子关系（`GetParent(歌词窗) == Shell_TrayWnd`）、槽位内像素变化而任务栏按钮区 0 变化、`WindowFromPoint` 不命中本应用、切回桌面与退出无残留。多屏、高 DPI、自动隐藏、`TaskbarCreated` 重建、长时间 z-order 未验；Linux/macOS 不支持。始终禁止 DLL/全局 Hook/修改 Explorer 按钮/系统进程 kill。
-7. **安装包未签名、未实际执行安装**：`check:nsis` 只做静态校验；CI 未在 GitHub 上真跑过一遍。
-8. **歌词窗配置会保存**，若数据根不可写，设置页显示未保存与重试；窗口位置不作为配置保存。旧仓数据迁移仍不做。
+1. **只在 Windows 上构建与验证过**。Linux 与 macOS 没有构建过，本项目不宣称支持。
+2. **安装包未签名**；`check:nsis` 只做静态校验，没有在干净机器上做过安装与卸载测试。
+3. **华为音乐没有公开接口文档**：登录与业务接口对齐的是非官方参考实现与实测结果，官方调整随时可能让它失效。
+4. **任务栏歌词是 Beta**：只在单屏 1920×1080、100% 缩放上真机验证过，多屏、高 DPI、任务栏自动隐藏没有验证。
+5. **不少界面改动只在代码级与无头浏览器里验证过**，真实窗口里的观感仍需人工确认，例如沉浸页收起标题栏后的边缘缩放与 Snap 布局。
+6. **会话到期**：启动时已到期会回到扫码页并说明原因（真机验证过）；运行中到期时，要等下一次业务请求才回到扫码页，没有后台定时检查。服务端若在到期之前提前作废会话，客户端无法察觉。
+
+---
+
+## 参考项目与致谢
+
+本项目参考、改编或直接使用了下列项目。参考关系如实列出；第三方组件的许可证与归属见 [NOTICE](NOTICE)。
+
+**参考实现与设计参考**
+
+| 项目 | 地址 | 本项目参考了什么 |
+|---|---|---|
+| talongao/huawei-music-desktop | https://github.com/talongao/huawei-music-desktop | 华为音乐第三方客户端（学习版）。本项目的登录链路（OAuth 授权与 token 端点、`loginex` 换取音乐会话）、业务接口的请求与响应形状、播放地址的 CDN 白名单，都对齐这个参考实现的实测值，见 [docs/API_CONTRACT.md](docs/API_CONTRACT.md) |
+| ANYNC/TaskbarLyrics | https://github.com/ANYNC/TaskbarLyrics | Windows 任务栏歌词：自窗附着、UIA 占用快照与安全空白布局改编自其固定提交 `bd746ff87a2d4d20543a7e91654ef09675a93c5b`（MIT，许可证全文见 NOTICE）；不包含其修改 Explorer 任务列表尺寸的算法 |
+| Mai-icy/Spotify-lyrics-window | https://github.com/Mai-icy/Spotify-lyrics-window | 桌面歌词窗的设计参考：横版与竖排显示、样式自定义、悬浮窗交互 |
+| Apple Music-like Lyrics（AMLL） | https://github.com/amll-dev/applemusic-like-lyrics ，文档 https://amll.dev/guides | 歌词播放器、沉浸页布局、封面与背景渲染直接使用其官方组件（AGPL-3.0-only） |
+| shadcn/ui | https://ui.shadcn.com ，https://github.com/shadcn-ui/ui | 全部界面组件来源（生成在 `src/renderer/components/ui/`） |
+
+**运行时会访问的第三方服务**
+
+| 服务 | 地址 | 用途 |
+|---|---|---|
+| 酷狗音乐 | https://www.kugou.com | 华为音乐取不到歌词时的回退来源之一 |
+| LRCLIB | https://lrclib.net | 华为音乐取不到歌词时的回退来源之一 |
+
+**主要依赖**
+
+| 依赖 | 地址 | 用途 |
+|---|---|---|
+| Tauri 2 | https://tauri.app ，https://github.com/tauri-apps/tauri | 桌面外壳与官方插件（single-instance、window-state、global-shortcut、notification、autostart、log） |
+| React | https://react.dev | 渲染层 |
+| Vite | https://vite.dev | 渲染层构建 |
+| TypeScript | https://www.typescriptlang.org | 类型检查 |
+| Tailwind CSS | https://tailwindcss.com | 样式工具类与设计令牌 |
+| Radix UI | https://www.radix-ui.com | shadcn/ui 的无障碍原语 |
+| Lucide | https://lucide.dev | 图标；应用与托盘图标由 `scripts/make-icon.mjs` 从 Lucide 生成（归属见 `build/icon.LICENSE.txt`） |
+| sonner | https://github.com/emilkowalski/sonner | 提示条（shadcn/ui 的 Toaster） |
+| next-themes | https://github.com/pacocoursey/next-themes | 提示条跟随主题 |
+| node-qrcode | https://github.com/soldair/node-qrcode | 登录二维码渲染（本项目不手写二维码编码） |
+| PixiJS | https://pixijs.com | AMLL 背景渲染 |
+| Motion | https://motion.dev | AMLL 布局动效，尊重系统的「减少动态效果」设置 |
+| Jotai | https://jotai.org | AMLL 的状态库 |
+| undici | https://undici.nodejs.org | sidecar 的 HTTP 客户端与代理 |
+| Node.js 单文件可执行程序（SEA） | https://nodejs.org/api/single-executable-applications.html | sidecar 打包 |
+| NSIS | https://nsis.sourceforge.io | Windows 安装包 |
+| Microsoft Edge WebView2 | https://developer.microsoft.com/microsoft-edge/webview2/ | Windows 上的 webview 运行时 |
 
 ---
 
 ## OAuth 身份声明（必须读）
 
-登录链路使用 `client_id = 101444301`（`redirect_uri = hms://redirect_uri`，`scope = openid`，
-`access_type = offline`，PKCE S256）。
+登录链路使用 `client_id = 101444301`、`redirect_uri = hms://redirect_uri`、`access_type = offline`，授权码 + PKCE（S256）；scope 清单见 [docs/API_CONTRACT.md](docs/API_CONTRACT.md) §1.1。
 
-- 这个身份**不是本项目注册的**，极可能是**华为音乐官方 App 的 OAuth 身份**；
+- 这个身份**不是本项目注册的**，沿用自参考实现，极可能是华为音乐官方 App 的 OAuth 身份；
 - 本项目**不持有**该身份的任何凭据，也**没有被授权使用它**；
-- 该身份**随时可能失效**（官方改配置、下线 v3 端点、换区域主机都会让它失效）；
-- 本项目**不做**「修身份式重试」（不尝试伪造、轮换或猜测其它 client id）；
-- 唯一证据等级：token 端点对一个**无效**授权码回了「授权码无效」而不是「客户端未注册」——
-  这只是「身份被受理」的**弱证据**，**不等于**身份被授权使用。详见
-  [docs/API_CONTRACT.md](docs/API_CONTRACT.md) §1.1/§1.3。
-
-## 免责声明
-
-1. **非官方**：本项目是第三方独立实现，与华为及其关联公司没有任何隶属、合作或代理关系，
-   不是官方发布物；华为音乐、华为帐号等一切官方权利归官方所有。
-2. **未签名**：发布物没有代码签名证书，Windows SmartScreen 会提示「未知发布者」。
-   这不是被篡改的证据，但**也没有任何东西替你担保这个文件**——请用同一 Release 里的
-   `SHA256SUMS` 自己核一遍（`certutil -hashfile <安装包> SHA256`）。
-3. **OAuth 身份不属于本项目**：见上一节。登录凭据只落本机（DPAPI 保护的会话信封），
-   不进发布物、不进 CI。
-4. **按现状提供（AS IS）**：本项目不提供任何担保。因使用本项目产生的账号风险、
-   数据风险或其它后果，由使用者自行承担。请自行确认你的使用方式符合当地法律与官方条款。
-5. **AGPL 完整源码**：本项目以 AGPL-3.0-only 授权，对应版本的完整源码须随 Release 提供。
-   当前仓库尚未配置 remote，CI 发布说明里的源码地址是**占位符**，发布前必须替换为真实地址。
-
-## 许可
-
-- 本项目源代码：**GNU Affero General Public License v3.0 only（AGPL-3.0-only）**，全文见 [LICENSE](LICENSE)。
-- 第三方组件归属与各自许可证：见 [NOTICE](NOTICE)（Tauri、React、Vite、TypeScript、Tailwind、shadcn/ui、
-  radix-ui、cva、AMLL、Lucide、undici、Node.js）。图标归属见 `build/icon.LICENSE.txt`。
-- 注意：AMLL（`@applemusic-like-lyrics/*`）是 **AGPL-3.0-only**。以二进制形式分发本项目时，
-  须一并保留 `NOTICE` 与相应许可证文本。
+- 该身份**随时可能失效**（官方改配置、下线端点或换主机都会让它失效）；
+- 本项目**不做**「修身份式重试」：不伪造、不轮换、不猜测其它 client id；
+- 能扫码登录成功，只说明这个身份目前被受理，**不等于**本项目获得了使用授权。
 
 ---
 
-## 文档索引
+## 免责声明
+
+1. **非官方**：本项目是第三方独立实现，与华为及其关联公司没有任何隶属、合作或代理关系，不是官方发布物；华为音乐、华为帐号等一切官方权利归官方所有。
+2. **未签名**：安装包没有代码签名证书，SmartScreen 会提示「未知发布者」。这不是被篡改的证据，但也没有任何东西替你担保这个文件，请用同一 Release 里的 `SHA256SUMS` 自己核对。
+3. **OAuth 身份不属于本项目**：见上一节。登录凭据只落本机（DPAPI 保护的会话信封），不进发布物，不进 CI。
+4. **按现状提供（AS IS）**：本项目不提供任何担保。因使用本项目产生的账号风险、数据风险或其它后果由使用者自行承担；请自行确认你的使用方式符合当地法律与官方条款。
+
+---
+
+## 许可
+
+- 本项目源代码以 **GNU Affero General Public License v3.0 only（AGPL-3.0-only）** 授权，全文见 [LICENSE](LICENSE)。完整源码在 https://github.com/Solathis/HWMusic ，每个 Release 的发布说明都给出它对应提交的源码地址。
+- 第三方组件的归属与各自许可证见 [NOTICE](NOTICE)；图标归属见 `build/icon.LICENSE.txt`。
+- AMLL（`@applemusic-like-lyrics/*`）同样是 AGPL-3.0-only。以二进制形式分发本项目时，须一并保留 `NOTICE` 与相应许可证文本。
+
+---
+
+## 文档
 
 | 文档 | 内容 |
 |---|---|
-| [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) | 每个任务与每项能力的档位（verified / in-progress / pending / untested）+ 证据指向 |
-| [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) | 全部未验证项与已知限制，逐条（含"谁的边界、谁来验"） |
-| [docs/API_CONTRACT.md](docs/API_CONTRACT.md) | 接口事实与协议的**唯一真源**：OAuth 端点与证据、业务端点登记（全部待确认）、频道/命令契约、常量位置、红线、变更记录 |
-| [docs/PLATFORM_DIFFERENCES.md](docs/PLATFORM_DIFFERENCES.md) | 三端（Windows/Linux/macOS）能力差异、capability 权限清单、托盘/代理/窗口/快捷键/任务栏歌词 |
-| [docs/RUN_AND_PACKAGING.md](docs/RUN_AND_PACKAGING.md) | 打包链为什么这么排、`smoke:build` 三种结论、CI 17 步与几条不能改的规矩 |
-| [docs/superpowers/plans/2026-10-18-full-rebuild-from-zero.md](docs/superpowers/plans/2026-10-18-full-rebuild-from-zero.md) | 过程文档：本次从零重建的实施计划（Global Constraints 是硬边界的真源） |
-| [.superpowers/sdd/…/](.superpowers/sdd/2026-10-18-full-rebuild-from-zero/) | 过程文档：R0–R15 的任务简报与实现报告（未入库，仅在本地工作树） |
-
-**日志与报告**：`.superpowers/` 与 `.tmp/` 已 gitignore，属本机过程资料，不在发布物内。
+| [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) | 每项能力的档位（verified / untested 等）、证据与当前测试基线 |
+| [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) | 全部未验证项与已知限制，逐条列出 |
+| [docs/API_CONTRACT.md](docs/API_CONTRACT.md) | 接口事实与协议的唯一真源：OAuth、业务端点、频道与命令契约、常量、红线 |
+| [docs/PLATFORM_DIFFERENCES.md](docs/PLATFORM_DIFFERENCES.md) | Windows / Linux / macOS 的能力差异与 capability 权限清单 |
+| [docs/RUN_AND_PACKAGING.md](docs/RUN_AND_PACKAGING.md) | 打包链为什么这么排、`smoke:build` 的三种结论、CI 规矩 |
+| [docs/superpowers/plans/2026-10-18-full-rebuild-from-zero.md](docs/superpowers/plans/2026-10-18-full-rebuild-from-zero.md) | 本次从零重建的实施计划（过程文档） |

@@ -31,6 +31,11 @@ Copyright (C) 2026 本项目作者
 - react-toastify（AMLL full 声明的依赖，应用不新增通知状态机）—— MIT
 - @ungap/structured-clone（AMLL 声明的依赖）—— ISC
 - Lucide 图标（lucide-react）—— ISC
+- node-qrcode（qrcode；登录二维码渲染）—— MIT
+- PixiJS（@pixi/*；AMLL 背景渲染）—— MIT
+- sonner（shadcn/ui 的提示条）—— MIT
+- next-themes（提示条跟随主题）—— MIT
+- cn（shadcn/ui 的类名合并工具）—— MIT
 - undici —— MIT
 - Node.js —— MIT
 
