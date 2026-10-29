@@ -16,8 +16,8 @@
 
 安装包只经 [GitHub Releases](https://github.com/Solathis/HWMusic/releases) 发布，不另设网盘或其它下载渠道。
 
-1. 从 Release 下载 `华为音乐第三方客户端_<版本>_x64-setup.exe` 与 `SHA256SUMS`。
-2. 核对哈希：`certutil -hashfile 华为音乐第三方客户端_<版本>_x64-setup.exe SHA256`，结果应与 `SHA256SUMS` 里对应的那一行一致。
+1. 从 Release 下载 `HWMusic_<版本>_x64-setup.exe` 与 `SHA256SUMS`。文件名用英文，是因为 GitHub 会删掉资产名里的中文；安装后的应用名仍是「华为音乐第三方客户端」。
+2. 核对哈希：`certutil -hashfile HWMusic_<版本>_x64-setup.exe SHA256`，结果应与 `SHA256SUMS` 里那一行一致。
 3. 运行安装包。SmartScreen 拦下时点「更多信息」→「仍要运行」。机器上没有 WebView2 运行时的话，安装程序会联网下载安装。
 
 只在 Windows x64 上构建和验证过；Linux 与 macOS 没有构建过，本项目不宣称支持。
@@ -94,10 +94,11 @@ npm run dev:web    # 只起渲染层（没有宿主能力，适合改界面）
 | `npm run dist:win` | 上面两步 + `tauri build`（NSIS）+ mtime 新鲜度检查，产物在 `src-tauri/target/release/bundle/nsis/` |
 | `npm run check:nsis` | 对安装包与暂存目录做静态校验（不执行安装包） |
 | `npm run release:checksums` | 写 `SHA256SUMS` |
+| `npm run release:assets` | 把安装包复制成英文文件名 `HWMusic_<版本>_x64-setup.exe`，连同只含它的 `SHA256SUMS` 放进 `bundle/release-assets/`；Release 上传的就是这两个文件 |
 
 `tauri.conf.json` 的 `beforeBuildCommand` 有意留空，原因、mtime 检查的口径与 CI 的规矩见 [docs/RUN_AND_PACKAGING.md](docs/RUN_AND_PACKAGING.md)。
 
-**CI**（`.github/workflows/windows-nsis.yml`，windows-latest）：依赖安装 → 取参考实现（固定提交）→ 单元测试 → 类型检查 → 验收六路径 → 浏览器守卫 → Rust 测试 → 打包 → 安装包静态校验 → 校验和。推 `main` 只保留构建产物；推 `v*` 标签额外创建 GitHub Release，附安装包与 `SHA256SUMS`，发布说明写明未签名、非官方、OAuth 身份不属于本项目，并给出对应提交的完整源码地址。
+**CI**（`.github/workflows/windows-nsis.yml`，windows-latest）：依赖安装 → 取参考实现（固定提交）→ 单元测试 → 类型检查 → 验收六路径 → 浏览器守卫 → Rust 测试 → 打包 → 安装包静态校验 → 校验和 → 发布用资产（英文文件名）。推 `main` 只保留构建产物；推 `v*` 标签额外创建 GitHub Release，附英文文件名的安装包与 `SHA256SUMS`，发布说明写明未签名、非官方、OAuth 身份不属于本项目，并给出对应提交的完整源码地址。
 
 ---
 

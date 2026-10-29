@@ -307,10 +307,10 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
 
 | # | 项 | 档位 | 说明 |
 |---|---|---|---|
-| F1 | **CI 没有在 GitHub 上真跑过一遍** | untested | 本机无 runner、无仓库 remote、不联网推 CI。workflow 的 YAML 用真解析器验过（`yaml.safe_load` → 17 步），每条外部命令都显式查 `$LASTEXITCODE`，顺序由 5 条契约测试钉住——但**首次 push 后用它的日志回填**才算验过 |
+| F1 | **CI 没有在 GitHub 上真跑过一遍** | in-progress | 本机无 runner、无仓库 remote、不联网推 CI。workflow 的 YAML 用真解析器验过（`yaml.safe_load` → 17 步），每条外部命令都显式查 `$LASTEXITCODE`，顺序由 5 条契约测试钉住——但**首次 push 后用它的日志回填**才算验过。**更正（2026-10-29）**：已推到 Solathis/HWMusic，在 GitHub 上跑过三次。第一次单元测试失败（差分测试缺参考实现，按缺席跳过 6 条，`2d27c5b` 已修）；后两次从依赖安装到构建产物全部通过，浏览器守卫在运行器上失败（无头 Chromium 里有渲染断言失败，随后 `waitForFunction` 超时），之后的 Rust 测试、打包与发布都被跳过。v0.2.0 因此是维护者本机构建、手动发布的 |
 | F2 | **NSIS 安装包没有真正执行过安装** | untested（**按设计**） | `check:nsis` 只做**静态**校验（装一次要写系统目录、注册表、开始菜单，还会拉起 WebView2 安装器，在 CI 里等于给每个 PR 装一次应用）。**未验**：装 / 卸载 / 快捷方式 / WebView2 引导流程 |
 | F3 | **发布物未做代码签名** | verified（已知事实） | Windows SmartScreen 会提示"未知发布者"。这不是被篡改的证据，但也没有任何东西替你担保这个文件——请用同一 Release 的 `SHA256SUMS` 自查 |
-| F4 | **CI 发布说明里的源码地址是占位符** | pending | 本仓 `git remote -v` 为空，没有真实地址可写。AGPL 要求拿到二进制的人能拿到对应源码，**发布前必须替换**为真实地址 |
+| F4 | **CI 发布说明里的源码地址是占位符** | verified（已修） | 本仓 `git remote -v` 为空，没有真实地址可写。AGPL 要求拿到二进制的人能拿到对应源码，**发布前必须替换**为真实地址。**更正（2026-10-29）**：`f03db42` 已改成 `${{ github.server_url }}/${{ github.repository }}/tree/${{ github.sha }}`，由 `test/release.test.mjs` 钉住；v0.2.0 的发布说明指向 `2d27c5b` 的源码树，匿名访问返回 200 |
 | F5 | **本机 `vite build` / `dist:*` 需要 `TEMP` 指向仓内** | verified（环境限制，非代码问题） | 受限沙箱里 `%TEMP%` 落在不可删的目录下，esbuild/vite/tauri 清理自己的临时文件时报 `Access is denied`。打包脚本**对子进程**把 `TEMP`/`TMP` 指向仓内 `.tmp/temp`（已 gitignore），**不改用户环境变量**；CI runner 自带可写 TEMP，不受影响 |
 | F6 | **仓库整体不是 rustfmt-clean** | verified（如实记） | `cargo fmt --check` 在 `bridge.rs` 等既有文件上就有 diff。**CI 里刻意不加 `cargo fmt --check`**（那会把多个任务的代码一起重排成一个大 diff）；新代码按现有风格手写 |
 | F7 | **`tauri build` 会规范化 `src-tauri/Cargo.toml`** | verified（工具行为） | 会把 `tauri-build = "2"` 写成 `tauri-build = { version = "2", features = [] }`（语义等价），**工作树会变脏**。下次在本机跑 `dist:win` 会再次出现 |

@@ -21,7 +21,8 @@
     "dist:sidecar": "node scripts/build-sidecar.mjs",
     "dist:win": "node scripts/dist-win.mjs",
     "check:nsis": "node scripts/check-nsis-package.mjs",
-    "release:checksums": "node scripts/release-checksums.mjs"
+    "release:checksums": "node scripts/release-checksums.mjs",
+    "release:assets": "node scripts/release-assets.mjs"
   },
   "dependencies": {
     "@applemusic-like-lyrics/core": "0.6.0",

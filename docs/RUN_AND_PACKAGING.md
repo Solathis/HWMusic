@@ -84,6 +84,7 @@ Node 的 SEA 嵌入入口**只认 CJS**，而 `src/sidecar/main.mjs` 有顶层 a
 ```powershell
 npm run check:nsis        # 对打包产物做静态校验（不执行安装包）
 npm run release:checksums # 生成 SHA256SUMS
+npm run release:assets    # 发布用资产：英文文件名的安装包 + 只含它的 SHA256SUMS
 npm run smoke:build       # 起一次真产物（PASS / FAIL / UNTESTED，见第 5 节）
 ```
 
@@ -96,6 +97,11 @@ npm run smoke:build       # 起一次真产物（PASS / FAIL / UNTESTED，见第
 `release:checksums` 写出 `<sha256>  <文件名>` 形状的 `SHA256SUMS`（按文件名排序，
 重跑不产生无意义 diff）。产物一个都没有时它**报错退出**，不写空清单——
 空的 `SHA256SUMS` 看起来像"校验过了"。
+
+`release:assets` 把安装包复制成英文文件名 `HWMusic_<版本>_x64-setup.exe`，连同只含它的 `SHA256SUMS`
+放进 `bundle/release-assets/`（每次先清空），Release 上传的就是这两个文件。原因是 GitHub 会删掉资产名里的中文：
+v0.2.0 草稿实测，中文名的安装包传上去成了 `_0.2.0_x64-setup.exe`。`productName` 不能因此改成英文：
+默认安装目录与卸载项注册表键都以它命名，改了会让新旧版本装进两个目录、留下两个卸载项。
 
 ## 4. 测试
 
@@ -135,7 +141,7 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
 顺序：`npm ci` → 取参考实现（固定提交）→ `npm run test`（断言 `fail 0` / `skipped 0`，计数从 `--test-reporter=tap` 读）
 → `typecheck` → 验收六路径 → 装 Chromium → `dist:sidecar` + `build:web`
 → `test:browser`（断言 `PASS N / SKIP 0 / FAIL 0`）→ `cargo test` → `dist:win` → `check:nsis`
-→ `release:checksums` → artifact（main 推送与标签都留）→ Release（**仅 `v*` 标签**）。
+→ `release:checksums` → `release:assets` → artifact（main 推送与标签都留）→ Release（**仅 `v*` 标签**，只传 `bundle/release-assets/` 里的两个文件）。
 
 几条不能改的规矩：
 
@@ -153,6 +159,11 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
   脚本与校验步骤都从这个目录读产物，否则步骤之间会各看各的目录。
 - 推 `main` 只构建 + 留 artifact；推 `v*` 标签才发 Release，发布说明带四句免责声明
   （未签名 / 非官方 / OAuth 身份不属于本项目 / AGPL 完整源码地址）。
+- 打包前先删 `bundle/`：缓存恢复的 `target` 里可能留着旧版本安装包，会让 `check:nsis` 的「恰好一个安装包」失败，
+  或者把旧包混进 Release。
+- CI 发不出 Release 时（v0.2.0 就是这样：浏览器守卫在 GitHub 运行器上没通过），维护者在标签对应的提交上本机跑
+  `dist:win` → `check:nsis` → `release:checksums` → `release:assets`，再用 `gh release create <标签> --draft`
+  上传 `bundle/release-assets/` 里的两个文件，核对资产名与哈希后再发布；发布说明照写四句免责，并注明不是 CI 构建的。
 
 ## 7. 本机环境限制（不假造然后说"验过了"）
 

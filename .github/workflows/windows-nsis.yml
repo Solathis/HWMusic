@@ -1,6 +1,6 @@
 # Windows 安装包流水线（NSIS）。触发：推 main = 构建 + 留 artifact（不发布）；推 v* 标签额外打 Release。
 # 口径（见 docs/RUN_AND_PACKAGING.md）：依赖安装 → 单元测试（fail 0 / skipped 0）→ 类型检查 → 验收六路径
-# → 浏览器守卫（PASS N / SKIP 0 / FAIL 0）→ Rust 测试 → 打包 → 安装包静态校验 → 校验和。
+# → 浏览器守卫（PASS N / SKIP 0 / FAIL 0）→ Rust 测试 → 打包 → 安装包静态校验 → 校验和 → 发布用资产（英文文件名）。
 # 每个 run 块都显式查 $LASTEXITCODE：pwsh 不会因原生命令非 0 自动失败，不查的话「步骤全绿」只是没人看退出码。
 # 命令之间不串 &&（npm 的 script-shell 可能是 PowerShell，语义会变且失败容易被吞）；
 # 工具都走仓内 `node node_modules/...` 直接路径（本机 PowerShell 也会拒包管理器的临时执行器：SecurityError）。
@@ -127,6 +127,8 @@ jobs:
       - name: 打包安装包（npm run dist:win）
         shell: pwsh
         run: |
+          # 缓存恢复的 target 里可能留着旧版本安装包：不清掉的话「恰好一个安装包」的校验会失败，旧包还可能混进 Release
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:CARGO_TARGET_DIR/release/bundle"
           npm run dist:win
           if ($LASTEXITCODE -ne 0) { Write-Error "npm run dist:win 失败（退出码 $LASTEXITCODE）"; exit 1 }
 
@@ -142,6 +144,14 @@ jobs:
           npm run release:checksums
           if ($LASTEXITCODE -ne 0) { Write-Error "npm run release:checksums 失败（退出码 $LASTEXITCODE）"; exit 1 }
           if (-not (Test-Path "$env:CARGO_TARGET_DIR/release/bundle/nsis/SHA256SUMS")) { Write-Error "SHA256SUMS 没写出来"; exit 1 }
+
+      # GitHub 会删掉资产名里的中文（v0.2.0 草稿实测），所以 Release 上传的是英文文件名的副本。
+      - name: 生成发布用资产（npm run release:assets）
+        shell: pwsh
+        run: |
+          npm run release:assets
+          if ($LASTEXITCODE -ne 0) { Write-Error "npm run release:assets 失败（退出码 $LASTEXITCODE）"; exit 1 }
+          if (-not (Test-Path "$env:CARGO_TARGET_DIR/release/bundle/release-assets/SHA256SUMS")) { Write-Error "release-assets 里没有 SHA256SUMS"; exit 1 }
 
       # 注：真窗冒烟（npm run smoke:build）不进 CI——它要一个交互式桌面会话，在无人值守的运行器上只会得到
       # UNTESTED，把「没测」写进绿色流水线比不写更糟。它是本地/发布前的人工步骤，口径见 docs/RUN_AND_PACKAGING.md。
@@ -161,8 +171,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/nsis/SHA256SUMS
+            src-tauri/target/release/bundle/release-assets/HWMusic_*.exe
+            src-tauri/target/release/bundle/release-assets/SHA256SUMS
           body: |
             ## 华为音乐第三方桌面客户端 ${{ github.ref_name }}（Windows / NSIS）
 
@@ -180,3 +190,5 @@ jobs:
             4. **AGPL 完整源码**：本项目以 AGPL-3.0-only 授权，**对应版本的完整源码**在
                ${{ github.server_url }}/${{ github.repository }}/tree/${{ github.sha }} 提供（本 Release 对应的提交）；
                AGPL 要求拿到二进制的人能拿到对应源码，所以这个链接必须指向本 Release 对应的提交。
+
+            安装包用英文文件名，是因为 GitHub 会删掉资产名里的中文；安装后的应用名仍是「华为音乐第三方客户端」。
