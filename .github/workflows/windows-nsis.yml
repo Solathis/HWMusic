@@ -55,6 +55,16 @@ jobs:
           npm ci
           if ($LASTEXITCODE -ne 0) { Write-Error "npm ci 失败（退出码 $LASTEXITCODE）"; exit 1 }
 
+      # 差分测试（test/reference-parity.test.mjs）逐字比对参考实现的源码：按 docs/API_CONTRACT.md 记录的固定提交取到 .tmp/reference-repo/，
+      # 不取的话那 6 条按缺席跳过，而下一步要求 skipped 0。.tmp/ 不进打包输入。
+      - name: 取参考实现（固定提交，供差分测试）
+        shell: pwsh
+        run: |
+          git clone --quiet https://github.com/talongao/huawei-music-desktop.git .tmp/reference-repo
+          if ($LASTEXITCODE -ne 0) { Write-Error "参考实现克隆失败（退出码 $LASTEXITCODE）"; exit 1 }
+          git -C .tmp/reference-repo checkout --quiet --detach 3fd67319fa4b4a10de00d6da7d88e4e52ebd8327
+          if ($LASTEXITCODE -ne 0) { Write-Error "参考实现检出固定提交失败（退出码 $LASTEXITCODE）"; exit 1 }
+
       - name: 单元测试（npm run test，断言 fail 0 / skipped 0）
         shell: pwsh
         run: |

@@ -132,7 +132,7 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
 
 ## 6. CI（`.github/workflows/windows-nsis.yml`）
 
-顺序：`npm ci` → `npm run test`（断言 `fail 0` / `skipped 0`，计数从 `--test-reporter=tap` 读）
+顺序：`npm ci` → 取参考实现（固定提交）→ `npm run test`（断言 `fail 0` / `skipped 0`，计数从 `--test-reporter=tap` 读）
 → `typecheck` → 验收六路径 → 装 Chromium → `dist:sidecar` + `build:web`
 → `test:browser`（断言 `PASS N / SKIP 0 / FAIL 0`）→ `cargo test` → `dist:win` → `check:nsis`
 → `release:checksums` → artifact（main 推送与标签都留）→ Release（**仅 `v*` 标签**）。
@@ -147,6 +147,7 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
 - `npm run test` 自己用 `node --test test/*.test.mjs` 这种**显式路径**，不用 `node --test` 的自动发现：
   自动发现会把 `scripts/test-browser.mjs`（命中 `test-*.mjs`）也当成测试文件跑掉，
   单元测试就悄悄依赖起浏览器了。
+- 差分测试（`test/reference-parity.test.mjs`）逐字比对参考实现的源码，所以 CI 在单元测试之前按 `docs/API_CONTRACT.md` 记录的固定提交把它克隆到 `.tmp/reference-repo/`：不取的话那 6 条按缺席跳过，`skipped 0` 就过不去。`.tmp/` 不进打包输入。
 - **命令之间不串 `&&`**（理由同第 2 节），也不引 `npx`：工具都走仓内直接路径。
 - `CARGO_TARGET_DIR` 的**唯一真源在 workflow 里**（`${{ github.workspace }}/src-tauri/target`）：
   脚本与校验步骤都从这个目录读产物，否则步骤之间会各看各的目录。

@@ -97,7 +97,7 @@ npm run dev:web    # 只起渲染层（没有宿主能力，适合改界面）
 
 `tauri.conf.json` 的 `beforeBuildCommand` 有意留空，原因、mtime 检查的口径与 CI 的规矩见 [docs/RUN_AND_PACKAGING.md](docs/RUN_AND_PACKAGING.md)。
 
-**CI**（`.github/workflows/windows-nsis.yml`，windows-latest）：依赖安装 → 单元测试 → 类型检查 → 验收六路径 → 浏览器守卫 → Rust 测试 → 打包 → 安装包静态校验 → 校验和。推 `main` 只保留构建产物；推 `v*` 标签额外创建 GitHub Release，附安装包与 `SHA256SUMS`，发布说明写明未签名、非官方、OAuth 身份不属于本项目，并给出对应提交的完整源码地址。
+**CI**（`.github/workflows/windows-nsis.yml`，windows-latest）：依赖安装 → 取参考实现（固定提交）→ 单元测试 → 类型检查 → 验收六路径 → 浏览器守卫 → Rust 测试 → 打包 → 安装包静态校验 → 校验和。推 `main` 只保留构建产物；推 `v*` 标签额外创建 GitHub Release，附安装包与 `SHA256SUMS`，发布说明写明未签名、非官方、OAuth 身份不属于本项目，并给出对应提交的完整源码地址。
 
 ---
 
@@ -110,6 +110,8 @@ npm run dev:web    # 只起渲染层（没有宿主能力，适合改界面）
 | `npm run test:acceptance` | 六条关键路径（登录门禁、代理、托盘、桌面歌词、任务栏歌词降级与无注入、设置持久化） | PASS 6 / SKIP 0 / FAIL 0 |
 | `npm run test:browser` | 界面在真 Chromium 里的 DOM 与像素断言 | PASS N / SKIP 0 / FAIL 0；没有 Chromium 判 FAIL，不静默跳过 |
 | `cd src-tauri; cargo test` | Rust 单元与集成测试 | 0 failed（1 条 DPAPI 端到端用例默认 ignored） |
+
+`test/reference-parity.test.mjs` 的 6 条差分测试逐字比对参考实现的源码：本机没有 `.tmp/reference-repo/` 时按缺席跳过，`npm test` 会报 skipped 6（不算验过）。要跑全，把 https://github.com/talongao/huawei-music-desktop 克隆到 `.tmp/reference-repo/`，再检出 [docs/API_CONTRACT.md](docs/API_CONTRACT.md) 记录的固定提交；CI 每次都这样取。
 
 浏览器守卫用的是合成账号与夹具数据，不能当作个人账号的验证证据。当前基线数字见 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)。
 
