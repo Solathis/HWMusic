@@ -548,7 +548,7 @@ test("命令名：歌词专命令共享真源、注册与最小 capability 一�
   assert.deepEqual(popupPermission.permissions, ["core:event:default"]);
   assert.doesNotMatch(JSON.stringify(popupPermission), /allow-start|allow-set-(size|position)|allow-close/, "弹出窗不许有窗口权限");
   const rust = rustProduction(rustSource("lyrics_window.rs"));
-  for (const [name, values] of [["LYRICS_LAYOUTS", ["horizontal","vertical"]], ["LYRICS_STYLES", ["clean","panel","bare"]], ["LYRICS_CONTROL_ACTIONS", ["toggle","previous","next"]]]) {
+  for (const [name, values] of [["LYRICS_LAYOUTS", ["horizontal","vertical"]], ["LYRICS_STYLES", ["clean","panel","bare"]], ["LYRICS_CONTROL_ACTIONS", ["toggle","previous","next","close"]]]) {
     const body = rust.match(new RegExp(`${name}[^=]*=\\s*&\\[([^\\]]+)\\]`))[1];
     assert.deepEqual([...body.matchAll(/"([^"]+)"/g)].map((match) => match[1]), values);
   }
@@ -1100,6 +1100,24 @@ test("歌词窗：官方 AMLL 渲染与受限命令，不调任意业务请求",
   // 视觉约束：不写 AMLL 变量、不拿色值拼样式
   assert.doesNotMatch(code, /--amll-/, "AMLL 变量只许出现在 amll-theme.css");
   assert.doesNotMatch(code, /style=\{\{/, "不许内联视觉样式（AMLL 100% 尺寸例外只有那两处宿主）");
+});
+
+test("R82 桌面歌词关闭键：控件行最右一枚 shadcn 图标按钮，经受限命令 close 关闭；锁定后不出现", () => {
+  const code = stripComments(read("src/renderer/LyricsWindow.tsx"));
+  assert.match(code, /import\s*\{[^}]*\bX\b[^}]*\}\s*from\s*"lucide-react"/, "关闭图标用 Lucide 的 X");
+  const row = code.slice(code.indexOf('data-testid="lyrics-controls"'));
+  const button = row.match(/<Button[^>]*aria-label="关闭桌面歌词"[^>]*>/)?.[0] ?? "";
+  for (const part of ['variant="ghost"', 'size="icon-sm"', 'data-testid="lyrics-close"', "onClick={closeLyrics}"]) {
+    assert.ok(button.includes(part), `关闭键缺 ${part}`);
+  }
+  assert.ok(row.indexOf("{appearanceButton}") < row.indexOf('aria-label="关闭桌面歌词"'), "关闭键排在控件行最右");
+  assert.match(code, /const closeLyrics = \(\) => \{\s*setActionError\(null\)\s*void coreLyricsControl\("close"\)\.catch\(\(\) => setActionError\("[^"]+"\)\)/,
+    "关闭走受限命令 close，失败有自己的一句话");
+  assert.doesNotMatch(code, /getCurrentWindow\(\)\.(close|hide|destroy)\(/, "不自己关窗：歌词窗没有关窗的窗口权限");
+  const locked = code.slice(code.indexOf("const lockedControls"), code.indexOf("const controls ="));
+  assert.ok(locked.includes("{lockButton}") && !locked.includes("关闭桌面歌词"), "锁定后只留解锁键");
+  const host = read("src/renderer/host-api.ts");
+  assert.match(host, /export async function coreLyricsControl\(action: "toggle" \| "previous" \| "next" \| "close"\)/);
 });
 
 test("歌词窗：data 属性全部来自纯逻辑模块（字号/颜色/模式/拖动/点透）", () => {

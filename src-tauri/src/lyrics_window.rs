@@ -212,7 +212,7 @@ pub const DEFAULT_TASKBAR_COLOR: &str = "foreground";
 
 pub const LYRICS_LAYOUTS: &[&str] = &["horizontal", "vertical"];
 pub const LYRICS_STYLES: &[&str] = &["clean", "panel", "bare"];
-pub const LYRICS_CONTROL_ACTIONS: &[&str] = &["toggle", "previous", "next"];
+pub const LYRICS_CONTROL_ACTIONS: &[&str] = &["toggle", "previous", "next", "close"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LyricsConfig {
@@ -912,7 +912,7 @@ pub fn require_lyrics_source(label: &str) -> Result<(), CoreError> {
     Err(CoreError::new("forbidden_source", "歌词配置仅接受主窗、歌词窗或设置弹出窗调用"))
 }
 
-/// 谁可以发歌词的**媒体控制**：只有主窗与歌词窗（弹出窗只改外观）。
+/// 谁可以发歌词的**媒体控制与关闭**：只有主窗与歌词窗（弹出窗只改外观）。
 pub fn require_lyrics_control_source(label: &str) -> Result<(), CoreError> {
     if [MAIN_WINDOW_LABEL, LYRICS_WINDOW_LABEL].contains(&label) {
         return Ok(());
@@ -972,7 +972,7 @@ pub fn control_payload(label: &str, payload: &Value) -> Result<Value, CoreError>
             }
         }
     }
-    Err(CoreError::new("invalid_payload", "歌词媒体控制仅接受 {action: toggle|previous|next}"))
+    Err(CoreError::new("invalid_payload", "歌词媒体控制仅接受 {action: toggle|previous|next|close}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1591,10 +1591,16 @@ pub async fn core_lyrics_configure(
     Ok(payload)
 }
 
+/// 歌词窗的三枚媒体键转成播放命令；`close` 与托盘「关闭桌面歌词」同一条路：先把托盘勾选改成不勾，再请主窗关歌词窗。
 #[tauri::command]
 pub async fn core_lyrics_control(app: AppHandle, webview: tauri::Webview, payload: Value) -> Result<Value, CoreError> {
     let command = control_payload(webview.label(), &payload)?;
-    emit_core_event(&app, crate::bridge::PLAYER_COMMAND, command);
+    if command["command"] == "close" {
+        crate::tray::revert_lyrics_checked(&app, false);
+        emit_core_event(&app, crate::bridge::LYRICS_TOGGLE, json!({ "checked": false }));
+    } else {
+        emit_core_event(&app, crate::bridge::PLAYER_COMMAND, command);
+    }
     Ok(Value::Null)
 }
 
@@ -2736,6 +2742,22 @@ mod tests {
             assert!(body.find(guard).unwrap() < 900);
         }
         assert_eq!(production.matches("#[tauri::command]").count(), 6);
+    }
+
+    #[test]
+    fn r82_close_action_reuses_the_tray_close_path() {
+        for source in [MAIN_WINDOW_LABEL, LYRICS_WINDOW_LABEL] {
+            assert_eq!(control_payload(source, &json!({"action": "close"})).unwrap(), json!({"command": "close"}));
+        }
+        assert!(control_payload(crate::LYRICS_SETTINGS_WINDOW_LABEL, &json!({"action": "close"})).is_err(), "弹出窗不能替用户关歌词");
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_window.rs")).unwrap();
+        let production = &source[..source.find("#[cfg(test)]").unwrap()];
+        let body = &production[production.find("pub async fn core_lyrics_control(").unwrap()..];
+        let body = &body[..body.find("\n}").unwrap()];
+        let revert = body.find("crate::tray::revert_lyrics_checked(&app, false)").expect("关闭先把托盘勾选改成不勾");
+        let toggle = body.find("crate::bridge::LYRICS_TOGGLE").expect("再请主窗关歌词窗（与托盘同一条广播）");
+        assert!(revert < toggle);
+        assert!(body.contains(r#""checked": false"#), "目标态是关");
     }
 
     // ---- 歌词配置持久化（Rust 拥有的保存任务）----------------------------------

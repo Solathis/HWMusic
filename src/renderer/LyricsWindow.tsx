@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } fr
 import { getCurrentWindow } from "@tauri-apps/api/window"
 // 缩放拖柄用 `MoveDiagonal2`：`GripDiagonal` 在钉住的 lucide-react 0.468.0 里不存在，且不新增依赖。
 // 对角双箭头正好是缩放手柄的形状。
-import { MoveDiagonal2, GripHorizontal, Lock, Unlock, Pause, Play, SkipBack, SkipForward, Settings2 } from "lucide-react"
+import { MoveDiagonal2, GripHorizontal, Lock, Unlock, Pause, Play, SkipBack, SkipForward, Settings2, X } from "lucide-react"
 
 import { LYRICS_DOCUMENT, LYRICS_POINTER, LYRICS_PROGRESS, LYRICS_STATE, THEME_CHANGED } from "../shared/channels.ts"
 import { coreLyricsConfigure, coreLyricsControl, coreLyricsSettingsOpen, coreLyricsUnlockZone, onCoreEvent, signalLyricsReady } from "./host-api"
@@ -261,6 +261,11 @@ export function LyricsWindow() {
     setActionError(null)
     void coreLyricsControl(action).catch(() => setActionError("媒体动作未能发出，请从主窗重试。"))
   }
+  /** 关闭与托盘「关闭桌面歌词」同一条受限路（歌词窗没有关窗的窗口权限）。 */
+  const closeLyrics = () => {
+    setActionError(null)
+    void coreLyricsControl("close").catch(() => setActionError("桌面歌词未能关闭，请从托盘或主窗关闭。"))
+  }
   /** 外观设置是另一扇独立小窗（`lyrics-settings`）：齿轮把自己客户区里的 DIP 矩形交给宿主，位置、尺寸、关闭全由 Rust 定。 */
   const openAppearance = (event: MouseEvent<HTMLButtonElement>) => {
     setActionError(null)
@@ -307,6 +312,8 @@ export function LyricsWindow() {
       </> : null}
       {lockButton}
       {appearanceButton}
+      <Button variant="ghost" size="icon-sm" aria-label="关闭桌面歌词" data-testid="lyrics-close"
+        onClick={closeLyrics}><X /></Button>
     </div>
   )
   /** 竖版（桌面模式）改由自渲染的单列承担，横版与任务栏仍是官方 `LyricPlayer`。 */

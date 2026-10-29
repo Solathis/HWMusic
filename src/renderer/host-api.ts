@@ -169,7 +169,8 @@ export async function coreLyricsConfigure(config: unknown, retrySave?: boolean):
   return invokeLyrics(CORE_LYRICS_CONFIGURE, retrySave === undefined ? { config } : { config, retrySave });
 }
 
-export async function coreLyricsControl(action: "toggle" | "previous" | "next"): Promise<unknown> {
+/** 歌词窗的媒体键与关闭；`close` 与托盘「关闭桌面歌词」同一条路。 */
+export async function coreLyricsControl(action: "toggle" | "previous" | "next" | "close"): Promise<unknown> {
   return invokeLyrics(CORE_LYRICS_CONTROL, { payload: { action } });
 }
 

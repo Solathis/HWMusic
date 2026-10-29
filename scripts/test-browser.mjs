@@ -368,6 +368,8 @@ mockIPC(async (command, args) => {
   }
   if (command === "core_lyrics_control") {
     mediaActions.push(args.payload.action);
+    // close 不是播放命令：Rust 那边改托盘勾选并发 lyrics:toggle，这里只记下它
+    if (args.payload.action === "close") return null;
     return emit("core:event", { channel: "player:command", payload: { command: args.payload.action } });
   }
   if (command === "core_lyrics_configure") {
@@ -2274,7 +2276,7 @@ export async function checkLockedLyricsPointer(browser, port, guardDir, add) {
  * 桌面歌词的**交互**验收（锁定 / 缩放 / 竖排 / 逐字 / 颜色）。每一项都钉一个"看起来做了、其实没做"的地方：
  * 1. 锁定时图标是 **Lock**、无障碍名称说清"已锁定"、按压态为 true；
  * 2. 锁定后窗口里**只剩**解锁按钮，且不悬停时不可见；悬停后可见且真的可点；
- * 3. 解锁后拖动柄/媒体/外观/缩放柄全部回来，媒体动作仍只发一次；
+ * 3. 解锁后拖动柄/媒体/外观/缩放柄/关闭键全部回来，媒体动作与关闭都只发一次；
  * 4. 右下角缩放柄调用官方 `startResizeDragging("SouthEast")`（mock 计数），锁定/任务栏时连按钮都不存在；
  * 5. 尺寸稳定 250ms 后保存 DIP 宽高；锁定时不再保存（Rust 那边窗口也不可缩放）；
  * 6. 竖版是**真竖排**：同一列字符 x 相同、y 严格递增（横排对照则 x 递增）——不是窄窗换行；
@@ -2494,6 +2496,19 @@ export async function checkDesktopInteraction(page, guardDir, add) {
   await page.evaluate(() => window.__guard.desktopDocument());
   const actionsAfter = await page.evaluate(() => window.__guard.mediaActions());
   add("desktop-media-once", actionsAfter.length === actionsBefore + 1 && actionsAfter.at(-1) === "toggle", JSON.stringify(actionsAfter));
+  // 关闭键：一击只发一次 close（关窗由 Rust 走托盘那条路，不是播放命令）
+  const closeKey = desktop.getByRole("button", { name: "关闭桌面歌词", exact: true });
+  const closeShape = await closeKey.evaluate((button) => ({
+    icon: Boolean(button.querySelector(".lucide-x")),
+    inRow: button.parentElement?.getAttribute("data-testid") === "lyrics-controls",
+  })).catch(() => null);
+  const closeBefore = await page.evaluate(() => window.__guard.mediaActions().length);
+  const closeClicked = await closeKey.click({ timeout: 3000 }).then(() => true, () => false);
+  await page.waitForTimeout(150);
+  const closeAfter = await page.evaluate(() => window.__guard.mediaActions());
+  add("r82-desktop-close-key", closeShape?.icon === true && closeShape.inRow && closeClicked
+    && closeAfter.length === closeBefore + 1 && closeAfter.at(-1) === "close",
+    JSON.stringify({ closeShape, closeClicked, closeBefore, actions: closeAfter.slice(-3) }));
   await page.evaluate(() => window.__guard.desktopDocument());
 
   // ⑥ 缩放保存：稳定 250ms 后发一条带 DIP 宽高的窄命令；锁定时一条都不发
