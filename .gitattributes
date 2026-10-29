@@ -1,0 +1,2 @@
+# 仓库一律以 LF 检出：Windows 的 Git 默认 core.autocrlf=true，CI（windows-latest）检出成 CRLF 会让按行扫源码的测试失配。
+* text=auto eol=lf

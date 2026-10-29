@@ -168,5 +168,5 @@ jobs:
                本项目也不持有任何官方凭据。登录凭据只落本机（DPAPI 保护的会话信封），
                不进发布物、不进 CI。
             4. **AGPL 完整源码**：本项目以 AGPL-3.0-only 授权，**对应版本的完整源码**在
-               https://github.com/your-fork-here 提供（占位地址，发布前按仓库实际地址替换）；
+               ${{ github.server_url }}/${{ github.repository }}/tree/${{ github.sha }} 提供（本 Release 对应的提交）；
                AGPL 要求拿到二进制的人能拿到对应源码，所以这个链接必须指向本 Release 对应的提交。
