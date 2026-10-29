@@ -1,7 +1,7 @@
 /**
  * 渲染层唯一的宿主桥封装：白名单方法，拿不到任何 Token——凭据与业务 HTTP 只在 sidecar/Rust。
  *
- * 歌词窗仅获配置与三种媒体动作的专命令；任意业务请求仍只在主窗执行。
+ * 歌词窗仅获配置、三种媒体动作与关闭的专命令；任意业务请求仍只在主窗执行。
  */
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -24,6 +24,7 @@ import {
   CORE_LYRICS_SETTINGS_RESIZE,
   CORE_LYRICS_TOGGLE,
   CORE_LYRICS_UNLOCK_ZONE,
+  CORE_MAIN_CHROME,
   CORE_READ_RUN_LOG,
   CORE_RENDERER_READY,
   CORE_SET_AUTOSTART,
@@ -224,6 +225,26 @@ export type LoginChromeRequest =
 export async function coreLoginChrome<T = unknown>(payload: LoginChromeRequest): Promise<T> {
   try {
     return await invoke<T>(CORE_LOGIN_CHROME, { payload });
+  } catch (failure) {
+    throw normalizeFailure(failure);
+  }
+}
+
+// 沉浸页的主窗外框：一条专用命令，只对主窗开放。
+
+/** `immersive` / `normal` 收起或装回标题栏，`read` 只读，其余三个是窗口按钮。 */
+export type MainChromeAction = "immersive" | "normal" | "read" | "minimize" | "toggle-maximize" | "close";
+
+/** 宿主回报的实际状态：`frameless` 为真时页面要自己画拖动区与窗口按钮。 */
+export interface MainChromeState {
+  frameless: boolean;
+  maximized: boolean;
+}
+
+/** 回执是做完之后的实际状态。 */
+export async function coreMainChrome(action: MainChromeAction): Promise<MainChromeState> {
+  try {
+    return await invoke<MainChromeState>(CORE_MAIN_CHROME, { payload: { action } });
   } catch (failure) {
     throw normalizeFailure(failure);
   }

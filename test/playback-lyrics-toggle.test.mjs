@@ -338,7 +338,12 @@ test("R54 沉浸页收起：顶部整行（宽度铺满、箭头居中），不�
   assert.match(stage, /<ChevronDownIcon/, "图标是 lucide 的 ChevronDown");
   assert.doesNotMatch(stage, /absolute top-2 left-1\/2 -translate-x-1\/2/, "顶部中央那一小块已不再是收起入口");
   assert.doesNotMatch(stage, /<div[^>]*onClick=\{onClose\}/, "可点区域不能是裸 div（键盘/无障碍都要靠按钮）");
-  assert.doesNotMatch(stage, /\bXIcon\b/, "叉号图标已不再引用");
+  // 叉号只属于「关闭窗口」那枚窗口按钮（关窗口，不是收起沉浸页）；收起入口仍是下拉箭头
+  const collapse = stage.match(/<Button[^>]*aria-label="收起歌词"[^>]*>[\s\S]*?<\/Button>/)?.[0] ?? "";
+  assert.ok(collapse.includes("<ChevronDownIcon") && !collapse.includes("XIcon"), "收起入口不用叉号图标");
+  assert.equal([...stage.matchAll(/<XIcon\b/g)].length, 1, "叉号只有窗口按钮里的那一枚");
+  const closeWindowAt = stage.indexOf('aria-label="关闭窗口"');
+  assert.ok(closeWindowAt > 0 && stage.indexOf("<XIcon") > closeWindowAt, "叉号是「关闭窗口」按钮的图标");
   assert.match(stage, /"Escape"/, "ESC 关闭保留（键盘用户不该只剩鼠标一条路）");
   assert.match(stage, /\[role="dialog"\], \[role="alertdialog"\], \[role="menu"\]/, "上层弹窗打开时 ESC 先关弹窗");
 });

@@ -34,7 +34,7 @@ export const CORE_READ_RUN_LOG = "core_read_run_log";
 /** 歌词专命令均 async。toggle/document/progress 限 main；configure 限 main/lyrics/设置弹出窗；
  * control 限 main/lyrics（弹出窗只改外观，不按播放键）。
  * configure({}) 纯读，回 {config, visible, revision}；restoreIfPristine 仅 main 且 revision=0 恢复。
- * control 仅接受 {action: toggle|previous|next}，转现 player:command，不开放 core_call。
+ * control 仅接受 {action: toggle|previous|next|close}：媒体键转现 player:command，close 走托盘「关闭桌面歌词」那条路；不开放 core_call。
  */
 export const CORE_LYRICS_TOGGLE = "core_lyrics_toggle";
 export const CORE_LYRICS_CONFIGURE = "core_lyrics_configure";
@@ -58,6 +58,12 @@ export const CORE_LYRICS_SETTINGS_CLOSE = "core_lyrics_settings_close";
  * 载荷 `{action, theme?}`：`return` 取消登录、`theme` 读回或改主题；回执是事实（`{theme}` / `{cancelled}`）。
  */
 export const CORE_LOGIN_CHROME = "core_login_chrome";
+
+/**
+ * 沉浸页的窗口外框，只接受主窗：`{action}` 为 immersive / normal（收起或装回标题栏）、read（只读）、minimize / toggle-maximize / close（窗口按钮）。
+ * 只有 Windows 的 immersive 真的收起标题栏，其他平台保留原生标题栏；回执是实际的 `{frameless, maximized}`。
+ */
+export const CORE_MAIN_CHROME = "core_main_chrome";
 
 /**
  * 本地曲库的四条命令：全部在 Rust 侧、挂主窗来源守卫——路径只由宿主持有，渲染层只拿 id。

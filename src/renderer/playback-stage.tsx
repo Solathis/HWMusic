@@ -1,9 +1,10 @@
 import { AutoLyricLayout, BouncingSlider, Cover, MediaButton, MusicInfo, VolumeControl } from "@applemusic-like-lyrics/react-full"
 import { MotionConfig } from "framer-motion"
 import { useEffect, useRef } from "react"
-import type { KeyboardEvent as ReactKeyboardEvent } from "react"
+import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react"
 import { createPortal } from "react-dom"
-import { CaptionsIcon, ChevronDownIcon, Disc3Icon, ListMusicIcon, PauseIcon, PlayIcon, SkipBackIcon, SkipForwardIcon, VolumeXIcon } from "lucide-react"
+import { getCurrentWindow } from "@tauri-apps/api/window"
+import { CaptionsIcon, ChevronDownIcon, CopyIcon, Disc3Icon, ListMusicIcon, MinusIcon, PauseIcon, PlayIcon, SkipBackIcon, SkipForwardIcon, SquareIcon, VolumeXIcon, XIcon } from "lucide-react"
 
 import { Avatar, AvatarFallback } from "./components/ui/avatar"
 import { Alert, AlertDescription } from "./components/ui/alert"
@@ -12,6 +13,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenu
 import { AmllBackground, useAlbumImage } from "./AmllBackground.tsx"
 import { AmllLyricsPanel } from "./AmllLyricsPanel.tsx"
 import { LyricsTargetMenu, lyricsToggleView } from "./components.tsx"
+import { useMainChrome } from "./use-main-chrome.ts"
 import { lyricsNoticeText, playbackModeLabel } from "./features/playback/playback-state.mjs"
 import { PLAYBACK_MODES } from "./features/playback/player.mjs"
 import { formatDuration, trackAlbumOf, trackArtistsOf, trackCoverUrlOf, trackNameOf } from "./features/library/track-fields.mjs"
@@ -45,6 +47,9 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
   const coverImage = useAlbumImage(open ? coverUrl : null)
   const lyricsView = lyricsToggleView(lyrics)
   const seekOwner = useRef<number | null>(null)
+  const chrome = useMainChrome(open)
+  const rowPress = useRef<{ x: number; y: number } | null>(null)
+  const rowDragged = useRef(false)
   useEffect(() => {
     if (!open) return undefined
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -187,6 +192,27 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
   )
   const musicControls = <div className="isolate flex min-w-0 flex-col gap-4">{info}{controls}</div>
 
+  // 窗口按钮与收起行同一种淡色半透明悬停
+  const chromeButton = "h-10 w-11 rounded-none px-0 hover:bg-background/30 dark:hover:bg-foreground/10"
+  // 标题栏收起时这一行兼作拖动区：按下后移动超过 4px 才算拖窗，否则仍是点击收起
+  const startRowPress = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    rowDragged.current = false
+    rowPress.current = chrome.frameless && event.button === 0 ? { x: event.clientX, y: event.clientY } : null
+  }
+  const trackRowPress = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const start = rowPress.current
+    if (start === null || (event.buttons & 1) === 0) return
+    if (Math.abs(event.clientX - start.x) + Math.abs(event.clientY - start.y) < 4) return
+    rowPress.current = null
+    rowDragged.current = true
+    void getCurrentWindow().startDragging().catch(() => undefined)
+  }
+  const clickRow = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    const dragged = rowDragged.current && event.detail > 0
+    rowDragged.current = false
+    if (!dragged) onClose()
+  }
+
   return createPortal(
     <MotionConfig reducedMotion="user">
       <div
@@ -235,13 +261,28 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
         {/* 收起 = 顶部整行：行高只占顶部一条带，箭头居中，行内任意位置可点（不用右上角叉号）。 */}
         <Button
           variant="ghost"
-          className="absolute inset-x-0 top-0 h-10 w-full rounded-none motion-reduce:transition-none! motion-reduce:duration-0!"
+          className="absolute inset-x-0 top-0 h-10 w-full rounded-none hover:bg-background/30 dark:hover:bg-foreground/10 motion-reduce:transition-none! motion-reduce:duration-0!"
           aria-label="收起歌词"
+          onPointerDown={startRowPress}
+          onPointerMove={trackRowPress}
           data-testid="playback-stage-close-row"
-          onClick={onClose}
+          onClick={clickRow}
         >
           <ChevronDownIcon className="size-4" />
         </Button>
+        {chrome.frameless ? (
+          <div className="absolute right-0 top-0 flex" data-testid="playback-stage-window-controls">
+            <Button variant="ghost" className={chromeButton} aria-label="最小化" onClick={() => chrome.act("minimize")}>
+              <MinusIcon className="size-4" />
+            </Button>
+            <Button variant="ghost" className={chromeButton} aria-label={chrome.maximized ? "还原" : "最大化"} onClick={() => chrome.act("toggle-maximize")}>
+              {chrome.maximized ? <CopyIcon className="size-3.5" /> : <SquareIcon className="size-3.5" />}
+            </Button>
+            <Button variant="ghost" className={chromeButton} aria-label="关闭窗口" onClick={() => chrome.act("close")}>
+              <XIcon className="size-4" />
+            </Button>
+          </div>
+        ) : null}
       </div>
     </MotionConfig>,
     document.body,

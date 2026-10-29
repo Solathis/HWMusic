@@ -162,6 +162,10 @@ let runLogPlan = { failTimes: 0, mode: "entries" };
 const runLogReads = [];
 const runLogScopes = [];
 let dragCalls = 0;
+/** 主窗外框命令的调用记录；夹具默认不是 Windows（不收标题栏），既有沉浸页检查看不到窗口按钮。 */
+const mainChromeCalls = [];
+let mainChromeSupported = false;
+let mainChromeState = { frameless: false, maximized: false };
 /** 官方 startResizeDragging 的方向记录（缩放手柄「真的调了官方 API」按它判）。 */
 const resizeCalls = [];
 /** 每次 core_lyrics_configure 的补丁（窗口尺寸保存与「锁定后不保存」按它判）。 */
@@ -359,6 +363,15 @@ mockIPC(async (command, args) => {
   if (command === "plugin:window|start_dragging") { dragCalls += 1; return; }
   if (command === "plugin:window|start_resize_dragging") { resizeCalls.push(args.value ?? null); return; }
   if (command === "core_get_tray_available") return true;
+  if (command === "core_main_chrome") {
+    const action = args.payload?.action;
+    if (!["immersive", "normal", "read", "minimize", "toggle-maximize", "close"].includes(action)) throw new Error("主窗外框动作不认识：" + action);
+    mainChromeCalls.push(action);
+    if (action === "immersive") mainChromeState = { ...mainChromeState, frameless: mainChromeSupported };
+    if (action === "normal") mainChromeState = { ...mainChromeState, frameless: false };
+    if (action === "toggle-maximize") mainChromeState = { ...mainChromeState, maximized: !mainChromeState.maximized };
+    return { ...mainChromeState };
+  }
   if (command === "core_login_chrome") return { theme: currentTheme };
   if (command === "core_lyrics_document") return emit("core:event", { channel: "lyrics:document", payload: args.document });
   if (command === "core_lyrics_unlock_zone") { unlockZones.push(args.zone ?? null); return null; }
@@ -471,6 +484,9 @@ function Guard() {
       },
       setDesktop,
       dragCount: () => dragCalls,
+      /** 主窗外框命令的调用记录；setMainChromeSupported(true) = 按 Windows 收起标题栏（同时清空记录与状态）。 */
+      mainChromeCalls: () => mainChromeCalls.slice(),
+      setMainChromeSupported: (value) => { mainChromeSupported = value === true; mainChromeState = { frameless: false, maximized: false }; mainChromeCalls.length = 0; },
       /** 进度 IPC 的累计次数（配合 resetProgressCount 计一段时间内的推送数）。 */
       progressCount: () => lyricsProgressCalls,
       unlockZones: () => unlockZones.slice(),
@@ -4009,6 +4025,118 @@ export async function checkRunLogScope(page, guardDir, add) {
  * 根节点没有 `data-lyrics-color`、也没有内联 `--amll-lp-color` 覆盖；算出来的 `--amll-lp-color` 就是主题前景色（`--foreground`）；
  * 把桌面歌词的自定义色设成绿色之后，沉浸页当前行的墨色仍是主题前景色，不偏绿。
  */
+/**
+ * 沉浸页的主窗外框。钉四件事：
+ * 1. 收起行悬停是**淡色半透明**（背景 alpha 远小于不透明），浅色与深色主题各量一次；
+ * 2. 打开与关闭沉浸页成对地请宿主收起 / 装回标题栏；
+ * 3. 宿主回报收起了标题栏（Windows）才画窗口按钮：在右上角、不压住收起箭头，三枚按钮各发一次对应动作，最大化后换成「还原」；
+ * 4. 收起行兼作拖动区：拖动走官方 startDragging 且不收起沉浸页，原地点击仍收起。
+ */
+export async function checkImmersiveChrome(page, guardDir, add) {
+  const stage = page.getByTestId("playback-stage");
+  const row = page.getByTestId("playback-stage-close-row");
+  const openStage = async () => {
+    await page.getByRole("button", { name: "打开歌词", exact: true }).click();
+    await stage.waitFor();
+    await page.waitForTimeout(500);
+  };
+  const closeStage = async () => {
+    await row.click();
+    await stage.waitFor({ state: "detached" });
+  };
+  const hoverAlpha = async () => {
+    await page.mouse.move(640, 400);
+    await row.hover({ position: { x: 200, y: 20 } });
+    await page.waitForTimeout(400);
+    return row.evaluate((node) => {
+      const color = getComputedStyle(node).backgroundColor;
+      const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+      probe.fillStyle = "#010203";
+      probe.fillStyle = color;
+      const parsed = probe.fillStyle !== "#010203";
+      probe.clearRect(0, 0, 1, 1);
+      probe.fillRect(0, 0, 1, 1);
+      return { color, parsed, alpha: probe.getImageData(0, 0, 1, 1).data[3], theme: document.documentElement.className };
+    });
+  };
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.evaluate(() => { window.__guard.setMainChromeSupported(false); document.documentElement.className = "light"; });
+
+  // ① 悬停淡色半透明（夹具默认不收标题栏：顺带确认此时没有窗口按钮）
+  await openStage();
+  const framedControls = await page.getByTestId("playback-stage-window-controls").count();
+  const light = await hoverAlpha();
+  await page.evaluate(() => { document.documentElement.className = "dark"; });
+  const dark = await hoverAlpha();
+  await page.evaluate(() => { document.documentElement.className = "light"; });
+  await closeStage();
+  add("r80-immersive-chrome-hover-translucent",
+    light.parsed && dark.parsed && light.alpha > 0 && light.alpha < 120 && dark.alpha > 0 && dark.alpha < 120 && dark.theme.includes("dark"),
+    JSON.stringify({ light, dark }));
+
+  // ② 打开 / 关闭成对地收起 / 装回标题栏
+  await page.waitForTimeout(200);
+  const lifecycle = await page.evaluate(() => window.__guard.mainChromeCalls().filter((action) => action === "immersive" || action === "normal"));
+  const paired = lifecycle.length >= 2 && lifecycle.length % 2 === 0
+    && lifecycle.every((action, index) => action === (index % 2 === 0 ? "immersive" : "normal"));
+  add("r80-immersive-chrome-paired", paired, JSON.stringify(lifecycle));
+
+  // ③ 宿主回报收起了标题栏：右上角三枚窗口按钮
+  await page.evaluate(() => window.__guard.setMainChromeSupported(true));
+  await openStage();
+  const controls = page.getByTestId("playback-stage-window-controls");
+  const controlsVisible = await controls.waitFor({ timeout: 3000 }).then(() => true, () => false);
+  const layout = await stage.evaluate((element) => {
+    const box = element.querySelector('[data-testid="playback-stage-window-controls"]')?.getBoundingClientRect();
+    const arrow = element.querySelector('[data-testid="playback-stage-close-row"] svg')?.getBoundingClientRect();
+    if (!box || !arrow) return null;
+    const hit = document.elementFromPoint(arrow.x + arrow.width / 2, arrow.y + arrow.height / 2);
+    return {
+      right: Math.round(innerWidth - box.right), top: Math.round(box.top),
+      clearOfArrow: box.left > arrow.right,
+      arrowHit: Boolean(hit?.closest('[data-testid="playback-stage-close-row"]')),
+      labels: [...element.querySelectorAll('[data-testid="playback-stage-window-controls"] button')].map((button) => button.getAttribute("aria-label")),
+    };
+  });
+  const press = (name) => stage.getByRole("button", { name, exact: true }).click({ timeout: 3000 }).then(() => true, () => false);
+  const minimized = await press("最小化");
+  const maximized = await press("最大化");
+  const restoreShown = await stage.getByRole("button", { name: "还原", exact: true }).waitFor({ timeout: 3000 }).then(() => true, () => false);
+  const restored = await press("还原");
+  const closed = await press("关闭窗口");
+  await page.waitForTimeout(200);
+  const stillOpen = await stage.count() === 1;
+  const box = await stage.boundingBox();
+  if (box) await page.screenshot({ path: path.join(guardDir, "r80-immersive-window-controls.png"), clip: { x: box.x + box.width - 360, y: box.y, width: 360, height: 120 } });
+  const windowActions = await page.evaluate(() => window.__guard.mainChromeCalls().filter((action) => !["immersive", "normal", "read"].includes(action)));
+  add("r80-immersive-chrome-window-controls",
+    framedControls === 0 && controlsVisible && layout !== null && layout.right === 0 && layout.top === 0 && layout.clearOfArrow && layout.arrowHit
+      && JSON.stringify(layout.labels) === JSON.stringify(["最小化", "最大化", "关闭窗口"])
+      && minimized && maximized && restoreShown && restored && closed && stillOpen
+      && JSON.stringify(windowActions) === JSON.stringify(["minimize", "toggle-maximize", "toggle-maximize", "close"]),
+    JSON.stringify({ framedControls, controlsVisible, layout, minimized, maximized, restoreShown, restored, closed, stillOpen, windowActions }));
+
+  // ④ 收起行兼作拖动区：拖动不收起，原地点击收起
+  const rowBox = await row.boundingBox();
+  const dragBefore = await page.evaluate(() => window.__guard.dragCount());
+  await page.mouse.move(rowBox.x + 200, rowBox.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(rowBox.x + 320, rowBox.y + 26, { steps: 3 });
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  const dragAfter = await page.evaluate(() => window.__guard.dragCount());
+  const openAfterDrag = await stage.count() === 1;
+  await row.click({ position: { x: 200, y: 20 } });
+  const closedByClick = await stage.waitFor({ state: "detached", timeout: 3000 }).then(() => true, () => false);
+  await page.waitForTimeout(200);
+  const finalCalls = await page.evaluate(() => window.__guard.mainChromeCalls());
+  await page.evaluate(() => window.__guard.setMainChromeSupported(false));
+  add("r80-immersive-chrome-row-drag",
+    dragAfter === dragBefore + 1 && openAfterDrag && closedByClick && finalCalls.at(-1) === "normal",
+    JSON.stringify({ dragBefore, dragAfter, openAfterDrag, closedByClick, finalCalls }));
+}
+
 export async function checkImmersiveLyricsColorIsFixed(page, guardDir, add) {
   const configureDesktop = (patch) => page.evaluate((next) => window.__guard.configureDesktop(next), patch);
   const mainLine = '[data-testid="amll-lyrics-panel"] [class*="lyricMainLine"][class*="active"]';
@@ -5985,6 +6113,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     await checked("r56-settings-log-pane", () => checkSettingsLogPane(page, guardDir, add));
     await checked("r72-log-scope", () => checkRunLogScope(page, guardDir, add));
     await checked("r52-immersive-lyrics-color-fixed", () => checkImmersiveLyricsColorIsFixed(page, guardDir, add));
+    /** 沉浸页的主窗外框（悬停淡色、标题栏收起与装回、窗口按钮、拖动区）。 */
+    await checked("r80-immersive-chrome", () => checkImmersiveChrome(page, guardDir, add));
     /** 播放栏/沉浸页快捷开关的真行为（延迟 IPC 下的双击、拒绝后恢复、两种模式、菜单层级）；它自己重新载入主页，只碰播放栏与沉浸页。 */
     await checkPlaybackLyricsToggle(page, port, guardDir, add);
     await checkLyricsTargetMenus(browser, port, guardDir, add);

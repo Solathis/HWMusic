@@ -10,6 +10,7 @@ mod commands;
 pub mod login;
 pub mod lyrics_settings;
 pub mod lyrics_window;
+mod main_chrome;
 /// 本地曲库（选文件 / 元数据 / 索引 / 按 id 提供音频与封面）与自定义协议
 pub mod local_library;
 pub mod taskbar_lyrics;
@@ -241,6 +242,12 @@ pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std
     {
         builder = builder.proxy_url(proxy_url);
     }
+    // 页面重载后沉浸页已不在，先把标题栏装回去
+    builder = builder.on_page_load(|window, payload| {
+        if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+            main_chrome::restore_frame(&window);
+        }
+    });
     let window = builder.build()?;
 
     let close_app = app.clone();
@@ -486,6 +493,9 @@ fn commit_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
     // 用户在退出前开着菜单/拖着窗：只有准备成功之后才取消（准备失败时不能先摧毁他的状态）。
     cancel_own_modals_now(app);
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        main_chrome::restore_frame(&window);
+    }
     lyrics_window::stop_persistence(app);
     finish_app_exit(
         || {
@@ -755,7 +765,9 @@ pub fn run() {
             lyrics_settings::core_lyrics_settings_close,
             // 登录体验的浮动控件（返回 / 主题）另开一条命令而不放宽 core_call，浮动 webview 的 label 不是 main。
             // 来源守卫的边界见 commands.rs 的 `require_login_chrome_source`。
-            commands::core_login_chrome
+            commands::core_login_chrome,
+            // 沉浸页的主窗外框（Windows 收起标题栏、窗口按钮）：主窗来源守卫在命令里。
+            main_chrome::core_main_chrome
         ])
         .build(tauri::generate_context!())
         .expect("Tauri 应用启动失败")
