@@ -1997,6 +1997,14 @@ test("CI：浏览器守卫把等待上限调到 60 秒，失败时上传截图�
   assert.ok(guardStep.includes("include-hidden-files: true"), ".tmp 是隐藏目录，upload-artifact v4 默认不收");
 });
 
+test("test:browser：写死的短等待按等待上限同倍放大（本机不变，CI 60 秒时放大 4 倍）", async () => {
+  const mod = await import("../scripts/test-browser.mjs");
+  assert.equal(mod.guardScaledMs(3000, {}), 3000);
+  assert.equal(mod.guardScaledMs(3000, { HWMUSIC_GUARD_TIMEOUT_MS: "60000" }), 12000);
+  assert.equal(mod.guardScaledMs(5000, { HWMUSIC_GUARD_TIMEOUT_MS: "10000" }), 5000, "调低无效，与等待上限一致");
+  assert.doesNotMatch(read("scripts/test-browser.mjs"), /timeout: [0-9]/, "新的短等待也要走 guardScaledMs");
+});
+
 test("test:browser：Chromium 候选顺序 = 显式覆盖 → playwright 自带 → 系统 Chrome/Edge", async () => {
   const mod = await import("../scripts/test-browser.mjs");
   const kinds = mod.chromiumCandidates({ env: { PLAYWRIGHT_CHROMIUM_EXECUTABLE: "C:\\x\\chromium.exe" } }).map(

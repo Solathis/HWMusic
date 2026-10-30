@@ -31,6 +31,10 @@ export function guardTimeoutMs(env = process.env) {
   return Number.isFinite(value) && value > GUARD_DEFAULT_TIMEOUT_MS ? value : GUARD_DEFAULT_TIMEOUT_MS;
 }
 const GUARD_TIMEOUT_MS = guardTimeoutMs();
+/** 写死的短等待（点击、出现、消失的上限）按等待上限同倍放大：本机不变，CI 设 60 秒时放大 4 倍。 */
+export function guardScaledMs(ms, env = process.env) {
+  return Math.round((ms * guardTimeoutMs(env)) / GUARD_DEFAULT_TIMEOUT_MS);
+}
 
 /** 歌词夹具：两行，间隔 3 秒（推进进度要看得见变化）。 */
 export const FIXTURE_LRC = ["[00:00.00]第一行歌词守卫", "[00:03.00]第二行歌词守卫"].join("\n");
@@ -895,7 +899,7 @@ export async function checkAccountArea(page, port, guardDir, add) {
   await page.waitForFunction(() => {
     const image = document.querySelector('[data-testid="account-avatar"] img');
     return image !== null && image.naturalWidth > 0;
-  }, null, { timeout: 10_000 });
+  }, null, { timeout: guardScaledMs(10000) });
   const withProfile = { avatar: await avatarState(), facts: await accountFacts() };
   add(
     "r57-account-profile-avatar",
@@ -908,7 +912,7 @@ export async function checkAccountArea(page, port, guardDir, add) {
   add("r57-account-name-truncated", withProfile.facts.nameTruncated, JSON.stringify(withProfile.facts));
   await page.getByTestId("account-name").hover();
   const tooltip = page.getByRole("tooltip");
-  await tooltip.waitFor({ timeout: 5_000 });
+  await tooltip.waitFor({ timeout: guardScaledMs(5000) });
   const remainingFirst = (await tooltip.textContent())?.trim() ?? "";
   await page.waitForTimeout(1_200);
   const remainingLater = (await tooltip.textContent())?.trim() ?? "";
@@ -936,7 +940,7 @@ export async function checkAccountArea(page, port, guardDir, add) {
   await page.waitForFunction(() => {
     const fallback = document.querySelector('[data-testid="account-avatar"] [data-slot="avatar-fallback"]');
     return (fallback?.textContent ?? "").trim() !== "";
-  }, null, { timeout: 10_000 });
+  }, null, { timeout: guardScaledMs(10000) });
   const vip = { avatar: await avatarState(), facts: await accountFacts() };
   add("r57-account-vip-expiry", vip.facts.vip === "会员 · 至 2026-12-31" && vip.facts.vipVisible, JSON.stringify(vip.facts));
   add("r57-account-avatar-letter-fallback", vip.avatar.fallbackText === "听", JSON.stringify(vip.avatar));
@@ -949,7 +953,7 @@ export async function checkAccountArea(page, port, guardDir, add) {
   await page.waitForFunction(() => {
     const name = document.querySelector('[data-testid="account-name"]');
     return name !== null && name.getClientRects().length === 0;
-  }, null, { timeout: 10_000 });
+  }, null, { timeout: guardScaledMs(10000) });
   await page.waitForTimeout(300);
   const collapsed = await accountFacts();
   add(
@@ -2161,7 +2165,7 @@ export async function checkDesktopProgressChain(browser, port, guardDir, add) {
     /** 真点击优先（可信手势，音频才放得起来）；摘帧时强制模式跳过可点性轮询，再不行就直接派发。 */
     const clickMedia = async (label) => {
       try {
-        await desktop.getByRole("button", { name: label, exact: true }).click({ force: true, timeout: 5000 });
+        await desktop.getByRole("button", { name: label, exact: true }).click({ force: true, timeout: guardScaledMs(5000) });
       } catch {
         await page.evaluate((name) => {
           const target = document.querySelector('[data-testid="lyrics-controls"] button[aria-label="' + name + '"]');
@@ -2188,8 +2192,8 @@ export async function checkDesktopProgressChain(browser, port, guardDir, add) {
 
     // ③ 播放：进度必须由状态机自己的通知流出来
     await clickMedia("播放");
-    await page.waitForFunction(() => window.__guard.snapshot().status === "playing", null, { polling: 100, timeout: 8000 });
-    await page.waitForFunction((base) => window.__guard.progressCount() > base, idle, { polling: 100, timeout: 8000 }).catch(() => {});
+    await page.waitForFunction(() => window.__guard.snapshot().status === "playing", null, { polling: 100, timeout: guardScaledMs(8000) });
+    await page.waitForFunction((base) => window.__guard.progressCount() > base, idle, { polling: 100, timeout: guardScaledMs(8000) }).catch(() => {});
     await page.waitForTimeout(500);
     const playingCount = await progressCount();
     const labelPlaying = await mediaLabel();
@@ -2197,7 +2201,7 @@ export async function checkDesktopProgressChain(browser, port, guardDir, add) {
 
     // ④ 暂停：播放态翻转同样要出一帧，图标翻回「播放」
     await clickMedia("暂停");
-    await page.waitForFunction(() => window.__guard.snapshot().status === "paused", null, { polling: 100, timeout: 8000 });
+    await page.waitForFunction(() => window.__guard.snapshot().status === "paused", null, { polling: 100, timeout: guardScaledMs(8000) });
     await page.waitForTimeout(500);
     const pausedCount = await progressCount();
     const labelPaused = await mediaLabel();
@@ -2541,7 +2545,7 @@ export async function checkDesktopInteraction(page, guardDir, add) {
     inRow: button.parentElement?.getAttribute("data-testid") === "lyrics-controls",
   })).catch(() => null);
   const closeBefore = await page.evaluate(() => window.__guard.mediaActions().length);
-  const closeClicked = await closeKey.click({ timeout: 3000 }).then(() => true, () => false);
+  const closeClicked = await closeKey.click({ timeout: guardScaledMs(3000) }).then(() => true, () => false);
   await page.waitForTimeout(150);
   const closeAfter = await page.evaluate(() => window.__guard.mediaActions());
   add("r82-desktop-close-key", closeShape?.icon === true && closeShape.inRow && closeClicked
@@ -4108,7 +4112,7 @@ export async function checkImmersiveChrome(page, guardDir, add) {
   await page.evaluate(() => window.__guard.setMainChromeSupported(true));
   await openStage();
   const controls = page.getByTestId("playback-stage-window-controls");
-  const controlsVisible = await controls.waitFor({ timeout: 3000 }).then(() => true, () => false);
+  const controlsVisible = await controls.waitFor({ timeout: guardScaledMs(3000) }).then(() => true, () => false);
   const layout = await stage.evaluate((element) => {
     const box = element.querySelector('[data-testid="playback-stage-window-controls"]')?.getBoundingClientRect();
     const arrow = element.querySelector('[data-testid="playback-stage-close-row"] svg')?.getBoundingClientRect();
@@ -4121,10 +4125,10 @@ export async function checkImmersiveChrome(page, guardDir, add) {
       labels: [...element.querySelectorAll('[data-testid="playback-stage-window-controls"] button')].map((button) => button.getAttribute("aria-label")),
     };
   });
-  const press = (name) => stage.getByRole("button", { name, exact: true }).click({ timeout: 3000 }).then(() => true, () => false);
+  const press = (name) => stage.getByRole("button", { name, exact: true }).click({ timeout: guardScaledMs(3000) }).then(() => true, () => false);
   const minimized = await press("最小化");
   const maximized = await press("最大化");
-  const restoreShown = await stage.getByRole("button", { name: "还原", exact: true }).waitFor({ timeout: 3000 }).then(() => true, () => false);
+  const restoreShown = await stage.getByRole("button", { name: "还原", exact: true }).waitFor({ timeout: guardScaledMs(3000) }).then(() => true, () => false);
   const restored = await press("还原");
   const closed = await press("关闭窗口");
   await page.waitForTimeout(200);
@@ -4150,7 +4154,7 @@ export async function checkImmersiveChrome(page, guardDir, add) {
   const dragAfter = await page.evaluate(() => window.__guard.dragCount());
   const openAfterDrag = await stage.count() === 1;
   await row.click({ position: { x: 200, y: 20 } });
-  const closedByClick = await stage.waitFor({ state: "detached", timeout: 3000 }).then(() => true, () => false);
+  const closedByClick = await stage.waitFor({ state: "detached", timeout: guardScaledMs(3000) }).then(() => true, () => false);
   await page.waitForTimeout(200);
   const finalCalls = await page.evaluate(() => window.__guard.mainChromeCalls());
   await page.evaluate(() => window.__guard.setMainChromeSupported(false));
@@ -4347,7 +4351,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
 
   // ③ 「播放全部」作用于整张歌单（120 首），不是已渲染的那 50 首
   await page.getByRole("button", { name: "播放全部", exact: true }).click();
-  await page.waitForFunction((total) => window.__guard.queueLength() === total, PAGINATION_FIXTURE.total, { timeout: 5000 }).catch(() => {});
+  await page.waitForFunction((total) => window.__guard.queueLength() === total, PAGINATION_FIXTURE.total, { timeout: guardScaledMs(5000) }).catch(() => {});
   const queued = await page.evaluate(() => window.__guard.queueLength());
   await page.evaluate(() => window.__guard.pause());
   add("pagination-play-all-whole-playlist", queued === PAGINATION_FIXTURE.total,
@@ -4363,7 +4367,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
   await page.waitForFunction((total) => {
     const state = window.__guard.snapshot();
     return state.index === 2 && state.entries.length === total;
-  }, PAGINATION_FIXTURE.total, { timeout: 5000 }).catch(() => {});
+  }, PAGINATION_FIXTURE.total, { timeout: guardScaledMs(5000) }).catch(() => {});
   const dblClickQueue = await queueState();
   await page.evaluate(() => window.__guard.pause());
   add("pagination-dblclick-whole-playlist", dblClickQueue.length === PAGINATION_FIXTURE.total
@@ -4487,7 +4491,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
   await page.waitForFunction((total) => {
     const state = window.__guard.snapshot();
     return state.index === 1 && state.entries.length === total;
-  }, PAGINATION_FIXTURE.total, { timeout: 5000 }).catch(() => {});
+  }, PAGINATION_FIXTURE.total, { timeout: guardScaledMs(5000) }).catch(() => {});
   const historyQueue = await queueState();
   await page.evaluate(() => window.__guard.pause());
   add("pagination-dblclick-history-whole-list", historyQueue.length === PAGINATION_FIXTURE.total
@@ -4499,7 +4503,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
   await visibleRowsIn(36);
   const favoritesRows = await rowCount();
   await table.locator("tbody tr").nth(1).dblclick();
-  await page.waitForFunction(() => window.__guard.snapshot().index === 1, null, { timeout: 5000 }).catch(() => {});
+  await page.waitForFunction(() => window.__guard.snapshot().index === 1, null, { timeout: guardScaledMs(5000) }).catch(() => {});
   const favoritesQueue = await queueState();
   await page.evaluate(() => window.__guard.pause());
   add("pagination-dblclick-favorites-loaded-only", favoritesRows === 36
@@ -4601,7 +4605,7 @@ export async function checkSidebarPlaylists(page, port, guardDir, add) {
   await page.waitForFunction(() => {
     const image = document.querySelector('[data-testid="sidebar-playlist-item"] img');
     return image !== null && image.naturalWidth > 0;
-  }, null, { timeout: 10_000 });
+  }, null, { timeout: guardScaledMs(10000) });
   const two = await itemFacts();
   add("r62-sidebar-playlist-items",
     two.length === 2
@@ -4688,8 +4692,14 @@ export async function checkSidebarPlaylists(page, port, guardDir, add) {
   await page.waitForFunction(() => {
     const name = document.querySelector('[data-testid="sidebar-playlist-name"]');
     return name !== null && name.getClientRects().length === 0;
-  }, null, { timeout: 10_000 });
+  }, null, { timeout: guardScaledMs(10000) });
   await page.waitForTimeout(300);
+  // 侧边栏收起是 CSS 过渡：慢渲染下 300 毫秒不一定走完（量到过渡中途的宽 65、标签透明度 0.08），等它停在终点再量。
+  await page.waitForFunction(() => {
+    const rail = document.querySelector('[data-slot="sidebar-container"]')?.getBoundingClientRect().width ?? 0;
+    const label = document.querySelector('[data-testid="sidebar-playlists"] [data-sidebar="group-label"]');
+    return Math.round(rail) === 48 && (label === null || getComputedStyle(label).opacity === "0");
+  }, null, { timeout: guardScaledMs(10000) }).catch(() => {});
   const rail = await page.evaluate(() => {
     const nodes = [...document.querySelectorAll('[data-testid="sidebar-playlist-item"]')];
     const visible = (node) => Boolean(node && node.getClientRects().length > 0);
@@ -4726,7 +4736,7 @@ export async function checkSidebarPlaylists(page, port, guardDir, add) {
     JSON.stringify(rail));
   await items().first().hover();
   const railTooltip = page.getByRole("tooltip");
-  await railTooltip.waitFor({ timeout: 5_000 });
+  await railTooltip.waitFor({ timeout: guardScaledMs(5000) });
   const railTooltipText = ((await railTooltip.textContent()) ?? "").trim();
   add("r62-sidebar-rail-tooltip", railTooltipText === "守卫歌单 · 自建 · 120 首", JSON.stringify({ railTooltipText }));
   await shotSidebar("r62-sidebar-rail-tooltip.png", 260);
@@ -4799,7 +4809,7 @@ export async function checkSidebarPlaylists(page, port, guardDir, add) {
   });
   await page.getByTestId("sidebar-playlist-name").first().hover();
   const nameTooltip = page.getByRole("tooltip");
-  await nameTooltip.waitFor({ timeout: 5_000 });
+  await nameTooltip.waitFor({ timeout: guardScaledMs(5000) });
   const nameTooltipText = ((await nameTooltip.textContent()) ?? "").trim();
   add("r62-sidebar-name-truncated-tooltip",
     nameFacts !== null && nameFacts.truncated && nameTooltipText === nameFacts.text,
@@ -4867,12 +4877,12 @@ export async function checkRowContextMenus(page, port, guardDir, add) {
   /** 右键 → 等菜单出现（或确认它没出现）；返回菜单项文案。 */
   const rightClickRow = async (index) => {
     await rowAt(index).click({ button: "right" });
-    await menu.waitFor({ timeout: 5_000 });
+    await menu.waitFor({ timeout: guardScaledMs(5000) });
     return menuItems();
   };
   const dismiss = async () => {
     await page.keyboard.press("Escape");
-    await menu.waitFor({ state: "detached", timeout: 5_000 }).catch(() => {});
+    await menu.waitFor({ state: "detached", timeout: guardScaledMs(5000) }).catch(() => {});
     await page.waitForTimeout(150);
   };
   /** 等菜单淡入/缩放动画收尾：截图不许拍在半透明那一帧（回放实测的 opacity 与在跑动画数）。 */
@@ -4883,7 +4893,7 @@ export async function checkRowContextMenus(page, port, guardDir, add) {
       const opacity = getComputedStyle(node).opacity;
       const running = node.getAnimations().filter((animation) => animation.playState === "running").length;
       return opacity === "1" && running === 0 ? { opacity, running } : false;
-    }, null, { timeout: 5_000 });
+    }, null, { timeout: guardScaledMs(5000) });
     await page.waitForTimeout(80);
     return settled.jsonValue();
   };
@@ -4911,7 +4921,7 @@ export async function checkRowContextMenus(page, port, guardDir, add) {
 
   // ——— ② 加入播放队列：排到队尾，当前索引不动 ———
   await page.getByTestId("row-menu-enqueue").click();
-  await menu.waitFor({ state: "detached", timeout: 5_000 }).catch(() => {});
+  await menu.waitFor({ state: "detached", timeout: guardScaledMs(5000) }).catch(() => {});
   const afterEnqueue = await queueState();
   add("r63-menu-enqueue-appends",
     JSON.stringify(afterEnqueue.ids) === JSON.stringify(["meta-12", "2"]) && afterEnqueue.index === 0
@@ -4922,7 +4932,7 @@ export async function checkRowContextMenus(page, port, guardDir, add) {
   await dismiss();
   await rightClickRow(4);
   await page.getByTestId("row-menu-play-next").click();
-  await menu.waitFor({ state: "detached", timeout: 5_000 }).catch(() => {});
+  await menu.waitFor({ state: "detached", timeout: guardScaledMs(5000) }).catch(() => {});
   const afterPlayNext = await queueState();
   add("r63-menu-play-next-inserts-after-current",
     JSON.stringify(afterPlayNext.ids) === JSON.stringify(["meta-12", "5", "2"]) && afterPlayNext.index === 0,
@@ -4932,7 +4942,7 @@ export async function checkRowContextMenus(page, port, guardDir, add) {
   await dismiss();
   await rightClickRow(2);
   await page.getByTestId("row-menu-play").click();
-  await page.waitForFunction(() => window.__guard.snapshot().entries.length === 36, null, { timeout: 5_000 }).catch(() => {});
+  await page.waitForFunction(() => window.__guard.snapshot().entries.length === 36, null, { timeout: guardScaledMs(5000) }).catch(() => {});
   const afterPlay = await queueState();
   await page.evaluate(() => window.__guard.pause());
   add("r63-menu-play-uses-whole-list",
@@ -4986,7 +4996,7 @@ export async function checkRowContextMenus(page, port, guardDir, add) {
   });
   if (deepTarget === null) throw new Error("行里找不到可点的叶子元素");
   await page.mouse.click(deepTarget.x, deepTarget.y, { button: "right" });
-  await menu.waitFor({ timeout: 5_000 });
+  await menu.waitFor({ timeout: guardScaledMs(5000) });
   const deepProbe = await probe();
   const deepItems = await menuItems();
   add("r63-deep-target-menu",
@@ -5019,9 +5029,9 @@ export async function checkRowContextMenus(page, port, guardDir, add) {
   // ——— ⑦ 队列行：菜单少一件「加入播放队列」（它已经在队列里） ———
   await page.getByRole("button", { name: "播放队列", exact: true }).click();
   const queueRow = page.locator('[data-testid="queue-panel"] li').first();
-  await queueRow.waitFor({ timeout: 5_000 });
+  await queueRow.waitFor({ timeout: guardScaledMs(5000) });
   await queueRow.getByRole("button").first().click({ button: "right" });
-  await menu.waitFor({ timeout: 5_000 });
+  await menu.waitFor({ timeout: guardScaledMs(5000) });
   const queueItems = await menuItems();
   const queueSettled = await waitMenuSettled();
   add("r63-queue-menu-items",
@@ -5031,7 +5041,7 @@ export async function checkRowContextMenus(page, port, guardDir, add) {
 
   // 队列行上的「下一首播放」同样插到当前之后
   await page.getByTestId("row-menu-play-next").click();
-  await menu.waitFor({ state: "detached", timeout: 5_000 }).catch(() => {});
+  await menu.waitFor({ state: "detached", timeout: guardScaledMs(5000) }).catch(() => {});
   const afterQueuePlayNext = await queueState();
   add("r63-queue-play-next-inserts-after-current",
     afterQueuePlayNext.ids.length === 37 && afterQueuePlayNext.ids[afterQueuePlayNext.index + 1] === "1",
@@ -5114,7 +5124,7 @@ export async function checkLocalSongs(page, port, guardDir, add) {
       const opacity = getComputedStyle(node).opacity;
       const running = node.getAnimations().filter((animation) => animation.playState === "running").length;
       return opacity === "1" && running === 0 ? { opacity, running } : false;
-    }, null, { timeout: 5_000 });
+    }, null, { timeout: guardScaledMs(5000) });
     await page.waitForTimeout(80);
     return settled.jsonValue();
   };
@@ -5178,7 +5188,7 @@ export async function checkLocalSongs(page, port, guardDir, add) {
   await rows().first().waitFor();
   resetMedia();
   await rows().nth(0).dblclick();
-  await page.waitForFunction(() => window.__guard.snapshot().status === "playing", null, { timeout: 10_000 });
+  await page.waitForFunction(() => window.__guard.snapshot().status === "playing", null, { timeout: guardScaledMs(10000) });
   const playedTrack = await page.evaluate(() => ({
     id: window.__guard.snapshot().track?.id ?? null,
     entries: window.__guard.snapshot().entries.length,
@@ -5193,7 +5203,7 @@ export async function checkLocalSongs(page, port, guardDir, add) {
   await page.evaluate(() => window.__guard.pause());
   resetMedia();
   await rows().nth(1).click({ button: "right" });
-  await menu.waitFor({ timeout: 5_000 });
+  await menu.waitFor({ timeout: guardScaledMs(5000) });
   const localMenuItems = await menuItems();
   add("r65-local-menu-items",
     JSON.stringify(localMenuItems) === JSON.stringify(["播放", "下一首播放", "加入播放队列"])
@@ -5203,7 +5213,7 @@ export async function checkLocalSongs(page, port, guardDir, add) {
   await page.screenshot({ path: path.join(guardDir, "r65-local-menu.png") });
   await page.getByTestId("row-menu-play").click();
   await page.waitForFunction(() => window.__guard.snapshot().track?.id === "local:fedcba9876543210fedcba9876543210"
-    && window.__guard.snapshot().status === "playing", null, { timeout: 10_000 });
+    && window.__guard.snapshot().status === "playing", null, { timeout: guardScaledMs(10000) });
   await page.waitForTimeout(300);
   add("r65-local-menu-play-url",
     audioUrls().length >= 1 && audioUrls().every((url) => url === "http://hwlocal.localhost/fedcba9876543210fedcba9876543210"),
@@ -5214,7 +5224,7 @@ export async function checkLocalSongs(page, port, guardDir, add) {
   await open("fixture");
   await rows().first().waitFor();
   await page.getByTestId("track-remove").first().click();
-  await page.waitForFunction(() => window.__guard.localTracks().length === 2, null, { timeout: 5_000 }).catch(() => {});
+  await page.waitForFunction(() => window.__guard.localTracks().length === 2, null, { timeout: guardScaledMs(5000) }).catch(() => {});
   const removeCalls = await page.evaluate(() => window.__guard.localRemoveCalls());
   const remaining = await page.evaluate(() => window.__guard.localTracks().map((track) => track.id));
   const statusText = ((await page.getByTestId("local-songs-status").textContent()) ?? "").trim();
@@ -5548,7 +5558,7 @@ async function launchChromium(candidates, log) {
 /** 守卫中途抛错时留现场：整页截图 + 播放器快照，CI 失败时随截图一起上传。 */
 async function saveFatalDiagnostics(page, guardDir, log) {
   try {
-    await page.screenshot({ path: path.join(guardDir, "fatal.png"), timeout: 10000 });
+    await page.screenshot({ path: path.join(guardDir, "fatal.png"), timeout: guardScaledMs(10000) });
     const state = await page.evaluate(() => {
       const snap = window.__guard?.snapshot?.();
       return snap ? { index: snap.index, status: snap.status, currentTimeMs: snap.currentTimeMs, durationMs: snap.durationMs, trackId: snap.trackId, lyrics: snap.lyrics?.status } : null;

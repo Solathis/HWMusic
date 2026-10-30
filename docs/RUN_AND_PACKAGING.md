@@ -161,7 +161,7 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
   （未签名 / 非官方 / OAuth 身份不属于本项目 / AGPL 完整源码地址）。
 - 打包前先删 `bundle/`：缓存恢复的 `target` 里可能留着旧版本安装包，会让 `check:nsis` 的「恰好一个安装包」失败，
   或者把旧包混进 Release。
-- CI 的浏览器守卫把等待上限调到 60 秒（`HWMUSIC_GUARD_TIMEOUT_MS`，本机默认 15 秒）：运行器没有 GPU，页面走软件光栅化，
+- CI 的浏览器守卫把等待上限调到 60 秒（`HWMUSIC_GUARD_TIMEOUT_MS`，本机默认 15 秒；守卫里写死的 3–10 秒短等待按同一倍数放大）：运行器没有 GPU，页面走软件光栅化，
   比本机慢得多。守卫失败时 `.tmp/browser-guard/` 的截图与守卫日志作为 `browser-guard-failure` 上传。本机复现时要把守卫
   连同它的浏览器进程一起钉在 2 个逻辑核上（GPU 进程不继承父进程的亲和性，只钉 node 复现不出来）。
 - CI 发不出 Release 时（v0.2.0 就是这样：浏览器守卫在 GitHub 运行器上没通过），维护者在标签对应的提交上本机跑
