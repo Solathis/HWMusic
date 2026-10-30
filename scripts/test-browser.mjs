@@ -24,6 +24,13 @@ import { POPOVER_PAD_DIP } from "../src/renderer/features/lyrics/lyrics-popover.
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** 守卫自己的中间产物（.gitignore 已含 .tmp/）。 */
 export const GUARD_DIR = ".tmp/browser-guard";
+const GUARD_DEFAULT_TIMEOUT_MS = 15000;
+/** 等待上限：默认 15 秒，`HWMUSIC_GUARD_TIMEOUT_MS` 只能往上调（CI 运行器没有 GPU，页面走软件光栅化，比本机慢得多）。 */
+export function guardTimeoutMs(env = process.env) {
+  const value = Number(env.HWMUSIC_GUARD_TIMEOUT_MS);
+  return Number.isFinite(value) && value > GUARD_DEFAULT_TIMEOUT_MS ? value : GUARD_DEFAULT_TIMEOUT_MS;
+}
+const GUARD_TIMEOUT_MS = guardTimeoutMs();
 
 /** 歌词夹具：两行，间隔 3 秒（推进进度要看得见变化）。 */
 export const FIXTURE_LRC = ["[00:00.00]第一行歌词守卫", "[00:03.00]第二行歌词守卫"].join("\n");
@@ -1144,7 +1151,7 @@ export async function checkStartupGate(page, port, guardDir, add) {
 export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
-  await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+  await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: GUARD_TIMEOUT_MS });
   await page.evaluate(() => { document.documentElement.className = "light"; });
   await page.evaluate(() => window.__guard.ready());
   await page.waitForFunction(() => window.__guard.snapshot().lyrics.status === "ready" && window.__guard.snapshot().durationMs > 0);
@@ -1510,10 +1517,10 @@ export async function checkLyricsTargetMenus(browser, port, guardDir, add) {
   const record = (name, ok, detail) => { done.add(name); add(name, ok, detail); };
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
   try {
-    page.setDefaultTimeout(15_000);
+    page.setDefaultTimeout(GUARD_TIMEOUT_MS);
     await routeGuardAudio(page, fixtureAudio());
     await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
-    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: GUARD_TIMEOUT_MS });
     await page.evaluate(() => window.__guard.ready());
     await page.waitForFunction(() => window.__guard.snapshot().lyrics.status === "ready");
     const readMenu = (testid) => page.evaluate((id) => {
@@ -1612,7 +1619,7 @@ export async function checkLyricsTargetMenus(browser, port, guardDir, add) {
 export async function checkNoBindingSurface(page, port, add) {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto(`http://127.0.0.1:${port}/index.html?surface=no-lyrics`, { waitUntil: "load" });
-  await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+  await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: GUARD_TIMEOUT_MS });
   await page.evaluate(() => window.__guard.ready());
   await page.waitForFunction(() => window.__guard.snapshot().durationMs > 0);
   await page.waitForTimeout(500);
@@ -2008,6 +2015,14 @@ export async function checkLyricsKaraoke(page, guardDir, add) {
     for (const word of state.words) inks.push(await charInk(png, word.box, meta));
     return { ...state, inks, sung: inks.map((ink) => sungInk(ink, theme)) };
   };
+  /** 在固定时刻取样：跳转并暂停（新的 seekGeneration 让官方组件直接定位），读到的逐字状态不随墙钟漂移。 */
+  let pinGeneration = 900;
+  const readPinned = async (label, timeMs, theme) => {
+    await stopProgress();
+    pinGeneration += 1;
+    await page.evaluate(({ ms, generation }) => window.__guard.desktopProgress({ timeMs: ms, playing: false, seekGeneration: generation }), { ms: timeMs, generation: pinGeneration });
+    return readAt(label, 800, theme);
+  };
   const runMode = async (label, config, viewport, theme) => {
     await page.setViewportSize(viewport);
     await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
@@ -2015,10 +2030,11 @@ export async function checkLyricsKaraoke(page, guardDir, add) {
     await page.waitForTimeout(400);
     await page.evaluate(() => window.__guard.desktopDocument());
     await page.waitForTimeout(250);
+    // 慢截图会让按墙钟外推的时刻越过 3 秒、切到第二行：先播一小段，再在第一行内的两个固定时刻取样。
     await startProgress(600);
-    const early = await readAt(`${label}-t1`, 700, theme);
-    const late = await readAt(`${label}-t2`, 1400, theme);
-    await stopProgress();
+    await page.waitForTimeout(400);
+    const early = await readPinned(`${label}-t1`, 1290, theme);
+    const late = await readPinned(`${label}-t2`, 2850, theme);
     const earlySung = early.sung.filter((value) => isSung(value, theme)).length;
     const lateSung = late.sung.filter((value) => isSung(value, theme)).length;
     const sungValues = early.sung.filter((value) => isSung(value, theme));
@@ -2056,7 +2072,12 @@ export async function checkLyricsKaraoke(page, guardDir, add) {
   await remount();
   await page.evaluate(() => window.__guard.desktopDocument());
   await page.waitForTimeout(400);
-  const beforeStub = await readWords();
+  // 逐词动画由官方组件在帧回调里建：慢渲染下 400 毫秒不一定建好，等到每个字都有暂停态的动画再量。
+  let beforeStub = await readWords();
+  for (const deadline = Date.now() + 8000; !(beforeStub.words.length >= 5 && beforeStub.words.every((word) => word.playState === "paused")) && Date.now() < deadline;) {
+    await page.waitForTimeout(250);
+    beforeStub = await readWords();
+  }
   await page.evaluate(() => { window.__r58Raf = window.requestAnimationFrame; window.requestAnimationFrame = () => 0; });
   for (const timeMs of [900, 1400, 1900, 2400, 2900]) {
     await page.evaluate((ms) => window.__guard.desktopProgress({ timeMs: ms, playing: true, seekGeneration: 100 }), timeMs);
@@ -2122,10 +2143,10 @@ export async function checkDesktopProgressChain(browser, port, guardDir, add) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
   let reported = false;
   try {
-    page.setDefaultTimeout(15_000);
+    page.setDefaultTimeout(GUARD_TIMEOUT_MS);
     await routeGuardAudio(page, fixtureAudio());
     await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
-    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: GUARD_TIMEOUT_MS });
     await page.evaluate(() => window.__guard.ready());
     await page.evaluate(() => window.__guard.desktopBeforeMount());
     await page.getByTestId("lyrics-window").waitFor();
@@ -2204,9 +2225,9 @@ export async function checkLockedLyricsPointer(browser, port, guardDir, add) {
   const record = (name, ok, detail) => { done.add(name); add(name, ok, detail); };
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
   try {
-    page.setDefaultTimeout(15_000);
+    page.setDefaultTimeout(GUARD_TIMEOUT_MS);
     await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
-    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: GUARD_TIMEOUT_MS });
     await page.evaluate(() => window.__guard.ready());
     await page.evaluate(() => window.__guard.desktopBeforeMount());
     await page.getByTestId("lyrics-window").waitFor();
@@ -3187,7 +3208,7 @@ export async function checkLyricsSettingsPopup(page, port, guardDir, add) {
   /** 打开某一页（查询串换一种气泡几何就会整页重载）。 */
   const load = async (bubble) => {
     await page.goto(bubble === null ? BASE : `${BASE}?bubble=${bubble}`, { waitUntil: "load" });
-    await page.waitForFunction(() => window.__popupGuard !== undefined, null, { timeout: 15_000 });
+    await page.waitForFunction(() => window.__popupGuard !== undefined, null, { timeout: GUARD_TIMEOUT_MS });
     await page.getByTestId("lyrics-appearance-panel").waitFor();
     await page.waitForTimeout(450);
   };
@@ -4209,7 +4230,12 @@ export async function checkDesktopLyricsScrim(page, guardDir, add) {
     await page.evaluate(() => window.__guard.desktopDocument());
     await page.waitForTimeout(1000);
     const scrim = await rootScrim();
-    const pixels = await inkContrast(page, activeLine, path.join(guardDir, `r50-scrim-${label}-line.png`));
+    // 淡入没完成时字迹偏灰：慢渲染下 1 秒不一定淡入完，等到对比度达标或超时再判。
+    let pixels = await inkContrast(page, activeLine, path.join(guardDir, `r50-scrim-${label}-line.png`));
+    for (const deadline = Date.now() + 8000; pixels.contrast <= 60 && Date.now() < deadline;) {
+      await page.waitForTimeout(250);
+      pixels = await inkContrast(page, activeLine, path.join(guardDir, `r50-scrim-${label}-line.png`));
+    }
     add(`r50-scrim-readable-${label}`,
       Boolean(scrim) && scrim.attr === "on" && scrim.background !== "rgba(0, 0, 0, 0)"
         && pixels.changed > 40 && pixels.contrast > 60,
@@ -4249,7 +4275,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
         .filter((node) => node.getClientRects().length > 0)
         .reduce((total, node) => total + node.querySelectorAll("tbody tr").length, 0) === rows,
       expected,
-      { timeout: 15_000 },
+      { timeout: GUARD_TIMEOUT_MS },
     );
   const statusText = async () => ((await page.getByTestId("list-pagination-status").textContent().catch(() => "")) ?? "");
   const sentinelCount = () => page.getByTestId("list-pagination-sentinel").count();
@@ -4485,7 +4511,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
   await page.waitForFunction((keyword) => window.__guard.libraryCalls().some((call) => call.channel === "library:search" && call.keyword === keyword), PAGINATION_FIXTURE.slowKeyword);
   await box.fill("快");
   await box.press("Enter");
-  await page.waitForFunction(() => document.body.textContent.includes("搜索快曲目 1"), null, { timeout: 15_000 });
+  await page.waitForFunction(() => document.body.textContent.includes("搜索快曲目 1"), null, { timeout: GUARD_TIMEOUT_MS });
   await page.waitForTimeout(PAGINATION_FIXTURE.slowDelayMs + 500);
   const searchText = (await table.textContent()) ?? "";
   const searchCalls = await callsOf("library:search");
@@ -4544,7 +4570,7 @@ export async function checkSidebarPlaylists(page, port, guardDir, add) {
     await page.setViewportSize({ width, height });
     const query = mode === "fixture" ? "" : `?playlists=${mode}`;
     await page.goto(`http://127.0.0.1:${port}/index.html${query}`, { waitUntil: "load" });
-    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: GUARD_TIMEOUT_MS });
     await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
     await page.getByTestId("main-content").waitFor();
   };
@@ -4714,7 +4740,7 @@ export async function checkSidebarPlaylists(page, port, guardDir, add) {
   add("r62-sidebar-loading-skeleton", skeleton.rows >= 2 && skeleton.list === 0 && skeleton.empty === 0, JSON.stringify(skeleton));
   await shotSidebar("r62-sidebar-loading-skeleton.png");
   // 骨架必须让位给真的列表（不是永远转下去）
-  await items().first().waitFor({ timeout: 15_000 });
+  await items().first().waitFor({ timeout: GUARD_TIMEOUT_MS });
   add("r62-sidebar-loading-settles", (await items().count()) === 2, `骨架退场后 ${await items().count()} 张`);
 
   // ——— ⑤ 失败：一句原因 + 「重试」，点重试真的再取一次 ———
@@ -4727,7 +4753,7 @@ export async function checkSidebarPlaylists(page, port, guardDir, add) {
     JSON.stringify({ failureText: failureText.slice(0, 40), retryCount }));
   await shotSidebar("r62-sidebar-failure.png");
   await retry.click();
-  await items().first().waitFor({ timeout: 15_000 });
+  await items().first().waitFor({ timeout: GUARD_TIMEOUT_MS });
   const retried = await page.evaluate(() => window.__guard.playlistListCalls().length);
   add("r62-sidebar-retry-recovers", (await items().count()) === 2 && retried === 2, `重试后 ${await items().count()} 张、请求 ${retried} 次`);
 
@@ -4808,7 +4834,7 @@ export async function checkRowContextMenus(page, port, guardDir, add) {
   const open = async (theme = "light") => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
-    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: GUARD_TIMEOUT_MS });
     await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
     await page.getByTestId("main-content").waitFor();
     await table.locator("tbody tr").first().waitFor();
@@ -5055,7 +5081,7 @@ export async function checkLocalSongs(page, port, guardDir, add) {
     await page.setViewportSize({ width: 1280, height: 800 });
     const query = mode === "fixture" ? "" : `?local=${mode}`;
     await page.goto(`http://127.0.0.1:${port}/index.html${query}`, { waitUntil: "load" });
-    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+    await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: GUARD_TIMEOUT_MS });
     await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
     await page.getByTestId("main-content").waitFor();
     await page.getByRole("button", { name: "本地歌曲", exact: true }).click();
@@ -5371,7 +5397,7 @@ export async function checkPageFill(page, guardDir, add) {
       const box = page.getByRole("textbox", { name: "搜索关键字" });
       await box.fill("守卫");
       await box.press("Enter");
-      await page.waitForFunction(() => document.body.textContent.includes("搜索守卫曲目 1"), null, { timeout: 15_000 });
+      await page.waitForFunction(() => document.body.textContent.includes("搜索守卫曲目 1"), null, { timeout: GUARD_TIMEOUT_MS });
       await page.waitForTimeout(300);
     });
     measured.push(await visit(size, "搜索结果", '[data-testid="track-table"]'));
@@ -5517,6 +5543,20 @@ async function launchChromium(candidates, log) {
   return { browser: null, failures };
 }
 
+/** 守卫中途抛错时留现场：整页截图 + 播放器快照，CI 失败时随截图一起上传。 */
+async function saveFatalDiagnostics(page, guardDir, log) {
+  try {
+    await page.screenshot({ path: path.join(guardDir, "fatal.png"), timeout: 10000 });
+    const state = await page.evaluate(() => {
+      const snap = window.__guard?.snapshot?.();
+      return snap ? { index: snap.index, status: snap.status, currentTimeMs: snap.currentTimeMs, durationMs: snap.durationMs, trackId: snap.trackId, lyrics: snap.lyrics?.status } : null;
+    });
+    log(`守卫中断时的现场：${JSON.stringify(state)}；截图 ${GUARD_DIR}/fatal.png`);
+  } catch (cause) {
+    log(`守卫中断时的现场没能留下：${String(cause?.message ?? cause).slice(0, 200)}`);
+  }
+}
+
 /** 跑全部检查，返回 {pass, fail, skipped, checks}。 */
 export async function runGuard({ root = ROOT, log = console.log } = {}) {
   const guardDir = path.join(root, GUARD_DIR);
@@ -5639,6 +5679,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     checks.push({ id, ok, detail });
     log(`  ${ok ? "PASS" : "FAIL"}  ${id.padEnd(22)} ${detail}`);
   };
+  let fatalPage = null;
   /** 单项检查的护栏：检查自己抛错（选择器不存在、等待超时）时记一条 FAIL 并继续——要读到的是「哪一项行为不成立」，而不是整轮守卫崩在第一项上。 */
   const checked = async (id, run) => {
     try {
@@ -5650,7 +5691,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
 
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
-    page.setDefaultTimeout(15_000);
+    page.setDefaultTimeout(GUARD_TIMEOUT_MS);
+    fatalPage = page;
     const consoleErrors = [];
     const pageErrors = [];
     page.on("console", (message) => {
@@ -5674,7 +5716,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
      * 放主页面里跑还会把它导航到登录页/主界面，污染后面每一项的基线。
      */
     const startupPage = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
-    startupPage.setDefaultTimeout(15_000);
+    startupPage.setDefaultTimeout(GUARD_TIMEOUT_MS);
     const startupErrors = [];
     startupPage.on("console", (message) => {
       if (message.type() === "error") startupErrors.push(message.text());
@@ -5687,7 +5729,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     /** 保存并恢复上次的播放进度。独立开一页（恢复只发生在**页面加载**时），夹具 settings 在页面脚本之前就写好「上次停在 0:05」。 */
     await checked("r64-resume-progress", async () => {
       const resumePage = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
-      resumePage.setDefaultTimeout(15_000);
+      resumePage.setDefaultTimeout(GUARD_TIMEOUT_MS);
       const resumeErrors = [];
       resumePage.on("pageerror", (error) => resumeErrors.push(error.message));
       await routeGuardAudio(resumePage, audio);
@@ -5698,11 +5740,11 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
         } catch {}
       }, RESUME_QUEUE);
       await resumePage.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
-      await resumePage.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+      await resumePage.waitForFunction(() => window.__guard !== undefined, null, { timeout: GUARD_TIMEOUT_MS });
       await resumePage.waitForFunction(
         () => window.__guard.snapshot().restored === true && window.__guard.snapshot().entries.length === 2,
         null,
-        { timeout: 15_000 },
+        { timeout: GUARD_TIMEOUT_MS },
       );
       const bar = resumePage.getByTestId("player-bar");
       await bar.waitFor();
@@ -5737,7 +5779,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       await resumePage.waitForFunction(
         () => window.__guard.snapshot().status === "playing" && window.__guard.snapshot().currentTimeMs >= 5000,
         null,
-        { timeout: 15_000 },
+        { timeout: GUARD_TIMEOUT_MS },
       );
       await resumePage.waitForTimeout(1200);
       const resumed = await resumePage.evaluate(() => ({ ...window.__guard.snapshot() }));
@@ -5764,7 +5806,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     const underlay = '[data-slot="sidebar-container"], [data-slot="sidebar-inset"] > header, [data-slot="sidebar-inset"] > .relative, [data-slot="sidebar-inset"] > [data-testid="player-bar"]';
     for (const theme of ["light", "dark"]) {
       await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
-      await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: 15_000 });
+      await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: GUARD_TIMEOUT_MS });
       await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
       await page.evaluate(() => window.__guard.ready());
       await page.waitForFunction(() => window.__guard.snapshot().lyrics.status === "ready" && window.__guard.snapshot().durationMs > 0);
@@ -5934,10 +5976,21 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
         await page.waitForTimeout(800);
       }
 
+      // 慢渲染下一次测量可能比整首歌（12 秒）还长：不按住会播到第二行甚至自动切歌。页面定时器不靠动画帧，测量期间把时钟按在第一行。
+      await page.evaluate(() => window.__guard.setTime(700));
       await stage.getByRole("button", { name: "播放", exact: true }).click();
       await page.waitForFunction(() => window.__guard.snapshot().status === "playing");
-      await page.waitForTimeout(300);
-      const playingPixels = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-playing-line.png`));
+      await page.evaluate(() => {
+        window.__playingClock = setInterval(() => {
+          if (window.__guard.snapshot().currentTimeMs > 2000) window.__guard.setTime(700);
+        }, 200);
+      });
+      let playingPixels = { ink: 0, changed: 0, box: null };
+      for (const deadline = Date.now() + 6000; playingPixels.ink <= 60 && Date.now() < deadline;) {
+        await page.waitForTimeout(300);
+        playingPixels = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-playing-line.png`));
+      }
+      await page.evaluate(() => clearInterval(window.__playingClock));
       add(`${theme}-playing-text-pixels`, playingPixels.ink > 60, JSON.stringify(playingPixels));
       await stage.getByRole("button", { name: "暂停", exact: true }).click();
       await page.evaluate(() => window.__guard.setTime(3300));
@@ -6006,9 +6059,14 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       for (const repeated of [false, true]) {
         await page.evaluate(() => window.__guard.markRuntime());
         if (repeated) await page.evaluate(() => window.__guard.prepareRepeatedQueue());
-        else await stage.getByRole("button", { name: "播放", exact: true }).click();
+        else { await page.evaluate(() => window.__guard.setTime(0)); await stage.getByRole("button", { name: "播放", exact: true }).click(); }
         await page.waitForFunction(() => window.__guard.snapshot().status === "playing" && window.__guard.snapshot().durationMs > 0);
-        const previousIndex = await page.evaluate(() => window.__guard.snapshot().index);
+        // 慢渲染下拖动手势可能比剩下的播放时长还久：手势期间把时钟按住，不让这一首自然播完而自动切歌。
+        await page.evaluate(() => {
+          window.__dragClock = setInterval(() => {
+            if (window.__guard.snapshot().currentTimeMs > 9000) window.__guard.setTime(1000);
+          }, 200);
+        });
         const gestureBox = await slider.locator('[class*="nowPlayingSlider"]').first().boundingBox();
         if (gestureBox) {
           await page.mouse.move(gestureBox.x + gestureBox.width * .2, gestureBox.y + gestureBox.height / 2);
@@ -6016,7 +6074,12 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
           await page.mouse.move(gestureBox.x + gestureBox.width * .8, gestureBox.y + gestureBox.height / 2, { steps: 12 });
           await page.waitForTimeout(100);
         }
-        await page.evaluate(() => window.__guard.nextTrack());
+        const previousIndex = await page.evaluate(async () => {
+          clearInterval(window.__dragClock);
+          const index = window.__guard.snapshot().index;
+          await window.__guard.nextTrack();
+          return index;
+        });
         await page.waitForFunction((index) => window.__guard.snapshot().index === index + 1
           && window.__guard.snapshot().status === "playing", previousIndex);
         const afterNext = await page.evaluate(() => ({ index: window.__guard.snapshot().index, timeMs: window.__guard.snapshot().currentTimeMs,
@@ -6074,15 +6137,23 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       await stage.getByRole("button", { name: "暂停", exact: true }).click();
       await page.setViewportSize({ width: 600, height: 900 });
       await page.waitForTimeout(1200);
-      const portrait = await page.evaluate(() => {
+      // 竖屏：先回到第一行（已扫亮两个字）；慢渲染下 1.2 秒内布局与字迹不一定稳定，轮询到达标或超时。
+      await page.evaluate(() => window.__guard.setTime(700));
+      const measurePortrait = () => page.evaluate(() => {
         const cover = document.querySelector('[data-testid="playback-stage-cover"]')?.getBoundingClientRect();
         const lyric = document.querySelector('[data-testid="amll-lyrics-panel"]')?.getBoundingClientRect();
         return { cover: cover?.toJSON(), lyric: lyric?.toJSON(), scrollWidth: document.documentElement.scrollWidth };
       });
-      const portraitInk = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-portrait-line.png`));
-      add(`${theme}-official-portrait`, Boolean(portrait.cover && portrait.lyric && portrait.cover.width >= 40
-        && portrait.cover.bottom <= portrait.lyric.y + 1 && portrait.lyric.width > 200
-        && portrait.scrollWidth <= 600 && portraitInk.ink > 60), JSON.stringify({ ...portrait, ink: portraitInk.ink }));
+      const portraitOk = (layout, ink) => Boolean(layout.cover && layout.lyric && layout.cover.width >= 40
+        && layout.cover.bottom <= layout.lyric.y + 1 && layout.lyric.width > 200 && layout.scrollWidth <= 600 && ink.ink > 60);
+      let portrait = await measurePortrait();
+      let portraitInk = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-portrait-line.png`));
+      for (const deadline = Date.now() + 8000; !portraitOk(portrait, portraitInk) && Date.now() < deadline;) {
+        await page.waitForTimeout(250);
+        portrait = await measurePortrait();
+        portraitInk = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-portrait-line.png`));
+      }
+      add(`${theme}-official-portrait`, portraitOk(portrait, portraitInk), JSON.stringify({ ...portrait, ink: portraitInk.ink }));
       await page.setViewportSize({ width: 1280, height: 800 });
       await page.emulateMedia({ reducedMotion: "no-preference" });
       await page.evaluate(() => window.__guard.setCoverFailure());
@@ -6179,7 +6250,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     /** 设置弹出窗那一页（真组件 + 真产物 CSS）；用**另一页**跑，因为它会改 viewport 与主题类，而主页面后面还有几项要用当前的桌面窗状态。 */
     await checked("r60-lyrics-settings-popup", async () => {
       const popupPage = await browser.newPage({ viewport: { width: 420, height: 720 }, colorScheme: "light" });
-      popupPage.setDefaultTimeout(15_000);
+      popupPage.setDefaultTimeout(GUARD_TIMEOUT_MS);
       popupPage.on("console", (message) => { if (message.type() === "error") consoleErrors.push(`[popup] ${message.text()}`); });
       popupPage.on("pageerror", (error) => pageErrors.push(`[popup] ${error.message}`));
       try {
@@ -6199,7 +6270,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     /** 账号区四态（另一页，挂真 App；头像的两种结局都用 page.route 造出来）。 */
     await checked("r57-account-area", async () => {
       const accountPage = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light", deviceScaleFactor: 2 });
-      accountPage.setDefaultTimeout(15_000);
+      accountPage.setDefaultTimeout(GUARD_TIMEOUT_MS);
       accountPage.on("console", (message) => { if (message.type() === "error") consoleErrors.push(`[account] ${message.text()}`); });
       accountPage.on("pageerror", (error) => pageErrors.push(`[account] ${error.message}`));
       const avatar = await sharp({ create: { width: 128, height: 128, channels: 3, background: { r: 90, g: 150, b: 210 } } }).png().toBuffer();
@@ -6219,6 +6290,9 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     await checkNoBindingSurface(page, port, add);
     add("no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,
       `console error ${consoleErrors.length} 条、pageerror ${pageErrors.length} 条${[...consoleErrors, ...pageErrors].slice(0, 3).map((text) => `\n      ${text.slice(0, 200)}`).join("")}`);
+  } catch (cause) {
+    if (fatalPage) await saveFatalDiagnostics(fatalPage, guardDir, log);
+    throw cause;
   } finally {
     await browser.close();
     server.close();

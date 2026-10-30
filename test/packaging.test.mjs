@@ -1979,6 +1979,24 @@ test("test:browser：SKIP 会让整体判失败（无 Chromium 环境 = FAIL，�
   assert.match(mod.formatGuardSummary({ pass: 5, fail: 0, skipped: 0 }), /PASS 5 \/ SKIP 0 \/ FAIL 0/);
 });
 
+test("test:browser：等待上限默认 15 秒，HWMUSIC_GUARD_TIMEOUT_MS 只能往上调（CI 运行器没有 GPU，走软件光栅化）", async () => {
+  const mod = await import("../scripts/test-browser.mjs");
+  assert.equal(mod.guardTimeoutMs({}), 15000);
+  assert.equal(mod.guardTimeoutMs({ HWMUSIC_GUARD_TIMEOUT_MS: "60000" }), 60000);
+  assert.equal(mod.guardTimeoutMs({ HWMUSIC_GUARD_TIMEOUT_MS: "10000" }), 15000, "调低会让本机也变脆");
+  assert.equal(mod.guardTimeoutMs({ HWMUSIC_GUARD_TIMEOUT_MS: "abc" }), 15000);
+  assert.doesNotMatch(read("scripts/test-browser.mjs"), /15_000/, "等待上限只有一个真源");
+});
+
+test("CI：浏览器守卫把等待上限调到 60 秒，失败时上传截图与日志", () => {
+  const workflow = read(".github/workflows/windows-nsis.yml");
+  const guardStep = workflow.slice(workflow.indexOf("- name: 浏览器守卫"), workflow.indexOf("- name: Rust 测试"));
+  assert.ok(guardStep.includes('HWMUSIC_GUARD_TIMEOUT_MS: "60000"'), "运行器没有 GPU，软件光栅化比本机慢得多");
+  assert.ok(guardStep.includes("if: failure()"), "只在失败时上传");
+  assert.ok(guardStep.includes(".tmp/browser-guard/") && guardStep.includes(".tmp/ci/test-browser.log"), "截图与守卫日志都要上传");
+  assert.ok(guardStep.includes("include-hidden-files: true"), ".tmp 是隐藏目录，upload-artifact v4 默认不收");
+});
+
 test("test:browser：Chromium 候选顺序 = 显式覆盖 → playwright 自带 → 系统 Chrome/Edge", async () => {
   const mod = await import("../scripts/test-browser.mjs");
   const kinds = mod.chromiumCandidates({ env: { PLAYWRIGHT_CHROMIUM_EXECUTABLE: "C:\\x\\chromium.exe" } }).map(

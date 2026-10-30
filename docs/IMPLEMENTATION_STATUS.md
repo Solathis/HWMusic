@@ -199,7 +199,7 @@
 | 25 | 打包链（`build:web` → `dist:sidecar` → `tauri build` + mtime 新鲜度） | **verified** | **verified**（本机真跑通一次） | `scripts/dist-win.mjs`；`test/packaging.test.mjs`（29 条契约测试，含"旧 exe + 新产物 → 必须失败"） |
 | 26 | sidecar SEA 打包与自验证 | **verified** | **verified**（本机真的起了两个模式） | `scripts/build-sidecar.mjs`；负向对照（产物 SHA ≠ node.exe） |
 | 27 | NSIS 安装包静态校验（8 项） | **verified** | untested（**不执行安装包**） | `scripts/check-nsis-package.mjs`；`test/packaging.test.mjs` |
-| 28 | CI 流水线（19 步） | **verified（YAML + 5 条契约测试）** | in-progress（GitHub 上跑过三次，浏览器守卫在运行器上未通过，见 KNOWN_LIMITATIONS F1） | `.github/workflows/windows-nsis.yml`；`yaml.safe_load` 验过；`test/packaging.test.mjs` 的 5 条 CI 契约测试 |
+| 28 | CI 流水线（20 步） | **verified（YAML + 5 条契约测试）** | in-progress（GitHub 上跑过三次，浏览器守卫在运行器上未通过，见 KNOWN_LIMITATIONS F1） | `.github/workflows/windows-nsis.yml`；`yaml.safe_load` 验过；`test/packaging.test.mjs` 的 5 条 CI 契约测试 |
 | 29 | 真窗冒烟（`smoke:build`） | verified（三种结论与退出码） | **UNTESTED**（本机起不了真窗，退出码 2） | `scripts/tauri-smoke.mjs`；窄指纹只认 `os error 5` / `拒绝访问` / `Access is denied`，别的崩溃一律 FAIL |
 | 30 | Linux / macOS 支持 | untested | untested | **本仓不宣称支持**（见 KNOWN_LIMITATIONS C 组与 [PLATFORM_DIFFERENCES.md](PLATFORM_DIFFERENCES.md)） |
 

@@ -109,6 +109,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "npm run build:web 失败（退出码 $LASTEXITCODE）"; exit 1 }
 
       - name: 浏览器守卫（npm run test:browser，断言 PASS N / SKIP 0 / FAIL 0）
+        # 运行器没有 GPU，页面走软件光栅化，比本机慢得多：等待上限放宽到 60 秒（本机默认 15 秒）
+        env:
+          HWMUSIC_GUARD_TIMEOUT_MS: "60000"
         shell: pwsh
         run: |
           npm run test:browser 2>&1 | Tee-Object -FilePath .tmp/ci/test-browser.log
@@ -116,6 +119,18 @@ jobs:
           $guard = Get-Content .tmp/ci/test-browser.log -Raw
           if ($guard -notmatch 'PASS \d+ / SKIP 0 / FAIL 0') { Write-Error "浏览器守卫没有 PASS N / SKIP 0 / FAIL 0（SKIP 不算成功）"; exit 1 }
           Write-Output "浏览器守卫：PASS N / SKIP 0 / FAIL 0"
+
+      - name: 上传浏览器守卫失败现场（截图与日志）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-guard-failure
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 7
+          path: |
+            .tmp/browser-guard/
+            .tmp/ci/test-browser.log
 
       - name: Rust 测试（cargo test）
         shell: pwsh

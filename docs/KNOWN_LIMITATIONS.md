@@ -315,7 +315,7 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
 | F6 | **仓库整体不是 rustfmt-clean** | verified（如实记） | `cargo fmt --check` 在 `bridge.rs` 等既有文件上就有 diff。**CI 里刻意不加 `cargo fmt --check`**（那会把多个任务的代码一起重排成一个大 diff）；新代码按现有风格手写 |
 | F7 | **`tauri build` 会规范化 `src-tauri/Cargo.toml`** | verified（工具行为） | 会把 `tauri-build = "2"` 写成 `tauri-build = { version = "2", features = [] }`（语义等价），**工作树会变脏**。下次在本机跑 `dist:win` 会再次出现 |
 | F8 | **关窗验证不能对所有顶层窗口发 WM_CLOSE** | verified（已知事实） | R72 实测：向全部顶层窗口发 WM_CLOSE 会打到 tao 的 Thread Event Target 窗（回调走 DefWindowProc 被销毁），之后 `app.exit` 发不出消息，日志出现「failed to exit」ERROR。这是验证脚本的问题，不是产品缺陷；验证时只关主窗（实测旧脚本 1 次 ERROR，只关主窗 0 次） |
-| F9 | **`r58-desktop-panel-sweep` 偶发计时抖动** | verified（如实记） | 守卫按墙钟推进进度、两次采样之间截图与量字形；机器忙时第二次采样会落到下一句、整行已暗而报一次 FAIL。R77 复跑出现过一次，重跑即过，此前 15 次均通过。约定：只有这一条失败时重跑一次，别的失败照实处理 |
+| F9 | **`r58-desktop-panel-sweep` 偶发计时抖动** | verified（已修） | 守卫按墙钟推进进度、两次采样之间截图与量字形；机器忙时第二次采样会落到下一句、整行已暗而报一次 FAIL。R77 复跑出现过一次，重跑即过，此前 15 次均通过。约定：只有这一条失败时重跑一次，别的失败照实处理。**更正（2026-10-30）**：根因是桌面歌词窗播放时按墙钟外推显示时刻，慢截图把第二次取样推过 3 秒、落到还没扫亮的第二行（限 4 核实测 `sung` 为 `[4,0]`）。现在两次取样都先跳转并暂停在固定时刻（1290 / 2850 毫秒）再量，与机器快慢无关，重跑约定作废 |
 
 ---
 
