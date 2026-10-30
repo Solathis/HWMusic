@@ -2070,7 +2070,8 @@ export async function checkLyricsKaraoke(page, guardDir, add) {
   await page.evaluate(() => { document.documentElement.className = "light"; });
   await configure({ ...DESKTOP_BASELINE });
   await remount();
-  await page.evaluate(() => window.__guard.desktopDocument());
+  // 主播放器此前一直在播：发文档前先定在第一行（慢机器上它早已过了 3 秒，落到还没建好逐词动画的第二行）。
+  await page.evaluate(() => { window.__guard.setTime(700); return window.__guard.desktopDocument(); });
   await page.waitForTimeout(400);
   // 逐词动画由官方组件在帧回调里建：慢渲染下 400 毫秒不一定建好，等到每个字都有暂停态的动画再量。
   let beforeStub = await readWords();
@@ -4227,7 +4228,8 @@ export async function checkDesktopLyricsScrim(page, guardDir, add) {
     await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
     await setWallpaper(wallpaper);
     await configure({ ...DESKTOP_BASELINE, style: "clean", mode: "desktop" });
-    await page.evaluate(() => window.__guard.desktopDocument());
+    // 取样时刻定在第一行大半已扫亮（2300 毫秒，本机一向通过时的状态）：主播放器此前一直在播，慢机器上会落到还没扫亮的第二行。
+    await page.evaluate(() => { window.__guard.setTime(2300); return window.__guard.desktopDocument(); });
     await page.waitForTimeout(1000);
     const scrim = await rootScrim();
     // 淡入没完成时字迹偏灰：慢渲染下 1 秒不一定淡入完，等到对比度达标或超时再判。
