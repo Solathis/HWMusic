@@ -21,7 +21,7 @@
 
 ## 0. 全局测试基线（终审修复波实测，全绿；真窗冒烟除外，见末行）
 
-**当前基线（R79–R82 收尾，截至 `de60272`；下方表格是终审修复波的历史基线，保留作证据）**：`npm test` 1275 pass / 0 fail / 0 skipped；`npm run typecheck` exit 0；`npm run build:web` 通过；`npm run test:acceptance` PASS 6 / SKIP 0 / FAIL 0（无注入扫描 20 类 token × 179 个文件 → 0 命中）；`npm run test:browser` PASS 312 / SKIP 0 / FAIL 0；`cargo test` 414 passed / 0 failed / 1 ignored（lib 356 + 集成 58：`frame_log_redaction` 4、`login_policy` 19、`taskbar_lyrics_test` 35），无 warning。sidecar 自验证、NSIS 静态校验、真窗冒烟本轮未重跑。
+**当前基线（截至 `b11a6fd`，本机与 [CI run 41055323039](https://github.com/Solathis/HWMusic/actions/runs/41055323039) 一致；下方表格是终审修复波的历史基线，保留作证据）**：`npm test` 1286 pass / 0 fail / 0 skipped；`npm run typecheck` exit 0；`npm run build:web` 通过；`npm run test:acceptance` PASS 6 / SKIP 0 / FAIL 0（无注入扫描 20 类 token × 180 个文件 → 0 命中）；`npm run test:browser` PASS 312 / SKIP 0 / FAIL 0；`cargo test` 414 passed / 0 failed / 1 ignored（lib 356 + 集成 58：`frame_log_redaction` 4、`login_policy` 19、`taskbar_lyrics_test` 35），无 warning。CI 上 `check:nsis` 8/8、`release:assets` 产出 `HWMusic_0.2.0_x64-setup.exe`；真窗冒烟不进 CI，本轮未跑。
 
 | 链路 | 命令 | 结果 |
 |---|---|---|
@@ -199,7 +199,7 @@
 | 25 | 打包链（`build:web` → `dist:sidecar` → `tauri build` + mtime 新鲜度） | **verified** | **verified**（本机真跑通一次） | `scripts/dist-win.mjs`；`test/packaging.test.mjs`（29 条契约测试，含"旧 exe + 新产物 → 必须失败"） |
 | 26 | sidecar SEA 打包与自验证 | **verified** | **verified**（本机真的起了两个模式） | `scripts/build-sidecar.mjs`；负向对照（产物 SHA ≠ node.exe） |
 | 27 | NSIS 安装包静态校验（8 项） | **verified** | untested（**不执行安装包**） | `scripts/check-nsis-package.mjs`；`test/packaging.test.mjs` |
-| 28 | CI 流水线（20 步） | **verified（YAML + 5 条契约测试）** | in-progress（GitHub 上跑过三次，浏览器守卫在运行器上未通过，见 KNOWN_LIMITATIONS F1） | `.github/workflows/windows-nsis.yml`；`yaml.safe_load` 验过；`test/packaging.test.mjs` 的 5 条 CI 契约测试 |
+| 28 | CI 流水线（20 步） | **verified（YAML + 5 条契约测试）** | **verified**（[run 41055323039](https://github.com/Solathis/HWMusic/actions/runs/41055323039)，`b11a6fd`：20 步全部通过；只有标签触发的「发布 Release」还没在 CI 上跑过，见 KNOWN_LIMITATIONS F1） | `.github/workflows/windows-nsis.yml`；`yaml.safe_load` 验过；`test/packaging.test.mjs` 的 5 条 CI 契约测试 |
 | 29 | 真窗冒烟（`smoke:build`） | verified（三种结论与退出码） | **UNTESTED**（本机起不了真窗，退出码 2） | `scripts/tauri-smoke.mjs`；窄指纹只认 `os error 5` / `拒绝访问` / `Access is denied`，别的崩溃一律 FAIL |
 | 30 | Linux / macOS 支持 | untested | untested | **本仓不宣称支持**（见 KNOWN_LIMITATIONS C 组与 [PLATFORM_DIFFERENCES.md](PLATFORM_DIFFERENCES.md)） |
 
