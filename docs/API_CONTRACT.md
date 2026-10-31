@@ -1832,6 +1832,7 @@ R63 按下面四条标准逐条查过，**一条都没满足**，所以 `src/ren
 | `CORE_SET_AUTOSTART` / `CORE_GET_AUTOSTART` | `"core_set_autostart"` / `"core_get_autostart"` | `src/shared/commands.ts` | R10：命令名的唯一真源（渲染层只用常量；Rust 侧为镜像副本，由 `test/autostart.test.mjs` 钉住） |
 | `CORE_GET_TRAY_AVAILABLE` | `"core_get_tray_available"` | `src/shared/commands.ts` | R11：托盘可用性的唯一来源（Rust 侧镜像由 `test/tray.test.mjs` 与 lib.rs 的注册扫描钉住） |
 | `CORE_READ_RUN_LOG` | `"core_read_run_log"` | `src/shared/commands.ts` | R56：设置页「日志」标签的数据源（宿主侧日志文件的最后 500 条；`require_main_webview` 守卫、返回前脱敏）；Rust 侧注册由 `lib.rs` 的注册扫描钉住 |
+| `CORE_APP_INFO` / `CORE_OPEN_LINK` | `"core_app_info"` / `"core_open_link"` | `src/shared/commands.ts` | AB1：设置「关于」。`core_app_info` 回 `{version, tauriVersion, webviewVersion?, os, arch}`；`core_open_link({key})` 只认 `src-tauri/src/about.rs` 固定表里的键，用系统浏览器打开（opener 插件的 Rust 函数，不注册插件、不给 webview 权限）。两条都过 `require_main_webview`，表与渲染层由 `test/about-pane.test.mjs` 互钉 |
 | `STDERR_PREFIX` / `STDERR_LOG_TARGET` | `"[hwmusic-core]"` / `"hwmusic_core"` | `src-tauri/src/sidecar.rs`（与 `src/sidecar/main.mjs` 的 `LOG_PREFIX` 逐字一致） | R56：sidecar stderr 每一行的前缀，以及它在日志文件里的 target |
 | `TRAY_AVAILABLE` | `false` | `src/renderer/features/settings/settings-form.mjs` | R11：**兜底值**——宿主没答上来时用（真值来自 `core_get_tray_available`）。方向保守：界面说"不可用"而实际能用，比反过来代价小 |
 | `TRAY_ID` | `"tray"` | `src-tauri/src/lib.rs` | R11：托盘**图标** id（菜单项 id 前缀是 `tray:`，见 `tray::MENU_ID_PREFIX`）；`core_get_tray_available` 与关窗回调都按它现问托盘表 |

@@ -73,3 +73,8 @@ export const CORE_LOCAL_BASE_URL = "core_local_base_url";
 export const CORE_LOCAL_LIST = "core_local_list";
 export const CORE_LOCAL_IMPORT = "core_local_import";
 export const CORE_LOCAL_REMOVE = "core_local_remove";
+
+/** 设置「关于」：版本与运行环境（只读），限主窗。 */
+export const CORE_APP_INFO = "core_app_info";
+/** 设置「关于」：按键打开外链，只认 `src-tauri/src/about.rs` 固定表里的键，限主窗。 */
+export const CORE_OPEN_LINK = "core_open_link";

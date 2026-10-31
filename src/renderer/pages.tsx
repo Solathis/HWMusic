@@ -42,6 +42,7 @@ import type { LogEntry } from "./log-terminal.tsx"
 import { RUN_LOG_READ_LIMIT } from "./features/settings/run-log.mjs"
 import { LyricsCacheCard } from "./lyrics-cache-card.tsx"
 import { TaskbarLyricsCard } from "./taskbar-lyrics-card.tsx"
+import { AboutPane } from "./about-pane.tsx"
 import { coreCall, getAutostart, setAutostart } from "./host-api"
 import { libraryEmptyText, libraryFailureText } from "./features/library/library-state.mjs"
 import {
@@ -795,6 +796,7 @@ export const SETTINGS_TABS = [
   { id: "network", label: "网络" },
   { id: "lyrics", label: "歌词" },
   { id: "log", label: "日志" },
+  { id: "about", label: "关于" },
 ]
 
 /** 设置页：所有文案与判定都在 `features/settings/settings-form.mjs`（纯函数），页面只塞状态、渲染返回值；凭据只写不读，失败与提示按回执如实说。 */
@@ -1272,6 +1274,11 @@ export function SettingsPage({
               <LogTerminal notices={notices} />
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* 关于：版本信息、技术栈与外链（只读，不是设置项） */}
+        <TabsContent value="about" className="grid grid-cols-1 items-start gap-4 xl:grid-cols-2">
+          <AboutPane />
         </TabsContent>
       </Tabs>
     </div>

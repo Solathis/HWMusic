@@ -51,7 +51,7 @@
    只在「命令名带 `plugin:` 前缀 / 应用定义了 app 级 ACL manifest / 来源不是本地」三种情形查 ACL，
    本应用三者皆不成立；**前置条件由 `test/autostart.test.mjs` 钉住**（将来谁加了 app 级 manifest，那条用例先红）。
 3. **不开 fs / shell / http / dialog / store 任何权限**，插件清单只限
-   single-instance、window-state、global-shortcut、notification、autostart、log。
+   single-instance、window-state、global-shortcut、notification、autostart、log；dialog 只从 Rust 调用，opener 只用它的 `open_url` 函数（不注册插件）。
 
 ---
 
@@ -198,6 +198,7 @@ webview 仍走代理——这是两套网络栈的行为不一致，如实记（
 | 音频 / 封面协议 URL | `http://hwlocal.localhost/<id>`（封面 `/<id>/cover`） | `hwlocal://localhost/<id>` | `hwlocal://localhost/<id>` |
 | 基址来源 | `core_local_base_url`（`protocol_base()`，`#[cfg(windows)]` 分支） | 同左 | 同左 |
 | 选文件对话框 | `tauri-plugin-dialog` 的 **Rust API**（`spawn_blocking` 里等，主线程不被占住） | 同左（未实测） | 同左（未实测） |
+| 打开外链（设置「关于」） | `tauri-plugin-opener` 的 Rust 函数 `open_url`（系统默认浏览器；不注册插件，webview 没有 opener 权限） | 同左（未实测） | 同左（未实测） |
 
 - **URL 形态由宿主算，渲染层不写死**：Windows 的 webview 只认 `http://<scheme>.localhost` 形态，mac/Linux 是 `hwlocal://localhost`。
   渲染层的 `normalizeLocalBaseUrl` 只接受这两种，认不出就回 `null`（界面说"本地播放不可用"），不拼一个注定 404 的地址。

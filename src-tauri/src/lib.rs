@@ -4,6 +4,7 @@
 //! capabilities 按窗口分文件、按最小权限配置，官方登录页没有任何命令权限。
 //! `bridge` / `login` / `lyrics_window` / `tray` 是 `pub`，好让 `tests/` 与内联单测直接测纯函数。
 
+mod about;
 pub mod bridge;
 pub mod close_behavior;
 mod commands;
@@ -748,6 +749,9 @@ pub fn run() {
             commands::core_get_tray_available,
             // 设置页「日志」标签的数据源（主窗来源守卫 + 返回前脱敏）
             commands::core_read_run_log,
+            // 设置「关于」：版本信息与按键打开外链（主窗来源守卫在命令里）
+            about::core_app_info,
+            about::core_open_link,
             // 本地曲库四条命令（选文件 / 快照 / 导入 / 移除）：对话框只在 Rust 侧开，渲染层只拿到 id 与元数据。
             local_library::core_local_base_url,
             local_library::core_local_list,

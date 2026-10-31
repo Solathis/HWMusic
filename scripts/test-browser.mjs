@@ -189,6 +189,9 @@ const settingsPopupOpens = [];
 const settingsPopupResizes = [];
 const settingsPopupCloses = [];
 const mediaActions = [];
+/** 「关于」里每次「打开」的键；openLinkFails 为真时宿主拒绝（造出打开失败）。 */
+const openLinkCalls = [];
+let openLinkFails = false;
 /** core_lyrics_progress 的调用次数（判断去掉 rAF 后进度是否还在推）。 */
 let lyricsProgressCalls = 0;
 /** 歌词页上报的解锁区（null = 没有解锁按钮）。 */
@@ -374,6 +377,12 @@ mockIPC(async (command, args) => {
   if (command === "plugin:window|start_dragging") { dragCalls += 1; return; }
   if (command === "plugin:window|start_resize_dragging") { resizeCalls.push(args.value ?? null); return; }
   if (command === "core_get_tray_available") return true;
+  if (command === "core_app_info") return { version: "0.2.0", tauriVersion: "2.12.4", webviewVersion: "131.0.2903.70", os: "windows", arch: "x86_64" };
+  if (command === "core_open_link") {
+    openLinkCalls.push(String(args?.key ?? ""));
+    if (openLinkFails) throw { kind: "internal", message: "守卫夹具：这一次打开外链被故意拒绝" };
+    return null;
+  }
   if (command === "core_main_chrome") {
     const action = args.payload?.action;
     if (!["immersive", "normal", "read", "minimize", "toggle-maximize", "close"].includes(action)) throw new Error("主窗外框动作不认识：" + action);
@@ -474,6 +483,8 @@ function Guard() {
         runtime.player.setQueue([seconds === null ? song : { ...song, duration: seconds }], 0);
       },
       markRuntime() { this.markedRuntime = runtime; },
+      openLinkCalls: () => [...openLinkCalls],
+      setOpenLinkFails(value) { openLinkFails = value === true; },
       sameRuntime: () => window.__guard.markedRuntime === getPlayerRuntime(),
       async setCoverFailure() {
         await runtime.player.playQueue(songs.map((song) => ({ ...song, coverUrl: "https://music.dbankcdn.cn/guard-cover-broken.png" })), 0);
@@ -5366,7 +5377,7 @@ export async function checkPageFill(page, guardDir, add) {
     await page.getByTestId("settings-page").getByRole("tab", { name: label, exact: true }).click();
     await page.waitForTimeout(250);
   };
-  const SETTINGS_TABS_UNDER_TEST = ["通用", "网络", "歌词", "日志"];
+  const SETTINGS_TABS_UNDER_TEST = ["通用", "网络", "歌词", "日志", "关于"];
   const layoutAt = {};
   /** 每个尺寸一次的控制实验（见下面的"人为恢复 max-w-3xl"）。 */
   const controls = [];
@@ -5567,6 +5578,56 @@ async function saveFatalDiagnostics(page, guardDir, log) {
   } catch (cause) {
     log(`守卫中断时的现场没能留下：${String(cause?.message ?? cause).slice(0, 200)}`);
   }
+}
+
+/** 打开设置「关于」：先收起沉浸页与搜索栏，与 openSettingsLyricsPane 同一条路。 */
+async function openSettingsAboutPane(page) {
+  const stage = page.getByTestId("playback-stage");
+  if (await stage.count()) {
+    await stage.getByRole("button", { name: "收起歌词", exact: true }).click();
+    await stage.waitFor({ state: "detached" });
+  }
+  if (await page.getByTestId("sidebar-search-rail").count()) await page.getByTestId("sidebar-search-rail").click();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByTestId("settings-page").waitFor();
+  await page.getByTestId("settings-page").getByRole("tab", { name: "关于", exact: true }).click();
+  await page.getByTestId("about-info").waitFor();
+}
+
+/**
+ * 设置「关于」：版本、系统、WebView 与 Tauri 版本来自宿主回报；技术栈每行三列齐全；
+ * 「打开」只把键交给宿主，宿主拒绝时就地说明并给出下一步。
+ */
+export async function checkSettingsAboutPane(page, guardDir, add) {
+  await openSettingsAboutPane(page);
+  await page.waitForFunction(() => document.querySelector('dd[data-testid="about-version"]')?.textContent === "0.2.0");
+  const shown = await page.evaluate(() => {
+    const text = (id) => document.querySelector(`[data-testid="${id}"]`)?.textContent ?? null;
+    const rows = [...document.querySelectorAll('[data-testid="about-stack"] tbody tr')]
+      .map((row) => [...row.querySelectorAll("td")].map((cell) => cell.textContent.trim()));
+    return { os: text("about-os"), webview: text("about-webview"), rows };
+  });
+  const version = await page.locator('dd[data-testid="about-version"]').textContent();
+  const tauri = shown.rows.find((row) => row[0] === "Tauri");
+  const runtimeOk = version === "0.2.0" && shown.os === "Windows x86_64" && shown.webview === "131.0.2903.70"
+    && tauri?.[2] === "2.12.4" && shown.rows.length >= 8 && shown.rows.every((row) => row.length === 3 && row.every((cell) => cell !== ""));
+  add("about-pane-runtime", runtimeOk,
+    `版本 ${version} · 系统 ${shown.os} · WebView ${shown.webview} · Tauri ${tauri?.[2] ?? "缺"} · 技术栈 ${shown.rows.length} 行`);
+
+  await page.getByRole("button", { name: "打开源码仓库", exact: true }).click();
+  await page.waitForFunction(() => window.__guard.openLinkCalls().length === 1);
+  await page.evaluate(() => window.__guard.setOpenLinkFails(true));
+  await page.getByRole("button", { name: "打开问题反馈", exact: true }).click();
+  const alert = page.getByTestId("about-links").getByRole("alert");
+  await alert.waitFor();
+  const alertText = (await alert.textContent()) ?? "";
+  await page.evaluate(() => window.__guard.setOpenLinkFails(false));
+  const calls = await page.evaluate(() => window.__guard.openLinkCalls());
+  add("about-pane-links-by-key",
+    JSON.stringify(calls) === JSON.stringify(["repository", "issues"]) && alertText.includes("没能打开浏览器") && alertText.includes("手动打开"),
+    `宿主收到的键 ${JSON.stringify(calls)}（不是 URL）· 失败提示「${alertText}」`);
+  await page.screenshot({ path: path.join(guardDir, "about-pane.png") });
+  await page.getByTestId("settings-page").getByRole("tab", { name: "通用", exact: true }).click();
 }
 
 /** 跑全部检查，返回 {pass, fail, skipped, checks}。 */
@@ -6277,6 +6338,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     await checked("r63-row-context-menu", () => checkRowContextMenus(page, port, guardDir, add));
     /** 侧栏「本地歌曲」（自己开页、自己收尾；假的本地协议由它自己 route 接住）。 */
     await checked("r65-local-songs", () => checkLocalSongs(page, port, guardDir, add));
+    /** 设置「关于」：版本与技术栈来自宿主回报、外链只按键交宿主、打开失败就地说明。 */
+    await checked("about-pane", () => checkSettingsAboutPane(page, guardDir, add));
     /** 主内容区宽度；会遍历各主页面并切换窗口尺寸，所以排在倒数第二（下一项自己 goto）。 */
     await checked("r66b-page-fill", () => checkPageFill(page, guardDir, add));
     /** 账号区四态（另一页，挂真 App；头像的两种结局都用 page.route 造出来）。 */

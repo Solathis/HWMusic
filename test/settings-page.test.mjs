@@ -156,7 +156,7 @@ function paneSource(source, id) {
   return source.slice(start, end);
 }
 
-test("R41b 二级分类：四个标签页，trigger 与 content 的值都来自 SETTINGS_TABS", () => {
+test("R41b 二级分类：五个标签页，trigger 与 content 的值都来自 SETTINGS_TABS", () => {
   const page = read("src/renderer/pages.tsx");
   const source = settingsPageSource();
 
@@ -174,8 +174,9 @@ test("R41b 二级分类：四个标签页，trigger 与 content 的值都来自 
       ["network", "网络"],
       ["lyrics", "歌词"],
       ["log", "日志"],
+      ["about", "关于"],
     ],
-    "四个分类与文案（文案要克制：两三个字，不带句号）",
+    "五个分类与文案（文案要克制：两三个字，不带句号）",
   );
   assert.ok(ids.every(([, label]) => label.length >= 2 && label.length <= 3), "标签文案不许长过三个字");
   for (const [id] of ids) paneSource(source, id); // 每个 id 都要有对应的 content
@@ -188,6 +189,7 @@ test("R41b 二级分类：卡片各归其类（只搬家，卡内一个字没改
     network: paneSource(source, "network"),
     lyrics: paneSource(source, "lyrics"),
     log: paneSource(source, "log"),
+    about: paneSource(source, "about"),
   };
 
   // 通用：关窗行为 / 开机自启 / 外观 / 播放队列
@@ -203,6 +205,8 @@ test("R41b 二级分类：卡片各归其类（只搬家，卡内一个字没改
   // 日志：只读的诊断面板（不是设置项），所以它单独一类
   assert.ok(panes.log.includes("<CardTitle>运行日志</CardTitle>"), "日志单独成一类");
   assert.ok(panes.log.includes("<LogTerminal"), "日志终端在那一页里");
+  // 关于：只读的版本与外链（不是设置项），同样单独一类
+  assert.ok(panes.about.includes("<AboutPane />"), "关于页挂着 AboutPane");
   assert.doesNotMatch(panes.general, /LogTerminal/, "通用页里不许还留着日志终端（挂两处等于两处要同步）");
 
   // 每一张卡都只出现一次（"搬家"不是"复制"）

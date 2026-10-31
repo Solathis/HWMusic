@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import {
+  CORE_APP_INFO,
   CORE_CALL,
   CORE_GET_AUTOSTART,
   CORE_GET_TRAY_AVAILABLE,
@@ -25,6 +26,7 @@ import {
   CORE_LYRICS_TOGGLE,
   CORE_LYRICS_UNLOCK_ZONE,
   CORE_MAIN_CHROME,
+  CORE_OPEN_LINK,
   CORE_READ_RUN_LOG,
   CORE_RENDERER_READY,
   CORE_SET_AUTOSTART,
@@ -141,6 +143,32 @@ export async function getTrayAvailable(): Promise<boolean> {
 export async function readRunLog(scope: "session" | "all" = "session"): Promise<unknown> {
   try {
     return await invoke<unknown>(CORE_READ_RUN_LOG, { scope });
+  } catch (failure) {
+    throw normalizeFailure(failure);
+  }
+}
+
+/** 设置「关于」的版本与运行环境（Rust `about::AppInfo` 的镜像）；取不到的值缺省。 */
+export interface AppInfo {
+  version?: string;
+  tauriVersion?: string;
+  webviewVersion?: string | null;
+  os?: string;
+  arch?: string;
+}
+
+export async function getAppInfo(): Promise<AppInfo> {
+  try {
+    return await invoke<AppInfo>(CORE_APP_INFO);
+  } catch (failure) {
+    throw normalizeFailure(failure);
+  }
+}
+
+/** 按键打开外链：只传键，地址由 Rust 的固定表给出。 */
+export async function openLink(key: string): Promise<void> {
+  try {
+    await invoke<void>(CORE_OPEN_LINK, { key });
   } catch (failure) {
     throw normalizeFailure(failure);
   }
