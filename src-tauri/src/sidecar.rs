@@ -7,6 +7,8 @@ use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -284,6 +286,9 @@ impl SidecarProcess {
             // stderr 必须接管道：`inherit` 时 sidecar 的每一行只落在启动它的那个控制台上，
             // 日志文件里一条都没有（设置页的日志面板因此看不到 core 这一侧）。
             .stderr(Stdio::piped());
+        // 发布版宿主没有控制台：不加这个标志，Windows 会给 sidecar 另开一个 cmd 窗口，关掉它 sidecar 就退出。
+        #[cfg(windows)]
+        command.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
 
         let mut child = command.spawn().map_err(|source| LaunchError::Spawn {
             program: plan.program.clone(),
@@ -825,6 +830,24 @@ mod tests {
         assert!(body.contains(".stderr(Stdio::piped())"), "stderr 必须接管道：{body}");
         assert!(!body.contains("Stdio::inherit()"), "inherit 会让 sidecar 日志漏出日志文件：{body}");
         assert!(body.contains("spawn_stderr_reader("), "必须真的起一个读线程：{body}");
+    }
+
+    /// 起 sidecar 前要在 Windows 上设 CREATE_NO_WINDOW，否则发布版一启动就弹出 cmd 窗口。
+    #[test]
+    fn spawn_hides_the_console_window_on_windows() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sidecar.rs"))
+            .expect("要能读到自己的源码");
+        let production = match source.find("#[cfg(test)]") {
+            Some(cut) => &source[..cut],
+            None => &source[..],
+        };
+        let start = production.find("pub fn spawn(plan: &LaunchPlan)").expect("找不到 spawn");
+        let call = start + production[start..].find("command.spawn()").expect("spawn 里要有 command.spawn()");
+        let setup = &production[start..call];
+        assert!(
+            setup.contains("#[cfg(windows)]") && setup.contains("creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0)"),
+            "起进程之前要在 Windows 上设 CREATE_NO_WINDOW：{setup}"
+        );
     }
 
     /// 端到端：真 sidecar 读真 `settings.json` → 广播 `app:notice` → 宿主帧泵收到 `Effect::Emit`。
