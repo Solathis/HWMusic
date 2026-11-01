@@ -16,11 +16,24 @@ export const RENDERER_DIR = "out/renderer";
 /** sidecar 二进制所在目录（与 tauri.conf.json 的 externalBin 前缀一致）。 */
 export const BINARIES_DIR = "src-tauri/binaries";
 
+/** 有更新签名私钥时才让 tauri 产 `.sig`：没有 secret 的 PR 与本机构建照常出包。 */
+export const UPDATER_ARTIFACTS_CONFIG = JSON.stringify({ bundle: { createUpdaterArtifacts: true } });
+
+export function hasSigningKey(env = process.env) {
+  return typeof env.TAURI_SIGNING_PRIVATE_KEY === "string" && env.TAURI_SIGNING_PRIVATE_KEY.trim() !== "";
+}
+
+/** 私钥去掉首尾空白（secret 粘贴时常多一个换行）；没设密码就给空串，tauri 不会停下来等输入。 */
+export function signingEnv(env = process.env) {
+  if (!hasSigningKey(env)) return env;
+  return { ...env, TAURI_SIGNING_PRIVATE_KEY: env.TAURI_SIGNING_PRIVATE_KEY.trim(), TAURI_SIGNING_PRIVATE_KEY_PASSWORD: env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD ?? "" };
+}
+
 /**
  * 编排的三步（参数不含 shell：`npm run a && npm run b` 在 npm 的 script-shell 是 PowerShell 时
  * 语义会变，而且失败容易被吞；这里由 Node 逐步 spawn 并逐步查退出码）。
  */
-export function backendSteps() {
+export function backendSteps(env = process.env) {
   return [
     {
       id: "build:web",
@@ -38,7 +51,7 @@ export function backendSteps() {
       id: "tauri:build",
       why: "最后才是 cargo 编译 + NSIS 打包（这一步会把上面两份产物嵌进/放进安装包）",
       command: process.execPath,
-      args: ["node_modules/@tauri-apps/cli/tauri.js", "build"],
+      args: ["node_modules/@tauri-apps/cli/tauri.js", "build", ...(hasSigningKey(env) ? ["--config", UPDATER_ARTIFACTS_CONFIG] : [])],
     },
   ];
 }
@@ -171,9 +184,9 @@ export async function appExeName(root = ROOT) {
 async function main() {
   const temp = path.join(ROOT, ".tmp/temp");
   await mkdir(temp, { recursive: true });
-  const env = { ...process.env, TEMP: temp, TMP: temp };
+  const env = signingEnv({ ...process.env, TEMP: temp, TMP: temp });
 
-  for (const step of backendSteps()) {
+  for (const step of backendSteps(env)) {
     console.log(`\n=== ${step.id} ===\n${step.why}`);
     const code = await runStep(step, env);
     if (code !== 0) {
@@ -216,6 +229,14 @@ async function main() {
     process.exit(1);
   }
 
+  if (hasSigningKey(env)) {
+    const signatures = (await listFiles(path.join(targetDir, "release", "bundle", "nsis"))).filter((file) => file.endsWith("-setup.exe.sig"));
+    if (signatures.length !== 1) {
+      console.error(`\ndist:win 失败：给了更新签名私钥，但 bundle/nsis 里的签名不是恰好一个（${signatures.length} 个）`);
+      process.exit(1);
+    }
+    console.log(`更新签名：${path.relative(ROOT, signatures[0])}`);
+  }
   console.log(`dist:win 完成：${path.relative(ROOT, appExePath)} 里是最新产物（mtime 检查通过）`);
   console.log("提示：安装包与静态校验见 npm run check:nsis（不执行安装包）");
 }

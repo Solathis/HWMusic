@@ -140,6 +140,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Error "cargo test 失败（退出码 $LASTEXITCODE）"; exit 1 }
 
       - name: 打包安装包（npm run dist:win）
+        # 有 secret 才产更新签名（PR 与 fork 没有 secret，照常出包、不带 .sig）
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         shell: pwsh
         run: |
           # 缓存恢复的 target 里可能留着旧版本安装包：不清掉的话「恰好一个安装包」的校验会失败，旧包还可能混进 Release
@@ -162,11 +165,24 @@ jobs:
 
       # GitHub 会删掉资产名里的中文（v0.2.0 草稿实测），所以 Release 上传的是英文文件名的副本。
       - name: 生成发布用资产（npm run release:assets）
+        # 标签构建必须带更新签名与本版本的 CHANGELOG 一节：缺了就失败，不发一个已安装客户端收不到的版本
+        env:
+          HWMUSIC_REQUIRE_RELEASE_METADATA: ${{ startsWith(github.ref, 'refs/tags/v') }}
         shell: pwsh
         run: |
           npm run release:assets
           if ($LASTEXITCODE -ne 0) { Write-Error "npm run release:assets 失败（退出码 $LASTEXITCODE）"; exit 1 }
           if (-not (Test-Path "$env:CARGO_TARGET_DIR/release/bundle/release-assets/SHA256SUMS")) { Write-Error "release-assets 里没有 SHA256SUMS"; exit 1 }
+
+      - name: 验证更新签名（npm run verify:update-signature）
+        shell: pwsh
+        run: |
+          if (Test-Path "$env:CARGO_TARGET_DIR/release/bundle/release-assets/latest.json") {
+            npm run verify:update-signature
+            if ($LASTEXITCODE -ne 0) { Write-Error "npm run verify:update-signature 失败（退出码 $LASTEXITCODE）"; exit 1 }
+          } else {
+            Write-Output "没有 latest.json（这次构建没有更新签名私钥），跳过验签"
+          }
 
       # 注：真窗冒烟（npm run smoke:build）不进 CI——它要一个交互式桌面会话，在无人值守的运行器上只会得到
       # UNTESTED，把「没测」写进绿色流水线比不写更糟。它是本地/发布前的人工步骤，口径见 docs/RUN_AND_PACKAGING.md。
@@ -179,31 +195,18 @@ jobs:
           path: |
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/nsis/SHA256SUMS
+            src-tauri/target/release/bundle/release-assets/latest.json
+            src-tauri/target/release/bundle/release-assets/RELEASE_NOTES.md
             src-tauri/binaries/hwmusic-core-*.exe
 
       - name: 发布 Release（仅 v* 标签）
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          name: HWMusic ${{ github.ref_name }}
           files: |
             src-tauri/target/release/bundle/release-assets/HWMusic_*.exe
             src-tauri/target/release/bundle/release-assets/SHA256SUMS
-          body: |
-            ## 华为音乐第三方桌面客户端 ${{ github.ref_name }}（Windows / NSIS）
-
-            下面是四句必须先读完的话，然后才是安装包：
-
-            1. **未签名**：本安装包没有代码签名证书，Windows SmartScreen 会提示"未知发布者"。
-               这不是被篡改的证据，但也意味着**没有任何东西替你担保这个文件**——请用同一 Release 里的
-               `SHA256SUMS` 自己核一遍（`certutil -hashfile <安装包> SHA256`）。
-            2. **非官方**：这是第三方独立实现，与华为及其关联公司没有任何隶属、合作或代理关系，
-               **不是官方发布物**；官方 App 的一切权利仍归官方。
-            3. **OAuth 身份不属于本项目**：登录走官方页面，用的是**上游项目注册的** OAuth client id
-               （源码见 `src/protocols/auth.mjs`），它不是本项目注册的应用身份，
-               本项目也不持有任何官方凭据。登录凭据只落本机（DPAPI 保护的会话信封），
-               不进发布物、不进 CI。
-            4. **AGPL 完整源码**：本项目以 AGPL-3.0-only 授权，**对应版本的完整源码**在
-               ${{ github.server_url }}/${{ github.repository }}/tree/${{ github.sha }} 提供（本 Release 对应的提交）；
-               AGPL 要求拿到二进制的人能拿到对应源码，所以这个链接必须指向本 Release 对应的提交。
-
-            安装包用英文文件名，是因为 GitHub 会删掉资产名里的中文；安装后的应用名仍是「华为音乐第三方客户端」。
+            src-tauri/target/release/bundle/release-assets/latest.json
+          # 正文只列本版本的新增 / 改进 / 修复（取自 CHANGELOG.md）；免责声明与源码地址在 README，标签自带对应源码包
+          body_path: src-tauri/target/release/bundle/release-assets/RELEASE_NOTES.md

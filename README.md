@@ -59,7 +59,7 @@
 - 单实例运行、窗口位置与大小记忆、开机自启、浅色 / 深色 / 跟随系统三种主题。
 - 设置页：HTTP 代理（主机、端口、用户名密码、例外列表、测试连接）；运行日志用编辑器样式展示，可按级别和关键字筛选。
 
-**明确不做**：每日推荐、移动端、云同步、自动更新服务、其它平台音源、绕过付费或 DRM、「加入已有歌单」（没有官方追加接口的证据）。
+**明确不做**：每日推荐、移动端、云同步、其它平台音源、绕过付费或 DRM、「加入已有歌单」（没有官方追加接口的证据）。
 
 ---
 
@@ -255,7 +255,7 @@ npm run dev:web    # 只起渲染层（没有宿主能力，适合改界面）
 
 ## 许可
 
-- 本项目源代码以 **GNU Affero General Public License v3.0 only（AGPL-3.0-only）** 授权，全文见 [LICENSE](LICENSE)。完整源码在 https://github.com/Solathis/HWMusic ，每个 Release 的发布说明都给出它对应提交的源码地址。
+- 本项目源代码以 **GNU Affero General Public License v3.0 only（AGPL-3.0-only）** 授权，全文见 [LICENSE](LICENSE)。完整源码在 https://github.com/Solathis/HWMusic ，每个 Release 都附有对应标签的源码包。
 - 第三方组件的归属与各自许可证见 [NOTICE](NOTICE)；图标归属见 `build/icon.LICENSE.txt`。
 - AMLL（`@applemusic-like-lyrics/*`）同样是 AGPL-3.0-only。以二进制形式分发本项目时，须一并保留 `NOTICE` 与相应许可证文本。
 

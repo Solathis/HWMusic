@@ -22,7 +22,8 @@
     "dist:win": "node scripts/dist-win.mjs",
     "check:nsis": "node scripts/check-nsis-package.mjs",
     "release:checksums": "node scripts/release-checksums.mjs",
-    "release:assets": "node scripts/release-assets.mjs"
+    "release:assets": "node scripts/release-assets.mjs",
+    "verify:update-signature": "node scripts/update-signature.mjs"
   },
   "dependencies": {
     "@applemusic-like-lyrics/core": "0.6.0",

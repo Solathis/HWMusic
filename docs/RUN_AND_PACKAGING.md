@@ -141,7 +141,7 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
 顺序：`npm ci` → 取参考实现（固定提交）→ `npm run test`（断言 `fail 0` / `skipped 0`，计数从 `--test-reporter=tap` 读）
 → `typecheck` → 验收六路径 → 装 Chromium → `dist:sidecar` + `build:web`
 → `test:browser`（断言 `PASS N / SKIP 0 / FAIL 0`）→ `cargo test` → `dist:win` → `check:nsis`
-→ `release:checksums` → `release:assets` → artifact（main 推送与标签都留）→ Release（**仅 `v*` 标签**，只传 `bundle/release-assets/` 里的两个文件）。
+→ `release:checksums` → `release:assets` → `verify:update-signature`（有 `latest.json` 时）→ artifact（main 推送与标签都留）→ Release（**仅 `v*` 标签**，传英文名安装包、`SHA256SUMS` 与 `latest.json`）。
 
 几条不能改的规矩：
 
@@ -157,8 +157,12 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
 - **命令之间不串 `&&`**（理由同第 2 节），也不引 `npx`：工具都走仓内直接路径。
 - `CARGO_TARGET_DIR` 的**唯一真源在 workflow 里**（`${{ github.workspace }}/src-tauri/target`）：
   脚本与校验步骤都从这个目录读产物，否则步骤之间会各看各的目录。
-- 推 `main` 只构建 + 留 artifact；推 `v*` 标签才发 Release，发布说明带四句免责声明
-  （未签名 / 非官方 / OAuth 身份不属于本项目 / AGPL 完整源码地址）。
+- 推 `main` 只构建 + 留 artifact；推 `v*` 标签才发 Release。Release 正文只有 `CHANGELOG.md` 里本版本那一节（新增 / 改进 / 修复，
+  由 `release:assets` 写成 `RELEASE_NOTES.md`）；未签名、非官方、OAuth 身份与 AGPL 源码的说明在 README，标签自带对应源码包。
+- 在线更新签名：私钥只在 secret `TAURI_SIGNING_PRIVATE_KEY`，只给 `dist:win` 一步；有它时 `dist:win` 打开 `createUpdaterArtifacts`
+  产出 `-setup.exe.sig`，`release:assets` 据此写 `latest.json`（`windows-x86_64` 与 `windows-x86_64-nsis` 两个键都指向本标签的安装包），
+  `verify:update-signature` 用 `tauri.conf.json` 里的公钥再验一遍。标签构建（`HWMUSIC_REQUIRE_RELEASE_METADATA`）缺签名或缺本版本的
+  CHANGELOG 一节就失败；PR 与 fork 没有 secret，照常出包、不带签名。
 - 打包前先删 `bundle/`：缓存恢复的 `target` 里可能留着旧版本安装包，会让 `check:nsis` 的「恰好一个安装包」失败，
   或者把旧包混进 Release。
 - CI 的浏览器守卫把等待上限调到 60 秒（`HWMUSIC_GUARD_TIMEOUT_MS`，本机默认 15 秒；守卫里写死的 3–10 秒短等待按同一倍数放大）：运行器没有 GPU，页面走软件光栅化，
@@ -166,7 +170,7 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
   连同它的浏览器进程一起钉在 2 个逻辑核上（GPU 进程不继承父进程的亲和性，只钉 node 复现不出来）。
 - CI 发不出 Release 时（v0.2.0 就是这样：浏览器守卫在 GitHub 运行器上没通过），维护者在标签对应的提交上本机跑
   `dist:win` → `check:nsis` → `release:checksums` → `release:assets`，再用 `gh release create <标签> --draft`
-  上传 `bundle/release-assets/` 里的两个文件，核对资产名与哈希后再发布；发布说明照写四句免责，并注明不是 CI 构建的。
+  上传 `bundle/release-assets/` 里的安装包、`SHA256SUMS` 与 `latest.json`，核对资产名与哈希后再发布；正文用同目录的 `RELEASE_NOTES.md`（`--notes-file`），并注明不是 CI 构建的。本机要产签名，先在本机环境里设 `TAURI_SIGNING_PRIVATE_KEY`。
 
 ## 7. 本机环境限制（不假造然后说"验过了"）
 

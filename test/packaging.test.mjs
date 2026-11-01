@@ -2103,15 +2103,39 @@ test("CI：npm test 断言 fail 0 / skipped 0，test:browser 断言 PASS N / SKI
   assert.match(workflow, /test-reporter=tap|--test-reporter/, "计数要从稳定的 reporter 输出里读");
 });
 
-test("CI：release 只在 v* 标签触发，发布说明含四句免责声明，main 推送只传 artifact", () => {
+test("CI：release 只在 v* 标签触发，正文取自本版本的 RELEASE_NOTES.md，main 推送只传 artifact", () => {
   const workflow = read(WORKFLOW);
   assert.match(workflow, /startsWith\(github\.ref,\s*'refs\/tags\/v'\)|refs\/tags\/v\*/, "v* 标签才发布");
   assert.match(workflow, /actions\/upload-artifact/, "main 推送要留 artifact");
   assert.match(workflow, /softprops\/action-gh-release|gh release create/, "Release 步骤要走 GitHub Release");
+  const releaseStep = workflow.slice(workflow.indexOf("- name: 发布 Release"));
+  assert.ok(releaseStep.includes("body_path: src-tauri/target/release/bundle/release-assets/RELEASE_NOTES.md"), "正文只列本版本的更新与修复");
+  assert.ok(releaseStep.includes("src-tauri/target/release/bundle/release-assets/latest.json"), "更新器的清单随 Release 上传");
+});
 
-  for (const phrase of ["未签名", "非官方", "OAuth", "AGPL"]) {
-    assert.ok(workflow.includes(phrase), `发布说明缺免责声明关键词：${phrase}`);
-  }
+test("CI：签名私钥只给 dist:win，标签构建必须带签名与 CHANGELOG，latest.json 用公钥再验一遍", () => {
+  const workflow = read(WORKFLOW);
+  const dist = workflow.slice(workflow.indexOf("- name: 打包安装包（npm run dist:win）"), workflow.indexOf("- name: 安装包静态校验"));
+  assert.ok(dist.includes("TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"), "dist:win 从 secret 取私钥");
+  assert.equal(workflow.split("secrets.TAURI_SIGNING_PRIVATE_KEY").length - 1, 1, "私钥只给这一步");
+  const assets = workflow.slice(workflow.indexOf("- name: 生成发布用资产"));
+  assert.ok(assets.includes("HWMUSIC_REQUIRE_RELEASE_METADATA: ${{ startsWith(github.ref, 'refs/tags/v') }}"), "标签构建缺签名就失败");
+  const verifyAt = workflow.indexOf("npm run verify:update-signature");
+  assert.ok(verifyAt > workflow.indexOf("npm run release:assets") && verifyAt < workflow.indexOf("- name: 发布 Release"), "发布前验签");
+  assert.equal(JSON.parse(read("package.json")).scripts["verify:update-signature"], "node scripts/update-signature.mjs");
+});
+
+test("dist:win：只有给了签名私钥才打开 createUpdaterArtifacts（PR 与本机照常出包）", async () => {
+  const mod = await import("../scripts/dist-win.mjs");
+  const tauri = (env) => mod.backendSteps(env).find((step) => step.id === "tauri:build").args;
+  assert.deepEqual(tauri({}), ["node_modules/@tauri-apps/cli/tauri.js", "build"]);
+  assert.deepEqual(tauri({ TAURI_SIGNING_PRIVATE_KEY: "  " }), ["node_modules/@tauri-apps/cli/tauri.js", "build"], "空白私钥当没给");
+  assert.deepEqual(tauri({ TAURI_SIGNING_PRIVATE_KEY: "key" }), ["node_modules/@tauri-apps/cli/tauri.js", "build", "--config", mod.UPDATER_ARTIFACTS_CONFIG]);
+  assert.deepEqual(JSON.parse(mod.UPDATER_ARTIFACTS_CONFIG), { bundle: { createUpdaterArtifacts: true } });
+  const env = mod.signingEnv({ TAURI_SIGNING_PRIVATE_KEY: " key\n" });
+  assert.equal(env.TAURI_SIGNING_PRIVATE_KEY, "key", "去掉 secret 粘贴时多出的换行");
+  assert.equal(env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD, "", "没设密码时给空串，tauri 不会停下来等输入");
+  assert.deepEqual(mod.signingEnv({ PATH: "x" }), { PATH: "x" }, "没给私钥就原样不动");
 });
 
 test("CI：构建顺序与本地一致——先构建产物，再 test:browser / dist:win / check:nsis", () => {

@@ -204,6 +204,7 @@
 | 30 | Linux / macOS 支持 | untested | untested | **本仓不宣称支持**（见 KNOWN_LIMITATIONS C 组与 [PLATFORM_DIFFERENCES.md](PLATFORM_DIFFERENCES.md)） |
 | 31 | 设置「关于」（版本 / 运行环境 / 技术栈 / 开源地址与参考项目） | **verified** | untested | `test/about-pane.test.mjs`（外链两侧互钉、技术栈版本对锁文件、命令守卫与权限）；Rust `about.rs` 内联测试；浏览器守卫 `about-pane-runtime`、`about-pane-links-by-key` |
 | 32 | 在线更新（检查 / 下载验签 / 退出后安装） | **verified**（状态机、文案、代理、退出顺序、配置） | untested（真实下载安装要等下一版发布） | `test/app-update.test.mjs`；Rust `app_update.rs`、`webview_proxy.rs` 内联测试；浏览器守卫 `about-update-check`、`about-update-install` |
+| 33 | 在线更新的发布链（更新签名 / latest.json / Release 正文取自 CHANGELOG） | **verified**（打包、验签、清单与正文的契约测试） | untested（带 secret 的 CI 构建还没跑过） | `test/update-signature.test.mjs`、`test/release.test.mjs`、`test/packaging.test.mjs`；CI 步骤「验证更新签名」 |
 
 ---
 
