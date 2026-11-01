@@ -264,7 +264,7 @@ function confirmedState() {
 function failedState() {
   return reduceGateState(preparingState(), {
     type: LOGIN_GATE_EVENT.qrFailed,
-    message: "二维码登录端点未配置（见 docs/API_CONTRACT.md §1.7）",
+    message: "二维码登录端点未配置",
     errorKind: "missing_endpoint",
   });
 }

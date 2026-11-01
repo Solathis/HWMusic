@@ -29,7 +29,7 @@ import {
   lyricAddressOf,
 } from "../src/protocols/music.mjs";
 
-/** 参考实现里的关键事实（逐字）：出处是 .tmp/reference-repo/ 下的各源码与 docs/API_CONTRACT.md。 */
+/** 参考实现里的关键事实（逐字）：出处是 .tmp/reference-repo/ 下的各源码。 */
 const REFERENCE = {
   authorize: "https://oauth-login.platform.hicloud.com/oauth2/v3/authorize",
   token: "https://oauth-login.cloud.huawei.com/oauth2/v3/token",

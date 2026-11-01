@@ -31,10 +31,9 @@ test("发布：行尾固定为 LF（Windows CI 检出默认转 CRLF，按行扫�
 
 test("发布：CI 按固定提交取参考实现，差分测试才不会按缺席跳过（CI 要求 skipped 0）", () => {
   const workflow = read(".github/workflows/windows-nsis.yml");
-  const pinned = read("docs/API_CONTRACT.md").match(/talongao\/huawei-music-desktop`，main @ `([0-9a-f]{40})`/)?.[1];
-  assert.ok(pinned, "API_CONTRACT.md 里要记着参考实现的固定提交");
+  const pinned = workflow.split("checkout --quiet --detach ")[1]?.slice(0, 40) ?? "";
+  assert.match(pinned, /^[0-9a-f]{40}$/, "检出写死的完整提交号，不跟着参考仓库的 main 走");
   assert.ok(workflow.includes("git clone --quiet https://github.com/talongao/huawei-music-desktop.git .tmp/reference-repo"), "取到差分测试读的位置");
-  assert.ok(workflow.includes(`checkout --quiet --detach ${pinned}`), "检出的是文档记录的那个提交");
   assert.ok(workflow.indexOf("取参考实现") > 0 && workflow.indexOf("取参考实现") < workflow.indexOf("npm run test 2>&1"), "在单元测试之前取");
 });
 
@@ -101,12 +100,11 @@ test("发布：CI 的 Release 只传 release-assets 里的英文名资产，打�
   assert.equal(JSON.parse(read("package.json")).scripts["release:assets"], "node scripts/release-assets.mjs");
 });
 
-test("发布：README 与打包文档写的是 Release 上真实的英文资产名", () => {
+test("发布：README 写的是 Release 上真实的英文资产名", () => {
   const readme = read("README.md");
   assert.ok(readme.includes("HWMusic_<版本>_x64-setup.exe"), "README 下载说明用英文资产名");
   assert.ok(!readme.includes("华为音乐第三方客户端_<版本>_x64-setup.exe"), "Release 上没有中文名的资产");
   assert.ok(readme.includes("npm run release:assets"), "构建表列出 release:assets");
-  assert.ok(read("docs/RUN_AND_PACKAGING.md").includes("release:assets"), "打包文档写清 release:assets");
 });
 
 test("发布：Release 正文只列本版本的新增 / 改进 / 修复，免责声明与源码地址在 README", () => {

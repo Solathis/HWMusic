@@ -60,7 +60,7 @@ test("菜单项 id 是稳定常量（界面与测试都按它认，不认文案�
 // ---------------------------------------------------------------------------
 
 test("「加入歌单」默认不出现：没有「向已有歌单追加」的端点证据就不上菜单", () => {
-  assert.equal(ADD_TO_PLAYLIST_SUPPORTED, false, "证据一变（docs/API_CONTRACT.md §2.13）才许翻这个闸门");
+  assert.equal(ADD_TO_PLAYLIST_SUPPORTED, false, "有了向已有歌单追加歌曲的官方接口证据才许翻这个闸门");
   for (const target of [TRACK_MENU_TARGET.track, TRACK_MENU_TARGET.queue]) {
     assert.ok(!idsOf(trackMenuItems(target)).includes("add-to-playlist"), `${target} 的菜单里没有加入歌单`);
   }

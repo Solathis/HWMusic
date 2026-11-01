@@ -1,41 +1,63 @@
 /**
- * README：三张截图（主界面 / 播放页 / 设置）真实存在、尺寸一致、用演示数据；正文简短、参考项目齐全。
+ * README 与仓库卫生：本地文档目录不入库，入库的代码、测试、CI 与 README 也不读、不链它；README 的图都是仓库里真实存在的文件。
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-import { SCREENSHOT_DIR, SCREENSHOTS, VIEWPORT, demoHarnessSource, demoPlaylists, demoSongs } from "../scripts/readme-screenshots.mjs";
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
+const read = (relative) => readFileSync(path.join(ROOT, relative), "utf8");
+const LOCAL_DOCS = "doc" + "s/";
+const TEXT = /\.(mjs|js|cjs|ts|tsx|rs|ya?ml|json|css|html|md)$/;
 
-const read = (relative) => readFileSync(new URL(`../${relative}`, import.meta.url));
+function sourceFiles(dir) {
+  return readdirSync(path.join(ROOT, dir), { recursive: true })
+    .map((name) => `${dir}/${String(name).split(path.sep).join("/")}`)
+    .filter((file) => TEXT.test(file) && statSync(path.join(ROOT, file)).isFile());
+}
 
-test("README：主界面 / 播放页 / 设置三张截图都在，是 PNG，尺寸就是截图脚本的视口", () => {
-  const readme = read("README.md").toString("utf8");
-  assert.deepEqual(SCREENSHOTS, ["main.png", "player.png", "settings.png"]);
-  for (const name of SCREENSHOTS) {
-    const file = `${SCREENSHOT_DIR}/${name}`;
-    assert.ok(readme.includes(`](${file})`), `README 要引用 ${file}`);
-    const png = read(file);
-    assert.equal(png.subarray(1, 4).toString("latin1"), "PNG", `${file} 是 PNG`);
-    assert.deepEqual([png.readUInt32BE(16), png.readUInt32BE(20)], [VIEWPORT.width, VIEWPORT.height], `${file} 的尺寸`);
-    assert.ok(png.length < 400 * 1024, `${file} 不超过 400 KB（${png.length} 字节）`);
+/** 文本里指向本地文档目录的位置；外部网址里的同名路径不算。 */
+function localDocsRefs(text) {
+  const hits = [];
+  let at = text.indexOf(LOCAL_DOCS);
+  while (at >= 0) {
+    const token = text.slice(Math.max(0, at - 200), at).split(/[\s"'`(（「]/).at(-1);
+    if (!token.includes("://")) hits.push(text.slice(Math.max(0, at - 30), at + 40).replace(/\s+/g, " "));
+    at = text.indexOf(LOCAL_DOCS, at + LOCAL_DOCS.length);
   }
-  assert.match(readme, /截图使用演示数据/, "说清截图不是真实账号");
+  return hits;
+}
+
+test("仓库卫生：本地文档目录不入库，入库的代码、测试、CI 与 README 不读也不链它（CI 上没有这个目录）", () => {
+  assert.ok(read(".gitignore").split(/\r?\n/).includes("/" + LOCAL_DOCS), ".gitignore 要忽略根目录的文档目录");
+  const files = ["README.md", "package.json", ...[".github", "scripts", "src", "src-tauri/src", "test"].flatMap(sourceFiles)];
+  const offenders = files.flatMap((file) => localDocsRefs(read(file)).map((hit) => `${file}：${hit}`));
+  assert.deepEqual(offenders, [], "这些地方还在引用本地文档目录");
 });
 
-test("README：截图只用演示数据（演示账号、演示歌手、原创歌词），不连真实服务", () => {
-  const source = demoHarnessSource({ version: "0.0.0", tauriVersion: "0.0.0" });
-  assert.match(source, /userName: "演示用户"/);
-  assert.ok(demoSongs().every((song) => song.artists.startsWith("演示")), "歌手都是演示名字");
-  assert.ok([...demoSongs(), ...demoPlaylists()].every((item) => item.coverUrl.startsWith("https://music.dbankcdn.cn/demo/")), "封面都由脚本本地生成并拦截");
-  for (const secret of [".local/", "session.enc", "accessToken", "refreshToken"]) assert.ok(!source.includes(secret), `不读任何真实会话：${secret}`);
-  const script = read("scripts/readme-screenshots.mjs").toString("utf8");
-  assert.doesNotMatch(script, /headless:\s*false/, "无头浏览器，不抢焦点");
-  assert.equal(JSON.parse(read("package.json").toString("utf8")).scripts["docs:screenshots"], "node scripts/readme-screenshots.mjs");
+test("README：图片都是仓库里真实存在的文件，不放在本地文档目录，也不再用演示数据假图", () => {
+  const readme = read("README.md");
+  const images = [];
+  let at = readme.indexOf("![");
+  while (at >= 0) {
+    const open = readme.indexOf("](", at);
+    const close = readme.indexOf(")", open + 2);
+    if (open < 0 || close < 0) break;
+    images.push(readme.slice(open + 2, close));
+    at = readme.indexOf("![", close);
+  }
+  for (const image of images.filter((src) => !src.includes("://"))) {
+    assert.ok(!image.startsWith(LOCAL_DOCS), `${image} 在本地文档目录里，GitHub 上看不到`);
+    assert.ok(existsSync(path.join(ROOT, image)), `README 引用的 ${image} 不存在`);
+  }
+  assert.doesNotMatch(readme, /演示数据/, "截图必须是实机截图");
+  assert.ok(!existsSync(path.join(ROOT, "scripts/readme-screenshots.mjs")), "演示数据截图生成器已删除");
 });
 
 test("README：简短，参考项目与地址齐全", () => {
-  const readme = read("README.md").toString("utf8");
+  const readme = read("README.md");
   assert.ok(readme.split("\n").length <= 120, `README 应简短（现在 ${readme.split("\n").length} 行）`);
   for (const url of [
     "https://github.com/talongao/huawei-music-desktop",

@@ -245,7 +245,7 @@ test("失败：广播带原文案，界面给得出「重试」；网页入口�
   state = reduceGateState(state, {
     type: LOGIN_GATE_EVENT.qr,
     status: QR_GATE_STATUS.failed,
-    message: "二维码登录端点未配置（见 docs/API_CONTRACT.md §1.7）",
+    message: "二维码登录端点未配置",
     errorKind: "missing_endpoint",
   });
   assert.match(loginGateStatusLine(state), /端点未配置/, "失败文案要显示给用户，不许只进控制台");
@@ -294,7 +294,7 @@ test("互斥：发起网页登录时状态行说的是「正在打开华为官�
   state = reduceGateState(state, {
     type: LOGIN_GATE_EVENT.qr,
     status: QR_GATE_STATUS.failed,
-    message: "二维码登录端点未配置（见 docs/API_CONTRACT.md §1.7）",
+    message: "二维码登录端点未配置",
     errorKind: "missing_endpoint",
   });
   state = reduceGateState(state, { type: LOGIN_GATE_EVENT.started });
@@ -1085,27 +1085,6 @@ test("R37 遮蔽：门禁源码真的把遮蔽层画在 canvas 之上（绝对�
   // 不许出现裸色值 / 非令牌调色板（test/theme-tokens.test.mjs 的扫描口径，这里就近再钉一条）
   const maskBlock = jsx.slice(jsx.indexOf("QR_MASK_TESTID") - 400, jsx.indexOf("QR_MASK_TESTID") + 400);
   assert.doesNotMatch(maskBlock, /#[0-9a-fA-F]{3,8}\b|\brgba?\(|\boklch\(/, `遮罩不得硬编码颜色：${maskBlock}`);
-});
-
-test("R37 文档：遮蔽这一项按 B22 登记（真机观感 untested），且编号计数与表里的行数对得上", () => {
-  const doc = read("docs/KNOWN_LIMITATIONS.md");
-
-  // 这处改动只有 SSR 标记、纯函数与源码扫描三种证据，真窗观感未测，必须登记。
-  const row = doc.split("\n").find((line) => line.startsWith("| B22 |"));
-  assert.ok(row, "B22 是 R37 新增的那一条（真窗观感 untested）：没有它就是漏登");
-  assert.match(row, /遮[蔽罩]/, "这一行说的就是「扫到之后把二维码遮住」");
-  assert.match(row, /untested/, "缺的正是真窗上那一眼");
-  assert.match(row, /login-gate-markup|login-gate\.test/, "要说清机制侧由哪些测试钉住");
-
-  // 文档以行数为准：最后一次计数更正的数必须等于实际行数。
-  const rows = doc.match(/^\| [A-G][0-9A-Za-z-]* \|/gm) ?? [];
-  const totals = [...doc.matchAll(/全文 \*\*(\d+) 条\*\*/g)];
-  assert.ok(totals.length > 0, "计数行读不出来（格式变了就同步改这条）");
-  assert.equal(
-    Number(totals.at(-1)[1]),
-    rows.length,
-    "计数行与表里的实际行数对不上：加/删条目时要连着更新计数行",
-  );
 });
 
 // 恢复期间答「恢复中」：仍是中性启动屏，绝不画登录页、绝不建码。

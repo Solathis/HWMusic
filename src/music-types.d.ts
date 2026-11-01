@@ -1,6 +1,6 @@
 /**
  * 华为业务接口的数据形状（协议层的类型说明，供 TS 侧消费）。
- * 线上形状见 `docs/API_CONTRACT.md` §2，协议层负责翻成这些内部形状（`contentID → id`、`contentName → name`…）。
+ * 协议层负责把线上形状翻成这些内部形状（`contentID → id`、`contentName → name`…）。
  * 运行时实现是 src/protocols/music.mjs；这里只做类型声明，不含逻辑。
  */
 import type { CoreResult } from "./shared/result.ts";

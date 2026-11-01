@@ -523,22 +523,7 @@ test("边界：认证状态机自己不发 HTTP（兑换与验证全部由调用
   assert.doesNotMatch(source, /undici/, "也不得自己挑 HTTP 客户端");
 });
 
-test("端点真源：默认端点就是 docs/API_CONTRACT.md 登记的值（含 R17 确认的 loginex）", async () => {
-  const contract = await import("node:fs/promises").then((fs) =>
-    fs.readFile(new URL("../docs/API_CONTRACT.md", import.meta.url), "utf8"),
-  );
-  assert.ok(contract.includes(HUAWEI_OAUTH_ENDPOINTS.authorize), "authorize 端点必须是契约里登记的那一条");
-  assert.ok(contract.includes(HUAWEI_OAUTH_ENDPOINTS.token), "token 端点必须是契约里登记的那一条");
-  // loginex 已是确认值：默认端点必须在契约里逐字出现，文档与代码不许各说各话。
-  assert.ok(
-    contract.includes(HUAWEI_OAUTH_ENDPOINTS.loginex),
-    "loginex 端点必须是契约 §1.5 里登记的那一条（R17 确认值）",
-  );
-  assert.ok(
-    contract.includes("api-drcn.music.dbankcloud.cn"),
-    "契约里要写明音乐业务域（端点就是它拼出来的）",
-  );
-
+test("默认端点：authorize 指向华为 OAuth，loginex 不注入时取默认值，显式 null 才关掉", async () => {
   const { auth } = managerOf();
   const attempt = createAttempt({ authorizeEndpoint: HUAWEI_OAUTH_ENDPOINTS.authorize });
   assert.match(attempt.authorizeUrl, /^https:\/\/oauth-login\.platform\.hicloud\.com\/oauth2\/v3\/authorize/);

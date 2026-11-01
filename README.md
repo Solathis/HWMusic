@@ -4,14 +4,6 @@
 
 源码：https://github.com/Solathis/HWMusic
 
-![主界面](docs/assets/screenshots/main.png)
-
-| 播放页 | 设置 · 关于 |
-|---|---|
-| ![播放页](docs/assets/screenshots/player.png) | ![设置](docs/assets/screenshots/settings.png) |
-
-截图使用演示数据（`npm run docs:screenshots` 生成），不含真实账号。
-
 ## 下载
 
 - 只在 [GitHub Releases](https://github.com/Solathis/HWMusic/releases) 发布：下载 `HWMusic_<版本>_x64-setup.exe` 与 `SHA256SUMS`。
@@ -48,13 +40,13 @@ npm run release:checksums
 npm run release:assets      # 英文名安装包、SHA256SUMS、latest.json、RELEASE_NOTES.md
 ```
 
-打包顺序、CI 与发布规则见 [docs/RUN_AND_PACKAGING.md](docs/RUN_AND_PACKAGING.md)；每个版本的更新内容见 [CHANGELOG.md](CHANGELOG.md)。
+每个版本的更新内容见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 参考项目
 
 | 项目 | 地址 | 用途 |
 |---|---|---|
-| talongao/huawei-music-desktop | https://github.com/talongao/huawei-music-desktop | 登录链路、接口形状与播放地址白名单对齐它的实测值（见 [docs/API_CONTRACT.md](docs/API_CONTRACT.md)） |
+| talongao/huawei-music-desktop | https://github.com/talongao/huawei-music-desktop | 登录链路、接口形状与播放地址白名单对齐它的实测值 |
 | ANYNC/TaskbarLyrics | https://github.com/ANYNC/TaskbarLyrics | 任务栏歌词的自窗附着与安全空白布局改编自它（MIT，见 [NOTICE](NOTICE)） |
 | Mai-icy/Spotify-lyrics-window | https://github.com/Mai-icy/Spotify-lyrics-window | 桌面歌词的横竖版与交互设计参考 |
 | Apple Music-like Lyrics（AMLL） | https://github.com/amll-dev/applemusic-like-lyrics | 歌词、沉浸页与背景渲染的官方组件（AGPL-3.0-only） |
@@ -73,11 +65,3 @@ npm run release:assets      # 英文名安装包、SHA256SUMS、latest.json、RE
 ## 许可
 
 AGPL-3.0-only，全文见 [LICENSE](LICENSE)。每个 Release 都附有对应标签的源码包。AMLL 同为 AGPL-3.0-only；第三方组件的归属与许可证见 [NOTICE](NOTICE)，分发二进制时须一并保留。
-
-## 文档
-
-- [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)：每项能力的验证档位与证据
-- [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md)：已知限制与未验证项
-- [docs/API_CONTRACT.md](docs/API_CONTRACT.md)：接口、频道与命令契约
-- [docs/PLATFORM_DIFFERENCES.md](docs/PLATFORM_DIFFERENCES.md)：平台差异与权限清单
-- [docs/RUN_AND_PACKAGING.md](docs/RUN_AND_PACKAGING.md)：运行、打包、CI 与发布

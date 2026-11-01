@@ -25,7 +25,7 @@ import {
   refreshAccessToken,
 } from "../src/protocols/auth.mjs";
 
-/** 端点一律由调用方注入：测试用的合成端点，不代表真实 URL（真实值见 docs/API_CONTRACT.md）。 */
+/** 端点一律由调用方注入：测试用的合成端点，不代表真实 URL（真实值见 src/main/auth-manager.ts）。 */
 const AUTHORIZE_ENDPOINT = "https://example.invalid/oauth2/v3/authorize";
 const TOKEN_ENDPOINT = "https://example.invalid/oauth2/v3/token";
 

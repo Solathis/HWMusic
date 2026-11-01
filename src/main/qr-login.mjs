@@ -1,6 +1,6 @@
 /**
  * 二维码登录端口：把协议层的状态机接到华为真实端点上，用户手机确认之后把授权码交回登录链路。
- * 端点全部来自探针实探（证据登记在 docs/API_CONTRACT.md §1.7）：建单/轮询无状态，确认后的换码链
+ * 端点全部来自探针实探：建单/轮询无状态，确认后的换码链
  * 需要页面会话，二维码配置只由移动登录页下发；实测扫码链全通，最后一跳由宿主的登录 webview 完成。
  * 迟到的旧会话事件按身份丢弃，换码链读当前那张码的 qrCode，轮询每轮一行脱敏诊断日志。
  * 降级是硬约束：上下文任何一步失败只记一行日志，绝不挡界面，拿不到 sid 也不猜一个。
@@ -11,7 +11,7 @@ import { QR_LOGIN_STATUS, QR_PAGE_ACCEPT, createQrSession } from "../protocols/q
 import { err, ok } from "../shared/result.ts";
 
 /**
- * 探针确认的端点与参数（**改这里必须同步 docs/API_CONTRACT.md §1.7/§1.8 与 test/qr-*.test.mjs**）。
+ * 探针确认的端点与参数（**改这里必须同步 test/qr-*.test.mjs**）。
  */
 export const HUAWEI_QR_ENDPOINTS = {
   /**
@@ -223,7 +223,7 @@ export function createHuaweiQrPort(options = {}) {
     const casUrl = loginWay.data?.loginInteractInfo?.cas?.casLoginRedirectUrl;
     if (typeof casUrl !== "string" || casUrl === "") {
       return err(
-        "登录方式接口没有给出 CAS 跳转地址（响应形状变了？见 docs/API_CONTRACT.md §1.8）",
+        "登录方式接口没有给出 CAS 跳转地址（响应形状变了？）",
         QR_PORT_ERROR_KINDS.invalidResponse,
       );
     }

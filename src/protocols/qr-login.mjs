@@ -233,7 +233,7 @@ function resolveExpiresInMs(payload, now) {
     return expiredAt - createdAt;
   }
 
-  // 回退路径（已知偏差风险，见本函数说明与 docs/API_CONTRACT.md §3）
+  // 回退路径（已知偏差风险，见本函数说明）
   return Math.max(0, expiredAt - now());
 }
 
@@ -368,7 +368,7 @@ export function createQrSession(options = {}) {
   function endpointsReady() {
     if (isHttpUrl(createUrl) && isHttpUrl(pollUrl)) return true;
     fail(
-      "二维码登录端点未配置（建单/轮询地址由探针确认后注入，见 docs/API_CONTRACT.md §1.7）",
+      "二维码登录端点未配置（建单/轮询地址由探针确认后注入）",
       QR_ERROR_KINDS.missingEndpoint,
     );
     return false;

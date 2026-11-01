@@ -176,7 +176,7 @@ export interface RestoreStatus {
 }
 
 /** `auth:status` 载荷里那一格 `profile`：**认不出就没有这个键**，界面照旧显示兜底。
- * 取值只来自 `statusPayload`；形状与 `AccountProfile`、`docs/API_CONTRACT.md` §2.6 一致。 */
+ * 取值只来自 `statusPayload`；形状与 `AccountProfile` 一致。 */
 export type AuthProfile = { userName?: string; avatarUrl?: string; vip?: boolean; vipExpiresOn?: string };
 
 /** `auth:status` 的载荷形状（**广播与 `auth:get-status` 应答共用，唯一一处定义**）。

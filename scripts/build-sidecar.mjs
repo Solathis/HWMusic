@@ -52,7 +52,7 @@ export function hostTriple(platform = process.platform, arch = process.arch) {
   const triple = TRIPLES[`${platform}-${arch}`];
   if (triple === undefined) {
     throw new Error(
-      `不支持的平台组合 ${platform}-${arch}：没有已知的目标三元组（本仓只在 Windows 上打包，见 docs/RUN_AND_PACKAGING.md）`,
+      `不支持的平台组合 ${platform}-${arch}：没有已知的目标三元组（本仓只在 Windows 上打包）`,
     );
   }
   return triple;

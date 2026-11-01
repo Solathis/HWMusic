@@ -10,7 +10,7 @@ import { dirname } from "node:path";
 
 const CHROME_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-/** HarmonyOS 移动 UA：探针里唯一一条服务端认深色的路；产品没采用（登录 webview 保持宿主默认 UA，见 docs/API_CONTRACT.md「官方登录页的主题」）。 */
+/** HarmonyOS 移动 UA：探针里唯一一条服务端认深色的路；产品没采用（登录 webview 保持宿主默认 UA）。 */
 const HARMONY_UA =
   "Mozilla/5.0 (Phone; HarmonyOS 4.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36";
 

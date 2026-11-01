@@ -1,5 +1,5 @@
 # Windows 安装包流水线（NSIS）。触发：推 main = 构建 + 留 artifact（不发布）；推 v* 标签额外打 Release。
-# 口径（见 docs/RUN_AND_PACKAGING.md）：依赖安装 → 单元测试（fail 0 / skipped 0）→ 类型检查 → 验收六路径
+# 口径：依赖安装 → 单元测试（fail 0 / skipped 0）→ 类型检查 → 验收六路径
 # → 浏览器守卫（PASS N / SKIP 0 / FAIL 0）→ Rust 测试 → 打包 → 安装包静态校验 → 校验和 → 发布用资产（英文文件名）。
 # 每个 run 块都显式查 $LASTEXITCODE：pwsh 不会因原生命令非 0 自动失败，不查的话「步骤全绿」只是没人看退出码。
 # 命令之间不串 &&（npm 的 script-shell 可能是 PowerShell，语义会变且失败容易被吞）；
@@ -55,7 +55,7 @@ jobs:
           npm ci
           if ($LASTEXITCODE -ne 0) { Write-Error "npm ci 失败（退出码 $LASTEXITCODE）"; exit 1 }
 
-      # 差分测试（test/reference-parity.test.mjs）逐字比对参考实现的源码：按 docs/API_CONTRACT.md 记录的固定提交取到 .tmp/reference-repo/，
+      # 差分测试（test/reference-parity.test.mjs）逐字比对参考实现的源码：按下面写死的固定提交取到 .tmp/reference-repo/，
       # 不取的话那 6 条按缺席跳过，而下一步要求 skipped 0。.tmp/ 不进打包输入。
       - name: 取参考实现（固定提交，供差分测试）
         shell: pwsh
@@ -185,7 +185,7 @@ jobs:
           }
 
       # 注：真窗冒烟（npm run smoke:build）不进 CI——它要一个交互式桌面会话，在无人值守的运行器上只会得到
-      # UNTESTED，把「没测」写进绿色流水线比不写更糟。它是本地/发布前的人工步骤，口径见 docs/RUN_AND_PACKAGING.md。
+      # UNTESTED，把「没测」写进绿色流水线比不写更糟。它是本地/发布前的人工步骤。
 
       - name: 上传产物（main 推送与标签都留 artifact）
         uses: actions/upload-artifact@v4

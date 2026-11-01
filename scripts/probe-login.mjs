@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 登录链路探针：**只请求外网公开页面**（不登录、不提交凭据、不写 cookie、不带私人数据），结论写入 docs/API_CONTRACT.md。
+ * 登录链路探针：**只请求外网公开页面**（不登录、不提交凭据、不写 cookie、不带私人数据）。
  * 目的：把 authorize / token / loginCallback 的确切 URL 与跳转链确定下来（只落摘要，不落响应正文）。
  * 用法：`node scripts/probe-login.mjs` 只做 GET；`--include-token-probe` 追加 POST 一个**无效**授权码
  * （`code=PROBE-INVALID-CODE`），只期望 `invalid_grant`/`invalid_request` 这类标准错误码，不涉及任何账号。

@@ -2176,17 +2176,6 @@ test("CI：构建顺序与本地一致——先构建产物，再 test:browser /
 });
 
 // ---------------------------------------------------------------------------
-// 10. 文档锚点：RUN_AND_PACKAGING 必须说清编排与 untested 的边界
-// ---------------------------------------------------------------------------
-
-test("docs/RUN_AND_PACKAGING.md：写清构建顺序、mtime 检查、SEA 两层打包与 CI 口径", () => {
-  const doc = read("docs/RUN_AND_PACKAGING.md");
-  for (const phrase of ["build:web", "dist:sidecar", "dist:win", "check:nsis", "mtime", "$LASTEXITCODE", "SHA256SUMS"]) {
-    assert.ok(doc.includes(phrase), `交付文档缺关键事实：${phrase}`);
-  }
-});
-
-// ---------------------------------------------------------------------------
 // 11. smoke:build：三种结论不许混为一谈（UNTESTED 不是 PASS）
 // ---------------------------------------------------------------------------
 

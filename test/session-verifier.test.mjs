@@ -339,25 +339,3 @@ test("装配：sidecar 给 createAuthManager 传的是**真验证器**（不是�
   assert.doesNotMatch(verifier, /\bfetch\s*\(/, "验证器不自己发请求：HTTP 全走 music-service 的 api");
   assert.doesNotMatch(verifier, /console\./, "验证器不打印（凭据纪律：谁都不许把它写进日志）");
 });
-
-// 7. 文档钉：docs/KNOWN_LIMITATIONS.md 里那条「刻意没注入」必须随之改口。
-// 留着它，下一个人会以为缺口还在。
-
-test("文档：KNOWN_LIMITATIONS 不再说「会话验证器刻意没注入」，且如实留下仍未实测的那一半", () => {
-  const doc = read("docs/KNOWN_LIMITATIONS.md");
-
-  assert.doesNotMatch(
-    doc,
-    /会话验证器\*\*刻意没注入\*\*/,
-    "R37 起验证器已注入（侧车装配见 §6）：这一行留着就是文档在说谎",
-  );
-  assert.match(doc, /会话验证器[^\n]*R37/, "这条连带影响要写明口径是 R37 改的（谁改的、改成什么）");
-  assert.match(doc, /src\/main\/session-verifier\.mjs/, "要说清实现落在哪个文件");
-  assert.match(doc, /verify_unavailable/, "「没验成不判失效」这条保守口径仍要留着（它才是这一档的实质）");
-  assert.match(
-    doc,
-    /SESSION_INVALID_KINDS/,
-    "那条「按现有证据拟定的待确认清单」的自我披露也不许被顺手删掉",
-  );
-  assert.match(doc, /未实测/, "仍未实测的那一半（真机上「失效会话回什么业务码」）必须留在同一段里");
-});

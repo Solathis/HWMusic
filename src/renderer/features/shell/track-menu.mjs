@@ -1,7 +1,7 @@
 /**
  * 曲目行 / 队列行的专属菜单：**菜单项由这里决定**（界面只负责把它们画成 shadcn 的项）。
  * 队列行少一件「加入播放队列」；动作没接就不出那一项——按下去什么都不发生的按钮比没有更糟。
- * 「加入歌单」要有"向已有歌单追加歌曲"的官方端点证据（docs/API_CONTRACT.md §2.13），没有就不上菜单。
+ * 「加入歌单」要有"向已有歌单追加歌曲"的官方端点证据，没有就不上菜单。
  */
 
 export const TRACK_MENU_TARGET = Object.freeze({
@@ -16,7 +16,7 @@ export const TRACK_MENU_ITEM = Object.freeze({
   addToPlaylist: "add-to-playlist",
 });
 
-/** 加歌端点的证据状态（唯一开关：证据落地才翻，翻的时候同步 docs/API_CONTRACT.md）。 */
+/** 加歌端点的证据状态（唯一开关：证据落地才翻）。 */
 export const ADD_TO_PLAYLIST_SUPPORTED = false;
 
 /** 菜单本体与单项的锚点（守卫按它找，文案改动不许影响断言）。 */

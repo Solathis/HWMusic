@@ -1,6 +1,6 @@
 /**
  * OAuth/PKCE 协议原型（华为帐号 OAuth，授权码 + PKCE S256）。
- * 端点一律注入，本模块不写死任何 URL（生产默认值在 `src/main/auth-manager.ts`，见 `docs/API_CONTRACT.md` §1）。
+ * 端点一律注入，本模块不写死任何 URL（生产默认值在 `src/main/auth-manager.ts`）。
  * 协议事实：client_id = 101444301、redirect_uri = hms://redirect_uri、access_type = offline、response_type = code。
  * 安全约定：错误消息只带端点/HTTP 状态/错误码，绝不回显 code、code_verifier、access_token、refresh_token。
  */
@@ -89,7 +89,7 @@ function isHttpsEndpoint(value) {
 
 function endpointError(label) {
   return err(
-    `${label} 未确定：端点 URL 必须由调用方注入（待授权 probe / R7 联调确认，见 docs/API_CONTRACT.md）`,
+    `${label} 未确定：端点 URL 必须由调用方注入`,
     AUTH_ERROR_KINDS.missingEndpoint,
   );
 }
@@ -97,7 +97,7 @@ function endpointError(label) {
 /** 供 createAttempt 使用：拿不到合法端点属于编程错误，直接抛（启动期就该炸）。 */
 function assertHttpsEndpoint(value, label) {
   if (!isHttpsEndpoint(value)) {
-    throw new TypeError(`${label} 必须是 https 端点 URL（端点未知时不猜 URL，见 docs/API_CONTRACT.md）`);
+    throw new TypeError(`${label} 必须是 https 端点 URL（端点未知时不猜 URL）`);
   }
   return value.trim();
 }
