@@ -192,6 +192,10 @@ const mediaActions = [];
 /** 「关于」里每次「打开」的键；openLinkFails 为真时宿主拒绝（造出打开失败）。 */
 const openLinkCalls = [];
 let openLinkFails = false;
+/** 「软件更新」夹具：检查结果按 updatePlan 给；下载停在一半，等守卫放行才进入安装。 */
+let updatePlan = "latest";
+const updateInstallCalls = [];
+let releaseUpdateInstall = null;
 /** core_lyrics_progress 的调用次数（判断去掉 rAF 后进度是否还在推）。 */
 let lyricsProgressCalls = 0;
 /** 歌词页上报的解锁区（null = 没有解锁按钮）。 */
@@ -378,6 +382,19 @@ mockIPC(async (command, args) => {
   if (command === "plugin:window|start_resize_dragging") { resizeCalls.push(args.value ?? null); return; }
   if (command === "core_get_tray_available") return true;
   if (command === "core_app_info") return { version: "0.2.0", tauriVersion: "2.12.4", webviewVersion: "131.0.2903.70", os: "windows", arch: "x86_64" };
+  if (command === "core_update_check") {
+    if (updatePlan === "fail") throw { kind: "update", message: "连不上 GitHub 的更新服务器：检查网络，或在「网络」里配置 HTTP 代理后重试。" };
+    if (updatePlan === "available") return { available: true, currentVersion: "0.2.0", version: "0.3.0", notes: ["### 新增", "- 设置「关于」", "### 修复", "- 底栏时长"].join(String.fromCharCode(10)), date: "2026-11-01T00:00:00Z" };
+    return { available: false, currentVersion: "0.2.0", version: null, notes: null, date: null };
+  }
+  if (command === "core_update_install") {
+    updateInstallCalls.push(Math.round(performance.now()));
+    await emit("core:event", { channel: "update:progress", payload: { phase: "downloading", downloaded: 0, total: 4000000 } });
+    await emit("core:event", { channel: "update:progress", payload: { phase: "downloading", downloaded: 2000000, total: 4000000 } });
+    await new Promise((resolve) => { releaseUpdateInstall = resolve; });
+    await emit("core:event", { channel: "update:progress", payload: { phase: "installing" } });
+    return null;
+  }
   if (command === "core_open_link") {
     openLinkCalls.push(String(args?.key ?? ""));
     if (openLinkFails) throw { kind: "internal", message: "守卫夹具：这一次打开外链被故意拒绝" };
@@ -485,6 +502,9 @@ function Guard() {
       markRuntime() { this.markedRuntime = runtime; },
       openLinkCalls: () => [...openLinkCalls],
       setOpenLinkFails(value) { openLinkFails = value === true; },
+      setUpdatePlan(value) { updatePlan = value; },
+      updateInstallCalls: () => updateInstallCalls.length,
+      finishUpdateInstall() { releaseUpdateInstall?.(); },
       sameRuntime: () => window.__guard.markedRuntime === getPlayerRuntime(),
       async setCoverFailure() {
         await runtime.player.playQueue(songs.map((song) => ({ ...song, coverUrl: "https://music.dbankcdn.cn/guard-cover-broken.png" })), 0);
@@ -5630,6 +5650,50 @@ export async function checkSettingsAboutPane(page, guardDir, add) {
   await page.getByTestId("settings-page").getByRole("tab", { name: "通用", exact: true }).click();
 }
 
+/** 设置「关于」的软件更新：失败给原因与下一步、已是最新、新版本带说明、下载进度条、进入安装；任何时候只有一个主按钮。 */
+export async function checkAboutUpdate(page, guardDir, add) {
+  await openSettingsAboutPane(page);
+  const panel = page.getByTestId("update-panel");
+  const plan = (value) => page.evaluate((next) => window.__guard.setUpdatePlan(next), value);
+  const waitText = (text) => page.waitForFunction((wanted) => document.querySelector('[data-testid="update-panel"]')?.textContent?.includes(wanted), text);
+
+  await plan("fail");
+  await panel.getByRole("button", { name: "检查更新", exact: true }).click();
+  await panel.getByRole("alert").waitFor();
+  const failure = { alert: (await panel.getByRole("alert").textContent()) ?? "", buttons: await panel.getByRole("button").count() };
+  await plan("latest");
+  await panel.getByRole("button", { name: "检查更新", exact: true }).click();
+  await waitText("已是最新版本");
+  const latestAlerts = await panel.getByRole("alert").count();
+  add("about-update-check",
+    failure.alert.includes("检查更新失败") && failure.alert.includes("HTTP 代理") && failure.buttons === 1 && latestAlerts === 0,
+    `失败「${failure.alert}」· 按钮 ${failure.buttons} 个 · 重新检查后提示 ${latestAlerts} 条`);
+
+  await plan("available");
+  await panel.getByRole("button", { name: "检查更新", exact: true }).click();
+  await waitText("发现新版本 0.3.0");
+  const notes = await page.evaluate(() => [...document.querySelectorAll('[data-testid="update-notes"] li')].map((item) => item.textContent));
+  await panel.getByRole("button", { name: "下载并安装", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="update-panel"] [data-slot="progress-indicator"]')?.style.transform === "translateX(-50%)");
+  const downloading = {
+    text: (await panel.textContent()) ?? "",
+    disabled: await panel.getByRole("button", { name: "下载并安装", exact: true }).isDisabled(),
+  };
+  await page.evaluate(() => window.__guard.finishUpdateInstall());
+  await waitText("正在安装");
+  const installing = {
+    bars: await panel.getByRole("progressbar").count(),
+    disabled: await panel.getByRole("button", { name: "下载并安装", exact: true }).isDisabled(),
+    calls: await page.evaluate(() => window.__guard.updateInstallCalls()),
+  };
+  add("about-update-install",
+    JSON.stringify(notes) === JSON.stringify(["设置「关于」", "底栏时长"]) && downloading.text.includes("已下载 1.9 MB / 3.8 MB") && downloading.disabled
+      && installing.bars === 0 && installing.disabled && installing.calls === 1,
+    `说明 ${JSON.stringify(notes)} · 下载中「${downloading.text.includes("已下载 1.9 MB / 3.8 MB") ? "已下载 1.9 MB / 3.8 MB" : downloading.text}」按钮禁用 ${downloading.disabled} · 安装中进度条 ${installing.bars} 个、按钮禁用 ${installing.disabled}、安装请求 ${installing.calls} 次`);
+  await page.screenshot({ path: path.join(guardDir, "about-update.png") });
+  await page.getByTestId("settings-page").getByRole("tab", { name: "通用", exact: true }).click();
+}
+
 /** 跑全部检查，返回 {pass, fail, skipped, checks}。 */
 export async function runGuard({ root = ROOT, log = console.log } = {}) {
   const guardDir = path.join(root, GUARD_DIR);
@@ -6340,6 +6404,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     await checked("r65-local-songs", () => checkLocalSongs(page, port, guardDir, add));
     /** 设置「关于」：版本与技术栈来自宿主回报、外链只按键交宿主、打开失败就地说明。 */
     await checked("about-pane", () => checkSettingsAboutPane(page, guardDir, add));
+    /** 「软件更新」：失败说原因、已是最新、新版本说明、下载进度与安装（同一个主按钮）。 */
+    await checked("about-update", () => checkAboutUpdate(page, guardDir, add));
     /** 主内容区宽度；会遍历各主页面并切换窗口尺寸，所以排在倒数第二（下一项自己 goto）。 */
     await checked("r66b-page-fill", () => checkPageFill(page, guardDir, add));
     /** 账号区四态（另一页，挂真 App；头像的两种结局都用 page.route 造出来）。 */

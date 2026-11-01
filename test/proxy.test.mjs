@@ -614,8 +614,9 @@ test("广播帧形状：{channel, payload}，没有 id 也没有 ok（Rust class
       "lyrics:state",
       "lyrics:pointer",
       "theme:changed",
+      "update:progress",
     ],
-    "R7 增补 auth:status（登录状态）、R9 预登记 player:command（R11 托盘）、R11 增补托盘那两条、R12 增补歌词窗那三条、R16 增补 auth:qr（二维码生命周期）、R25 增补 theme:changed（主题三态）、桌面歌词锁定后的指针进出 lyrics:pointer",
+    "R7 增补 auth:status（登录状态）、R9 预登记 player:command（R11 托盘）、R11 增补托盘那两条、R12 增补歌词窗那三条、R16 增补 auth:qr（二维码生命周期）、R25 增补 theme:changed（主题三态）、桌面歌词锁定后的指针进出 lyrics:pointer、UP1 增补在线更新进度 update:progress",
   );
 });
 

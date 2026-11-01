@@ -117,6 +117,7 @@ const BROADCAST_CHANNEL_NAMES = [
   "lyrics:toggle",
   "player:command",
   "theme:changed",
+  "update:progress",
 ];
 
 test("一致性：请求频道白名单（Node 共享常量 ↔ Rust commands.rs 全部 auth:/settings:/library:/playback:/lyrics: 字面量）", () => {

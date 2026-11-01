@@ -47,6 +47,8 @@ pub const LYRICS_POINTER: &str = "lyrics:pointer";
 /// 主题变化广播频道：`{theme: "light"|"dark"|"system"}` —— 目标态。
 /// 主题状态归 Rust 持有；三个 webview 各存一份必然漂移，一条广播让主窗与两个浮动控件一起变。
 pub const THEME_CHANGED: &str = "theme:changed";
+/// 在线更新进度 `{phase: "downloading"|"installing"|"failed", downloaded?, total?, message?}`（宿主 → 主窗）。
+pub const UPDATE_PROGRESS: &str = "update:progress";
 pub const BROADCAST_CHANNELS: &[&str] = &[
     "app:notice",
     "auth:status",
@@ -59,6 +61,7 @@ pub const BROADCAST_CHANNELS: &[&str] = &[
     "lyrics:state",
     "lyrics:pointer",
     "theme:changed",
+    "update:progress",
 ];
 
 /// 已答复 id 的保留上限：应答一次性守卫必须有界（超出按插入顺序淘汰）。
@@ -591,7 +594,8 @@ mod tests {
                 LYRICS_PROGRESS,
                 LYRICS_STATE,
                 LYRICS_POINTER,
-                THEME_CHANGED
+                THEME_CHANGED,
+                UPDATE_PROGRESS
             ]
         );
         assert_eq!(APP_NOTICE, "app:notice");
@@ -605,6 +609,7 @@ mod tests {
         assert_eq!(LYRICS_STATE, "lyrics:state");
         assert_eq!(LYRICS_POINTER, "lyrics:pointer");
         assert_eq!(THEME_CHANGED, "theme:changed");
+        assert_eq!(UPDATE_PROGRESS, "update:progress");
     }
 
     /// 可读回的假写入端：断言"到底写出了什么帧"。
@@ -771,6 +776,7 @@ mod tests {
             "lyrics:state",
             "lyrics:pointer",
             "theme:changed",
+            "update:progress",
         ];
         assert_eq!(BROADCAST_CHANNELS, expected, "控制器裁决的广播集合（R16 起加上二维码那条）");
 

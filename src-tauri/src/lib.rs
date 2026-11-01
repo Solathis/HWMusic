@@ -5,6 +5,7 @@
 //! `bridge` / `login` / `lyrics_window` / `tray` 是 `pub`，好让 `tests/` 与内联单测直接测纯函数。
 
 mod about;
+mod app_update;
 pub mod bridge;
 pub mod close_behavior;
 mod commands;
@@ -510,6 +511,8 @@ fn commit_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
         },
         || {
             app.state::<ExitState>().1.store(true, std::sync::atomic::Ordering::Release);
+            // 下载并验过签名的更新在这里安装（sidecar 已收掉）；没有挂起的安装包就照常退出
+            app_update::install_pending(app);
             app.exit(0);
         },
     );
@@ -537,13 +540,16 @@ fn abort_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>, reason: &str) {
     }
     app.state::<ExitState>().reset_request();
     log::warn!("正常退出未完成（{reason}）：已保留窗口与 core，可再次退出重试");
-    commands::emit_core_event(
-        app,
-        crate::bridge::APP_NOTICE,
-        serde_json::json!({
-            "text": format!("退出未完成：配置还没全部保存（{reason}）。窗口已保留，请稍后重新退出一次。")
-        }),
-    );
+    // 这次退出是为了安装更新：提示由更新区给（只说一次），不再叫用户「重新退出」
+    if !app_update::abort_pending(app, reason) {
+        commands::emit_core_event(
+            app,
+            crate::bridge::APP_NOTICE,
+            serde_json::json!({
+                "text": format!("退出未完成：配置还没全部保存（{reason}）。窗口已保留，请稍后重新退出一次。")
+            }),
+        );
+    }
     focus_main(app);
 }
 
@@ -610,6 +616,8 @@ pub fn run() {
         // 对话框插件只从 Rust 侧用（`local_library::pick_paths`），渲染层拿不到能力：`plugin:dialog|*` 要 capabilities 授权。
         // 本应用没有那条权限（见 `capabilities/main.json` 与 `test/packaging.test.mjs` 的扫描）。
         .plugin(tauri_plugin_dialog::init())
+        // 在线更新只从 Rust 调（`app_update`），capabilities 不给 webview `updater:*` 权限。
+        .plugin(tauri_plugin_updater::Builder::new().build())
         /*
           本地曲库的自定义 URI 协议（`hwlocal`）：判定全在 `local_library::handle_protocol` 纯函数里。
           只按 id 查索引、只服务主窗、支持 Range，磁盘读放阻塞线程池，免得堵住同一帧的其它请求。
@@ -676,6 +684,7 @@ pub fn run() {
             // 主题先于建窗读盘：三个 webview 挂载时都要读它，浮动控件还要等到用户点登录才建。
             app.manage(theme::ThemeState::restore(&data_root));
             app.manage(ExitState::default());
+            app.manage(app_update::UpdateState::default());
             // 持久化准入门必须先于任何会写盘的运行时登记，主题事务、歌词保存、退出编排都靠它看同一个阶段。
             app.manage(Arc::new(commands::PersistenceGate::new()));
 
@@ -752,6 +761,9 @@ pub fn run() {
             // 设置「关于」：版本信息与按键打开外链（主窗来源守卫在命令里）
             about::core_app_info,
             about::core_open_link,
+            // 检查更新 / 下载并安装（主窗来源守卫在命令里；安装挂在正常退出的最后一步）
+            app_update::core_update_check,
+            app_update::core_update_install,
             // 本地曲库四条命令（选文件 / 快照 / 导入 / 移除）：对话框只在 Rust 侧开，渲染层只拿到 id 与元数据。
             local_library::core_local_base_url,
             local_library::core_local_list,

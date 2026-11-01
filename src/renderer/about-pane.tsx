@@ -6,6 +6,7 @@ import { useEffect, useState } from "react"
 import { ExternalLinkIcon } from "lucide-react"
 
 import { Button } from "./components/ui/button"
+import { Separator } from "./components/ui/separator"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./components/ui/table"
 import {
@@ -18,6 +19,7 @@ import {
   techVersionText,
 } from "./features/settings/about-info.mjs"
 import { getAppInfo, openLink, type AppInfo } from "./host-api"
+import { UpdatePanel } from "./update-panel.tsx"
 
 interface AboutLink {
   key: string
@@ -110,6 +112,8 @@ export function AboutPane() {
               {ABOUT_INFO_FAILED}
             </p>
           ) : null}
+          <Separator />
+          <UpdatePanel />
         </CardContent>
       </Card>
 

@@ -197,5 +197,6 @@ test("广播频道：R16 起是 app:notice + auth:status + auth:qr + player:comm
     "lyrics:state",
     "lyrics:pointer",
     "theme:changed",
+    "update:progress",
   ]);
 });

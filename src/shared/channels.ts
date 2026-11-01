@@ -72,6 +72,8 @@ export const AUTH_QR = "auth:qr" as const;
  * 官方登录页零注入、不订阅；歌词窗订阅（否则深色主题下停在浅色令牌上，有歌词但看不见）。
  */
 export const THEME_CHANGED = "theme:changed" as const;
+/** 在线更新进度：`{phase: "downloading"|"installing"|"failed", downloaded?, total?, message?}`，宿主 → 主窗。 */
+export const UPDATE_PROGRESS = "update:progress" as const;
 
 export const BROADCAST_CHANNELS = [
   APP_NOTICE,
@@ -85,6 +87,7 @@ export const BROADCAST_CHANNELS = [
   LYRICS_STATE,
   LYRICS_POINTER,
   THEME_CHANGED,
+  UPDATE_PROGRESS,
 ] as const;
 
 export type BroadcastChannel = (typeof BROADCAST_CHANNELS)[number];

@@ -30,6 +30,8 @@ import {
   CORE_READ_RUN_LOG,
   CORE_RENDERER_READY,
   CORE_SET_AUTOSTART,
+  CORE_UPDATE_CHECK,
+  CORE_UPDATE_INSTALL,
 } from "../shared/commands.ts";
 import { CORE_EVENT, LYRICS_STATE, THEME_CHANGED } from "../shared/channels.ts";
 import { acceptThemePayload } from "./features/theme/theme.mjs";
@@ -169,6 +171,33 @@ export async function getAppInfo(): Promise<AppInfo> {
 export async function openLink(key: string): Promise<void> {
   try {
     await invoke<void>(CORE_OPEN_LINK, { key });
+  } catch (failure) {
+    throw normalizeFailure(failure);
+  }
+}
+
+/** `core_update_check` 的回执（Rust `app_update::UpdateCheck` 的镜像）。 */
+export interface UpdateCheck {
+  available: boolean;
+  currentVersion: string;
+  version?: string | null;
+  notes?: string | null;
+  date?: string | null;
+}
+
+/** 检查更新（只问不下）；失败的 `kind` 为 `update` 时 message 可直接显示。 */
+export async function checkForUpdate(): Promise<UpdateCheck> {
+  try {
+    return await invoke<UpdateCheck>(CORE_UPDATE_CHECK);
+  } catch (failure) {
+    throw normalizeFailure(failure);
+  }
+}
+
+/** 下载并安装上次检查到的新版本：进度见 `update:progress`，成功后应用会退出并重启。 */
+export async function installUpdate(): Promise<void> {
+  try {
+    await invoke<void>(CORE_UPDATE_INSTALL);
   } catch (failure) {
     throw normalizeFailure(failure);
   }

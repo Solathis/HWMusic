@@ -203,6 +203,7 @@
 | 29 | 真窗冒烟（`smoke:build`） | verified（三种结论与退出码） | **UNTESTED**（本机起不了真窗，退出码 2） | `scripts/tauri-smoke.mjs`；窄指纹只认 `os error 5` / `拒绝访问` / `Access is denied`，别的崩溃一律 FAIL |
 | 30 | Linux / macOS 支持 | untested | untested | **本仓不宣称支持**（见 KNOWN_LIMITATIONS C 组与 [PLATFORM_DIFFERENCES.md](PLATFORM_DIFFERENCES.md)） |
 | 31 | 设置「关于」（版本 / 运行环境 / 技术栈 / 开源地址与参考项目） | **verified** | untested | `test/about-pane.test.mjs`（外链两侧互钉、技术栈版本对锁文件、命令守卫与权限）；Rust `about.rs` 内联测试；浏览器守卫 `about-pane-runtime`、`about-pane-links-by-key` |
+| 32 | 在线更新（检查 / 下载验签 / 退出后安装） | **verified**（状态机、文案、代理、退出顺序、配置） | untested（真实下载安装要等下一版发布） | `test/app-update.test.mjs`；Rust `app_update.rs`、`webview_proxy.rs` 内联测试；浏览器守卫 `about-update-check`、`about-update-install` |
 
 ---
 

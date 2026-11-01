@@ -78,3 +78,8 @@ export const CORE_LOCAL_REMOVE = "core_local_remove";
 export const CORE_APP_INFO = "core_app_info";
 /** 设置「关于」：按键打开外链，只认 `src-tauri/src/about.rs` 固定表里的键，限主窗。 */
 export const CORE_OPEN_LINK = "core_open_link";
+
+/** 检查更新（只问不下）：回 `{available, currentVersion, version?, notes?, date?}`，限主窗。 */
+export const CORE_UPDATE_CHECK = "core_update_check";
+/** 下载、验签并在正常退出后安装上次检查到的新版本；进度走 `update:progress` 广播，限主窗。 */
+export const CORE_UPDATE_INSTALL = "core_update_install";

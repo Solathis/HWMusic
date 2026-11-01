@@ -97,19 +97,20 @@ pub fn webview_proxy_url(
     })
 }
 
-/// `settings.json` 文本 → webview 代理：非 JSON、非对象、`schemaVersion` 不是 1、缺 `data`、
-/// `data.proxy` 不是对象、端口或主机不全，一律 `None`（直连），绝不猜。
-pub fn parse_settings(raw: &str) -> Option<WebviewProxy> {
+/// `settings.json` 文本里的 `data.proxy` 对象：非 JSON、非对象、`schemaVersion` 不是 1、缺 `data` 或 `proxy` 不是对象都是 `None`。
+fn proxy_section(raw: &str) -> Option<serde_json::Map<String, Value>> {
     let value: Value = serde_json::from_str(raw).ok()?;
     let document = value.as_object()?;
     if document.get("schemaVersion").and_then(Value::as_f64) != Some(SETTINGS_SCHEMA_VERSION) {
         return None;
     }
-    let proxy = document
-        .get("data")?
-        .as_object()?
-        .get("proxy")?
-        .as_object()?;
+    document.get("data")?.as_object()?.get("proxy")?.as_object().cloned()
+}
+
+/// `settings.json` 文本 → webview 代理：非 JSON、非对象、`schemaVersion` 不是 1、缺 `data`、
+/// `data.proxy` 不是对象、端口或主机不全，一律 `None`（直连），绝不猜。
+pub fn parse_settings(raw: &str) -> Option<WebviewProxy> {
+    let proxy = proxy_section(raw)?;
     webview_proxy_url(
         proxy.get("enabled").and_then(Value::as_bool),
         proxy.get("host").and_then(Value::as_str),
@@ -146,6 +147,49 @@ pub fn resolve_for_webview(data_dir: &Path, window_tag: &str) -> Option<String> 
     let proxy = read_proxy(data_dir);
     log::info!("{}", describe(window_tag, proxy.as_ref()));
     proxy.map(|proxy| proxy.url)
+}
+
+/// 更新请求用的代理：与 webview 同一份设置、同一套主机与端口规则，但凭据保留在 URL 里（reqwest 支持认证代理）。
+/// 这个 URL 只交给 `UpdaterBuilder::proxy`，不进日志（日志用 [`describe_update_proxy`]）。
+pub fn updater_proxy_url(
+    enabled: Option<bool>,
+    host: Option<&str>,
+    port: Option<f64>,
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Option<tauri::Url> {
+    if enabled != Some(true) {
+        return None;
+    }
+    let host = clean_host(host)?;
+    let port = clean_port(port)?;
+    let mut url = tauri::Url::parse(&format!("http://{host}:{port}")).ok()?;
+    if let Some(username) = username.filter(|value| !value.is_empty()) {
+        url.set_username(username).ok()?;
+        url.set_password(password.filter(|value| !value.is_empty())).ok()?;
+    }
+    Some(url)
+}
+
+/// 读数据目录下 `settings.json` 里给更新请求用的代理；读不到或没配就是直连。
+pub fn read_update_proxy(data_dir: &Path) -> Option<tauri::Url> {
+    let raw = std::fs::read_to_string(data_dir.join(SETTINGS_FILE_NAME)).ok()?;
+    let proxy = proxy_section(&raw)?;
+    updater_proxy_url(
+        proxy.get("enabled").and_then(Value::as_bool),
+        proxy.get("host").and_then(Value::as_str),
+        proxy.get("port").and_then(Value::as_f64),
+        proxy.get("username").and_then(Value::as_str),
+        proxy.get("password").and_then(Value::as_str),
+    )
+}
+
+/// 更新请求的代理日志：只有 `host:port`，绝不含凭据。
+pub fn describe_update_proxy(proxy: Option<&tauri::Url>) -> String {
+    match proxy.and_then(|url| Some((url.host_str()?.to_string(), url.port_or_known_default()?))) {
+        Some((host, port)) => format!("经 HTTP 代理 {host}:{port}"),
+        None => "直连（未配置代理）".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -412,6 +456,41 @@ mod tests {
         assert_eq!(clean_host(None), None);
         assert_eq!(clean_port(Some(8080.0)), Some(8080));
         assert_eq!(clean_port(Some(0.0)), None);
+    }
+
+    #[test]
+    fn updater_proxy_keeps_encoded_credentials_but_logs_never_do() {
+        let url = updater_proxy_url(Some(true), Some(" proxy.lan "), Some(8080.0), Some("user"), Some("p@ss:w"))
+            .expect("完整配置要得到 URL");
+        assert_eq!(url.as_str(), "http://user:p%40ss%3Aw@proxy.lan:8080/");
+        let line = describe_update_proxy(Some(&url));
+        assert_eq!(line, "经 HTTP 代理 proxy.lan:8080");
+        assert!(!line.contains("user") && !line.contains("p%40ss"), "日志不含凭据：{line}");
+        assert_eq!(describe_update_proxy(None), "直连（未配置代理）");
+    }
+
+    #[test]
+    fn updater_proxy_follows_the_same_host_and_port_rules() {
+        assert!(updater_proxy_url(Some(false), Some("proxy.lan"), Some(8080.0), None, None).is_none(), "没启用就直连");
+        assert!(updater_proxy_url(Some(true), Some("http://proxy.lan"), Some(8080.0), None, None).is_none(), "带协议前缀的主机不认");
+        assert!(updater_proxy_url(Some(true), Some("proxy.lan"), None, None, None).is_none(), "缺端口不认");
+        let anonymous = updater_proxy_url(Some(true), Some("[::1]"), Some(7890.0), Some(""), Some("")).expect("IPv6 带方括号可用");
+        assert_eq!(anonymous.as_str(), "http://[::1]:7890/", "空凭据当没填");
+    }
+
+    #[test]
+    fn read_update_proxy_reads_the_same_settings_document() {
+        let dir = test_dir("update-proxy");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("测试目录必须能建");
+        assert_eq!(read_update_proxy(&dir), None, "没有设置文件就是直连");
+        std::fs::write(
+            dir.join(SETTINGS_FILE_NAME),
+            json!({ "schemaVersion": 1, "data": { "proxy": { "enabled": true, "host": "127.0.0.1", "port": 7890, "username": "u", "password": "p" } } }).to_string(),
+        )
+        .expect("设置文件要能写");
+        assert_eq!(read_update_proxy(&dir).map(|url| url.to_string()).as_deref(), Some("http://u:p@127.0.0.1:7890/"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn host_fixture_path() -> PathBuf {

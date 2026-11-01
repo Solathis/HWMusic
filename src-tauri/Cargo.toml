@@ -32,6 +32,8 @@ tauri-plugin-log = "2"
 tauri-plugin-dialog = "=2.8.3"
 # 设置「关于」打开外链：只用 Rust 函数 `open_url`，不注册插件（不给 webview 注入点击拦截，也没有 `opener:*` 权限）。
 tauri-plugin-opener = "=2.7.2"
+# 在线更新：只从 Rust 调用（`app_update`）。钉到补丁版本：它的 `configure_client` 暴露了 reqwest 的类型。
+tauri-plugin-updater = "=2.14.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"

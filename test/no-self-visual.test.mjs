@@ -29,6 +29,9 @@ const UI_FILES = [
   "src/renderer/theme-toggle.tsx",
   // 歌词设置弹出窗（菜单本体是官方 DropdownMenu，控件全是 shadcn 原语）
   "src/renderer/LyricsSettingsPopup.tsx",
+  // 设置「关于」与其中的软件更新
+  "src/renderer/about-pane.tsx",
+  "src/renderer/update-panel.tsx",
 ];
 
 /** AMLL 宿主是例外：视觉全部来自官方包（BackgroundRender / LyricPlayer），宿主只提供定位容器，同样不许自绘。 */
