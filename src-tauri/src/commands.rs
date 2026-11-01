@@ -760,6 +760,13 @@ pub fn shutdown_core<R: tauri::Runtime>(app: &AppHandle<R>, reason: &str) {
     }
 }
 
+/// core 进程已退出或没起来：此后的调用都会立刻失败，退出前的保存确认也不可能成功。
+pub fn core_is_gone<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
+    app.try_state::<Arc<CoreState>>()
+        .and_then(|state| state.shared())
+        .is_none_or(|shared| shared.is_closed())
+}
+
 /// 渲染层唯一业务通道：来源守卫 → 频道准入 → sidecar 调用（带超时）。
 /// 阻塞等待放进 `spawn_blocking`：同步命令会占住主线程，异步命令里直接阻塞又会卡住运行时的工作线程。
 #[tauri::command]

@@ -487,6 +487,16 @@ fn finish_prepared_exit(
     }
 }
 
+/// 准备失败但 core 已经退出：保存确认再试也发不出去，保窗只会让用户退不掉，所以照常退出（配置没能确认写盘）。
+fn settle_preparation(preparation: Result<(), String>, core_is_gone: impl FnOnce() -> bool) -> Result<(), String> {
+    let Err(reason) = preparation else { return Ok(()) };
+    if !core_is_gone() {
+        return Err(reason);
+    }
+    log::warn!("core 已退出，退出前的保存确认无法完成（{reason}）：照常退出");
+    Ok(())
+}
+
 /// 准备成功之后：进入不可逆阶段（取消自窗模态 → 停保存任务 → D 屏障/core 收尸 → app.exit）。
 fn commit_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Ok(gate) = commands::persistence_gate(app) {
@@ -556,7 +566,7 @@ fn abort_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>, reason: &str) {
 /// 退出线程：**先做可失败的保存准备，再做不可逆清理**（顺序是合同，不是风格）。
 fn run_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     let _ = finish_prepared_exit(
-        prepare_exit(app),
+        settle_preparation(prepare_exit(app), || commands::core_is_gone(app)),
         || commit_exit(app),
         |reason| abort_exit(app, reason),
     );
@@ -1780,6 +1790,34 @@ mod tests {
         assert!(failure_branch.contains("focus_main(app)"), "准备失败要把主窗拉回可操作的焦点");
         assert!(failure_branch.contains("APP_NOTICE"), "准备失败要留一条可操作提示");
         assert!(production.contains(".skip_taskbar(false)"), "任务栏按钮不能被主窗策略隐藏");
+    }
+
+    /// core 已经退出时，退出前的保存确认永远发不出去：不能因此保窗，否则怎么点退出都只会把主窗拉回来。
+    #[test]
+    fn exit_proceeds_when_the_core_is_already_gone() {
+        assert_eq!(settle_preparation(Ok(()), || unreachable!("准备成功不必再问 core")), Ok(()));
+        assert_eq!(
+            settle_preparation(Err("core 进程已退出，调用未发送".into()), || true),
+            Ok(()),
+            "core 已退出：照常退出"
+        );
+        assert_eq!(
+            settle_preparation(Err("等待已受理的保存超时".into()), || false),
+            Err("等待已受理的保存超时".to_string()),
+            "core 还活着：仍保窗、可重试"
+        );
+    }
+
+    /// 退出线程要先经 settle_preparation 再决定提交还是保窗。
+    #[test]
+    fn exit_thread_settles_preparation_against_core_liveness() {
+        let source = lib_source();
+        let production = production_source(&source);
+        let runner = production.split("fn run_exit<").nth(1).expect("退出线程主体").split("/// 建窗用的代理").next().expect("退出线程收口");
+        assert!(
+            runner.contains("settle_preparation(prepare_exit(app), || commands::core_is_gone(app))"),
+            "退出线程要按 core 是否已退出决定是否保窗：{runner}"
+        );
     }
 
     #[test]
