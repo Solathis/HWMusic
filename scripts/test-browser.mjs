@@ -1440,6 +1440,14 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
   await queueTrigger.press("Enter");
   const sheet = page.locator('[data-slot="sheet-content"]');
   await sheet.waitFor();
+  // 抽屉滑入时整块在视口外，中心点打不到它：慢机器上测得早就是假失败。先等它成为中心点的命中目标（有上限，超时照常量、照常判）
+  await page.waitForFunction(() => {
+    const content = document.querySelector('[data-slot="sheet-content"]');
+    if (!content) return false;
+    const s = content.getBoundingClientRect();
+    const hit = document.elementFromPoint(s.x + s.width / 2, s.y + s.height / 2);
+    return Boolean(hit && content.contains(hit));
+  }, null, { timeout: guardScaledMs(10000) }).catch(() => {});
   const sheetLayering = await page.evaluate(() => {
     const content = document.querySelector('[data-slot="sheet-content"]');
     const button = document.querySelector('[data-testid="playback-stage-close-row"]');

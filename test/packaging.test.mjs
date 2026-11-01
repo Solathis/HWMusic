@@ -2005,6 +2005,14 @@ test("test:browser：写死的短等待按等待上限同倍放大（本机不�
   assert.doesNotMatch(read("scripts/test-browser.mjs"), /timeout: [0-9]/, "新的短等待也要走 guardScaledMs");
 });
 
+test("test:browser：量播放队列抽屉的层级前先等它滑到位（滑入时中心点在视口外，测早了就是假失败）", () => {
+  const source = read("scripts/test-browser.mjs");
+  const measure = source.indexOf("  const sheetLayering = await page.evaluate(() => {");
+  const settle = source.lastIndexOf("先等它成为中心点的命中目标", measure);
+  assert.ok(measure > 0 && settle > 0 && measure - settle < 800, "测量之前紧挨着一段等待");
+  assert.match(source.slice(settle, measure), /timeout: guardScaledMs\(10000\)/, "等待有上限，并随等待上限放大");
+});
+
 test("test:browser：Chromium 候选顺序 = 显式覆盖 → playwright 自带 → 系统 Chrome/Edge", async () => {
   const mod = await import("../scripts/test-browser.mjs");
   const kinds = mod.chromiumCandidates({ env: { PLAYWRIGHT_CHROMIUM_EXECUTABLE: "C:\\x\\chromium.exe" } }).map(
