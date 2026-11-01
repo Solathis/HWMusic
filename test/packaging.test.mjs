@@ -2013,6 +2013,12 @@ test("test:browser：量播放队列抽屉的层级前先等它滑到位（滑�
   assert.match(source.slice(settle, measure), /timeout: guardScaledMs\(10000\)/, "等待有上限，并随等待上限放大");
 });
 
+test("test:browser：r58 固定时刻取样的停留随等待上限放大（慢运行器上逐字遮罩没画完就截图，CI run 41273309026）", () => {
+  const source = read("scripts/test-browser.mjs");
+  const pinned = source.slice(source.indexOf("  const readPinned = async (label, timeMs, theme) => {"), source.indexOf("  const runMode = async (label, config, viewport, theme) => {"));
+  assert.match(pinned, /return readAt\(label, guardScaledMs\(800\), theme\);/, "跳转并暂停后的停留按等待上限放大，判据不变");
+});
+
 test("test:browser：Chromium 候选顺序 = 显式覆盖 → playwright 自带 → 系统 Chrome/Edge", async () => {
   const mod = await import("../scripts/test-browser.mjs");
   const kinds = mod.chromiumCandidates({ env: { PLAYWRIGHT_CHROMIUM_EXECUTABLE: "C:\\x\\chromium.exe" } }).map(

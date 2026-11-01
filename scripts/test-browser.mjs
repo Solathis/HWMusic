@@ -2064,7 +2064,7 @@ export async function checkLyricsKaraoke(page, guardDir, add) {
     await stopProgress();
     pinGeneration += 1;
     await page.evaluate(({ ms, generation }) => window.__guard.desktopProgress({ timeMs: ms, playing: false, seekGeneration: generation }), { ms: timeMs, generation: pinGeneration });
-    return readAt(label, 800, theme);
+    return readAt(label, guardScaledMs(800), theme);
   };
   const runMode = async (label, config, viewport, theme) => {
     await page.setViewportSize(viewport);
