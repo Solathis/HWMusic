@@ -331,4 +331,29 @@ mod tests {
         }
         assert_eq!(update_error(Stage::Check, &UpdaterError::ReleaseNotFound).kind.as_deref(), Some(UPDATE_ERROR_KIND));
     }
+
+    /// 用正式公钥与 latest.json 地址假装是 0.0.1：检查、下载并验签最新 Release（经代理时设 HTTPS_PROXY）。
+    #[test]
+    #[ignore = "联网访问 GitHub Releases，发布后手动验证"]
+    fn real_release_is_found_and_verified() {
+        let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().plugins.0.insert("updater".into(), config["plugins"]["updater"].clone());
+        context.package_info_mut().version = "0.0.1".parse().expect("版本号");
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .build(context)
+            .expect("测试应用");
+        let proxy = std::env::var("HTTPS_PROXY").ok().and_then(|raw| tauri::Url::parse(&raw).ok());
+        let builder = app.handle().updater_builder().timeout(Duration::from_secs(60));
+        let builder = match proxy {
+            Some(url) => builder.proxy(url),
+            None => builder.no_proxy(),
+        };
+        let update = tauri::async_runtime::block_on(async { builder.build().expect("更新器").check().await.expect("检查更新") })
+            .expect("0.0.1 应当看到新版本");
+        assert_eq!(update.version, env!("CARGO_PKG_VERSION"), "latest.json 的版本就是本仓库当前版本");
+        let bytes = tauri::async_runtime::block_on(update.download(|_, _| {}, || {})).expect("下载并通过签名校验");
+        assert!(bytes.len() > 1024 * 1024, "安装包至少 1 MB：{}", bytes.len());
+    }
 }
