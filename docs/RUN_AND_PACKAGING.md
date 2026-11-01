@@ -168,9 +168,11 @@ Tauri 应用启动失败: PluginInitialization("log", "拒绝访问。 (os error
 - CI 的浏览器守卫把等待上限调到 60 秒（`HWMUSIC_GUARD_TIMEOUT_MS`，本机默认 15 秒；守卫里写死的 3–10 秒短等待按同一倍数放大）：运行器没有 GPU，页面走软件光栅化，
   比本机慢得多。守卫失败时 `.tmp/browser-guard/` 的截图与守卫日志作为 `browser-guard-failure` 上传。本机复现时要把守卫
   连同它的浏览器进程一起钉在 2 个逻辑核上（GPU 进程不继承父进程的亲和性，只钉 node 复现不出来）。
-- CI 发不出 Release 时（v0.2.0 就是这样：浏览器守卫在 GitHub 运行器上没通过），维护者在标签对应的提交上本机跑
-  `dist:win` → `check:nsis` → `release:checksums` → `release:assets`，再用 `gh release create <标签> --draft`
-  上传 `bundle/release-assets/` 里的安装包、`SHA256SUMS` 与 `latest.json`，核对资产名与哈希后再发布；正文用同目录的 `RELEASE_NOTES.md`（`--notes-file`），并注明不是 CI 构建的。本机要产签名，先在本机环境里设 `TAURI_SIGNING_PRIVATE_KEY`。
+- CI 发不出 Release 时（v0.2.0：浏览器守卫在运行器上没通过；v0.3.0：守卫偶发失败，且仓库没设签名 secret），维护者在标签对应的提交上本机跑
+  `dist:win` → `check:nsis` → `release:checksums` → `release:assets` → `verify:update-signature`，再用 `gh release create <标签> --draft`
+  上传 `bundle/release-assets/` 里的安装包、`SHA256SUMS` 与 `latest.json`，核对资产名与哈希后再发布；正文用同目录的 `RELEASE_NOTES.md`（`--notes-file`），只写新增 / 改进 / 修复，构建来源记在 IMPLEMENTATION_STATUS。本机要产签名，先把 `TAURI_SIGNING_PRIVATE_KEY` 设成私钥文件的路径（tauri 自己读文件，私钥内容不进命令行与日志）。没设这个 secret 时，标签 CI 会按设计在 `release:assets` 失败。
+- 发布后用真实端点验一次更新器：在 `src-tauri/` 下跑 `cargo test real_release_is_found_and_verified -- --ignored`（联网，经代理时设 `HTTPS_PROXY`）。
+  它假装当前是 0.0.1，要求公开端点给出的版本等于本仓库当前版本，并且下载与验签都通过。
 
 ## 7. 本机环境限制（不假造然后说"验过了"）
 
