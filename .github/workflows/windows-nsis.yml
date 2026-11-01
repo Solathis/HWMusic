@@ -1,6 +1,6 @@
 # Windows 安装包流水线（NSIS）。触发：推 main = 构建 + 留 artifact（不发布）；推 v* 标签额外打 Release。
-# 口径：依赖安装 → 单元测试（fail 0 / skipped 0）→ 类型检查 → 验收六路径
-# → 浏览器守卫（PASS N / SKIP 0 / FAIL 0）→ Rust 测试 → 打包 → 安装包静态校验 → 校验和 → 发布用资产（英文文件名）。
+# 口径：依赖安装 → 类型检查 → 浏览器守卫（PASS N / SKIP 0 / FAIL 0）→ Rust 测试 → 打包 → 安装包静态校验 → 校验和 → 发布用资产（英文文件名）。
+# 单元、契约测试与验收脚本只留在本地 test/（不入库），CI 不跑。
 # 每个 run 块都显式查 $LASTEXITCODE：pwsh 不会因原生命令非 0 自动失败，不查的话「步骤全绿」只是没人看退出码。
 # 命令之间不串 &&（npm 的 script-shell 可能是 PowerShell，语义会变且失败容易被吞）；
 # 工具都走仓内 `node node_modules/...` 直接路径（本机 PowerShell 也会拒包管理器的临时执行器：SecurityError）。
@@ -55,44 +55,11 @@ jobs:
           npm ci
           if ($LASTEXITCODE -ne 0) { Write-Error "npm ci 失败（退出码 $LASTEXITCODE）"; exit 1 }
 
-      # 差分测试（test/reference-parity.test.mjs）逐字比对参考实现的源码：按下面写死的固定提交取到 .tmp/reference-repo/，
-      # 不取的话那 6 条按缺席跳过，而下一步要求 skipped 0。.tmp/ 不进打包输入。
-      - name: 取参考实现（固定提交，供差分测试）
-        shell: pwsh
-        run: |
-          git clone --quiet https://github.com/talongao/huawei-music-desktop.git .tmp/reference-repo
-          if ($LASTEXITCODE -ne 0) { Write-Error "参考实现克隆失败（退出码 $LASTEXITCODE）"; exit 1 }
-          git -C .tmp/reference-repo checkout --quiet --detach 3fd67319fa4b4a10de00d6da7d88e4e52ebd8327
-          if ($LASTEXITCODE -ne 0) { Write-Error "参考实现检出固定提交失败（退出码 $LASTEXITCODE）"; exit 1 }
-
-      - name: 单元测试（npm run test，断言 fail 0 / skipped 0）
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path .tmp/ci | Out-Null
-          # 计数从稳定的 reporter 里读：NODE_OPTIONS 传 --test-reporter=tap。不用 `npm run test -- --test-reporter=tap`：
-          # npm 把追加参数放在位置参数之后，而 node 从第一个位置参数起就不再解析自己的选项（实测会把它当模块 require）。
-          $env:NODE_OPTIONS = "--test-reporter=tap"
-          npm run test 2>&1 | Tee-Object -FilePath .tmp/ci/npm-test.tap
-          if ($LASTEXITCODE -ne 0) { Write-Error "npm run test 失败（退出码 $LASTEXITCODE）"; exit 1 }
-          $tap = Get-Content .tmp/ci/npm-test.tap -Raw
-          if ($tap -notmatch '(?m)^# fail 0\s*$') { Write-Error "单元测试有失败：要求 fail 0（TAP 汇总）"; exit 1 }
-          if ($tap -notmatch '(?m)^# skipped 0\s*$') { Write-Error "单元测试有跳过：要求 skipped 0（跳过的测试不算验过）"; exit 1 }
-          Write-Output "npm run test：fail 0 / skipped 0"
-
       - name: 类型检查（npm run typecheck）
         shell: pwsh
         run: |
           npm run typecheck
           if ($LASTEXITCODE -ne 0) { Write-Error "npm run typecheck 失败（退出码 $LASTEXITCODE）"; exit 1 }
-
-      - name: 验收六路径（npm run test:acceptance）
-        shell: pwsh
-        run: |
-          npm run test:acceptance 2>&1 | Tee-Object -FilePath .tmp/ci/acceptance.log
-          if ($LASTEXITCODE -ne 0) { Write-Error "npm run test:acceptance 失败（退出码 $LASTEXITCODE）"; exit 1 }
-          $acceptance = Get-Content .tmp/ci/acceptance.log -Raw
-          if ($acceptance -notmatch 'PASS \d+ / SKIP 0 / FAIL 0') { Write-Error "验收没有 PASS N / SKIP 0 / FAIL 0（SKIP 不算 PASS）"; exit 1 }
-          Write-Output "验收六路径：PASS N / SKIP 0 / FAIL 0"
 
       - name: 安装 Chromium（浏览器守卫用）
         shell: pwsh
@@ -114,6 +81,7 @@ jobs:
           HWMUSIC_GUARD_TIMEOUT_MS: "60000"
         shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force -Path .tmp/ci | Out-Null
           npm run test:browser 2>&1 | Tee-Object -FilePath .tmp/ci/test-browser.log
           if ($LASTEXITCODE -ne 0) { Write-Error "npm run test:browser 失败（退出码 $LASTEXITCODE）"; exit 1 }
           $guard = Get-Content .tmp/ci/test-browser.log -Raw

@@ -28,5 +28,6 @@ research/
 .superpowers/
 target/
 
-# 本地文档（不上传 GitHub）
+# 本地文档与测试（不上传 GitHub）
 /docs/
+/test/

@@ -30,7 +30,6 @@
 ```powershell
 npm ci
 npm run dev                 # 开发：vite + tauri
-npm test                    # 单元与契约测试
 npm run typecheck
 npm run build:web
 npm run test:browser        # 真 Chromium 的界面守卫（先 build:web 与 dist:sidecar）
