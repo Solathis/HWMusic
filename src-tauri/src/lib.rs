@@ -1433,11 +1433,7 @@ mod tests {
     }
 
     fn host_fixture_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("test")
-            .join("fixtures")
-            .join("proxy-host-cases.json")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("proxy-host-cases.json")
     }
 
     /// 两条自启命令必须进 `generate_handler!`，只定义不注册时 `invoke` 只会报 "command not found"。
