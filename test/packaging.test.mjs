@@ -2019,6 +2019,17 @@ test("test:browser：r58 固定时刻取样的停留随等待上限放大（慢�
   assert.match(pinned, /return readAt\(label, guardScaledMs\(800\), theme\);/, "跳转并暂停后的停留按等待上限放大，判据不变");
 });
 
+test("test:browser：r58 逐字扫亮按本行未扫亮的字作基准（固定阈值在任务栏小字号下量到的是笔画粗细，CI run 41292810439）", () => {
+  const source = read("scripts/test-browser.mjs");
+  const runMode = source.slice(source.indexOf("  const runMode = async (label, config, viewport, theme) => {"), source.indexOf("  const baseline = { ...DESKTOP_BASELINE, locked: true, showControls: false };"));
+  assert.ok(runMode.includes("const unswept = early.sung.at(-1);"), "基准取 t1 时本行最后一个字（遮罩最小，还没扫到）");
+  assert.ok(runMode.includes("const earlySung = early.sung.filter((value) => sweptBy(value, unswept, theme) >= 40).length;"), "t1 已扫亮：比基准亮度差至少 40");
+  assert.ok(runMode.includes("const lateSung = late.sung.filter((value) => sweptBy(value, unswept, theme) >= 40).length;"), "t2 用同一基准");
+  assert.ok(runMode.includes("const contrast = Math.max(0, ...early.sung.map((value) => sweptBy(value, unswept, theme)));"), "对比度 = t1 的扫亮幅度");
+  assert.ok(runMode.includes("lateSung - earlySung >= 2 && lateSung >= 5 && contrast >= 40"), "其余判据不变");
+  assert.ok(!source.includes("value >= 150") && !source.includes("value <= 120"), "不再用固定亮度阈值");
+});
+
 test("test:browser：Chromium 候选顺序 = 显式覆盖 → playwright 自带 → 系统 Chrome/Edge", async () => {
   const mod = await import("../scripts/test-browser.mjs");
   const kinds = mod.chromiumCandidates({ env: { PLAYWRIGHT_CHROMIUM_EXECUTABLE: "C:\\x\\chromium.exe" } }).map(

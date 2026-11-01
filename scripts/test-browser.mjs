@@ -2035,7 +2035,8 @@ export async function checkLyricsKaraoke(page, guardDir, add) {
     return { p5: at(0.05), p95: at(0.95) };
   };
   const sungInk = (ink, theme) => (ink === null ? null : theme === "dark" ? ink.p95 : ink.p5);
-  const isSung = (value, theme) => value !== null && (theme === "dark" ? value >= 150 : value <= 120);
+  /** 扫亮程度按本行未扫亮的字比亮度：小字号下固定阈值量到的是字形笔画，不是遮罩进度。 */
+  const sweptBy = (value, unswept, theme) => (value === null || unswept === null ? 0 : theme === "dark" ? value - unswept : unswept - value);
   /** 开一轮进度泵（每 100ms 一条，时间按真实经过推进）；下一轮会先掐掉上一轮。 */
   const startProgress = (fromMs, spanMs = 2400) => page.evaluate(({ from, span }) => {
     clearTimeout(window.__r58Driver);
@@ -2078,14 +2079,10 @@ export async function checkLyricsKaraoke(page, guardDir, add) {
     await page.waitForTimeout(400);
     const early = await readPinned(`${label}-t1`, 1290, theme);
     const late = await readPinned(`${label}-t2`, 2850, theme);
-    const earlySung = early.sung.filter((value) => isSung(value, theme)).length;
-    const lateSung = late.sung.filter((value) => isSung(value, theme)).length;
-    const sungValues = early.sung.filter((value) => isSung(value, theme));
-    const unsungValues = early.sung.filter((value) => !isSung(value, theme));
-    const contrast = sungValues.length && unsungValues.length
-      ? Math.round(theme === "dark" ? Math.min(...sungValues) - Math.max(...unsungValues)
-        : Math.max(...unsungValues) - Math.min(...sungValues))
-      : 0;
+    const unswept = early.sung.at(-1);
+    const earlySung = early.sung.filter((value) => sweptBy(value, unswept, theme) >= 40).length;
+    const lateSung = late.sung.filter((value) => sweptBy(value, unswept, theme) >= 40).length;
+    const contrast = Math.max(0, ...early.sung.map((value) => sweptBy(value, unswept, theme)));
     add(`r58-${label}-sweep`,
       early.active === late.active && Boolean(early.active) && early.words.length >= 5
         && early.words.every((word) => word.inside)
