@@ -20,20 +20,8 @@
 
 ![沉浸式歌词：封面取主题色，逐字高亮](screenshots/player.png)
 
-![设置](screenshots/settings.png)
 
 ![关于：版本、技术栈与开源地址](screenshots/about.png)
-
-## 资源占用
-
-以下为 Windows x64 实机测得（整棵进程树：应用主进程 + 内核 sidecar + WebView2 渲染进程）：
-
-| 场景 | 工作集 | 私有内存 |
-|---|---|---|
-| 播放中（含封面与歌词） | 约 640 MB | 约 380 MB |
-| 暂停 / 空闲（停在设置页） | 约 645 MB | 约 390 MB |
-
-拆分：主进程约 42 MB、内核约 65 MB，其余约 530 MB 是 WebView2（Chromium 多进程：界面、渲染、GPU、网络）。数字随播放、歌词动画与系统缓存波动，任务管理器里看到的 `msedgewebview2.exe` 也属于本应用。
 
 ## 功能
 
