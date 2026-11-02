@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(parse_close_behavior(Some(&raw)), CloseBehavior::Tray);
         assert_eq!(
             crate::webview_proxy::parse_settings(&raw),
-            None,
+            crate::webview_proxy::WebviewNetwork::FollowSystem,
             "代理那边照旧当没配（两条判定互不影响）"
         );
     }

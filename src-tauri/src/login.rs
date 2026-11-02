@@ -994,11 +994,8 @@ fn create_login_view(
         )
     })?;
 
-    // 代理在建登录页时读取一次 → 改代理要重启应用才生效（与主窗一致）。
-    let proxy = crate::proxy_url_argument(crate::webview_proxy::resolve_for_webview(
-        data_root,
-        LOGIN_WEBVIEW_LABEL,
-    ));
+    // 出口在建登录页时读一次 → 改代理要重启应用才生效；登录页与两个浮动控件共用一个数据目录，WebView2 要求参数一致，所以三处同一份。
+    let network = crate::webview_proxy::resolve_for_webview(data_root, LOGIN_WEBVIEW_LABEL);
 
     let (sender, receiver) = std::sync::mpsc::channel();
     let app_for_build = app.clone();
@@ -1013,7 +1010,7 @@ fn create_login_view(
             &app_for_build,
             url_for_build,
             login_data_for_build,
-            proxy,
+            network,
             nav_session,
             load_session,
         );
@@ -1109,7 +1106,7 @@ fn build_on_main_thread(
     app: &AppHandle,
     url: tauri::Url,
     login_data: PathBuf,
-    proxy: Option<tauri::Url>,
+    network: crate::webview_proxy::WebviewNetwork,
     nav_session: Arc<LoginSession>,
     load_session: Arc<LoginSession>,
 ) -> Result<Webview, CoreError> {
@@ -1242,8 +1239,11 @@ fn build_on_main_thread(
         builder = builder.devtools(true);
     }
 
-    if let Some(proxy) = proxy {
-        builder = builder.proxy_url(proxy);
+    if let Some(proxy_url) = network.proxy_url() {
+        builder = builder.proxy_url(proxy_url);
+    }
+    if let Some(browser_args) = network.browser_args() {
+        builder = builder.additional_browser_args(browser_args);
     }
 
     let webview = main
@@ -1271,6 +1271,7 @@ fn build_on_main_thread(
         LOGIN_CHROME_KIND_RETURN,
         &login_data,
         chrome[0],
+        &network,
     ) {
         // 已经建出来的两个 webview 由调用方（`run_login_view` 的 Err 支 / 交付守卫）收，
         // 这里只把登录页也关掉：否则会留下一个盖着门禁的官方页（用户看不到二维码，也没法返回）。
@@ -1285,6 +1286,7 @@ fn build_on_main_thread(
         LOGIN_CHROME_KIND_THEME,
         &login_data,
         chrome[1],
+        &network,
     ) {
         // 主题控件只是少一个便利入口：登录本身照常（留痕即可，不打扰用户）。
         log::warn!("主题浮动控件建不起来（{error}）：这次登录没有右上角的主题控件");
@@ -1301,8 +1303,9 @@ fn build_chrome_on_main_thread(
     kind: &str,
     login_data: &Path,
     target: Rect,
+    network: &crate::webview_proxy::WebviewNetwork,
 ) -> Result<(), CoreError> {
-    let builder = WebviewBuilder::new(label, WebviewUrl::App(chrome_url(kind).into()))
+    let mut builder = WebviewBuilder::new(label, WebviewUrl::App(chrome_url(kind).into()))
         .data_directory(login_data.to_path_buf())
         // 透明：浮在官方页之上，不铺任何底色（wry 在 Windows 上把 alpha=0 交给
         // WebView2 的 `SetDefaultBackgroundColor`，只有 0 才是透明——非 0 会被强制成不透明）
@@ -1320,6 +1323,13 @@ fn build_chrome_on_main_thread(
         // 弹窗一律拒（这个页面里没有链接，也没有开新窗的理由）
         .on_new_window(|_url, _features| NewWindowResponse::Deny);
 
+    // 与登录页共用一个数据目录：WebView2 建第二个环境时要求参数一致，所以出口参数必须同一份。
+    if let Some(proxy_url) = network.proxy_url() {
+        builder = builder.proxy_url(proxy_url);
+    }
+    if let Some(browser_args) = network.browser_args() {
+        builder = builder.additional_browser_args(browser_args);
+    }
     main.add_child(
         builder,
         tauri::PhysicalPosition::new(target.x.round() as i32, target.y.round() as i32),

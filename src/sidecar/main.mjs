@@ -134,8 +134,8 @@ for (const [channel, handler] of Object.entries(createPlaybackHandlers({ api: mu
 }
 
 // 设置页的「测试连接」用独立 ProxyAgent，绝不换掉全局 dispatcher：测试连接不该改掉整个进程的出口。
-// 凭据只经这条路出去，不写日志。
-for (const [channel, handler] of Object.entries(createProxyHandlers({ testProxy: testProxyConnection }))) {
+// 凭据只经这条路出去（日志只记 host:port 与状态码）；系统代理由宿主经环境变量给，所以接上 process.env。
+for (const [channel, handler] of Object.entries(createProxyHandlers({ testProxy: testProxyConnection, env: process.env }))) {
   dispatcher.register(channel, handler);
 }
 

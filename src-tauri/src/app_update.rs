@@ -167,15 +167,17 @@ pub async fn core_update_check(
     state: State<'_, UpdateState>,
 ) -> Result<UpdateCheck, CoreError> {
     require_main_webview(webview.label())?;
-    let proxy = crate::webview_data_root(&app)
-        .ok()
-        .and_then(|root| crate::webview_proxy::read_update_proxy(&root));
-    log::info!("检查更新：{}", crate::webview_proxy::describe_update_proxy(proxy.as_ref()));
+    let network = crate::webview_proxy::read_update_network(
+        crate::webview_data_root(&app).ok().as_deref(),
+        crate::webview_proxy::system_proxy,
+    );
+    log::info!("检查更新：{}", crate::webview_proxy::describe_update_network(&network));
+    let proxy = network.proxy_url();
     let builder = app
         .updater_builder()
         .timeout(CHECK_TIMEOUT)
         .configure_client(|client| client.read_timeout(DOWNLOAD_STALL));
-    // 没配代理就直连，与 sidecar 一致（不悄悄改用系统代理）
+    // 系统与自定义代理显式交给 reqwest；不使用代理就 no_proxy（reqwest 默认会自己读系统代理）。
     let builder = match proxy {
         Some(url) => builder.proxy(url),
         None => builder.no_proxy(),

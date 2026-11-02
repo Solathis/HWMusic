@@ -8,6 +8,7 @@ import * as nodeFs from "node:fs/promises";
 import { isIPv6 } from "node:net";
 import { basename, dirname, isAbsolute, join } from "node:path";
 
+import { proxyModeAndScope } from "../shared/proxy-mode.mjs";
 import { CORE_ERROR_KINDS, err, ok } from "../shared/result.ts";
 
 /** 设置文件名（Rust `webview_proxy.rs` 的同名字面量，两侧由测试互钉）。 */
@@ -21,8 +22,10 @@ export const SETTINGS_DIR_MODE = 0o700;
 /** 关窗行为枚举；第一个是默认值。 */
 export const CLOSE_BEHAVIORS = ["tray", "quit"];
 export const DEFAULT_CLOSE_BEHAVIOR = CLOSE_BEHAVIORS[0];
-/** 代理默认值 = "没配"：`enabled:false`、端口 `null`、例外列表空。 */
+/** 代理默认值：跟随系统代理、只用于检查更新；`enabled` 由方式派生（mode === "custom"），照写给旧版读。 */
 export const DEFAULT_PROXY = Object.freeze({
+  mode: "system",
+  scope: "update",
   enabled: false,
   host: "",
   port: null,
@@ -119,13 +122,14 @@ export function normalizeBypass(raw) {
   return out;
 }
 
-/**
- * 代理对象归一：只认 `enabled === true`，其余字段各自清洗（坏值 = 没填）；未知子字段会被丢掉。
- */
+/** 代理对象归一：方式与作用范围按共享规则补齐，enabled 由方式派生，其余字段各自清洗（坏值 = 没填），未知子字段丢掉。 */
 export function normalizeProxy(raw) {
   const source = isPlainObject(raw) ? raw : {};
+  const { mode, scope } = proxyModeAndScope(source);
   return {
-    enabled: source.enabled === true,
+    mode,
+    scope,
+    enabled: mode === "custom",
     host: cleanHost(source.host) ?? "",
     port: cleanPort(source.port),
     username: typeof source.username === "string" ? source.username : "",

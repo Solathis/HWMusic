@@ -1144,12 +1144,12 @@ fn build_lyrics_window<R: Runtime>(
         )
     })?;
 
-    // 代理在建窗时读一次，改代理要重启应用才生效（主窗与登录窗相同）。
-    // 三窗都接 proxy_url 是审计结论：不接的话 webview 自己的网络栈会绕过设置直连。
-    let proxy = crate::proxy_url_argument(crate::webview_proxy::resolve_for_webview(
+    // 出口在建窗时读一次，改代理要重启应用才生效（主窗、登录窗相同）。
+    // 三窗都接出口是审计结论：不接的话 webview 自己的网络栈会绕过设置直连。
+    let network = crate::webview_proxy::resolve_for_webview(
         &data_root,
         LYRICS_WINDOW_LABEL,
-    ));
+    );
 
     let min_size = min_window_size(config);
     let mut builder = WebviewWindowBuilder::new(
@@ -1170,8 +1170,11 @@ fn build_lyrics_window<R: Runtime>(
     .visible(false)
     .data_directory(lyrics_data);
 
-    if let Some(proxy) = proxy {
-        builder = builder.proxy_url(proxy);
+    if let Some(proxy_url) = network.proxy_url() {
+        builder = builder.proxy_url(proxy_url);
+    }
+    if let Some(browser_args) = network.browser_args() {
+        builder = builder.additional_browser_args(browser_args);
     }
 
     let window = builder

@@ -25,6 +25,9 @@ pub const NODE_BIN_ENV: &str = "HWMUSIC_NODE_BIN";
 /// sidecar 脚本覆盖旋钮：只接受绝对路径；空值/相对路径=未设置（排障用）。
 pub const SIDECAR_SCRIPT_ENV: &str = "HWMUSIC_SIDECAR_SCRIPT";
 
+/// 宿主读到的系统代理（`http://host:port`）经这个环境变量交给 core；名字与 `src/main/proxy.mjs` 的 SYSTEM_PROXY_ENV 同源。
+pub const SYSTEM_PROXY_ENV: &str = "HWMUSIC_SYSTEM_PROXY";
+
 /// sidecar 启动参数：应用数据目录，Node 侧 `src/main/data-dir.mjs` 读同一字面量。
 /// 目录只由宿主解析后经 argv 传入；sidecar 自己猜目录，打包后会落到不可写的位置。
 pub const DATA_DIR_ARG: &str = "--data-dir";
@@ -286,6 +289,15 @@ impl SidecarProcess {
             // stderr 必须接管道：`inherit` 时 sidecar 的每一行只落在启动它的那个控制台上，
             // 日志文件里一条都没有（设置页的日志面板因此看不到 core 这一侧）。
             .stderr(Stdio::piped());
+        // 系统代理由宿主读（Node 读不了 Windows 注册表），经环境变量交给 core；没有就显式清掉，别继承宿主环境里的旧值。
+        match crate::webview_proxy::system_proxy() {
+            Some(raw) => {
+                command.env(SYSTEM_PROXY_ENV, raw);
+            }
+            None => {
+                command.env_remove(SYSTEM_PROXY_ENV);
+            }
+        }
         // 发布版宿主没有控制台：不加这个标志，Windows 会给 sidecar 另开一个 cmd 窗口，关掉它 sidecar 就退出。
         #[cfg(windows)]
         command.creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
@@ -848,6 +860,31 @@ mod tests {
             setup.contains("#[cfg(windows)]") && setup.contains("creation_flags(windows::Win32::System::Threading::CREATE_NO_WINDOW.0)"),
             "起进程之前要在 Windows 上设 CREATE_NO_WINDOW：{setup}"
         );
+    }
+
+    /// `HWMUSIC_SYSTEM_PROXY` 与 Node 侧同名字面量互钉：宿主写、core 读，名字不一致就等于没传。
+    #[test]
+    fn the_system_proxy_env_name_matches_the_node_side_literal() {
+        assert_eq!(SYSTEM_PROXY_ENV, "HWMUSIC_SYSTEM_PROXY");
+        let literal = r#"export const SYSTEM_PROXY_ENV = "HWMUSIC_SYSTEM_PROXY";"#;
+        let node = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("src").join("main").join("proxy.mjs")).expect("要能读到 Node 侧的 proxy.mjs");
+        assert!(node.contains(literal), "Node 侧的常量名变了：{literal}");
+    }
+
+    /// 起 sidecar 前要读一次系统代理：有就设进子进程，没有就显式清掉，绝不继承宿主环境里的旧值。
+    #[test]
+    fn spawn_forwards_the_system_proxy_or_clears_it() {
+        let source = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("sidecar.rs")).expect("要能读到自己的源码");
+        let production = match source.find("#[cfg(test)]") {
+            Some(cut) => &source[..cut],
+            None => &source[..],
+        };
+        let start = production.find("pub fn spawn(plan: &LaunchPlan)").expect("找不到 spawn");
+        let call = start + production[start..].find("command.spawn()").expect("spawn 里要有 command.spawn()");
+        let setup = &production[start..call];
+        assert!(setup.contains("crate::webview_proxy::system_proxy()"), "起进程前要读系统代理：{setup}");
+        assert!(setup.contains("command.env(") && setup.contains("SYSTEM_PROXY_ENV") && setup.contains("raw"), "有系统代理要传给 core：{setup}");
+        assert!(setup.contains("command.env_remove(") && setup.contains("SYSTEM_PROXY_ENV"), "没有就清掉，别继承旧值：{setup}");
     }
 
     /// 端到端：真 sidecar 读真 `settings.json` → 广播 `app:notice` → 宿主帧泵收到 `Effect::Emit`。

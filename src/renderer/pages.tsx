@@ -71,6 +71,10 @@ import {
   closeBehaviorNotice,
   closeBehaviorPatch,
   passwordHint,
+  PROXY_MODE_LABEL,
+  PROXY_SCOPE_LABEL,
+  PROXY_MODES,
+  PROXY_SCOPES,
   proxyFormFromSettings,
   proxyPatchFromForm,
   proxySaveNotice,
@@ -1091,7 +1095,7 @@ export function SettingsPage({
           </Card>
         </TabsContent>
 
-        {/* 网络：单张表单卡保持整宽，放进半栏会把主机/端口/账号字段挤窄 */}
+        {/* 网络：单张表单卡保持整宽；方式与作用范围决定下面显示哪些字段 */}
         <TabsContent value="network" className="grid grid-cols-1 items-start gap-4">
           <Card>
             <CardHeader>
@@ -1101,81 +1105,125 @@ export function SettingsPage({
               </CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-4">
-              <div className="flex items-center gap-2">
-                <Switch
-                  id="proxy-enabled"
-                  checked={form.enabled}
-                  disabled={!loaded || busy}
-                  onCheckedChange={(checked) => setForm((current) => ({ ...current, enabled: checked }))}
-                />
-                <Label htmlFor="proxy-enabled">使用代理</Label>
-              </div>
-
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="flex flex-col gap-1">
-                  <Label htmlFor="proxy-host">主机</Label>
-                  <Input
-                    id="proxy-host"
-                    value={form.host}
+                  <Label htmlFor="proxy-mode">代理方式</Label>
+                  <Select
+                    value={form.mode}
                     disabled={!loaded || busy}
-                    placeholder="proxy.example.com"
-                    onChange={(event) => setForm((current) => ({ ...current, host: event.target.value }))}
-                  />
+                    onValueChange={(value) => setForm((current) => ({ ...current, mode: value }))}
+                  >
+                    <SelectTrigger id="proxy-mode" aria-label="代理方式" className="w-full max-w-xs">
+                      <SelectValue>{PROXY_MODE_LABEL[form.mode]}</SelectValue>
+                    </SelectTrigger>
+                    <SelectContent position="popper" align="start" sideOffset={4}>
+                      <SelectGroup>
+                        {PROXY_MODES.map((mode: string) => (
+                          <SelectItem key={mode} value={mode}>
+                            {PROXY_MODE_LABEL[mode]}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="flex flex-col gap-1">
-                  <Label htmlFor="proxy-port">端口</Label>
-                  <Input
-                    id="proxy-port"
-                    value={form.portText}
-                    disabled={!loaded || busy}
-                    inputMode="numeric"
-                    placeholder="8080"
-                    onChange={(event) => setForm((current) => ({ ...current, portText: event.target.value }))}
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <Label htmlFor="proxy-username">用户名</Label>
-                  <Input
-                    id="proxy-username"
-                    value={form.username}
-                    disabled={!loaded || busy}
-                    autoComplete="off"
-                    onChange={(event) => setForm((current) => ({ ...current, username: event.target.value }))}
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <Label htmlFor="proxy-password">密码</Label>
-                  <Input
-                    id="proxy-password"
-                    type="password"
-                    value={form.password}
-                    disabled={!loaded || busy}
-                    autoComplete="new-password"
-                    onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
-                  />
-                  <span className="text-xs text-muted-foreground">{passwordHint(form)}</span>
+                  <Label htmlFor="proxy-scope">作用范围</Label>
+                  <Select
+                    value={form.scope}
+                    disabled={!loaded || busy || form.mode === "off"}
+                    onValueChange={(value) => setForm((current) => ({ ...current, scope: value }))}
+                  >
+                    <SelectTrigger id="proxy-scope" aria-label="作用范围" className="w-full max-w-xs">
+                      <SelectValue>{PROXY_SCOPE_LABEL[form.scope]}</SelectValue>
+                    </SelectTrigger>
+                    <SelectContent position="popper" align="start" sideOffset={4}>
+                      <SelectGroup>
+                        {PROXY_SCOPES.map((scope: string) => (
+                          <SelectItem key={scope} value={scope}>
+                            {PROXY_SCOPE_LABEL[scope]}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <span className="text-xs text-muted-foreground">仅检查更新：登录、播放与封面都直连。</span>
                 </div>
               </div>
 
-              <div className="flex flex-col gap-1">
-                <Label htmlFor="proxy-bypass">例外列表</Label>
-                <Input
-                  id="proxy-bypass"
-                  value={form.bypassText}
-                  disabled={!loaded || busy}
-                  placeholder="localhost, 127.0.0.1"
-                  onChange={(event) => setForm((current) => ({ ...current, bypassText: event.target.value }))}
-                />
-                <span className="text-xs text-muted-foreground">
-                  逗号分隔：这些地址不走代理（例外只在应用内核侧生效）。
-                </span>
-              </div>
+              {form.mode === "custom" ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="flex flex-col gap-1">
+                    <Label htmlFor="proxy-host">主机</Label>
+                    <Input
+                      id="proxy-host"
+                      value={form.host}
+                      disabled={!loaded || busy}
+                      placeholder="proxy.example.com"
+                      onChange={(event) => setForm((current) => ({ ...current, host: event.target.value }))}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <Label htmlFor="proxy-port">端口</Label>
+                    <Input
+                      id="proxy-port"
+                      value={form.portText}
+                      disabled={!loaded || busy}
+                      inputMode="numeric"
+                      placeholder="8080"
+                      onChange={(event) => setForm((current) => ({ ...current, portText: event.target.value }))}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <Label htmlFor="proxy-username">用户名</Label>
+                    <Input
+                      id="proxy-username"
+                      value={form.username}
+                      disabled={!loaded || busy}
+                      autoComplete="off"
+                      onChange={(event) => setForm((current) => ({ ...current, username: event.target.value }))}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <Label htmlFor="proxy-password">密码</Label>
+                    <Input
+                      id="proxy-password"
+                      type="password"
+                      value={form.password}
+                      disabled={!loaded || busy}
+                      autoComplete="new-password"
+                      onChange={(event) => setForm((current) => ({ ...current, password: event.target.value }))}
+                    />
+                    <span className="text-xs text-muted-foreground">{passwordHint(form)}</span>
+                  </div>
+                </div>
+              ) : null}
+
+              {form.mode === "custom" ? (
+                <div className="flex flex-col gap-1">
+                  <Label htmlFor="proxy-bypass">例外列表</Label>
+                  <Input
+                    id="proxy-bypass"
+                    value={form.bypassText}
+                    disabled={!loaded || busy}
+                    placeholder="localhost, 127.0.0.1"
+                    onChange={(event) => setForm((current) => ({ ...current, bypassText: event.target.value }))}
+                  />
+                  <span className="text-xs text-muted-foreground">
+                    逗号分隔：这些地址不走代理（例外只在应用内核侧生效）。
+                  </span>
+                </div>
+              ) : null}
 
               <div className="flex flex-wrap items-center gap-2">
                 <Button onClick={() => void saveProxy()} disabled={!loaded || busy}>
                   {saving ? "正在保存…" : "保存"}
                 </Button>
-                <Button variant="secondary" onClick={() => void testConnection()} disabled={!loaded || busy}>
+                <Button
+                  variant="secondary"
+                  onClick={() => void testConnection()}
+                  disabled={!loaded || busy || form.mode === "off"}
+                >
                   {testing ? "正在测试…" : "测试连接"}
                 </Button>
                 <Button variant="ghost" onClick={() => void restoreDefaultProxy()} disabled={!loaded || busy}>

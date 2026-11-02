@@ -210,7 +210,7 @@ pub fn window_state_flags(background_test: bool) -> StateFlags {
 }
 
 /// 创建主窗，返回实际使用的 webview 数据根（目录要先建好，WebView2 缺目录会报 `os error 5`）。
-/// 封面图与音频流走 WebView2 自己的网络栈，所以建窗时必须接 `proxy_url`，改代理要重启应用才生效。
+/// 封面图与音频流走 WebView2 自己的网络栈，所以建窗时必须接 `proxy_url` 或强制直连，改代理要重启应用才生效。
 pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let webview_data = webview_data_root(app)?;
     std::fs::create_dir_all(&webview_data)?;
@@ -237,12 +237,15 @@ pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std
     .visible(activation.visible)
     .focused(activation.focused);
 
-    // 没配代理或配置不可用 → None → 直连，绝不猜一个代理出来。
-    // 走 `proxy_url_argument` 而非 `Url::parse(...)?`：解析不了的写法只降级成没配，不能让建窗失败。
-    if let Some(proxy_url) =
-        proxy_url_argument(webview_proxy::resolve_for_webview(&webview_data, MAIN_WINDOW_LABEL))
-    {
+    // 出口按设置的作用范围定：自定义 + 全部请求 → proxy_url；系统代理 + 全部请求 → 两样都不传（WebView2 跟随系统）；
+    // 其余（不使用代理、仅检查更新、没配置）→ --no-proxy-server 强制直连。
+    let network = webview_proxy::resolve_for_webview(&webview_data, MAIN_WINDOW_LABEL);
+    // 走 `proxy_url_argument` 而非 `Url::parse(...)?`：解析不了的写法只降级成跟随系统，不能让建窗失败。
+    if let Some(proxy_url) = network.proxy_url() {
         builder = builder.proxy_url(proxy_url);
+    }
+    if let Some(browser_args) = network.browser_args() {
+        builder = builder.additional_browser_args(browser_args);
     }
     // 页面重载后沉浸页已不在，先把标题栏装回去
     builder = builder.on_page_load(|window, payload| {
@@ -572,14 +575,14 @@ fn run_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     );
 }
 
-/// 建窗用的代理 URL 参数是取值链的最后一道闸：解析失败一律当没配（直连），一个配置错误不能让主窗建不起来。
+/// 建窗用的代理 URL 参数是取值链的最后一道闸：解析失败一律交回调用方（该窗口跟随系统），一个配置错误不能让主窗建不起来。
 /// 入参只可能是 `webview_proxy` 拼出的 `http://host:port`，凭据在那里就被丢弃，所以这行日志不含用户名密码。
 pub fn proxy_url_argument(candidate: Option<String>) -> Option<tauri::Url> {
     let raw = candidate?;
     match tauri::Url::parse(&raw) {
         Ok(url) => Some(url),
         Err(error) => {
-            log::warn!("webview 代理地址无法解析，按没配处理（该窗口直连）：{raw}（{error}）");
+            log::warn!("webview 代理地址无法解析，按跟随系统处理（该窗口不传代理参数）：{raw}（{error}）");
             None
         }
     }

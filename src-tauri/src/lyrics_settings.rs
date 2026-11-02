@@ -344,11 +344,12 @@ fn build_popup<R: Runtime>(
             format!("歌词设置弹出窗数据目录（{data:?}）建不出来：{source}"),
         )
     })?;
-    // 与主窗/歌词窗/登录窗同一条取值链：不接代理的话，这扇窗自己的网络栈会绕过设置直连。
-    let proxy = crate::proxy_url_argument(crate::webview_proxy::resolve_for_webview(
+    // 出口在建窗时读一次，改代理要重启应用才生效（与主窗、歌词窗相同）。
+    // 不接出口的话，这扇窗自己的网络栈会绕过设置直连。
+    let network = crate::webview_proxy::resolve_for_webview(
         &data_root,
         LYRICS_SETTINGS_WINDOW_LABEL,
-    ));
+    );
 
     let mut builder = WebviewWindowBuilder::new(
         app,
@@ -367,8 +368,11 @@ fn build_popup<R: Runtime>(
     .visible(false)
     .data_directory(data);
 
-    if let Some(proxy) = proxy {
-        builder = builder.proxy_url(proxy);
+    if let Some(proxy_url) = network.proxy_url() {
+        builder = builder.proxy_url(proxy_url);
+    }
+    if let Some(browser_args) = network.browser_args() {
+        builder = builder.additional_browser_args(browser_args);
     }
 
     let window = builder

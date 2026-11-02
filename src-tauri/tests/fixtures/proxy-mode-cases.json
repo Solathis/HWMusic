@@ -1,0 +1,28 @@
+{
+  "why": "代理方式与作用范围的归一：Node 的 src/shared/proxy-mode.mjs 与 Rust 的 webview_proxy.rs 各读一遍，两侧结论必须相同。",
+  "cases": [
+    { "mode": "system", "scope": "update" },
+    { "proxy": null, "mode": "system", "scope": "update" },
+    { "proxy": "proxy.local", "mode": "system", "scope": "update" },
+    { "proxy": [], "mode": "system", "scope": "update" },
+    { "proxy": {}, "mode": "system", "scope": "update" },
+    { "proxy": { "enabled": false }, "mode": "system", "scope": "update" },
+    { "proxy": { "enabled": "true" }, "mode": "system", "scope": "update" },
+    { "proxy": { "enabled": 1 }, "mode": "system", "scope": "update" },
+    { "proxy": { "enabled": true }, "mode": "custom", "scope": "all" },
+    { "proxy": { "enabled": true, "scope": "update" }, "mode": "custom", "scope": "update" },
+    { "proxy": { "enabled": true, "mode": "system" }, "mode": "system", "scope": "update" },
+    { "proxy": { "mode": "off" }, "mode": "off", "scope": "update" },
+    { "proxy": { "mode": "off", "scope": "all" }, "mode": "off", "scope": "all" },
+    { "proxy": { "mode": "system", "scope": "all" }, "mode": "system", "scope": "all" },
+    { "proxy": { "mode": "system", "scope": "update" }, "mode": "system", "scope": "update" },
+    { "proxy": { "mode": "custom" }, "mode": "custom", "scope": "all" },
+    { "proxy": { "mode": "custom", "enabled": false }, "mode": "custom", "scope": "all" },
+    { "proxy": { "mode": "custom", "scope": "update" }, "mode": "custom", "scope": "update" },
+    { "proxy": { "mode": "custom", "scope": "nope" }, "mode": "custom", "scope": "all" },
+    { "proxy": { "mode": "pac", "enabled": true }, "mode": "custom", "scope": "all" },
+    { "proxy": { "mode": "SYSTEM", "scope": "ALL" }, "mode": "system", "scope": "update" },
+    { "proxy": { "mode": " system", "scope": "all " }, "mode": "system", "scope": "update" },
+    { "proxy": { "mode": 1, "scope": true }, "mode": "system", "scope": "update" }
+  ]
+}

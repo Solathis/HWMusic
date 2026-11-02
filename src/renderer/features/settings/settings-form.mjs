@@ -10,6 +10,13 @@ const isPlainObject = (value) => value !== null && typeof value === "object" && 
 /** 取一个对象的字符串字段（类型不对当没填）。 */
 const text = (value) => (typeof value === "string" ? value : "");
 
+/** 方式与作用范围的界面文案（键与共享模块的枚举同值）。 */
+/** @type {Record<string, string>} */
+export const PROXY_MODE_LABEL = { off: "不使用代理", system: "使用系统代理", custom: "自定义代理" };
+/** @type {Record<string, string>} */
+export const PROXY_SCOPE_LABEL = { all: "全部请求", update: "仅检查更新" };
+export { PROXY_MODES, PROXY_SCOPES } from "../../../shared/proxy-mode.mjs";
+
 // ---------------------------------------------------------------------------
 // 代理表单：读 → 表单（凭据在这一步就被丢掉）
 // ---------------------------------------------------------------------------
@@ -19,8 +26,12 @@ const text = (value) => (typeof value === "string" ? value : "");
  */
 export function proxyFormFromSettings(document) {
   const proxy = isPlainObject(document?.data) && isPlainObject(document.data.proxy) ? document.data.proxy : {};
+  const mode = proxy.mode === "off" || proxy.mode === "system" || proxy.mode === "custom" ? proxy.mode : proxy.enabled === true ? "custom" : "system";
+  const scope = proxy.scope === "all" || proxy.scope === "update" ? proxy.scope : mode === "custom" ? "all" : "update";
   return {
-    enabled: proxy.enabled === true,
+    mode,
+    scope,
+    enabled: mode === "custom",
     host: text(proxy.host),
     // 端口以**文本**进表单：用户的输入就是文本，清洗规则只有 core 一份（`8080x` 不该被这里静默丢掉）
     portText: typeof proxy.port === "number" ? String(proxy.port) : text(proxy.port),
@@ -62,9 +73,13 @@ function splitBypass(raw) {
  */
 export function proxyPatchFromForm(form) {
   const source = isPlainObject(form) ? form : {};
+  const mode = source.mode === "off" || source.mode === "system" || source.mode === "custom" ? source.mode : source.enabled === true ? "custom" : "system";
+  const scope = source.scope === "all" || source.scope === "update" ? source.scope : mode === "custom" ? "all" : "update";
   return {
     proxy: {
-      enabled: source.enabled === true,
+      mode,
+      scope,
+      enabled: mode === "custom",
       host: text(source.host).trim(),
       port: text(source.portText).trim(),
       username: text(source.username),
@@ -91,8 +106,9 @@ export function validateProxyForm(form) {
     }
   }
 
-  if (source.enabled === true && text(source.host).trim() === "") {
-    return "启用了代理但没填主机：这样等于直连。请填主机地址，或关掉代理开关。";
+  const custom = source.mode === undefined ? source.enabled === true : source.mode === "custom";
+  if (custom && text(source.host).trim() === "") {
+    return "选了自定义代理但没填主机：这样等于跟随系统代理（直连）。请填主机地址，或把方式改成「不使用代理」。";
   }
 
   return null;
@@ -117,7 +133,8 @@ export function proxySaveNotice(settings, restartRequired) {
 
 /** 认得的失败类别（认不出时优先用 core 给的那句话——它是唯一线索）。 */
 export const PROXY_TEST_FAILURE_TEXT = {
-  not_configured: "代理没开或没填全（主机与端口都要有）。",
+  not_configured: "没有使用代理：请求直连，不需要测试。",
+  no_system_proxy: "系统没有设置代理（自动配置脚本 PAC 暂不支持）。",
   invalid_url: "测试地址不可用。",
   timeout: "测试超时：代理可能不通，或网络被挡住。",
   http_status: "代理连上了，但目标站点返回了错误。",
@@ -133,9 +150,8 @@ export function proxyTestResultText(result) {
   if (!isPlainObject(result)) return null;
 
   if (result.ok === true) {
-    const status = typeof result.status === "number" ? `HTTP ${result.status}` : "已响应";
     const ms = typeof result.ms === "number" && Number.isFinite(result.ms) ? result.ms : null;
-    return ms === null ? `代理连通（${status}）。` : `代理连通（${status}，耗时 ${ms} 毫秒）。`;
+    return ms === null ? "代理连通。" : `代理连通，耗时 ${ms} 毫秒。`;
   }
 
   const message = isPlainObject(result.error) ? text(result.error.message).trim() : "";
