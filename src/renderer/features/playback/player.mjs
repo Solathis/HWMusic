@@ -4,6 +4,7 @@
  * `persistQueue`/`loadQueue`、`log`（只写该打扰的失败，绝不写播放地址）、`random`/`now`/`schedule`。
  * 状态里没有音频地址；每次装载领一个令牌，乱序应答整包丢掉；换队列 = 停止播放。
  * 取不到地址时按当前模式自动跳下一首（连续最多 3 首），用 `notice` 说明而非错误；都失败才停回 error。
+ * 音质只说服务端明确声明的那一档（`actualQuality`）：`unknown` / 缺失 / 本地曲目一律是 null，界面不许虚标。
  */
 import { queueEntriesOf, queueRecordOf, restoredEntries, sanitizeQueueRecord } from "./queue.mjs";
 import { LYRICS_STATUS } from "../lyrics/lyrics-window.mjs";
@@ -104,6 +105,15 @@ function kindOf(cause) {
   return cause !== null && typeof cause === "object" && typeof cause.kind === "string" ? cause.kind : null;
 }
 
+/**
+ * 服务端明确声明的音质：只认 "standard" / "lossless"。
+ * parser 判的 "unknown"、缺字段、本地曲目（协议按 id 拼地址，没有这个字段）一律 null——不确定就不说。
+ * @returns {"standard"|"lossless"|null}
+ */
+function declaredQualityOf(value) {
+  return value === "standard" || value === "lossless" ? value : null;
+}
+
 /** 提示里的曲目称呼：有名字用名字，没有就用标识。 */
 function trackLabelOf(entry) {
   if (entry !== null && typeof entry === "object") {
@@ -122,7 +132,7 @@ function skipNoticeOf(skippedLabels) {
  * 造播放状态机。
  * @param {object} options
  * @param {object} options.audio 音频端口（单实例！真实实现见 audio-element.mjs）
- * @param {(trackId: string) => Promise<{ok: true, data: {url?: unknown}} | {ok: false, error: {message?: string, kind?: string}}>} options.resolveUrl
+ * @param {(trackId: string) => Promise<{ok: true, data: {url?: unknown, actualQuality?: unknown}} | {ok: false, error: {message?: string, kind?: string}}>} options.resolveUrl
  * @param {(url: string) => (string|null)} options.guardUrl 媒体白名单闸门（放行回归一化地址，否则 null）
  * @param {(record: import("./queue.mjs").QueueRecord|null) => unknown} [options.persistQueue]
  * @param {() => Promise<unknown>} [options.loadQueue]
@@ -198,6 +208,7 @@ export function createPlayer(options = {}) {
    *   index: number,
    *   track: import("./queue.mjs").QueueEntry|null,
    *   loaded: boolean,
+   *   quality: "standard"|"lossless"|null,
    *   currentTimeMs: number,
    *   durationMs: number,
    *   volume: number,
@@ -217,6 +228,7 @@ export function createPlayer(options = {}) {
     index: -1,
     track: null,
     loaded: false,
+    quality: null,
     currentTimeMs: 0,
     durationMs: 0,
     volume: DEFAULT_VOLUME,
@@ -392,7 +404,7 @@ export function createPlayer(options = {}) {
 
   /**
    * 取地址 → 过闸门。任何一步失败都回结构化错误，**且消息里没有地址**。
-   * @returns {Promise<{ok: true, url: string} | {ok: false, error: {kind: string, message: string}}>}
+   * @returns {Promise<{ok: true, url: string, quality: "standard"|"lossless"|null} | {ok: false, error: {kind: string, message: string}}>}
    */
   async function resolveAddress(trackId) {
     let answer;
@@ -417,7 +429,8 @@ export function createPlayer(options = {}) {
       return { ok: false, error: { kind: kind ?? PLAYER_ERROR_KINDS.resolveFailed, message } };
     }
 
-    const raw = answer.data !== null && typeof answer.data === "object" ? answer.data.url : null;
+    const data = answer.data !== null && typeof answer.data === "object" ? answer.data : null;
+    const raw = data === null ? null : data.url;
     if (typeof raw !== "string" || raw.trim() === "") {
       return {
         ok: false,
@@ -442,7 +455,7 @@ export function createPlayer(options = {}) {
         },
       };
     }
-    return { ok: true, url: safe };
+    return { ok: true, url: safe, quality: declaredQualityOf(data === null ? null : data.actualQuality) };
   }
 
   /** 让音频真的出声（令牌对不上就丢弃：那是过期请求）。 */
@@ -506,6 +519,8 @@ export function createPlayer(options = {}) {
         ? {}
         : {
             loaded: false,
+            // 新曲目还没装载：上一首的音质到此为止（装载成功后按解析结果重新写）
+            quality: null,
             currentTimeMs: resumeMs ?? 0,
             durationMs: totalDurationMsOf(entry, reportedDurationMs),
             status: PLAYER_STATUS.loading,
@@ -540,7 +555,7 @@ export function createPlayer(options = {}) {
         audio.setCurrentTime(pendingMs);
         publish({ currentTimeMs: pendingMs, seekGeneration: state.seekGeneration + 1 });
       }
-      publish({ loaded: true });
+      publish({ loaded: true, quality: resolved.quality });
     }
 
     // 说清跳过了哪几首：这是说明不是故障，状态照常进 playing
@@ -643,6 +658,7 @@ export function createPlayer(options = {}) {
       playbackGeneration: state.playbackGeneration + 1,
       status: PLAYER_STATUS.idle,
       loaded: false,
+      quality: null,
       currentTimeMs: 0,
       durationMs: totalDurationMsOf(index >= 0 ? entries[index] : null, 0),
       error: null,
@@ -730,6 +746,7 @@ export function createPlayer(options = {}) {
       playbackGeneration: state.playbackGeneration + 1,
       status: PLAYER_STATUS.idle,
       loaded: false,
+      quality: null,
       currentTimeMs: 0,
       durationMs: 0,
       error: null,
@@ -779,6 +796,7 @@ export function createPlayer(options = {}) {
       playbackGeneration: state.playbackGeneration + 1,
       status: PLAYER_STATUS.idle,
       loaded: false,
+      quality: null,
       currentTimeMs: positionMs,
       durationMs,
       error: null,

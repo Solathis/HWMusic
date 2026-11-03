@@ -63,6 +63,7 @@ import { lyricsTargetOf } from "./features/lyrics/lyrics-window.mjs"
 import { TRACK_MENU_TARGET } from "./features/shell/track-menu.mjs"
 import {
   playbackModeLabel,
+  playbackQualityText,
   playerStatusText,
   trackArtistOf,
   trackTitleOf,
@@ -430,6 +431,7 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
 
   const playing = state.status === "playing"
   const hasTrack = state.track !== null
+  const qualityText = playbackQualityText(state)
   const durationMs = state.durationMs
   const shownMs = dragMs ?? state.currentTimeMs
   const ModeIcon = MODE_ICONS[state.mode as keyof typeof MODE_ICONS] ?? ListMusicIcon
@@ -441,8 +443,13 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
       <CoverArt coverUrl={trackCoverUrlOf(state.track)} className="size-10 rounded-md" />
       <div className="flex min-w-0 flex-col">
         <span className="truncate text-sm font-medium">{trackTitleOf(state.track)}</span>
+        {/*
+         * 「艺人 · 状态」，服务端明确声明了音质时再补一句（错误/没声明都不补：这一行归当下那件事）。
+         */}
         <span className="truncate text-xs text-muted-foreground">
-          {state.track === null ? playerStatusText(state) : `${trackArtistOf(state.track)} · ${playerStatusText(state)}`}
+          {state.track === null
+            ? playerStatusText(state)
+            : `${trackArtistOf(state.track)} · ${playerStatusText(state)}${qualityText === null ? "" : ` · ${qualityText}`}`}
         </span>
       </div>
     </>

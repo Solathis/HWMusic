@@ -14,7 +14,7 @@ import { AmllBackground, useAlbumImage } from "./AmllBackground.tsx"
 import { AmllLyricsPanel } from "./AmllLyricsPanel.tsx"
 import { LyricsTargetMenu, LyricsToggleIcon, lyricsToggleView } from "./components.tsx"
 import { useMainChrome } from "./use-main-chrome.ts"
-import { lyricsNoticeText, playbackModeLabel } from "./features/playback/playback-state.mjs"
+import { lyricsNoticeText, playbackModeLabel, playbackQualityText } from "./features/playback/playback-state.mjs"
 import { PLAYBACK_MODES } from "./features/playback/player.mjs"
 import { formatDuration, trackAlbumOf, trackArtistsOf, trackCoverUrlOf, trackNameOf } from "./features/library/track-fields.mjs"
 import type { PlayerRuntime } from "./features/playback/player-runtime.ts"
@@ -85,13 +85,20 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
     player.setMuted(false)
     player.setVolume(value / 100)
   }
+  const qualityText = playbackQualityText(state)
   const info = (
-    <MusicInfo
-      className="text-foreground! [&>button]:hidden!"
-      name={trackNameOf(state.track)}
-      artists={[trackArtistsOf(state.track)]}
-      album={trackAlbumOf(state.track)}
-    />
+    <div className="flex min-w-0 flex-col gap-1">
+      <MusicInfo
+        className="text-foreground! [&>button]:hidden!"
+        name={trackNameOf(state.track)}
+        artists={[trackArtistsOf(state.track)]}
+        album={trackAlbumOf(state.track)}
+      />
+      {/* 音质小字紧跟 MusicInfo：文案与播放栏同一份，没声明音质就整行不渲染（不留空位） */}
+      {qualityText === null ? null : (
+        <p className="text-xs text-muted-foreground" data-testid="playback-stage-quality">{qualityText}</p>
+      )}
+    </div>
   )
   const controls = (
     <div className="isolate flex w-full flex-col gap-3 text-foreground motion-reduce:[&_*]:animate-none! motion-reduce:[&_*]:transition-none! motion-reduce:[&_*]:duration-0!" data-testid="playback-stage-player">

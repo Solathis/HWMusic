@@ -1,8 +1,8 @@
 /**
- * 播放器的文案：状态标签、失败人话、歌词占位文案。
+ * 播放器的文案：状态标签、失败人话、音质小字、歌词占位文案。
  *
  * 与 `library-state.mjs` 同一条纪律——不冒充：接口没配置就说未配置，队列空就说下一步做什么，
- * 歌词 `unavailable`（没有来源）与 `empty`（确实没有）必须分开。
+ * 歌词 `unavailable`（没有来源）与 `empty`（确实没有）必须分开；音质只说服务端声明的那一档。
  */
 
 /** 「取播放地址失败」的开头（业务错误那句要把码接在它后面，措辞只此一处）。 */
@@ -59,6 +59,27 @@ export function playerStatusText(state) {
   if (typeof notice === "string" && notice.trim() !== "") return notice.trim();
   const status = state !== null && typeof state === "object" ? state.status : null;
   return PLAYER_STATUS_TEXT[status] ?? PLAYER_STATUS_TEXT.idle;
+}
+
+/**
+ * 服务端明确声明的音质 → 一行小字。表里只有两档：`unknown` 不在表里，认不出就不说（不虚标）。
+ */
+export const PLAYBACK_QUALITY_TEXT = {
+  standard: "标准音质",
+  lossless: "无损音质",
+};
+
+/**
+ * 音质文案：播放栏副标题与沉浸页左侧小字都读这一份（不许各写一份）。
+ * 三个前提缺一不可——有 quality、播放没出错、值在表里；否则返回 `null`（界面一个字都不加）。
+ */
+export function playbackQualityText(state) {
+  if (state === null || typeof state !== "object") return null;
+  // 出错时这一行归错误文案：再补一句音质会让人以为两边都成立
+  if (state.error !== null && state.error !== undefined) return null;
+  const quality = state.quality;
+  if (typeof quality !== "string" || !Object.hasOwn(PLAYBACK_QUALITY_TEXT, quality)) return null;
+  return PLAYBACK_QUALITY_TEXT[quality];
 }
 
 /** 曲目标题：只知道标识时就显示标识——说"曲目 1001"才是实话，说"未知歌曲"会让人以为队列坏了。 */

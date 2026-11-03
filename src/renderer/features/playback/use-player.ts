@@ -7,8 +7,19 @@ import { useSyncExternalStore } from "react";
 
 import { getPlayerRuntime, type PlayerRuntime } from "./player-runtime.ts";
 
-/** 播放状态的形状（唯一真源是 `player.mjs` 里的状态对象）。 */
+/**
+ * 播放状态的形状（唯一真源是 `player.mjs` 里的状态对象）。
+ * `quality` 也在那份 JSDoc 里：给的是**服务端明确声明的**音质，`null` = 没声明（界面一个字都不说）。
+ */
 export type PlayerState = ReturnType<PlayerRuntime["player"]["snapshot"]>;
+
+/** 当前播放音质：直接取自状态快照（不在这里重复一份取值表）。 */
+export type PlaybackQuality = PlayerState["quality"];
+
+/** 编译期对齐：状态里的音质必须正好是这三档（`player.mjs` 多一档/少一档都会在这里报错）。 */
+export type PlaybackQualityPinned = Expect<PlaybackQuality extends "standard" | "lossless" | null ? true : never>;
+
+type Expect<Value extends true> = Value;
 
 export interface PlayerBinding {
   runtime: PlayerRuntime;
