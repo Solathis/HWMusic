@@ -83,7 +83,7 @@ export function LogTerminal({ notices = [] }: { notices?: LogEntry[] }) {
   const [failed, setFailed] = useState(false)
   const [levels, setLevels] = useState<string[]>(() => [...RUN_LOG_DEFAULT_LEVELS])
   const [query, setQuery] = useState("")
-  const [autoRefresh, setAutoRefresh] = useState(false)
+  const [autoRefresh, setAutoRefresh] = useState(true)
   const [scope, setScope] = useState<"session" | "all">("session")
 
   const refresh = useCallback(async () => {
