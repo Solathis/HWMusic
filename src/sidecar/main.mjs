@@ -81,7 +81,9 @@ function unavailableSessionStore() {
 // —— 启动装配：数据目录 → 设置 → 代理（顺序是硬要求，见文件头说明）——
 const dataDir = dataDirFromArgv(process.argv.slice(2));
 const settingsStore = createSettingsStore({ dir: dataDir, log });
-const settings = await settingsStore.read();
+// `let` 而不是 `const`：`settings:set` 落盘成功后换成回执里那份文档，
+// 于是读「当前设置」的地方（如播放音质）永远看到刚保存的值，不必重启 sidecar。
+let settings = await settingsStore.read();
 const startupProxy = applyStartupProxy({ settings, env: process.env, log });
 
 const dispatcher = createDispatcher({
@@ -92,6 +94,8 @@ const settingsHandlers = createSettingsHandlers({ store: settingsStore });
 dispatcher.register(SETTINGS_GET, settingsHandlers.get);
 dispatcher.register(SETTINGS_SET, async (request) => {
   const answer = await settingsHandlers.set(request);
+  // 落盘成功就把内存里这份文档换成回执里的新值：`settings:get` 与播放音质都读它。
+  if (answer.ok === true && answer.data?.settings !== undefined) settings = answer.data.settings;
   // 代理改动已落盘，但需重启应用才生效，这里再记一条日志备查。
   if (answer.ok === true && answer.data?.restartRequired === true) {
     log("代理设置已保存：sidecar 侧需重启应用后生效");
@@ -123,13 +127,20 @@ for (const [channel, handler] of Object.entries(createLyricsHandlers({ api: musi
 }
 
 // 播放地址通道：`playback:resolve-url` 拿的是当次播放地址，原样放进应答，不写日志、不落盘。
+// 音质是**取值函数**（settings.data 是活的：`settings:set` 成功后就换成新文档），改设置即时生效。
 // `local:` 曲目的歌词走本地那一链，宿主要求口用惰性引用 `rpc`（装配在它之前、调用在之后）。
 const localLyrics = createLocalLyricsResolver({
   cache: lyricsCache,
   localLyricsSource: (payload) => rpc.callHost(HOST_LOCAL_LYRICS_SOURCE, payload),
   log: (text) => log(text),
 });
-for (const [channel, handler] of Object.entries(createPlaybackHandlers({ api: musicService.api, localLyrics }))) {
+for (const [channel, handler] of Object.entries(
+  createPlaybackHandlers({
+    api: musicService.api,
+    localLyrics,
+    playbackQuality: () => settings.data?.playbackQuality,
+  }),
+)) {
   dispatcher.register(channel, handler);
 }
 

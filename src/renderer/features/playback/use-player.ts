@@ -17,7 +17,7 @@ export type PlayerState = ReturnType<PlayerRuntime["player"]["snapshot"]>;
 export type PlaybackQuality = PlayerState["quality"];
 
 /** 编译期对齐：状态里的音质必须正好是这三档（`player.mjs` 多一档/少一档都会在这里报错）。 */
-export type PlaybackQualityPinned = Expect<PlaybackQuality extends "standard" | "lossless" | null ? true : never>;
+export type PlaybackQualityPinned = Expect<PlaybackQuality extends "standard" | "high" | "lossless" | null ? true : never>;
 
 type Expect<Value extends true> = Value;
 

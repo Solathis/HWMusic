@@ -21,12 +21,29 @@ function textOf(value) {
 
 /**
  * 造 `playback:resolve-url` / `playback:lyrics` 的处理器表（`dispatcher.register` 直接消费）。
- * @param {{api: object, localLyrics?: Function|null}} options `api` = music api 产物；`localLyrics` = 本地曲目的取词口。
+ *
+ * `playbackQuality` 是**取值函数**而不是快照：设置页改完音质立刻生效，不必重启 sidecar。
+ * 取不到/抛错时一律不带这个字段，让协议层用它自己的默认档（不在这里替它猜一档）。
+ *
+ * @param {{api: object, localLyrics?: Function|null, playbackQuality?: (() => unknown)|null}} options
+ *   `api` = music api 产物；`localLyrics` = 本地曲目的取词口；`playbackQuality` = 当前音质。
  * @returns {Record<string, (request: object) => Promise<object>|object>}
  */
-export function createPlaybackHandlers({ api, localLyrics = null } = {}) {
+export function createPlaybackHandlers({ api, localLyrics = null, playbackQuality = null } = {}) {
   if (api === null || typeof api !== "object") {
     throw new TypeError("createPlaybackHandlers 需要注入 music api（端点未配置时它自己会回结构化错误）");
+  }
+
+  /** 当前音质（设置里的那一档）：拿不到就是 `null`，交给协议层兜底。 */
+  function qualityOf() {
+    if (typeof playbackQuality !== "function") return null;
+    try {
+      const value = playbackQuality();
+      return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+    } catch {
+      // 设置读坏了不该让播放失败：退回协议层的默认档（它会如实报自己的错）
+      return null;
+    }
   }
 
   /** 两条频道共用的载荷读法：`trackId` 必填，缺了就是调用方的问题。 */
@@ -61,7 +78,9 @@ export function createPlaybackHandlers({ api, localLyrics = null } = {}) {
       if (trackId === null) {
         return err("播放地址需要非空 trackId（曲目标识）", CORE_ERROR_KINDS.invalidPayload);
       }
-      return api.getPlayback({ trackId });
+      const quality = qualityOf();
+      // 音质只在拿得到时才进请求（缺了就是协议层的默认档，绝不在这里编一个）
+      return api.getPlayback(quality === null ? { trackId } : { trackId, quality });
     },
     [PLAYBACK_LYRICS]: async (request) => {
       const trackId = trackIdOf(request);

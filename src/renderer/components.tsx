@@ -47,6 +47,7 @@ import {
   TableHeader,
   TableRow,
 } from "./components/ui/table"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
 import {
   trackAlbumIdOf,
   trackAlbumOf,
@@ -131,6 +132,39 @@ export function LoadFailed({ text }: { text: string }) {
 }
 
 /**
+ * 下架曲目的两个文案（唯一真源）：徽标一句话，tooltip 说清是谁的要求。
+ * 这一行停在"看得见、点不动"，绝不冒充成"暂时取不到地址，稍后再试"。
+ */
+export const OFFLINE_TRACK_BADGE_TEXT = "已下架"
+export const OFFLINE_TRACK_TOOLTIP_TEXT = "应版权方要求已下架该音乐"
+
+/**
+ * 曲目标题：已知下架的行外面包一层 Tooltip 说明原因，并补一枚「已下架」徽标。
+ * 正常行只渲染纯标题——不为统一给每一行都挂 tooltip（悬停一片灰框只会碍事）。
+ * Provider 跟着这条 tooltip 走：任何挂载点（含 SSR/组件测试）都不必先套一层。
+ */
+function TrackTitle({ text, offline }: { text: string; offline: boolean }) {
+  if (!offline) return <span className="min-w-0 truncate">{text}</span>
+  return (
+    <>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="min-w-0 truncate" data-testid="track-offline-title">
+              {text}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="top">{OFFLINE_TRACK_TOOLTIP_TEXT}</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+      <Badge variant="outline" className="shrink-0" data-testid="track-offline">
+        {OFFLINE_TRACK_BADGE_TEXT}
+      </Badge>
+    </>
+  )
+}
+
+/**
  * 列表骨架（曲目表的加载态）：一行骨架 52px，与真实行高对齐，避免加载完内容跳一下。
  */
 export function ListSkeleton({ count = 8 }: { count?: number }) {
@@ -162,6 +196,11 @@ export interface TrackTableProps extends TrackRowActions {
    * 文件已经不在的曲目 id：这些行被标出来，而不是从列表里消失。
    */
   unavailableIds?: string[]
+  /**
+   * 已知下架的曲目 id（来自播放状态里的 `offlineIds`）：这些行变灰、不许双击/回车激活，
+   * 行菜单里也不出现播放与入队动作——"点了没反应"比"明确点不动"更糟。
+   */
+  offlineIds?: string[]
   /** 移除这一行（本地歌曲那一列：占的正是收藏心形的位置） */
   onRemove?: (song: unknown, index: number) => void
 }
@@ -192,12 +231,14 @@ export function TrackTable({
   favoritedIds = [],
   showFavorite = true,
   unavailableIds = [],
+  offlineIds = [],
   onRemove,
 }: TrackTableProps) {
   if (songs.length === 0) return <EmptyState text={emptyText} />
 
   const favorited = new Set(favoritedIds)
   const unavailable = new Set(unavailableIds)
+  const offline = new Set(offlineIds)
 
   return (
     /*
@@ -223,33 +264,42 @@ export function TrackTable({
             const artistId = trackArtistIdOf(song)
             const isFavorited = id !== null && favorited.has(id)
             const isUnavailable = id !== null && unavailable.has(id)
+            // 已知下架：行留着（用户还要看得见），但一律点不动、也不进菜单的播放动作
+            const isOffline = id !== null && offline.has(id)
             return (
               <TrackRowMenu
                 key={`${id ?? "row"}-${index}`}
                 target={TRACK_MENU_TARGET.track}
                 songs={[song]}
-                canPlay={onActivate !== undefined}
+                canPlay={onActivate !== undefined && !isOffline}
                 onPlay={() => onActivate?.(song, index)}
-                onPlayNext={onPlayNext}
-                onEnqueue={onEnqueue}
+                onPlayNext={isOffline ? undefined : onPlayNext}
+                onEnqueue={isOffline ? undefined : onEnqueue}
               >
                 <TableRow
                   tabIndex={0}
-                  aria-label={`${trackNameOf(song)}，双击播放`}
-                  onDoubleClick={() => onActivate?.(song, index)}
+                  aria-label={isOffline ? `${trackNameOf(song)}，已下架` : `${trackNameOf(song)}，双击播放`}
+                  aria-disabled={isOffline ? true : undefined}
+                  // 下架那一行不响应双击/回车（激活动作整条摘掉，不是"点了没反应"）
+                  onDoubleClick={isOffline ? undefined : () => onActivate?.(song, index)}
                   onKeyDown={(event) => {
+                    if (isOffline) return
                     if (event.key !== "Enter" && event.key !== " ") return
                     event.preventDefault()
                     onActivate?.(song, index)
                   }}
-                  className="focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                  className={
+                    isOffline
+                      ? "opacity-50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                      : "focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                  }
                 >
                   <TableCell className="text-center tabular-nums text-muted-foreground">{index + 1}</TableCell>
                   <TableCell className="font-medium">
                     {/* 小封面：`<img>` + 占位兜底见 CoverArt，地址来自协议层的白名单投影 */}
                     <div className="flex min-w-0 items-center gap-2">
                       <CoverArt coverUrl={trackCoverUrlOf(song)} className="size-9 rounded-md" iconClassName="size-4" />
-                      <span className="truncate">{trackNameOf(song)}</span>
+                      <TrackTitle text={trackNameOf(song)} offline={isOffline} />
                       {/* 文件不在就写在这里，行本身留着（用户还看得见、还能移除） */}
                       {isUnavailable ? (
                         <Badge variant="outline" className="shrink-0" data-testid="track-unavailable">
@@ -634,11 +684,13 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
 export interface QueuePanelProps extends TrackRowActions {
   entries: PlayerState["entries"]
   index: number
+  /** 已知下架的曲目 id（同曲目表）：这些行变灰、点不动，只说清原因 */
+  offlineIds?: string[]
   onSelect?: (index: number) => void
   onClear?: () => void
 }
 
-export function QueuePanel({ entries, index, onSelect, onClear, onPlayNext, onEnqueue }: QueuePanelProps) {
+export function QueuePanel({ entries, index, onSelect, onClear, onPlayNext, offlineIds = [] }: QueuePanelProps) {
   if (entries.length === 0) {
     return (
       <div className="flex min-h-0 flex-1 flex-col gap-3 px-4 pb-4" data-testid="queue-panel">
@@ -647,6 +699,8 @@ export function QueuePanel({ entries, index, onSelect, onClear, onPlayNext, onEn
       </div>
     )
   }
+
+  const offline = new Set(offlineIds)
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2 px-4 pb-4" data-testid="queue-panel">
@@ -658,29 +712,39 @@ export function QueuePanel({ entries, index, onSelect, onClear, onPlayNext, onEn
       </div>
       <ScrollArea className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:!block">
         <ul className="flex min-w-0 flex-col gap-1 [&>li]:min-w-0">
-          {entries.map((entry, position) => (
-            <li key={`${entry.id}-${position}`}>
-              <TrackRowMenu
-                target={TRACK_MENU_TARGET.queue}
-                songs={[entry]}
-                canPlay={onSelect !== undefined}
-                onPlay={() => onSelect?.(position)}
-                onPlayNext={onPlayNext}
-              >
-                <Button
-                  variant={position === index ? "secondary" : "ghost"}
-                  size="sm"
-                  className="w-full min-w-0 max-w-full justify-start"
-                  aria-current={position === index ? "true" : undefined}
-                  onClick={() => onSelect?.(position)}
+          {entries.map((entry, position) => {
+            // 已知下架：整行点不动，行菜单里也不出现播放/入队动作（只留"看得见"）
+            const isOffline = entry !== null && typeof entry === "object" && offline.has(entry.id)
+            return (
+              <li key={`${entry.id}-${position}`}>
+                <TrackRowMenu
+                  target={TRACK_MENU_TARGET.queue}
+                  songs={[entry]}
+                  canPlay={onSelect !== undefined && !isOffline}
+                  onPlay={() => onSelect?.(position)}
+                  onPlayNext={isOffline ? undefined : onPlayNext}
                 >
-                  <CoverArt coverUrl={trackCoverUrlOf(entry)} className="size-6 rounded-sm" iconClassName="size-3.5" />
-                  <span className="min-w-0 flex-1 truncate text-left">{trackTitleOf(entry)}</span>
-                  <span className="ml-auto min-w-0 max-w-1/3 truncate text-xs text-muted-foreground">{trackArtistOf(entry)}</span>
-                </Button>
-              </TrackRowMenu>
-            </li>
-          ))}
+                  <Button
+                    variant={position === index ? "secondary" : "ghost"}
+                    size="sm"
+                    className={`w-full min-w-0 max-w-full justify-start ${isOffline ? "opacity-50" : ""}`}
+                    aria-current={position === index ? "true" : undefined}
+                    aria-disabled={isOffline ? true : undefined}
+                    onClick={() => {
+                      if (isOffline) return
+                      onSelect?.(position)
+                    }}
+                  >
+                    <CoverArt coverUrl={trackCoverUrlOf(entry)} className="size-6 rounded-sm" iconClassName="size-3.5" />
+                    <span className="flex min-w-0 flex-1 items-center gap-2 text-left">
+                      <TrackTitle text={trackTitleOf(entry)} offline={isOffline} />
+                    </span>
+                    <span className="ml-auto min-w-0 max-w-1/3 truncate text-xs text-muted-foreground">{trackArtistOf(entry)}</span>
+                  </Button>
+                </TrackRowMenu>
+              </li>
+            )
+          })}
         </ul>
       </ScrollArea>
     </div>

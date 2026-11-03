@@ -45,6 +45,8 @@ export interface FavoritesPageProps extends TrackRowActions {
   onActivateTrack: (song: unknown, index: number, songs: unknown[]) => void
   onOpenAlbum: (albumId: string, song: unknown) => void
   onOpenArtist: (artistId: string, song: unknown) => void
+  /** 已知下架的曲目 id（外壳从播放状态交下来）：这些行变灰、不许激活 */
+  offlineIds?: string[]
 }
 
 export function FavoritesPage({
@@ -54,6 +56,7 @@ export function FavoritesPage({
   onOpenArtist,
   onPlayNext,
   onEnqueue,
+  offlineIds = [],
 }: FavoritesPageProps) {
   const [state, setState] = useState<FavoritesState>(createFavoritesState)
   const stateRef = useRef(state)
@@ -174,6 +177,7 @@ export function FavoritesPage({
               onOpenArtist={onOpenArtist}
               onPlayNext={onPlayNext}
               onEnqueue={onEnqueue}
+              offlineIds={offlineIds}
             />
           )}
           {summary.loading && state.songs.length > 0 ? <ListSkeleton /> : null}

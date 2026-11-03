@@ -336,7 +336,12 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
 
   /** 行菜单的动作包：页面够不到播放运行时，外壳随 `navigation` 一起交下去。 */
   const rowActions = { onPlayNext, onEnqueue }
-  const navigation = { onActivateTrack, onOpenAlbum, onOpenArtist, rowActions }
+  /**
+   * 已知下架的曲目 id（播放状态里那份）：随 `navigation` 交给各页面，列表据此把行变灰。
+   * 只透传，不是第二份状态——判据只有播放状态一处。
+   */
+  const offlineIds = playback.offlineIds
+  const navigation = { onActivateTrack, onOpenAlbum, onOpenArtist, rowActions, offlineIds }
 
   /** 账号资料的四项投影（缺什么兜什么，绝不编：见 features/auth/account.mjs）。 */
   const accountName = accountNameText(profile)
@@ -514,6 +519,7 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
                 <QueuePanel
                   entries={playback.entries}
                   index={playback.index}
+                  offlineIds={playback.offlineIds}
                   onSelect={(position) => {
                     void runtime.player.playAt(position)
                   }}
@@ -535,6 +541,7 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
             onActivateTrack={onActivateTrack}
             onOpenAlbum={onOpenAlbum}
             onOpenArtist={onOpenArtist}
+            offlineIds={playback.offlineIds}
             {...rowActions}
           />
         </div>

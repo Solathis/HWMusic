@@ -8,6 +8,7 @@ import * as nodeFs from "node:fs/promises";
 import { isIPv6 } from "node:net";
 import { basename, dirname, isAbsolute, join } from "node:path";
 
+import { DEFAULT_PLAYBACK_QUALITY, PLAYBACK_QUALITIES, isPlaybackQuality } from "../shared/playback-quality.mjs";
 import { proxyModeAndScope } from "../shared/proxy-mode.mjs";
 import { CORE_ERROR_KINDS, err, ok } from "../shared/result.ts";
 
@@ -22,6 +23,8 @@ export const SETTINGS_DIR_MODE = 0o700;
 /** 关窗行为枚举；第一个是默认值。 */
 export const CLOSE_BEHAVIORS = ["tray", "quit"];
 export const DEFAULT_CLOSE_BEHAVIOR = CLOSE_BEHAVIORS[0];
+/** 下架曲目清单的上限（只用于"变灰"，多了就是坏数据：真下架也不会一次两千首）。 */
+export const OFFLINE_TRACKS_LIMIT = 2000;
 /** 代理默认值：跟随系统代理、只用于检查更新；`enabled` 由方式派生（mode === "custom"），照写给旧版读。 */
 export const DEFAULT_PROXY = Object.freeze({
   mode: "system",
@@ -139,6 +142,25 @@ export function normalizeProxy(raw) {
 }
 
 /**
+ * 下架曲目清单归一：只留非空字符串、去空白去重、上限 2000（多出来的丢弃）。
+ * 这份清单只用来把行变灰 —— 认不出的形状一律当没有，绝不让它影响别的键。
+ */
+export function normalizeOfflineTracks(raw) {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const entry of raw) {
+    if (typeof entry !== "string") continue;
+    const id = entry.trim();
+    if (id === "" || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+    if (out.length >= OFFLINE_TRACKS_LIMIT) break;
+  }
+  return out;
+}
+
+/**
  * 设置文档归一。认不出（非对象 / schemaVersion ≠ 1 / data 不是对象）时整份当没配；认得出时未知键原样带过。
  */
 export function normalizeSettingsDocument(raw) {
@@ -154,6 +176,8 @@ export function normalizeSettingsDocument(raw) {
       closeBehavior: data.closeBehavior === "minimize"
         ? "tray"
         : CLOSE_BEHAVIORS.includes(data.closeBehavior) ? data.closeBehavior : DEFAULT_CLOSE_BEHAVIOR,
+      playbackQuality: isPlaybackQuality(data.playbackQuality) ? data.playbackQuality : DEFAULT_PLAYBACK_QUALITY,
+      offlineTracks: normalizeOfflineTracks(data.offlineTracks),
     },
   };
 }
@@ -190,6 +214,34 @@ export function mergeSettings(document, patch) {
         );
       }
       data.closeBehavior = value;
+      continue;
+    }
+    if (key === "playbackQuality") {
+      if (value === null) {
+        data.playbackQuality = DEFAULT_PLAYBACK_QUALITY;
+        continue;
+      }
+      if (!isPlaybackQuality(value)) {
+        fail(
+          CORE_ERROR_KINDS.invalidPayload,
+          `playbackQuality 只接受 ${PLAYBACK_QUALITIES.join(" / ")} 三档（收到 ${JSON.stringify(value)}）`,
+        );
+      }
+      data.playbackQuality = value;
+      continue;
+    }
+    if (key === "offlineTracks") {
+      if (value === null) {
+        data.offlineTracks = [];
+        continue;
+      }
+      if (!Array.isArray(value)) {
+        fail(CORE_ERROR_KINDS.invalidPayload, "offlineTracks 必须是字符串数组（要清空请传 null 或空数组）");
+      }
+      if (!value.every((entry) => typeof entry === "string")) {
+        fail(CORE_ERROR_KINDS.invalidPayload, "offlineTracks 的元素只能是字符串（曲目 id）");
+      }
+      data.offlineTracks = normalizeOfflineTracks(value);
       continue;
     }
     if (value === null) {

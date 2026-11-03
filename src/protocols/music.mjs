@@ -97,6 +97,12 @@ export const MUSIC_ERROR_KINDS = {
   invalidResponse: "invalid_response",
   /** HTTP 2xx 但业务错误码不是 000000 */
   apiError: "api_error",
+  /** 服务端说资源不存在或暂不可用（200001） */
+  contentUnavailable: "content_unavailable",
+  /** 服务端说资源已下架（200002） */
+  contentOffline: "content_offline",
+  /** 当前音质需要会员（142400） */
+  vipRequired: "vip_required",
   /** 播放地址不在 CDN 白名单内（渲染层反正也加载不了，早点如实报错） */
   unsafeMediaUrl: "unsafe_media_url",
   /** 歌词缓存不可用：宿主没给数据目录，属环境问题，而非"这首没有歌词"。 */
@@ -104,6 +110,13 @@ export const MUSIC_ERROR_KINDS = {
   /** 响应已过期：请求在途时会话换了或歌单重开，这份数据属于过去，必须丢弃而不是重试。 */
   staleResponse: "stale_response",
 };
+
+/** 播放业务码 → 结构化类别与一句人话（实测语义，别的端点不套用）。 */
+export const MUSIC_PLAYBACK_BUSINESS_ERRORS = Object.freeze({
+  "200001": { kind: MUSIC_ERROR_KINDS.contentUnavailable, message: "歌曲不存在或暂不可用（200001）" },
+  "200002": { kind: MUSIC_ERROR_KINDS.contentOffline, message: "该歌曲已在华为音乐下架（Content is offline，200002）" },
+  "142400": { kind: MUSIC_ERROR_KINDS.vipRequired, message: "当前音质需要会员（142400）" },
+});
 
 /** 能佐证"这是试听片段"的标志位候选（与 auditionTime 齐备才算试听）。 */
 export const DEFAULT_AUDITION_FLAG_KEYS = ["isAudition", "audition", "tryListen", "trialFlag", "isTry"];
@@ -481,12 +494,14 @@ function hostOf(value) {
 /**
  * 已确认的音质（**声明的**音质要与实际返回对得上才算数，见参考 `confirmedPlaybackQuality`）。
  * `playQuality` 是接口回的音质码，`type` 是响应里声明的编码（mp3/flac 之类）。
+ * 三档各有实测/契约佐证：1+mp3 → standard、2+mp3 → high、3+flac → lossless；对不上就是 unknown。
  */
 export function confirmedPlaybackQuality(playQuality, declaredType) {
   const quality = String(playQuality ?? "");
   const normalized = typeof declaredType === "string" ? declaredType.trim().toLowerCase() : "";
   const codec = /\bflac\b/.test(normalized) ? "flac" : /\bmp3\b/.test(normalized) || normalized === "audio/mpeg" ? "mp3" : undefined;
   if (quality === "3" && codec === "flac") return "lossless";
+  if (quality === "2" && codec === "mp3") return "high";
   if (quality === "1" && codec === "mp3") return "standard";
   return "unknown";
 }
@@ -1666,8 +1681,8 @@ export function createMusicApi(options = {}) {
   }
 
   /**
-   * 播放地址：音质只认 standard/high/lossless；只有业务错误（`api_error`）才按 1→2→3 的阶梯逐档重试
-   * （每档只试一次，含第一次最多 3 次请求），非业务错误一次都不重试。
+   * 播放地址：音质只认 standard/high/lossless。业务码先分类，只有认不出的业务错误才按 1→2→3 阶梯逐档重试
+   * （每档只试一次，含第一次最多 3 次请求）：下架/不存在换哪一档都是同一句话，要会员只降一档试标准音质。
    */
   async function getPlayback(request = {}) {
     const trackId = request.trackId ?? request.id;
@@ -1683,7 +1698,26 @@ export function createMusicApi(options = {}) {
 
     const id = trackId.trim();
     let last = await playbackOnce(id, qualityType);
-    if (last.ok || last.error?.kind !== MUSIC_ERROR_KINDS.apiError) return last;
+    if (last.ok) return last;
+    const kind = last.error?.kind;
+
+    // 下架/资源不存在：与音质无关，重试与换档都是同一个答案——只请求这一次
+    if (kind === MUSIC_ERROR_KINDS.contentOffline || kind === MUSIC_ERROR_KINDS.contentUnavailable) {
+      log(playbackFailureLine(quality, last.error));
+      return last;
+    }
+
+    // 当前音质要会员：阶梯救不了，只降一档到标准音质试一次（标准档也要会员就到此为止）
+    if (kind === MUSIC_ERROR_KINDS.vipRequired) {
+      log(playbackFailureLine(quality, last.error));
+      if (isStandardQuality(qualityType)) return last;
+      log(`播放地址换一档再试：quality=${quality} → standard（当前音质需要会员）`);
+      const standard = await playbackOnce(id, MUSIC_QUALITY_TYPES.standard);
+      if (!standard.ok) log(playbackFailureLine("standard", standard.error));
+      return standard;
+    }
+
+    if (kind !== MUSIC_ERROR_KINDS.apiError) return last;
     log(playbackFailureLine(quality, last.error));
 
     // 换档只在业务错误时发生：成功就交回那一档的结果，全部失败则交回最后一次的失败
@@ -1701,12 +1735,27 @@ export function createMusicApi(options = {}) {
     return last;
   }
 
-  /** 单次取址（一档音质一次请求）：响应里没有可用地址同样算失败。 */
+  /** 播放响应的业务码（与 decodeEnvelope 同一条取值路径；取不到回 null）。 */
+  function playbackBusinessCodeOf(raw) {
+    if (raw === null || typeof raw !== "object") return null;
+    const result = raw.result;
+    const code = result !== null && typeof result === "object" ? result.resultCode : (raw.resultCode ?? raw.code);
+    return code === undefined || code === null || code === "" ? null : String(code);
+  }
+
+  /** 单次取址（一档音质一次请求）：响应里没有可用地址同样算失败。业务码分类后不再交给换档逻辑。 */
   async function playbackOnce(contentCode, qualityType) {
     const result = await call("playback", {
       params: { contentCode, contentType: "1", qualityType },
     });
-    if (!result.ok) return result;
+    if (!result.ok) {
+      const code = playbackBusinessCodeOf(result.raw);
+      if (code !== null && Object.hasOwn(MUSIC_PLAYBACK_BUSINESS_ERRORS, code)) {
+        const mapped = MUSIC_PLAYBACK_BUSINESS_ERRORS[code];
+        return err(mapped.message, mapped.kind);
+      }
+      return result;
+    }
     return parsePlaybackPayload(result.data, { isSafeUrl, flagKeys });
   }
 

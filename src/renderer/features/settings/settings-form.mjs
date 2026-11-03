@@ -3,6 +3,12 @@
  * 界面只做两件事：把状态塞进这层函数、把返回值渲染出来。
  */
 import { trackTitleOf } from "../playback/playback-state.mjs";
+import {
+  DEFAULT_PLAYBACK_QUALITY,
+  PLAYBACK_QUALITIES,
+  PLAYBACK_QUALITY_LABELS,
+  isPlaybackQuality,
+} from "../../../shared/playback-quality.mjs";
 
 /** 普通对象判定（数组/空值都不是表单）。 */
 const isPlainObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -203,6 +209,24 @@ export function closeBehaviorNotice(behavior, options = {}) {
   return options?.trayAvailable === true
     ? "关窗后应用继续在托盘运行：托盘菜单里可以退出。"
     : "托盘当前不可用（没装上或状态没取到，详情见运行日志）：现在关窗会直接退出，选「最小化到托盘」等同于退出。";
+}
+
+// ---------------------------------------------------------------------------
+// 音质（standard / high / lossless）
+// ---------------------------------------------------------------------------
+
+/** 音质枚举、默认值与中文标签的唯一真源在 shared（core 归一同一条规则）。 */
+export { DEFAULT_PLAYBACK_QUALITY, PLAYBACK_QUALITIES, PLAYBACK_QUALITY_LABELS, isPlaybackQuality };
+
+/** 设置文档 → 当前音质（认不出就是默认档：core 读盘时也按同一条兜底）。 */
+export function playbackQualityFromSettings(document) {
+  const stored = isPlainObject(document?.data) ? document.data.playbackQuality : null;
+  return isPlaybackQuality(stored) ? stored : DEFAULT_PLAYBACK_QUALITY;
+}
+
+/** 认不出的 UI 值保守回落默认档；core 写入路径仍结构化拒绝越界值。 */
+export function playbackQualityPatch(value) {
+  return { playbackQuality: isPlaybackQuality(value) ? value : DEFAULT_PLAYBACK_QUALITY };
 }
 
 // ---------------------------------------------------------------------------

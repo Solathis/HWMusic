@@ -4,6 +4,8 @@
  * `persistQueue`/`loadQueue`、`log`（只写该打扰的失败，绝不写播放地址）、`random`/`now`/`schedule`。
  * 状态里没有音频地址；每次装载领一个令牌，乱序应答整包丢掉；换队列 = 停止播放。
  * 取不到地址时按当前模式自动跳下一首（连续最多 3 首），用 `notice` 说明而非错误；都失败才停回 error。
+ * 服务端已判定的下架/不存在曲目不占那 3 首（另有 30 首的天花板），换档与重试对它们没有意义。
+ * 这些曲目的 id 会进状态的 `offlineIds`（列表据此变灰并禁播），并尽力落盘到设置里；那份清单只用于灰显。
  * 音质只说服务端明确声明的那一档（`actualQuality`）：`unknown` / 缺失 / 本地曲目一律是 null，界面不许虚标。
  */
 import { queueEntriesOf, queueRecordOf, restoredEntries, sanitizeQueueRecord } from "./queue.mjs";
@@ -54,6 +56,13 @@ export const RESUME_TAIL_MS = 3000;
 
 /** 连续跳歌上限：三首都取不到地址就停住，把最后那个失败交给界面。 */
 export const MAX_CONSECUTIVE_SKIPS = 3;
+
+/** 服务端已判定不可播（下架/不存在）：换档与短重试都无意义。 */
+const UNPLAYABLE_SKIP_KINDS = new Set(["content_offline", "content_unavailable"]);
+/** 连续下架曲目的跳过上限（防止整张失效歌单把请求刷到底）。 */
+export const MAX_UNPLAYABLE_SKIPS = 30;
+/** 下架曲目清单的上限（与 core 的归一同一口径：只留最近的 2000 首）。 */
+export const MAX_OFFLINE_IDS = 2000;
 
 /** 音频端口会发的事件（真实元素的适配见 audio-element.mjs）。 */
 export const PLAYER_AUDIO_EVENTS = ["ended", "error", "loadedmetadata", "durationchange", "timeupdate", "playing", "waiting"];
@@ -106,12 +115,12 @@ function kindOf(cause) {
 }
 
 /**
- * 服务端明确声明的音质：只认 "standard" / "lossless"。
+ * 服务端明确声明的音质：只认 "standard" / "high" / "lossless"。
  * parser 判的 "unknown"、缺字段、本地曲目（协议按 id 拼地址，没有这个字段）一律 null——不确定就不说。
- * @returns {"standard"|"lossless"|null}
+ * @returns {"standard"|"high"|"lossless"|null}
  */
 function declaredQualityOf(value) {
-  return value === "standard" || value === "lossless" ? value : null;
+  return value === "standard" || value === "high" || value === "lossless" ? value : null;
 }
 
 /** 提示里的曲目称呼：有名字用名字，没有就用标识。 */
@@ -123,9 +132,33 @@ function trackLabelOf(entry) {
   return "当前曲目";
 }
 
-/** 跳歌说明：不是错误，状态仍是 playing。 */
-function skipNoticeOf(skippedLabels) {
-  return `${skippedLabels.map((label) => `「${label}」`).join("、")}暂时无法播放，已跳到下一首`;
+/**
+ * 下架曲目 id 清单归一：只留非空字符串、去重、最多 `MAX_OFFLINE_IDS` 首。
+ * @param {unknown} values
+ * @returns {string[]}
+ */
+function offlineIdsOf(values) {
+  if (!Array.isArray(values)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const id = value.trim();
+    if (id === "" || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+    if (out.length >= MAX_OFFLINE_IDS) break;
+  }
+  return out;
+}
+
+/** 跳歌说明：不是错误，状态仍是 playing（下架/不存在说成"下架或不可用"，不谎称稍后还能播）。 */
+function skipNoticeOf(skipped) {
+  const labels = skipped.map((item) => `「${item.label}」`).join("、");
+  if (skipped.every((item) => UNPLAYABLE_SKIP_KINDS.has(item.kind))) {
+    return `${labels}已在华为音乐下架或不可用，已跳过`;
+  }
+  return `${labels}暂时无法播放，已跳到下一首`;
 }
 
 /**
@@ -136,6 +169,8 @@ function skipNoticeOf(skippedLabels) {
  * @param {(url: string) => (string|null)} options.guardUrl 媒体白名单闸门（放行回归一化地址，否则 null）
  * @param {(record: import("./queue.mjs").QueueRecord|null) => unknown} [options.persistQueue]
  * @param {() => Promise<unknown>} [options.loadQueue]
+ * @param {string[]} [options.initialOfflineIds] 启动时已知的下架曲目 id（读设置得到；之后靠 hydrateOfflineIds 补）
+ * @param {(ids: string[]) => unknown} [options.persistOfflineIds] 下架曲目清单变长时落盘（fire-and-forget）
  * @param {(...parts: unknown[]) => void} [options.log]
  * @param {() => number} [options.random]
  * @param {() => number} [options.now]
@@ -164,6 +199,8 @@ export function createPlayer(options = {}) {
 
   const persistQueue = typeof options.persistQueue === "function" ? options.persistQueue : async () => null;
   const loadQueue = typeof options.loadQueue === "function" ? options.loadQueue : async () => null;
+  /** 下架清单的落盘口（不给就只在本次进程里灰显，重启后重新"第一次遇到"再记一次）。 */
+  const persistOfflineIds = typeof options.persistOfflineIds === "function" ? options.persistOfflineIds : null;
   const log = typeof options.log === "function" ? options.log : () => {};
   const random = typeof options.random === "function" ? options.random : Math.random;
   const now = typeof options.now === "function" ? options.now : () => Date.now();
@@ -208,7 +245,8 @@ export function createPlayer(options = {}) {
    *   index: number,
    *   track: import("./queue.mjs").QueueEntry|null,
    *   loaded: boolean,
-   *   quality: "standard"|"lossless"|null,
+   *   quality: "standard"|"high"|"lossless"|null,
+   *   offlineIds: string[],
    *   currentTimeMs: number,
    *   durationMs: number,
    *   volume: number,
@@ -229,6 +267,7 @@ export function createPlayer(options = {}) {
     track: null,
     loaded: false,
     quality: null,
+    offlineIds: offlineIdsOf(options.initialOfflineIds),
     currentTimeMs: 0,
     durationMs: 0,
     volume: DEFAULT_VOLUME,
@@ -292,6 +331,39 @@ export function createPlayer(options = {}) {
     } catch (cause) {
       log("队列持久化失败（队列仍在内存里，下次启动恢复不了）：", textOf(cause));
     }
+  }
+
+  /**
+   * 记住一首"服务端已判下架/不存在"的曲目：进状态（列表据此变灰），并 fire-and-forget 落盘。
+   * 写不进去只是下次启动少了灰显，绝不影响这一首的跳歌——所以只记一行日志。
+   */
+  function rememberOffline(trackId) {
+    if (typeof trackId !== "string" || trackId.trim() === "") return;
+    const id = trackId.trim();
+    if (state.offlineIds.includes(id)) return;
+    // 超过上限时丢最旧的：这份清单只求"最近见过的下架曲目"
+    const offlineIds = [...state.offlineIds, id].slice(-MAX_OFFLINE_IDS);
+    publish({ offlineIds });
+    if (persistOfflineIds === null) return;
+    try {
+      const answer = persistOfflineIds(offlineIds);
+      if (answer !== null && typeof answer === "object" && typeof answer.then === "function") {
+        answer.catch((cause) => log("下架曲目清单没能落盘（只影响下次启动的灰显）：", textOf(cause)));
+      }
+    } catch (cause) {
+      log("下架曲目清单没能落盘（只影响下次启动的灰显）：", textOf(cause));
+    }
+  }
+
+  /**
+   * 启动时把设置里那份下架清单并进状态（与运行中累积的那份合并去重）。
+   * 只读不写：读回来的东西不写回去（同 `restore()` 的纪律）。
+   * @param {unknown} ids
+   */
+  function hydrateOfflineIds(ids) {
+    const merged = offlineIdsOf([...state.offlineIds, ...offlineIdsOf(ids)]);
+    if (merged.length !== state.offlineIds.length) publish({ offlineIds: merged });
+    return done({ offlineCount: merged.length });
   }
 
   function cancelTrailing() {
@@ -404,7 +476,7 @@ export function createPlayer(options = {}) {
 
   /**
    * 取地址 → 过闸门。任何一步失败都回结构化错误，**且消息里没有地址**。
-   * @returns {Promise<{ok: true, url: string, quality: "standard"|"lossless"|null} | {ok: false, error: {kind: string, message: string}}>}
+   * @returns {Promise<{ok: true, url: string, quality: "standard"|"high"|"lossless"|null} | {ok: false, error: {kind: string, message: string}}>}
    */
   async function resolveAddress(trackId) {
     let answer;
@@ -488,7 +560,7 @@ export function createPlayer(options = {}) {
 
   /**
    * 装载并播放第 `index` 首（`manual: true` 在随机模式下以这一首开头重开一轮）。
-   * `skipped` 只在自动跳歌的递归里传（已跳过的曲目称呼）。
+   * `skipped` 只在自动跳歌的递归里传（已跳过的曲目 `{label, kind}` 列表）。
    */
   async function start(index, { manual = true, skipped = [] } = {}) {
     if (state.entries.length === 0) {
@@ -532,17 +604,23 @@ export function createPlayer(options = {}) {
       const resolved = await resolveAddress(entry.id);
       if (activeToken !== token) return done({ stale: true });
       if (!resolved.ok) {
-        const skippedLabels = [...skipped, trackLabelOf(entry)];
-        // 到连跳上限就不再往下翻（否则坏队列会被一路刷到底）
-        const exhausted = skippedLabels.length >= MAX_CONSECUTIVE_SKIPS;
+        // 服务端已判下架/不存在：记进清单（列表据此变灰并禁播），再按原有规则决定跳不跳
+        if (UNPLAYABLE_SKIP_KINDS.has(resolved.error.kind)) rememberOffline(entry.id);
+        const skippedItems = [...skipped, { label: trackLabelOf(entry), kind: resolved.error.kind }];
+        // 下架/不存在不是"临时失败"：它们不占连跳三首的额度，只有自己的天花板（失效歌单不该被刷到底）
+        const transient = skippedItems.filter((item) => !UNPLAYABLE_SKIP_KINDS.has(item.kind)).length;
+        const unplayable = skippedItems.length - transient;
+        const exhausted = transient >= MAX_CONSECUTIVE_SKIPS || unplayable >= MAX_UNPLAYABLE_SKIPS;
         const target = exhausted ? null : skipTargetOf(index);
-        // 没有下一首或已试满三首：走原来的失败路径，留下最后一次的错
+        // 没有下一首或已到上限：走原来的失败路径，留下最后一次的错
         if (target === null) {
-          log(`播放地址取不到，不再跳歌：${entry.id}｜${resolved.error.kind}｜连试 ${skippedLabels.length} 首`);
+          log(
+            `播放地址取不到，不再跳歌：${entry.id}｜${resolved.error.kind}｜临时失败 ${transient} 首、不可播 ${unplayable} 首`,
+          );
           return failPlayback(resolved.error.kind, resolved.error.message);
         }
-        log(`播放地址取不到，自动跳下一首：${entry.id}｜${resolved.error.kind}`);
-        return start(target, { manual: false, skipped: skippedLabels });
+        log(`播放地址取不到，自动跳下一首：${entry.id}｜${resolved.error.kind}｜临时失败 ${transient} 首、不可播 ${unplayable} 首`);
+        return start(target, { manual: false, skipped: skippedItems });
       }
 
       loadedId = entry.id;
@@ -952,6 +1030,7 @@ export function createPlayer(options = {}) {
     toggleMute,
     setMode,
     setLyrics,
+    hydrateOfflineIds,
     clear,
     restore,
   };

@@ -19,6 +19,9 @@ export const PLAYBACK_FAILURE_TEXT = {
   network_error: "取播放地址失败（网络不通）。",
   http_error: "取播放地址失败（服务端返回错误）。",
   api_error: `${API_FAILURE_LEAD}（接口返回业务错误）。`,
+  content_offline: "该歌曲已在华为音乐下架，无法播放。",
+  content_unavailable: "歌曲不存在或暂不可用。",
+  vip_required: "当前音质需要会员（可在设置里换回标准音质）。",
   resolve_failed: "取播放地址失败（详情见日志）。",
   audio_error: "音频播放失败（音源不可用或格式不支持）。",
   core_unavailable: "内核尚未就绪，暂时无法播放。",
@@ -62,10 +65,11 @@ export function playerStatusText(state) {
 }
 
 /**
- * 服务端明确声明的音质 → 一行小字。表里只有两档：`unknown` 不在表里，认不出就不说（不虚标）。
+ * 服务端明确声明的音质 → 一行小字。表里只有三档：`unknown` 不在表里，认不出就不说（不虚标）。
  */
 export const PLAYBACK_QUALITY_TEXT = {
   standard: "标准音质",
+  high: "高音质",
   lossless: "无损音质",
 };
 

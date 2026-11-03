@@ -109,6 +109,21 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
     }
   }
 
+  /**
+   * `settings:set` 的**唯一**写入口：队列与下架曲目清单都经它落盘。
+   * 写盘标签只有这两个（源码扫描按这一处判"别的地方不碰设置写入"）。
+   */
+  async function writeSettingsPatch(patch: Record<string, unknown>): Promise<void> {
+    await callCore(SETTINGS_SET, { patch });
+  }
+
+  /** 启动时的 `settings:get` 只读一次：队列恢复与下架曲目清单共用同一份（进程内缓存）。 */
+  let settingsRead: Promise<unknown> | null = null;
+  function readSettingsOnce(): Promise<unknown> {
+    if (settingsRead === null) settingsRead = callCore(SETTINGS_GET);
+    return settingsRead;
+  }
+
   const player = createPlayer({
     audio: createAudio() as never,
     // coreCall 成功时直接给 data；失败时**抛出** core 错误（kind/message 会被状态机原样保留）
@@ -127,10 +142,10 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
     },
     guardUrl: deps.guardUrl ?? guardMediaUrl,
     persistQueue: async (record: import("./queue.mjs").QueueRecord | null) => {
-      await callCore(SETTINGS_SET, { patch: { [QUEUE_SETTING_KEY]: record } });
+      await writeSettingsPatch({ [QUEUE_SETTING_KEY]: record });
     },
     loadQueue: async () => {
-      const answer = (await callCore(SETTINGS_GET)) as SettingsAnswer | null;
+      const answer = (await readSettingsOnce()) as SettingsAnswer | null;
       const data = answer?.settings?.data;
       const record = data !== null && typeof data === "object" ? (data[QUEUE_SETTING_KEY] ?? null) : null;
       // 恢复时跳过「文件已不在」的本地曲目；曲库读不到（`null`）就整段跳过判定。
@@ -143,6 +158,10 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
         else log(text);
       }
       return filtered.record;
+    },
+    // 下架清单落盘：只写 `offlineTracks`，失败只留痕（下次启动少一次灰显，不影响这次播放）
+    persistOfflineIds: async (ids: string[]) => {
+      await writeSettingsPatch({ offlineTracks: ids });
     },
     log,
   });
@@ -202,10 +221,26 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
 
   let initialized = false;
 
+  /**
+   * 读设置里的下架清单并交给状态机（已知下架的曲目在列表里变灰、点不动）。
+   * 读不到只留痕：这是"这次启动少了对下架的记性"，不是启动失败。
+   */
+  async function hydrateOfflineIds(): Promise<void> {
+    try {
+      const answer = (await readSettingsOnce()) as SettingsAnswer | null;
+      const data = answer?.settings?.data;
+      const stored = data !== null && typeof data === "object" ? data.offlineTracks : null;
+      player.hydrateOfflineIds(Array.isArray(stored) ? stored : []);
+    } catch (cause) {
+      log("下架曲目清单读不到（本次启动不做灰显）：", cause);
+    }
+  }
+
   async function initialize(): Promise<void> {
     if (initialized) return;
     initialized = true;
     await player.restore();
+    await hydrateOfflineIds();
   }
 
   function dispose(): void {

@@ -62,6 +62,8 @@ import {
 import {
   APPEARANCE_NOTICE_TEXT,
   CLOSE_BEHAVIORS,
+  PLAYBACK_QUALITIES,
+  PLAYBACK_QUALITY_LABELS,
   TRAY_AVAILABLE,
   autostartFailureText,
   autostartStateText,
@@ -75,6 +77,8 @@ import {
   PROXY_SCOPE_LABEL,
   PROXY_MODES,
   PROXY_SCOPES,
+  playbackQualityFromSettings,
+  playbackQualityPatch,
   proxyFormFromSettings,
   proxyPatchFromForm,
   proxySaveNotice,
@@ -408,6 +412,7 @@ function BrowsableTrackList({
           onOpenArtist={navigation.onOpenArtist}
           onPlayNext={navigation.rowActions?.onPlayNext}
           onEnqueue={navigation.rowActions?.onEnqueue}
+          offlineIds={navigation.offlineIds}
         />
       )}
 
@@ -435,6 +440,11 @@ export interface PageNavigationProps {
   onOpenArtist: (artistId: string, song: unknown) => void
   /** 行菜单的两个播放动作（外壳提供，页面只转给曲目表，不自己实现） */
   rowActions?: TrackRowActions
+  /**
+   * 已知下架的曲目 id（外壳从播放状态里交下来）：这些行变灰、不许激活。
+   * 页面只转发，不自己判断"哪些下架"——判据只在播放状态那一处。
+   */
+  offlineIds?: string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -764,6 +774,7 @@ export function LocalSongsPage({ ...navigation }: PageNavigationProps) {
           onEnqueue={navigation.rowActions?.onEnqueue}
           showFavorite={false}
           unavailableIds={unavailableIds}
+          offlineIds={navigation.offlineIds}
           onRemove={(song) => void onRemove(song)}
         />
       )}
@@ -803,6 +814,11 @@ export const SETTINGS_TABS = [
   { id: "about", label: "关于" },
 ]
 
+/** 音质档 → 中文标签（表只有一处：shared/playback-quality.mjs）。 */
+function playbackQualityLabel(value: string): string {
+  return (PLAYBACK_QUALITY_LABELS as Record<string, string>)[value] ?? PLAYBACK_QUALITY_LABELS.high
+}
+
 /** 设置页：所有文案与判定都在 `features/settings/settings-form.mjs`（纯函数），页面只塞状态、渲染返回值；凭据只写不读，失败与提示按回执如实说。 */
 export function SettingsPage({
   queue = null,
@@ -812,6 +828,8 @@ export function SettingsPage({
 }: SettingsPageProps) {
   const [form, setForm] = useState(() => proxyFormFromSettings(null))
   const [closeBehavior, setCloseBehavior] = useState(() => closeBehaviorFromSettings(null))
+  /** 播放音质（standard / high / lossless）：与关窗行为同一条"选中即保存"的路。 */
+  const [playbackQuality, setPlaybackQuality] = useState(() => playbackQualityFromSettings(null))
   const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
@@ -835,6 +853,7 @@ export function SettingsPage({
         if (!alive) return
         setForm(proxyFormFromSettings(answer.settings))
         setCloseBehavior(closeBehaviorFromSettings(answer.settings))
+        setPlaybackQuality(playbackQualityFromSettings(answer.settings))
         setLoaded(true)
       } catch (error) {
         if (!alive) return
@@ -885,6 +904,7 @@ export function SettingsPage({
       // 按回执重建表单：写的和显示的下一次是同一条数据（密码字段随之回到空）
       setForm(proxyFormFromSettings(answer.settings))
       setCloseBehavior(closeBehaviorFromSettings(answer.settings))
+      setPlaybackQuality(playbackQualityFromSettings(answer.settings))
       setNotice(proxySaveNotice(answer.settings, answer.restartRequired === true))
     } catch (error) {
       setFailure(settingsFailureText(error))
@@ -903,6 +923,7 @@ export function SettingsPage({
       const answer = await coreCall<SettingsAnswer>(SETTINGS_SET, { patch: { proxy: null } })
       setForm(proxyFormFromSettings(answer.settings))
       setCloseBehavior(closeBehaviorFromSettings(answer.settings))
+      setPlaybackQuality(playbackQualityFromSettings(answer.settings))
       setNotice(proxySaveNotice(answer.settings, answer.restartRequired === true))
     } catch (error) {
       setFailure(settingsFailureText(error))
@@ -953,6 +974,25 @@ export function SettingsPage({
     }
   }
 
+  /** 音质：选中即保存（与关窗行为同一条路：先乐观显示、失败拨回去，成功按回执重建）。 */
+  async function choosePlaybackQuality(value: string) {
+    const previous = playbackQuality
+    const next = playbackQualityPatch(value).playbackQuality
+    setSaving(true)
+    setPlaybackQuality(next)
+    setFailure(null)
+    try {
+      const answer = await coreCall<SettingsAnswer>(SETTINGS_SET, { patch: playbackQualityPatch(next) })
+      setPlaybackQuality(playbackQualityFromSettings(answer.settings))
+    } catch (error) {
+      // 没写成就把选择拨回去：界面上停在一个"没保存的值"，跟撒谎只差一步
+      setPlaybackQuality(previous)
+      setFailure(settingsFailureText(error))
+    } finally {
+      setSaving(false)
+    }
+  }
+
   /** 自启开关：显示的是 core **回报的实际状态**（乐观翻转会在写入失败时撒谎）。 */
   async function applyAutostart(next: boolean) {
     setAutostartBusy(true)
@@ -992,7 +1032,7 @@ export function SettingsPage({
           ))}
         </TabsList>
 
-        {/* 通用：日常使用里会被改的四件（宽屏两列、窄屏单列；items-start 让高矮不同的卡不互相拉齐） */}
+        {/* 通用：日常使用里会被改的五件（宽屏两列、窄屏单列；items-start 让高矮不同的卡不互相拉齐） */}
         <TabsContent value="general" className="grid grid-cols-1 items-start gap-4 xl:grid-cols-2">
           <Card>
             <CardHeader>
@@ -1024,6 +1064,35 @@ export function SettingsPage({
                 {/* 可用性来自宿主：`trayAvailable` 由外壳启动时查一次交下来 */}
                 {closeBehaviorNotice(closeBehavior, { trayAvailable })}
               </p>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>音质</CardTitle>
+              {/* 只有这一句说明：要会员的档位怎么处理，其余交给用户自己选。 */}
+              <CardDescription>需要会员的档位会自动改用标准音质。</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Select
+                value={playbackQuality}
+                disabled={!loaded || saving}
+                onValueChange={(value) => void choosePlaybackQuality(value)}
+              >
+                <SelectTrigger id="playback-quality" aria-label="音质" className="w-full max-w-xs">
+                  {/* 标签直接写进 SelectValue：radix 在没展开过内容时拿不到选项文案 */}
+                  <SelectValue>{playbackQualityLabel(playbackQuality)}</SelectValue>
+                </SelectTrigger>
+                <SelectContent position="popper" align="start" sideOffset={4}>
+                  <SelectGroup>
+                    {PLAYBACK_QUALITIES.map((quality: string) => (
+                      <SelectItem key={quality} value={quality}>
+                        {playbackQualityLabel(quality)}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
             </CardContent>
           </Card>
 
