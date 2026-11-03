@@ -148,6 +148,6 @@ export interface MusicApi {
   getAlbum(albumId: string, request?: { page?: number; pageSize?: number }): Promise<CoreResult<{ albumId: string; songs: Song[]; detail: unknown; hasMore: boolean }>>;
   getArtist(artistId: string, request?: { songNum?: number; albumNum?: number }): Promise<CoreResult<{ artistId: string; songs: Song[]; detail: unknown }>>;
   getHistory(request?: { page?: number; pageSize?: number }): Promise<CoreResult<{ songs: Song[]; skipped: number; reportedTotal: number | null; hasMore: boolean }>>;
-  getPlayback(request?: { trackId?: string; id?: string; quality?: "standard" | "lossless" }): Promise<CoreResult<PlaybackInfo>>;
-  getLyrics(request?: { trackId?: string; id?: string; quality?: "standard" | "lossless" }): Promise<CoreResult<{ text: string; format: string; warnings: string[] }>>;
+  getPlayback(request?: { trackId?: string; id?: string; quality?: "standard" | "high" | "lossless" }): Promise<CoreResult<PlaybackInfo>>;
+  getLyrics(request?: { trackId?: string; id?: string; quality?: "standard" | "high" | "lossless" }): Promise<CoreResult<{ text: string; format: string; warnings: string[] }>>;
 }

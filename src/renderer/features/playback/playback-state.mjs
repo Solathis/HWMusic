@@ -5,6 +5,9 @@
  * 歌词 `unavailable`（没有来源）与 `empty`（确实没有）必须分开。
  */
 
+/** 「取播放地址失败」的开头（业务错误那句要把码接在它后面，措辞只此一处）。 */
+const API_FAILURE_LEAD = "取播放地址失败";
+
 /** 失败类别 → 一句话（类别来自状态机的结构化错误，core 的类别原样透传）。 */
 export const PLAYBACK_FAILURE_TEXT = {
   queue_empty: "播放队列是空的（先在列表里双击一首歌）。",
@@ -15,7 +18,7 @@ export const PLAYBACK_FAILURE_TEXT = {
   invalid_response: "播放接口没有给出可用的音频地址。",
   network_error: "取播放地址失败（网络不通）。",
   http_error: "取播放地址失败（服务端返回错误）。",
-  api_error: "取播放地址失败（接口返回业务错误）。",
+  api_error: `${API_FAILURE_LEAD}（接口返回业务错误）。`,
   resolve_failed: "取播放地址失败（详情见日志）。",
   audio_error: "音频播放失败（音源不可用或格式不支持）。",
   core_unavailable: "内核尚未就绪，暂时无法播放。",
@@ -28,9 +31,11 @@ const UNKNOWN_FAILURE_TEXT = "播放失败（详情见日志）。";
 /** 结构化错误 → 显示文案（认不出的类别带上 core 给的那句话，别丢掉唯一线索）。 */
 export function playbackFailureText(error) {
   if (error === null || typeof error !== "object") return UNKNOWN_FAILURE_TEXT;
+  const message = typeof error.message === "string" ? error.message.trim() : "";
+  // 业务错误自带业务码（「接口返回错误码 XXX」）：固定文案会把它吞掉，所以这里优先带上原话
+  if (error.kind === "api_error" && message !== "") return `${API_FAILURE_LEAD}（${message}）。`;
   const known = PLAYBACK_FAILURE_TEXT[error.kind];
   if (typeof known === "string") return known;
-  const message = typeof error.message === "string" ? error.message.trim() : "";
   if (message === "") return UNKNOWN_FAILURE_TEXT;
   return `播放失败：${message}`;
 }

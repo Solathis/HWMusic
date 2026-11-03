@@ -62,8 +62,8 @@ export const MUSIC_SONG_CONTENT_TYPES = Object.freeze(["1"]);
 /** "我的歌单"发现用的内容类型（1=歌曲、4=收藏歌单、5=自建歌单、7=榜单），调用方按 contentType 分流。 */
 export const MUSIC_LIBRARY_CONTENT_TYPES = Object.freeze(["1", "4", "5", "7"]);
 
-/** 音质 → qualityType（standard="1"、lossless="3"）；其余档位不认，不猜。 */
-export const MUSIC_QUALITY_TYPES = Object.freeze({ standard: "1", lossless: "3" });
+/** 音质 → qualityType（官方 H5 档位：standard="1"、high="2"、lossless="3"）；其余档位不认，不猜。 */
+export const MUSIC_QUALITY_TYPES = Object.freeze({ standard: "1", high: "2", lossless: "3" });
 
 /** 业务端点键名（唯一真源；每个键都要由调用方注入，缺一个就少一个可用接口）。 */
 export const MUSIC_ENDPOINT_KEYS = [
@@ -170,6 +170,25 @@ function positiveInt(value, fallback) {
 function playbackFailureLine(quality, error) {
   const detail = isNonEmptyString(error?.message) ? error.message.trim() : String(error?.kind ?? "未知错误");
   return `播放地址失败：quality=${String(quality).slice(0, 20)} code=${detail}`;
+}
+
+/** 音质阶梯（官方档位顺序 1→2→3）：业务错误时按它逐档换，每档只试一次。 */
+const PLAYBACK_QUALITY_LADDER = Object.freeze(Object.values(MUSIC_QUALITY_TYPES));
+
+/** 档位码 → 名字（日志里说人话；表外的码原样回字符串）。 */
+function qualityNameOf(qualityType) {
+  for (const [name, type] of Object.entries(MUSIC_QUALITY_TYPES)) {
+    if (type === qualityType) return name;
+  }
+  return String(qualityType);
+}
+
+/** 换档序列：从当前档之后开始、绕回没试过的档（当前档不重复，最多 2 档 → 含第一次共 3 次请求）。 */
+function qualityLadderAfter(qualityType) {
+  const ladder = PLAYBACK_QUALITY_LADDER;
+  const index = ladder.indexOf(qualityType);
+  if (index < 0) return ladder.slice(0, ladder.length - 1);
+  return [...ladder.slice(index + 1), ...ladder.slice(0, index)];
 }
 
 /** 解业务信封：HTTP 成功且 result.resultCode === "000000" 才算成功；返回整个响应体，容器由调用方取。 */
@@ -1646,27 +1665,40 @@ export function createMusicApi(options = {}) {
     return ok({ songs: normalized.songs, skipped: normalized.skipped, hasMore: false, reportedTotal: normalized.reportedTotal });
   }
 
-  /** 播放地址：音质只认 standard/lossless；只有业务错误（`api_error`）才换另一档重试一次。 */
+  /**
+   * 播放地址：音质只认 standard/high/lossless；只有业务错误（`api_error`）才按 1→2→3 的阶梯逐档重试
+   * （每档只试一次，含第一次最多 3 次请求），非业务错误一次都不重试。
+   */
   async function getPlayback(request = {}) {
     const trackId = request.trackId ?? request.id;
     if (!isNonEmptyString(trackId)) return err("播放地址接口需要 trackId", MUSIC_ERROR_KINDS.missingParam);
     const quality = request.quality ?? "standard";
     const qualityType = MUSIC_QUALITY_TYPES[quality];
     if (qualityType === undefined) {
-      return err(`不支持的音质：${String(quality).slice(0, 20)}（只认 standard / lossless）`, MUSIC_ERROR_KINDS.qualityUnsupported);
+      return err(
+        `不支持的音质：${String(quality).slice(0, 20)}（只认 ${Object.keys(MUSIC_QUALITY_TYPES).join(" / ")}）`,
+        MUSIC_ERROR_KINDS.qualityUnsupported,
+      );
     }
 
-    const first = await playbackOnce(trackId.trim(), qualityType);
-    if (first.ok) return first;
-    if (first.error?.kind !== MUSIC_ERROR_KINDS.apiError) return first;
+    const id = trackId.trim();
+    let last = await playbackOnce(id, qualityType);
+    if (last.ok || last.error?.kind !== MUSIC_ERROR_KINDS.apiError) return last;
+    log(playbackFailureLine(quality, last.error));
 
-    const retryQuality = quality === "lossless" ? "standard" : "lossless";
-    log(playbackFailureLine(quality, first.error));
-    log(`播放地址换一档重试：quality=${quality} → ${retryQuality}`);
-    const second = await playbackOnce(trackId.trim(), MUSIC_QUALITY_TYPES[retryQuality]);
-    if (second.ok) return second;
-    log(playbackFailureLine(retryQuality, second.error));
-    return second;
+    // 换档只在业务错误时发生：成功就交回那一档的结果，全部失败则交回最后一次的失败
+    let current = quality;
+    for (const nextType of qualityLadderAfter(qualityType)) {
+      const nextQuality = qualityNameOf(nextType);
+      log(`播放地址换一档再试：quality=${current} → ${nextQuality}`);
+      last = await playbackOnce(id, nextType);
+      if (last.ok) return last;
+      log(playbackFailureLine(nextQuality, last.error));
+      current = nextQuality;
+      // 换档后仍失败但不是业务错误（网络/端点）：换哪一档都一样，就此停下
+      if (last.error?.kind !== MUSIC_ERROR_KINDS.apiError) return last;
+    }
+    return last;
   }
 
   /** 单次取址（一档音质一次请求）：响应里没有可用地址同样算失败。 */
