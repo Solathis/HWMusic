@@ -3126,6 +3126,8 @@ const configureCalls = [];
 const resizeCalls = [];
 /** 关闭请求（Esc / 点面板外面）。 */
 const closeCalls = [];
+/** 取色期间报给宿主的标志（true = 系统取色器开着，宿主别因失焦收起气泡）。 */
+const colorPickingCalls = [];
 
 /**
  * 守卫用查询串挑一种气泡几何（宿主那一侧的算法在 Rust 里，这里只给答案）：
@@ -3162,6 +3164,10 @@ mockIPC(async (command, args) => {
     closeCalls.push(Math.round(performance.now()));
     return { open: false };
   }
+  if (command === "core_lyrics_settings_color_picking") {
+    colorPickingCalls.push(args.picking === true);
+    return { picking: args.picking === true };
+  }
   throw new Error("未提供弹出窗守卫命令：" + command);
 }, { shouldMockEvents: true });
 
@@ -3169,10 +3175,11 @@ window.__popupGuard = {
   configureCalls: () => configureCalls.map((patch) => ({ ...patch })),
   resizeCalls: () => resizeCalls.map((entry) => ({ ...entry })),
   closeCalls: () => closeCalls.slice(),
+  colorPickingCalls: () => colorPickingCalls.slice(),
   config: () => ({ ...config }),
   bubble: () => BUBBLE,
   async setTaskbarSupported(value) { taskbarSupported = value === true; await emit("core:event", { channel: "lyrics:state", payload: { config, revision, visible: true, taskbar: { supported: taskbarSupported, attached: false, reason: taskbarSupported ? "disabled" : "unsupported" } } }); },
-  reset: () => { configureCalls.length = 0; resizeCalls.length = 0; closeCalls.length = 0; },
+  reset: () => { configureCalls.length = 0; resizeCalls.length = 0; closeCalls.length = 0; colorPickingCalls.length = 0; },
 };
 
 createRoot(document.getElementById("root")).render(<StrictMode><LyricsSettingsPopup /></StrictMode>);
@@ -3198,7 +3205,7 @@ export function lyricsSettingsHarnessHtml() {
 
 /**
  * 设置面板那一页的**真浏览器**验收（气泡形态）：单独一页、单独一扇窗（`?` 里不带主界面），这一页挂的就是 `LyricsSettingsPopup`；
- * IPC 只给 `core_lyrics_configure` / `core_lyrics_settings_resize` / `core_lyrics_settings_close` 三条；
+ * IPC 只给 `core_lyrics_configure` / `core_lyrics_settings_resize` / `core_lyrics_settings_close` / `core_lyrics_settings_color_picking` 四条；
  * 宿主侧定位算法在 Rust（`bubble_placement` 纯函数单测），这里按查询串挑几种它算得出的几何，只钉页面这一侧真的照着摆：
  * 1. **面板贴在窗口留边内侧**（`(pad, pad)`），窗口尺寸 = 面板 + 四周留边，面板高度 ≤ 360 且不滚；
  * 2. **箭头指着锚点**：居中 / 左夹紧 / 右夹紧三种偏移下，箭头中心都落在 `pad + arrow` 上；
@@ -3207,7 +3214,8 @@ export function lyricsSettingsHarnessHtml() {
  * 5. **浅/深两色下每个控件都可见可点**（含五个字号档位）；
  * 6. **改任一项都关不掉面板**（单选组/开关/颜色：只发配置，不发关窗）；
  * 7. **Esc 真的请求关窗**，且关窗不卸面板（宿主只是 hide）；
- * 8. **色块显示主题下的真实颜色**（未设自定义色时与歌词实际颜色一致）。
+ * 8. **色块显示主题下的真实颜色**（未设自定义色时与歌词实际颜色一致）；
+ * 9. **拖动取色不打断**：输入框不按色值重建、拖动写入被节流、取色中的焦点/外部交互不关气泡（宽限过了照旧关）。
  */
 export async function checkLyricsSettingsPopup(page, port, guardDir, add) {
   /** 五个字号档位 + 那九个锚点：缺一个就等于"够不着"。 */
@@ -3452,6 +3460,71 @@ export async function checkLyricsSettingsPopup(page, port, guardDir, add) {
   }
   await page.evaluate(() => { document.documentElement.className = "light"; });
   await page.waitForTimeout(150);
+
+  /**
+   * ⑨ 拖动取色（R77）：色块是**同一个 DOM**（按色值重建输入框，系统的取色器当场就关）、
+   * 拖动中的写入被节流、取色那一小会儿的外部交互 / 焦点变化不许把气泡关掉。
+   */
+  const swatchInput = page.locator('[data-testid="lyrics-appearance-color"]');
+  await swatchInput.evaluate((input) => {
+    // 打个记号：DOM 被重建的话它就不在了
+    input.dataset.probe = "same-node";
+    input.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+  });
+  const writesBeforeDrag = await page.evaluate(() => window.__popupGuard.configureCalls().length);
+  // 一次拖动 = 真实取色器每帧一条 input（7 帧），松手一条 change
+  await swatchInput.evaluate((input) => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+    for (const value of ["#101010", "#202020", "#303030", "#404040", "#505050", "#606060", "#707070"]) {
+      setter.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await page.waitForFunction(() => window.__popupGuard.config().customColor === "#707070");
+  await page.waitForTimeout(250);
+  const dragged = await page.evaluate(() => {
+    const input = document.querySelector('[data-testid="lyrics-appearance-color"]');
+    return {
+      sameNode: input?.dataset.probe === "same-node",
+      value: input?.value ?? null,
+      customColor: window.__popupGuard.config().customColor,
+      writes: window.__popupGuard.configureCalls().length,
+      lastWrite: window.__popupGuard.configureCalls().at(-1) ?? null,
+    };
+  });
+  add("r77-popup-color-input-not-rebuilt",
+    dragged.sameNode && dragged.value === "#707070" && dragged.customColor === "#707070"
+      && dragged.lastWrite?.customColor === "#707070",
+    JSON.stringify(dragged));
+  add("r77-popup-color-drag-is-throttled",
+    dragged.writes - writesBeforeDrag >= 1 && dragged.writes - writesBeforeDrag <= 3,
+    JSON.stringify({ frames: 7, before: writesBeforeDrag, after: dragged.writes }));
+
+  // 取色中：系统取色器把焦点带走，Radix 眼里就是"外面被点了"（popover 的 dismiss 是 deferred：pointerdown → click）
+  const closesBeforePick = await page.evaluate(() => window.__popupGuard.closeCalls().length);
+  await swatchInput.evaluate((input) => {
+    input.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document.body.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+  });
+  await page.waitForTimeout(120);
+  const closesWhilePicking = await page.evaluate(() => window.__popupGuard.closeCalls().length);
+  add("r77-popup-color-picking-blocks-close",
+    closesWhilePicking === closesBeforePick && await page.getByTestId("lyrics-appearance-panel").count() === 1,
+    JSON.stringify({ before: closesBeforePick, after: closesWhilePicking }));
+  // 选完（原生 change）＋ 宽限过了照旧：同样的一下"点外面"就该关（守门不许把气泡焊死）
+  await swatchInput.evaluate((input) => { input.dispatchEvent(new Event("change", { bubbles: true })); });
+  await page.waitForTimeout(320);
+  await page.evaluate(() => {
+    document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await page.waitForTimeout(250);
+  add("r77-popup-outside-click-still-closes",
+    await page.evaluate((count) => window.__popupGuard.closeCalls().length > count, closesWhilePicking),
+    JSON.stringify(await page.evaluate(() => window.__popupGuard.closeCalls())));
 
   // ⑧ Esc：dismiss 回来的是"关窗命令"，页面自己不做主
   const closesBefore = await page.evaluate(() => window.__popupGuard.closeCalls().length);
@@ -3767,13 +3840,32 @@ export async function checkTaskbarLyricsSettings(page, guardDir, add) {
   await page.waitForFunction(() => window.__guard.desktopConfig().taskbarSize === "tsm");
   await page.getByTestId("taskbar-lyrics-karaoke").click();
   await page.waitForFunction(() => window.__guard.desktopConfig().taskbarKaraoke === false);
+  // R77：色块是同一个 DOM（按色值重建输入框，系统的取色器当场就关）；拖动中的写入被节流
   await page.locator("#taskbar-lyrics-custom-color").evaluate((input, next) => {
+    input.dataset.probe = "same-node";
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
-    setter.call(input, next);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
+    for (const value of ["#111111", "#222222", "#333333", "#444444", next]) {
+      setter.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
     input.dispatchEvent(new Event("change", { bubbles: true }));
   }, "#00dd00");
   await page.waitForFunction(() => window.__guard.desktopConfig().taskbarCustomColor === "#00dd00");
+  await page.waitForTimeout(250);
+  const draggedTaskbar = await page.evaluate(() => {
+    const input = document.querySelector("#taskbar-lyrics-custom-color");
+    return { sameNode: input?.dataset.probe === "same-node", value: input?.value ?? null,
+      customColor: window.__guard.desktopConfig().taskbarCustomColor,
+      writes: window.__guard.configureCalls().filter((patch) => "taskbarCustomColor" in patch) };
+  });
+  add("r77-taskbar-color-input-not-rebuilt",
+    draggedTaskbar.sameNode && draggedTaskbar.value === "#00dd00" && draggedTaskbar.customColor === "#00dd00"
+      && draggedTaskbar.writes.at(-1)?.taskbarCustomColor === "#00dd00",
+    JSON.stringify(draggedTaskbar));
+  add("r77-taskbar-color-drag-is-throttled",
+    draggedTaskbar.writes.length >= 1 && draggedTaskbar.writes.length <= 3,
+    JSON.stringify({ frames: 5, writes: draggedTaskbar.writes }));
+
   const writes = await page.evaluate(() => window.__guard.configureCalls());
   const onlyTaskbarKeys = writes.length >= 4
     && writes.every((patch) => Object.keys(patch).every((key) => key.startsWith("taskbar")));

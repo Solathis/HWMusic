@@ -792,6 +792,8 @@ pub fn run() {
             lyrics_settings::core_lyrics_settings_open,
             lyrics_settings::core_lyrics_settings_resize,
             lyrics_settings::core_lyrics_settings_close,
+            // 取色中的失焦守门：系统取色器会把焦点带走，那不等于用户点了面板外面。
+            lyrics_settings::core_lyrics_settings_color_picking,
             // 登录体验的浮动控件（返回 / 主题）另开一条命令而不放宽 core_call，浮动 webview 的 label 不是 main。
             // 来源守卫的边界见 commands.rs 的 `require_login_chrome_source`。
             commands::core_login_chrome,

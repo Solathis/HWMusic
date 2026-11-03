@@ -240,14 +240,14 @@ pub fn require_settings_open_source(label: &str) -> Result<(), CoreError> {
     ))
 }
 
-/// 谁可以指挥弹出窗自己（量尺寸 / 关掉）：**只有它自己**。
+/// 谁可以指挥弹出窗自己（量尺寸 / 报取色状态 / 关掉）：**只有它自己**。
 pub fn require_settings_self_source(label: &str) -> Result<(), CoreError> {
     if label == LYRICS_SETTINGS_WINDOW_LABEL {
         return Ok(());
     }
     Err(CoreError::new(
         "forbidden_source",
-        "只有歌词设置弹出窗可以上报尺寸或关闭自己",
+        "只有歌词设置弹出窗可以上报尺寸、取色状态或关闭自己",
     ))
 }
 
@@ -267,6 +267,8 @@ struct PopupState {
     content: Option<Size>,
     last_blur: Option<Instant>,
     shutting_down: bool,
+    /// 系统取色器正被页面确认开着：这期间宿主失焦不算"点了面板外面"。
+    color_picking: bool,
 }
 
 impl SettingsPopupState {
@@ -280,6 +282,14 @@ impl SettingsPopupState {
 
     fn content(&self) -> Option<Size> {
         self.with(|state| state.content)
+    }
+
+    fn set_color_picking(&self, picking: bool) {
+        self.with(|state| state.color_picking = picking);
+    }
+
+    fn color_picking(&self) -> bool {
+        self.with(|state| state.color_picking)
     }
 
     fn note_blur(&self) -> bool {
@@ -382,6 +392,13 @@ fn build_popup<R: Runtime>(
     window.on_window_event(move |event| match event {
         // 点到窗口外面 = 面板该收起来了。先 hide 再记时刻：紧跟着到达的那笔 open 会因为这段窗口被拒。
         tauri::WindowEvent::Focused(false) => {
+            // 系统取色器会把焦点带走：页面报了"正在取色"就先不收，也不记失焦时刻。
+            if events
+                .try_state::<SettingsPopupState>()
+                .is_some_and(|state| state.color_picking())
+            {
+                return;
+            }
             if let Some(window) = events.get_webview_window(LYRICS_SETTINGS_WINDOW_LABEL) {
                 if window.is_visible().unwrap_or(false) {
                     let _ = window.hide();
@@ -622,6 +639,18 @@ pub async fn core_lyrics_settings_close(
     require_settings_self_source(webview.label())?;
     hide(&app);
     Ok(json!({ "open": false }))
+}
+
+/// 页面报告"系统取色器开着/关了"：宿主的失焦关闭据此守门（页面管不到宿主那一侧）。
+#[tauri::command]
+pub async fn core_lyrics_settings_color_picking(
+    app: AppHandle,
+    webview: tauri::Webview,
+    picking: bool,
+) -> Result<Value, CoreError> {
+    require_settings_self_source(webview.label())?;
+    app.state::<SettingsPopupState>().set_color_picking(picking);
+    Ok(json!({ "picking": picking }))
 }
 
 #[cfg(test)]
@@ -952,7 +981,7 @@ mod tests {
         );
     }
 
-    /// 三条命令都是 async、都带窄守卫、都在 `lib.rs` 注册（命令名是跨语言契约）。
+    /// 四条命令都是 async、都带窄守卫、都在 `lib.rs` 注册（命令名是跨语言契约）。
     #[test]
     fn r60_every_popup_command_is_async_with_its_narrow_guard() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_settings.rs"))
@@ -962,6 +991,7 @@ mod tests {
             ("core_lyrics_settings_open", "require_settings_open_source("),
             ("core_lyrics_settings_resize", "require_settings_self_source("),
             ("core_lyrics_settings_close", "require_settings_self_source("),
+            ("core_lyrics_settings_color_picking", "require_settings_self_source("),
         ] {
             assert!(
                 production.contains(&format!("pub async fn {name}(")),
@@ -970,13 +1000,14 @@ mod tests {
             let body = &production[production.find(&format!("pub async fn {name}(")).unwrap()..];
             assert!(body.find(guard).unwrap() < 900, "{name} 必须先过窄守卫");
         }
-        assert_eq!(production.matches("#[tauri::command]").count(), 3);
+        assert_eq!(production.matches("#[tauri::command]").count(), 4);
         let lib = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
             .expect("要能读到 lib.rs");
         for name in [
             "core_lyrics_settings_open",
             "core_lyrics_settings_resize",
             "core_lyrics_settings_close",
+            "core_lyrics_settings_color_picking",
         ] {
             assert!(
                 lib.contains(&format!("lyrics_settings::{name}")),
@@ -986,6 +1017,55 @@ mod tests {
         assert!(
             lib.contains("pub const LYRICS_SETTINGS_WINDOW_LABEL"),
             "窗口 label 与歌词窗的常量放在同一处"
+        );
+    }
+
+    /// 取色中失焦不收起气泡：守门必须在 hide / note_blur 之前（页面侧的 pickingRef 管不到宿主）。
+    #[test]
+    fn r77_a_focused_loss_while_color_picking_keeps_the_bubble_up() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_settings.rs"))
+            .expect("要能读到自己的源码");
+        let production = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let start = production.find("WindowEvent::Focused(false)").expect("失焦分支必须在");
+        let rest = &production[start..];
+        let arm = &rest[..rest.find("WindowEvent::CloseRequested").expect("失焦分支之后是关闭分支")];
+        let guard = arm.find("color_picking()").expect("失焦分支必须先问取色状态");
+        assert!(arm.contains("state.color_picking()"), "问的是弹出窗自己那份状态");
+        assert!(guard < arm.find("window.hide()").expect("平时照旧 hide"), "取色中不许 hide");
+        assert!(
+            guard < arm.find("note_blur()").expect("平时要记失焦时刻"),
+            "取色中不许记失焦时刻（否则紧跟着的那笔 open 会被拒）"
+        );
+    }
+
+    /// 取色标志：只有弹出窗自己能报，能设置也能读回（命令过的是窄守卫）。
+    #[test]
+    fn r77_the_color_picking_flag_is_set_only_by_the_popup_itself() {
+        let state = SettingsPopupState::default();
+        assert!(!state.color_picking(), "默认没在取色");
+        state.set_color_picking(true);
+        assert!(state.color_picking());
+        state.set_color_picking(false);
+        assert!(!state.color_picking(), "松手（宽限过后）要落回 false，失焦关闭恢复");
+
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lyrics_settings.rs"))
+            .expect("要能读到自己的源码");
+        let production = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let name = "pub async fn core_lyrics_settings_color_picking(";
+        let body = &production[production.find(name).expect("命令必须在")..];
+        assert!(
+            body.find("require_settings_self_source(webview.label())").expect("窄守卫") < 400,
+            "只有弹出窗自己能报取色状态"
+        );
+        assert!(
+            body.contains("set_color_picking(picking)"),
+            "命令要落到宿主那份标志上"
+        );
+        let lib = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+            .expect("要能读到 lib.rs");
+        assert!(
+            lib.contains("lyrics_settings::core_lyrics_settings_color_picking"),
+            "命令必须在 generate_handler! 里注册"
         );
     }
 }

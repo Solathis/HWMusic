@@ -10,6 +10,7 @@ import { LYRICS_STATE, THEME_CHANGED } from "../shared/channels.ts"
 import {
   coreLyricsConfigure,
   coreLyricsSettingsClose,
+  coreLyricsSettingsColorPicking,
   coreLyricsSettingsResize,
   onCoreEvent,
 } from "./host-api"
@@ -41,6 +42,7 @@ import {
   normalizeLyricsConfig,
   saveErrorText,
 } from "./features/lyrics/lyrics-window.mjs"
+import { useColorInput } from "./features/lyrics/use-color-input.ts"
 import { useTokenColorHex } from "./features/lyrics/use-token-color.ts"
 import { createThemeAcceptor } from "./features/theme/theme-accept.mjs"
 import { applyThemeChoice } from "./features/theme/theme.mjs"
@@ -52,6 +54,9 @@ const APPEARANCE_SWITCHES = [
   ["enableSpring", "弹簧动画"],
   ["showControls", "媒体按钮"],
 ] as const
+
+/** 松手后的宽限（毫秒）：`change` / `blur` 之后这么久内的"外面有动静"仍算在取色（焦点还在往回走）。 */
+const PICKING_GRACE_MS = 150
 
 /** 一行"标签 + 控件"。 */
 function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -83,6 +88,37 @@ export function LyricsSettingsPopup() {
   const swatchValue = customColor ?? themeHex ?? ""
   const geometry = bubble ?? defaultBubbleGeometry(panel.width)
 
+  /** 取色中焦点被系统取色器带走会被 Radix 当成"点了外面"：置真期间（含 `PICKING_GRACE_MS` 宽限）的 dismiss 一律不认。 */
+  const pickingRef = useRef(false)
+  const pickingTimerRef = useRef<number | undefined>(undefined)
+  /** 同一段取色只告诉宿主一次：拖动时的每一条 `input` 都续期，但宿主要知道的只是"开着/关了"。 */
+  const hostPickingRef = useRef(false)
+
+  const holdPicking = useCallback(() => {
+    pickingRef.current = true
+    if (pickingTimerRef.current !== undefined) window.clearTimeout(pickingTimerRef.current)
+    pickingTimerRef.current = undefined
+    if (hostPickingRef.current) return
+    // 宿主侧的系统取色器失焦守门（页面管不到那扇窗的 Focused）：通知失败不影响取色。
+    hostPickingRef.current = true
+    void coreLyricsSettingsColorPicking(true).catch(() => undefined)
+  }, [])
+
+  const releasePicking = useCallback(() => {
+    if (pickingTimerRef.current !== undefined) window.clearTimeout(pickingTimerRef.current)
+    pickingTimerRef.current = window.setTimeout(() => {
+      pickingTimerRef.current = undefined
+      pickingRef.current = false
+      hostPickingRef.current = false
+      // 宽限过了才报"关了"：焦点回到面板之后，照旧的一次失焦也该收起气泡。
+      void coreLyricsSettingsColorPicking(false).catch(() => undefined)
+    }, PICKING_GRACE_MS)
+  }, [])
+
+  useEffect(() => () => {
+    if (pickingTimerRef.current !== undefined) window.clearTimeout(pickingTimerRef.current)
+  }, [])
+
   const acceptStatus = useCallback((payload: unknown) => {
     const next = payload as { ready?: boolean; config?: unknown; revision?: number; saveError?: unknown; taskbar?: { supported?: boolean } } | null
     if (next?.ready || !next?.config || !Number.isSafeInteger(next.revision) || next.revision! < revisionRef.current) return
@@ -98,6 +134,9 @@ export function LyricsSettingsPopup() {
       .then(acceptStatus)
       .catch(() => setActionError("配置未能应用，请从主窗设置重试。"))
   }, [acceptStatus])
+
+  /** 取色器：拖动中走 `onInput` 实时改色（节流 80ms），原生 `change` / 失焦时冲刷最后一次。 */
+  const colorInput = useColorInput(swatchValue, (value) => configure({ customColor: value }), releasePicking)
 
   useEffect(() => {
     let alive = true
@@ -161,6 +200,17 @@ export function LyricsSettingsPopup() {
     void coreLyricsSettingsClose().catch(() => undefined)
   }, [])
 
+  /** 开合只有"该关了"这一支有意义：取色中的动静不算（平时的点外面照旧关）。 */
+  const handleOpenChange = useCallback((open: boolean) => {
+    if (open || pickingRef.current) return
+    requestClose()
+  }, [requestClose])
+
+  /** 取色中的"外面有动静"直接吞掉：系统取色器会把焦点带走，那不等于用户点了外面。 */
+  const keepWhilePicking = useCallback((event: { preventDefault: () => void }) => {
+    if (pickingRef.current) event.preventDefault()
+  }, [])
+
   /** 单选组的写入：radix 在"再点一次已选中项"时给空串，那一支什么都不写。 */
   const pick = useCallback((key: "style" | "layout" | "size" | "mode") => (value: string) => {
     if (value === "") return
@@ -168,7 +218,7 @@ export function LyricsSettingsPopup() {
   }, [configure])
 
   return (
-    <Popover open modal={false} onOpenChange={requestClose}>
+    <Popover open modal={false} onOpenChange={handleOpenChange}>
       {/* 隐形触发点：left/width 决定箭头落在哪儿（面板左边缘被 radix 对齐到它的左边缘） */}
       <PopoverTrigger asChild>
         <span aria-hidden="true" data-testid="lyrics-settings-anchor"
@@ -177,7 +227,9 @@ export function LyricsSettingsPopup() {
       </PopoverTrigger>
       <PopoverContent ref={contentRef} side={geometry.side as "bottom" | "top"} align="start"
         sideOffset={-POPOVER_ARROW_DIP} avoidCollisions={false} className="w-[336px] gap-2 p-3"
-        data-testid="lyrics-appearance-panel">
+        data-testid="lyrics-appearance-panel"
+        onInteractOutside={keepWhilePicking}
+        onFocusOutside={keepWhilePicking}>
         <PopoverArrow />
         <PopoverHeader>
           <PopoverTitle>桌面歌词外观</PopoverTitle>
@@ -239,15 +291,21 @@ export function LyricsSettingsPopup() {
 
         <Field label="颜色">
           <div className="flex min-w-0 items-center gap-1.5">
-            {/* 非受控（`defaultValue` + 按色值换 key）：`type=color` 的受控值必须始终合法，
-                而"跟随主题"时显示的是当前主题下的真实颜色（`swatchValue`），不是浏览器默认黑。 */}
-            <Input key={swatchValue} id="lyrics-appearance-color" data-testid="lyrics-appearance-color"
+            {/* 非受控（`defaultValue` 只给初值，**不按色值换 key**）：按色值重建 DOM 会把系统的取色器关掉。
+                外部色值（切主题 / 恢复主题色）由 ref 写进 `input.value`；拖动中走 `onInput` 实时改色。
+                这里**不接 React 的 `onChange`**：它跟着 `input` 每帧触发，收尾只认原生 `change`（在钩子里）。 */}
+            <Input ref={colorInput.inputRef} id="lyrics-appearance-color" data-testid="lyrics-appearance-color"
               type="color" aria-label="自定义歌词颜色" className="h-7 w-10 shrink-0 p-0"
               defaultValue={swatchValue}
-              onChange={(event) => {
-                const value = event.target.value
-                if (!isCustomColor(value)) return
-                configure({ customColor: value })
+              onPointerDown={holdPicking}
+              onInput={(event) => {
+                // 拖动中的每一条 input 都在续期"还在取色"：取色器带走的焦点不许把气泡关掉
+                holdPicking()
+                colorInput.push(event.currentTarget.value)
+              }}
+              onBlur={() => {
+                colorInput.flush()
+                releasePicking()
               }} />
             <Button variant="ghost" size="sm" data-testid="lyrics-appearance-color-reset"
               disabled={customColor === null} onClick={() => configure({ customColor: "" })}>恢复主题色</Button>

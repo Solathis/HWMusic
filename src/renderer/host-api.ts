@@ -21,6 +21,7 @@ import {
   CORE_LYRICS_DOCUMENT,
   CORE_LYRICS_PROGRESS,
   CORE_LYRICS_SETTINGS_CLOSE,
+  CORE_LYRICS_SETTINGS_COLOR_PICKING,
   CORE_LYRICS_SETTINGS_OPEN,
   CORE_LYRICS_SETTINGS_RESIZE,
   CORE_LYRICS_TOGGLE,
@@ -264,6 +265,11 @@ export async function coreLyricsSettingsResize(width: number, height: number): P
 /** 关掉弹出窗（Esc / 点菜单外面）。 */
 export async function coreLyricsSettingsClose(): Promise<unknown> {
   return invokeLyrics(CORE_LYRICS_SETTINGS_CLOSE);
+}
+
+/** 告诉宿主系统取色器开着/关了：宿主的失焦关闭据此守门（页面侧的 `pickingRef` 管不到宿主）。 */
+export async function coreLyricsSettingsColorPicking(picking: boolean): Promise<unknown> {
+  return invokeLyrics(CORE_LYRICS_SETTINGS_COLOR_PICKING, { picking });
 }
 
 // 登录体验的浮动控件：一条专用命令。

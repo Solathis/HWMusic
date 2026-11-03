@@ -44,13 +44,14 @@ export const CORE_LYRICS_PROGRESS = "core_lyrics_progress";
 export const CORE_LYRICS_UNLOCK_ZONE = "core_lyrics_unlock_zone";
 
 /**
- * 歌词设置弹出窗的三条命令：打开 / 报尺寸 / 关闭自己。
+ * 歌词设置弹出窗的四条命令：打开 / 报尺寸 / 报取色状态 / 关闭自己。
  * 「放在哪、多大」必须由 Rust 决定（锚点换算、翻上方、夹进工作区），那扇窗因此不需要任何 window 权限。
- * `open({anchor})` 限 `main`/`lyrics`；`resize({width, height})` 与 `close()` 限 `lyrics-settings`。
+ * `open({anchor})` 限 `main`/`lyrics`；`resize({width, height})`、`colorPicking({picking})` 与 `close()` 限 `lyrics-settings`。
  */
 export const CORE_LYRICS_SETTINGS_OPEN = "core_lyrics_settings_open";
 export const CORE_LYRICS_SETTINGS_RESIZE = "core_lyrics_settings_resize";
 export const CORE_LYRICS_SETTINGS_CLOSE = "core_lyrics_settings_close";
+export const CORE_LYRICS_SETTINGS_COLOR_PICKING = "core_lyrics_settings_color_picking";
 
 /**
  * 登录体验的浮动控件：登录相关控件的唯一命令。
