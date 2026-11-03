@@ -256,7 +256,23 @@ pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std
     let window = builder.build()?;
 
     let close_app = app.clone();
+    // 只在"从未最小化变成最小化"时记一行，还原时复位：同一次最小化会连着来好几个 Resized。
+    let minimized_reported = std::cell::Cell::new(false);
     window.on_window_event(move |event| {
+        if let tauri::WindowEvent::Resized(_) = event {
+            let minimized = close_app
+                .get_webview_window(MAIN_WINDOW_LABEL)
+                .and_then(|window| window.is_minimized().ok())
+                .unwrap_or(false);
+            if minimized {
+                if !minimized_reported.replace(true) {
+                    log::info!("主窗已最小化：最小化事件已到达窗口");
+                }
+            } else {
+                minimized_reported.set(false);
+            }
+            return;
+        }
         let tauri::WindowEvent::CloseRequested { api, .. } = event else {
             return;
         };
@@ -602,8 +618,22 @@ pub fn focus_main<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+/// 任务栏归组要显式 AppUserModelID（tao 不设，Windows 就会按 exe 路径归组）。
+#[cfg(windows)]
+fn init_windows_app_user_model_id() {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+    let id = HSTRING::from("org.hwmusicdesktop.unofficial.internal");
+    match unsafe { SetCurrentProcessExplicitAppUserModelID(&id) } {
+        Ok(()) => log::info!("AppUserModelID 已设置：{id}"),
+        Err(error) => log::warn!("AppUserModelID 设置失败（任务栏归组可能异常）：{error}"),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(windows)]
+    init_windows_app_user_model_id();
     tauri::Builder::default()
         // single-instance 必须最先注册，否则第二个实例会先走完其它插件的初始化
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
