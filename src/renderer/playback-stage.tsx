@@ -1,6 +1,6 @@
 import { AutoLyricLayout, BouncingSlider, Cover, MediaButton, MusicInfo, VolumeControl } from "@applemusic-like-lyrics/react-full"
-import { MotionConfig } from "framer-motion"
-import { useEffect, useRef } from "react"
+import { AnimatePresence, MotionConfig, motion, useReducedMotion } from "framer-motion"
+import { useEffect, useRef, useState } from "react"
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react"
 import { createPortal } from "react-dom"
 import { getCurrentWindow } from "@tauri-apps/api/window"
@@ -44,7 +44,18 @@ function sliderKeyValue(event: ReactKeyboardEvent<HTMLDivElement>, value: number
 
 export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: PlaybackStageProps) {
   const coverUrl = trackCoverUrlOf(state.track)
-  const coverImage = useAlbumImage(open ? coverUrl : null)
+  // 退场 220ms 内保持画面：此时 open 已为 false，不能直接拿它取封面；演完 onExitComplete 再放开
+  const [exiting, setExiting] = useState(false)
+  const [lastOpen, setLastOpen] = useState(open)
+  if (lastOpen !== open) {
+    setLastOpen(open)
+    if (!open) setExiting(true)
+  }
+  const stageVisible = open || exiting
+  const coverImage = useAlbumImage(stageVisible ? coverUrl : null)
+  // 用户要求减少动效时不走过场：时长 0，直接到位
+  const reduceMotion = useReducedMotion()
+  const stageTransition = { duration: reduceMotion ? 0 : 0.22, ease: "easeOut" as const }
   const lyricsView = lyricsToggleView(lyrics)
   const seekOwner = useRef<number | null>(null)
   const chrome = useMainChrome(open)
@@ -60,7 +71,8 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
     document.addEventListener("keydown", closeOnEscape)
     return () => document.removeEventListener("keydown", closeOnEscape)
   }, [open, onClose])
-  if (!open) return null
+  // 退场演完才卸载：舞台与它的 portal 一并移除（playback-stage 节点随之 detached）
+  if (!stageVisible) return null
 
   const player = runtime.player
   const notice = lyricsNoticeText(state.lyrics)
@@ -215,75 +227,85 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
 
   return createPortal(
     <MotionConfig reducedMotion="user">
-      <div
-        className="fixed inset-0 isolate z-40 overflow-hidden bg-background motion-safe:animate-in motion-safe:fade-in motion-safe:duration-200"
-        data-testid="playback-stage"
-      >
-        <AmllBackground playing={playing} hasLyric={hasLyric} albumUrl={trackCoverUrlOf(state.track)} />
-        <div className="absolute inset-0 bg-background/40" data-testid="playback-stage-dim" aria-hidden="true" />
-        <AutoLyricLayout
-          className="relative isolate h-full w-full"
-          data-testid="playback-stage-layout"
-          coverSlot={coverImage ? (
-            <Cover
-              coverUrl={coverUrl ?? undefined}
-              musicPaused={!playing}
-              className="motion-reduce:transition-none! motion-reduce:duration-0! motion-reduce:[&_*]:transition-none! motion-reduce:[&_*]:duration-0!"
-              data-testid="playback-stage-cover"
-              role="img"
-              aria-label={`${trackNameOf(state.track)}封面`}
-            />
-          ) : (
-            <Avatar className="size-full rounded-md" data-testid="playback-stage-cover-fallback">
-              <AvatarFallback className="rounded-md" aria-label="暂无封面"><Disc3Icon className="size-12" /></AvatarFallback>
-            </Avatar>
-          )}
-          controlsSlot={musicControls}
-          smallControlsSlot={musicControls}
-          lyricSlot={(
-            <div className="relative isolate h-full min-h-0 w-full" data-testid="playback-stage-lyrics-slot">
-              {hasLyric ? (
-                <AmllLyricsPanel
-                  runtime={runtime}
-                  lines={state.lyrics.lines}
-                  playing={playing}
-                  seekGeneration={state.seekGeneration}
+      {/* 开门/关门共用一条过场：opacity 0↔1、scale 0.985↔1，退场反向 */}
+      <AnimatePresence onExitComplete={() => setExiting(false)}>
+        {open ? (
+          <motion.div
+            key="playback-stage"
+            initial={{ opacity: 0, scale: 0.985 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.985 }}
+            transition={stageTransition}
+            className="fixed inset-0 isolate z-40 overflow-hidden bg-background"
+            data-testid="playback-stage"
+          >
+            <AmllBackground playing={playing} hasLyric={hasLyric} albumUrl={trackCoverUrlOf(state.track)} />
+            <div className="absolute inset-0 bg-background/40" data-testid="playback-stage-dim" aria-hidden="true" />
+            <AutoLyricLayout
+              className="relative isolate h-full w-full"
+              data-testid="playback-stage-layout"
+              coverSlot={coverImage ? (
+                <Cover
+                  coverUrl={coverUrl ?? undefined}
+                  musicPaused={!playing}
+                  className="motion-reduce:transition-none! motion-reduce:duration-0! motion-reduce:[&_*]:transition-none! motion-reduce:[&_*]:duration-0!"
+                  data-testid="playback-stage-cover"
+                  role="img"
+                  aria-label={`${trackNameOf(state.track)}封面`}
                 />
-              ) : null}
-              {notice === null ? null : (
-                <div className="absolute inset-0 flex items-center justify-center p-6">
-                  <p role="status" className="max-w-md text-center text-sm text-foreground">{notice}</p>
+              ) : (
+                <Avatar className="size-full rounded-md" data-testid="playback-stage-cover-fallback">
+                  <AvatarFallback className="rounded-md" aria-label="暂无封面"><Disc3Icon className="size-12" /></AvatarFallback>
+                </Avatar>
+              )}
+              controlsSlot={musicControls}
+              smallControlsSlot={musicControls}
+              lyricSlot={(
+                <div className="relative isolate h-full min-h-0 w-full" data-testid="playback-stage-lyrics-slot">
+                  {hasLyric ? (
+                    <AmllLyricsPanel
+                      runtime={runtime}
+                      lines={state.lyrics.lines}
+                      playing={playing}
+                      seekGeneration={state.seekGeneration}
+                    />
+                  ) : null}
+                  {notice === null ? null : (
+                    <div className="absolute inset-0 flex items-center justify-center p-6">
+                      <p role="status" className="max-w-md text-center text-sm text-foreground">{notice}</p>
+                    </div>
+                  )}
                 </div>
               )}
-            </div>
-          )}
-        />
-        {/* 收起 = 顶部整行：行高只占顶部一条带，箭头居中，行内任意位置可点（不用右上角叉号）。 */}
-        <Button
-          variant="ghost"
-          className="absolute inset-x-0 top-0 h-10 w-full rounded-none hover:bg-background/30 dark:hover:bg-foreground/10 motion-reduce:transition-none! motion-reduce:duration-0!"
-          aria-label="收起歌词"
-          onPointerDown={startRowPress}
-          onPointerMove={trackRowPress}
-          data-testid="playback-stage-close-row"
-          onClick={clickRow}
-        >
-          <ChevronDownIcon className="size-4" />
-        </Button>
-        {chrome.frameless ? (
-          <div className="absolute right-0 top-0 flex" data-testid="playback-stage-window-controls">
-            <Button variant="ghost" className={chromeButton} aria-label="最小化" onClick={() => chrome.act("minimize")}>
-              <MinusIcon className="size-4" />
+            />
+            {/* 收起 = 顶部整行：行高只占顶部一条带，箭头居中，行内任意位置可点（不用右上角叉号）。 */}
+            <Button
+              variant="ghost"
+              className="absolute inset-x-0 top-0 h-10 w-full rounded-none hover:bg-background/30 dark:hover:bg-foreground/10 motion-reduce:transition-none! motion-reduce:duration-0!"
+              aria-label="收起歌词"
+              onPointerDown={startRowPress}
+              onPointerMove={trackRowPress}
+              data-testid="playback-stage-close-row"
+              onClick={clickRow}
+            >
+              <ChevronDownIcon className="size-4" />
             </Button>
-            <Button variant="ghost" className={chromeButton} aria-label={chrome.maximized ? "还原" : "最大化"} onClick={() => chrome.act("toggle-maximize")}>
-              {chrome.maximized ? <CopyIcon className="size-3.5" /> : <SquareIcon className="size-3.5" />}
-            </Button>
-            <Button variant="ghost" className={chromeButton} aria-label="关闭窗口" onClick={() => chrome.act("close")}>
-              <XIcon className="size-4" />
-            </Button>
-          </div>
+            {chrome.frameless ? (
+              <div className="absolute right-0 top-0 flex" data-testid="playback-stage-window-controls">
+                <Button variant="ghost" className={chromeButton} aria-label="最小化" onClick={() => chrome.act("minimize")}>
+                  <MinusIcon className="size-4" />
+                </Button>
+                <Button variant="ghost" className={chromeButton} aria-label={chrome.maximized ? "还原" : "最大化"} onClick={() => chrome.act("toggle-maximize")}>
+                  {chrome.maximized ? <CopyIcon className="size-3.5" /> : <SquareIcon className="size-3.5" />}
+                </Button>
+                <Button variant="ghost" className={chromeButton} aria-label="关闭窗口" onClick={() => chrome.act("close")}>
+                  <XIcon className="size-4" />
+                </Button>
+              </div>
+            ) : null}
+          </motion.div>
         ) : null}
-      </div>
+      </AnimatePresence>
     </MotionConfig>,
     document.body,
   )

@@ -1470,15 +1470,17 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
     JSON.stringify(sheetLayering));
 
   await page.keyboard.press("Escape");
-  add("playback-stage-escape-closes", await stage.count() === 0, "没有上层弹窗时 ESC 关闭舞台");
+  // 关门有约 220ms 的退场过场：等它真的从 DOM 里退掉，而不是要求瞬时消失
+  const escapeClosed = await stage.waitFor({ state: "detached", timeout: guardScaledMs(3000) }).then(() => true, () => false);
+  add("playback-stage-escape-closes", escapeClosed, "没有上层弹窗时 ESC 关闭舞台（退场过场结束后卸载）");
 
   // 行内任意位置都能收起（点在行的左端，而不是箭头所在的中线上）
   await page.getByRole("button", { name: "歌词", exact: true }).click();
   await stage.waitFor();
   await page.waitForTimeout(600);
   await stage.click({ position: { x: 40, y: 20 } });
-  const closedByRow = await stage.count() === 0;
-  add("r54-stage-close-row-anywhere", closedByRow, "行的左端（远离箭头）点击同样收起沉浸页");
+  const closedByRow = await stage.waitFor({ state: "detached", timeout: guardScaledMs(3000) }).then(() => true, () => false);
+  add("r54-stage-close-row-anywhere", closedByRow, "行的左端（远离箭头）点击同样收起沉浸页（退场过场结束后卸载）");
 
   /**
    * 底栏总时长：队列摆好但一次都没播（音频没装载）时，读数要来自条目元数据秒数；
@@ -6111,8 +6113,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       const reopened = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-reopened-line.png`));
       add(`${theme}-paused-reopen`, reopened.ink > 60, JSON.stringify(reopened));
       await page.keyboard.press("Escape");
-      const escaped = await stage.count() === 0;
-      add(`${theme}-escape-close`, escaped, "无上层弹窗时 ESC 关闭舞台");
+      const escaped = await stage.waitFor({ state: "detached", timeout: guardScaledMs(3000) }).then(() => true, () => false);
+      add(`${theme}-escape-close`, escaped, "无上层弹窗时 ESC 关闭舞台（退场过场结束后卸载）");
       if (escaped) {
         await page.getByRole("button", { name: "打开歌词", exact: true }).click();
         await page.waitForTimeout(800);
