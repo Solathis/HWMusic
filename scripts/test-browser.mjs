@@ -4135,6 +4135,8 @@ export async function checkSettingsLogPane(page, guardDir, add) {
   );
 
   // 读失败：一句带下一步的提示，且不留旧内容冒充新结果
+  // 关掉自动刷新：5 秒定时器会抢先消费这一次失败读，CI 慢时必现竞态
+  await page.getByTestId("log-autorefresh").click();
   await page.evaluate(() => window.__guard.setRunLogPlan({ failTimes: 1 }));
   await page.getByTestId("log-refresh").click();
   await page.waitForTimeout(250);
