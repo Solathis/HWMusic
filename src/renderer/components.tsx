@@ -6,12 +6,14 @@
 import { useState } from "react"
 import type { ComponentType, ReactElement } from "react"
 import {
-  CaptionsIcon,
+  CaptionsOffIcon,
   ChevronDownIcon,
   HeartIcon,
   ListMusicIcon,
   MusicIcon,
+  PanelBottomIcon,
   PauseIcon,
+  PictureInPicture2Icon,
   PlayIcon,
   Repeat1Icon,
   RepeatIcon,
@@ -355,20 +357,46 @@ const MODE_ICONS = {
   shuffle: ShuffleIcon,
 }
 
+/** 歌词开关的状态投影：`lyricsToggleView` 的返回值，图标与标签都读它。 */
+export interface LyricsToggleView {
+  on: boolean
+  mode: "desktop" | "taskbar"
+  label: string
+}
+
 /**
  * 歌词快捷开关的唯一语义，播放栏与沉浸页都读它，不许各写一份。
  * 状态取 `requestedVisible ?? visible`（否则点下去先弹回原状），标签按模式说「桌面歌词」/「任务栏歌词」。
  */
-export function lyricsToggleView(lyrics?: LyricsWindowBinding | null): {
-  on: boolean
-  mode: "desktop" | "taskbar"
-  label: string
-} | null {
+export function lyricsToggleView(lyrics?: LyricsWindowBinding | null): LyricsToggleView | null {
   if (lyrics === null || lyrics === undefined) return null
   const on = (lyrics.requestedVisible ?? lyrics.visible) === true
   const mode = lyrics.config?.mode === "taskbar" ? "taskbar" : "desktop"
   const surface = mode === "taskbar" ? "任务栏歌词" : "桌面歌词"
   return { on, mode, label: `${on ? "隐藏" : "显示"}${surface}` }
+}
+
+/** 图标名 → lucide 组件：关闭 / 桌面小窗 / 任务栏一条。 */
+const LYRICS_TOGGLE_ICONS = {
+  CaptionsOff: CaptionsOffIcon,
+  PictureInPicture2: PictureInPicture2Icon,
+  PanelBottom: PanelBottomIcon,
+}
+
+/** 状态 + 模式 → 三个图标里的哪一个（唯一映射，`LyricsToggleIcon` 只负责把名字换成 lucide 组件）。 */
+export function lyricsToggleIconName(view: LyricsToggleView): keyof typeof LYRICS_TOGGLE_ICONS {
+  if (!view.on) return "CaptionsOff"
+  return view.mode === "taskbar" ? "PanelBottom" : "PictureInPicture2"
+}
+
+/** 播放栏与沉浸页共用，尺寸由调用方给。 */
+export function LyricsToggleIcon({ view, className }: {
+  view: LyricsToggleView | null
+  className?: string
+}) {
+  if (view === null) return null
+  const Icon = LYRICS_TOGGLE_ICONS[lyricsToggleIconName(view)]
+  return <Icon className={className} />
 }
 
 /** 歌词显示目标的快捷切换（播放栏与沉浸页共用，触发按钮由调用方给出）。 */
@@ -537,7 +565,8 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
                 data-testid="player-lyrics-toggle"
                 onClick={() => lyrics?.toggleVisible("player-bar")}
               >
-                <CaptionsIcon />
+                {/* 图标跟着模式走（关闭 / 桌面小窗 / 任务栏一条），尺寸交给按钮 */}
+                <LyricsToggleIcon view={lyricsView} />
               </Button>
               <LyricsTargetMenu lyrics={lyrics} surface="player-bar" trigger={
                 <Button variant="ghost" size="icon-sm" aria-label="选择歌词显示位置" data-testid="player-lyrics-target">

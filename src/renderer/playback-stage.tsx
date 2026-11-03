@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react"
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react"
 import { createPortal } from "react-dom"
 import { getCurrentWindow } from "@tauri-apps/api/window"
-import { CaptionsIcon, ChevronDownIcon, CopyIcon, Disc3Icon, ListMusicIcon, MinusIcon, PauseIcon, PlayIcon, SkipBackIcon, SkipForwardIcon, SquareIcon, VolumeXIcon, XIcon } from "lucide-react"
+import { ChevronDownIcon, CopyIcon, Disc3Icon, ListMusicIcon, MinusIcon, PauseIcon, PlayIcon, SkipBackIcon, SkipForwardIcon, SquareIcon, VolumeXIcon, XIcon } from "lucide-react"
 
 import { Avatar, AvatarFallback } from "./components/ui/avatar"
 import { Alert, AlertDescription } from "./components/ui/alert"
@@ -12,7 +12,7 @@ import { Button } from "./components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "./components/ui/dropdown-menu"
 import { AmllBackground, useAlbumImage } from "./AmllBackground.tsx"
 import { AmllLyricsPanel } from "./AmllLyricsPanel.tsx"
-import { LyricsTargetMenu, lyricsToggleView } from "./components.tsx"
+import { LyricsTargetMenu, LyricsToggleIcon, lyricsToggleView } from "./components.tsx"
 import { useMainChrome } from "./use-main-chrome.ts"
 import { lyricsNoticeText, playbackModeLabel } from "./features/playback/playback-state.mjs"
 import { PLAYBACK_MODES } from "./features/playback/player.mjs"
@@ -180,7 +180,7 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
         {lyricsView === null ? null : lyrics === null ? null : (
           <>
             <MediaButton className="size-8 shrink-0" aria-label={lyricsView.label} aria-pressed={lyricsView.on} data-testid="stage-lyrics-toggle" onClick={() => lyrics?.toggleVisible("playback-stage")}>
-              <CaptionsIcon className="size-4" />
+              <LyricsToggleIcon view={lyricsView} className="size-4" />
             </MediaButton>
             <LyricsTargetMenu lyrics={lyrics} surface="playback-stage" trigger={
               <MediaButton className="size-8 shrink-0" aria-label="选择歌词显示位置" data-testid="stage-lyrics-target"><ChevronDownIcon className="size-4" /></MediaButton>
