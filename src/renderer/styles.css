@@ -182,3 +182,12 @@
     @apply overflow-hidden bg-background text-foreground;
   }
 }
+
+/* 主题切换的整页淡变：这里是浏览器 View Transition 快照的时长（不是自绘动画），只在系统没要求减少动效时生效 */
+@media (prefers-reduced-motion: no-preference) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 220ms;
+    animation-timing-function: ease-out;
+  }
+}

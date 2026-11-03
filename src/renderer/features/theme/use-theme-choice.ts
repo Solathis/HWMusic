@@ -8,14 +8,21 @@ import { THEME_CHANGED } from "../../../shared/channels.ts"
 import { coreLoginChrome, onCoreEvent } from "../../host-api.ts"
 // 只借类型：声明由 `theme-sync.ts` 拥有，运行时不需要它（本文件要能被 node 测试直接 import）
 import type { ThemePayload } from "../../theme-sync.ts"
-import { applyThemeChoice, THEME_DEFAULT } from "./theme.mjs"
+import { applyThemeChoice, normalizeThemeChoice, runThemeTransition, THEME_DEFAULT } from "./theme.mjs"
 import { createThemeAcceptor } from "./theme-accept.mjs"
 
+/** 过渡的环境：延迟到调用时再取（node 测试直接 import 本文件时没有 `window`）。 */
+const themeEnv = () => ({ document: window.document, matchMedia: window.matchMedia?.bind(window) })
+
 /**
- * 把档位落到 `<html>` 上（切类仍只经 `theme.mjs` 的 `applyThemeChoice`，这里只补 document 根），
- * 返回**实际生效**的档位。
+ * 把档位落到 `<html>` 上：切类只经 `applyThemeChoice`、带不带淡变交给 `runThemeTransition`，
+ * 返回先算定的**实际生效**档位（过渡回调在下一帧，取不到返回值）。
  */
-const applyTheme = (choice: unknown): string => applyThemeChoice(document.documentElement, choice)
+const applyTheme = (choice: unknown): string => {
+  const applied = normalizeThemeChoice(choice) ?? THEME_DEFAULT
+  runThemeTransition(themeEnv(), () => applyThemeChoice(document.documentElement, applied))
+  return applied
+}
 
 /** 一次落地的**唯一接受器**：广播、读回、写回回执共用它（同一个 revision 水位）。 */
 export interface ThemeChoiceTracker {

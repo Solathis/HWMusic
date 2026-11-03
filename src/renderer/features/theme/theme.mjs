@@ -1,7 +1,8 @@
 /**
  * 主题三态（浅色 / 深色 / 跟随系统）的渲染层唯一真源。
  *
- * 状态归 Rust 持有，这里只有纯函数与把类落到 html 上这一个副作用；认不出的档位不猜，按系统档处理。
+ * 状态归 Rust 持有，这里只有纯函数与"把类落到 html 上"这一个副作用（淡变只决定这一步当场做还是交给
+ * `startViewTransition`）；认不出的档位不猜，按系统档处理。
  */
 
 /** 三个档位（磁盘与广播上的字面量，Rust 侧镜像同值）。 */
@@ -92,4 +93,49 @@ export function applyThemeChoice(root, choice) {
     }
   }
   return applied;
+}
+
+/** `startViewTransition` 是函数才算有这套 API（只挂了个同名的非函数属性不算）。 */
+function hasViewTransition(document_) {
+  return document_ !== null && typeof document_ === "object" && typeof document_.startViewTransition === "function";
+}
+
+/** 用户是否要求减少动效（`matchMedia` 不可调用时按没有这个偏好处理，与 CSS 默认一致）。 */
+function prefersReducedMotion(env) {
+  const matchMedia = env.matchMedia;
+  if (typeof matchMedia !== "function") return false;
+  const query = matchMedia("(prefers-reduced-motion: reduce)");
+  return query !== null && typeof query === "object" && query.matches === true;
+}
+
+/** 过渡被跳过/打断（窗口改尺寸、切标签页）时浏览器会 reject 自己的 promise：吃掉，别变成未处理拒绝。 */
+function ignoreTransitionAbort(transition) {
+  if (transition === null || typeof transition !== "object") return;
+  for (const promise of [transition.ready, transition.finished]) {
+    if (promise !== null && typeof promise === "object" && typeof promise.catch === "function") promise.catch(() => {});
+  }
+}
+
+/**
+ * 一次主题落地的**唯一时序入口**：有 View Transition API、页面可见、未要求减少动效才把 `apply` 交给
+ * `startViewTransition`（快照与过渡由浏览器做），其余情况当场落地。
+ * @param {{document?: unknown, matchMedia?: unknown}} env 环境（`document` 与已绑定 window 的 `matchMedia`）
+ * @param {() => unknown} apply 真正切类的那一步（即 `applyThemeChoice(root, choice)`）
+ * @returns {boolean} 是否真的起了过渡
+ */
+export function runThemeTransition(env, apply) {
+  const source = env !== null && typeof env === "object" ? env : {};
+  const document_ = source.document;
+  if (!hasViewTransition(document_) || document_.visibilityState !== "visible" || prefersReducedMotion(source)) {
+    apply();
+    return false;
+  }
+  try {
+    ignoreTransitionAbort(document_.startViewTransition(() => apply()));
+    return true;
+  } catch {
+    // 浏览器偶尔拒绝起过渡（例如同一次提交里已有别的过渡）：淡变可以不发生，主题不许因此不落地
+    apply();
+    return false;
+  }
 }

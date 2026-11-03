@@ -6,7 +6,10 @@
  */
 import { THEME_CHANGED } from "../shared/channels.ts"
 import { coreLoginChrome, onCoreEvent } from "./host-api"
-import { acceptThemePayload, applyThemeChoice, THEME_DEFAULT } from "./features/theme/theme.mjs"
+import { acceptThemePayload, applyThemeChoice, runThemeTransition, THEME_DEFAULT } from "./features/theme/theme.mjs"
+
+/** 过渡的环境：延迟到调用时再取（node 测试直接 import 本文件时没有 `window`）。 */
+const themeEnv = () => ({ document: window.document, matchMedia: window.matchMedia?.bind(window) })
 
 /** `theme:changed` 的载荷形状（与 `src/shared/channels.ts` 的说明同源）。 */
 export interface ThemePayload {
@@ -25,7 +28,8 @@ export async function installThemeSync(): Promise<() => void> {
     if (!verdict.accept) return false
     seen = verdict.seen
     const source = payload !== null && typeof payload === "object" ? (payload as ThemePayload) : null
-    applyThemeChoice(document.documentElement, source?.theme)
+    // 切类仍是 `applyThemeChoice`；带不带整页淡变由 `runThemeTransition` 按 API/可见/减少动效三条判定
+    runThemeTransition(themeEnv(), () => applyThemeChoice(document.documentElement, source?.theme))
     return true
   }
 
