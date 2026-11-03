@@ -166,6 +166,12 @@ function positiveInt(value, fallback) {
   return Number.isInteger(number) && number > 0 ? number : fallback;
 }
 
+/** 取址失败的日志行：只带音质与业务码/错误类别，不带地址也不带凭据。 */
+function playbackFailureLine(quality, error) {
+  const detail = isNonEmptyString(error?.message) ? error.message.trim() : String(error?.kind ?? "未知错误");
+  return `播放地址失败：quality=${String(quality).slice(0, 20)} code=${detail}`;
+}
+
 /** 解业务信封：HTTP 成功且 result.resultCode === "000000" 才算成功；返回整个响应体，容器由调用方取。 */
 export function decodeEnvelope(raw) {
   if (raw === null || typeof raw !== "object") return err("接口响应不是 JSON 对象", MUSIC_ERROR_KINDS.invalidResponse);
@@ -1640,9 +1646,7 @@ export function createMusicApi(options = {}) {
     return ok({ songs: normalized.songs, skipped: normalized.skipped, hasMore: false, reportedTotal: normalized.reportedTotal });
   }
 
-  /**
-   * 播放地址：`contentCode`/`contentType`/`qualityType` 进 JSON 体。
-   * 音质只认 standard/lossless，别的一律如实回 `quality_unsupported`——不猜也不用别的音质顶替。 */
+  /** 播放地址：音质只认 standard/lossless；只有业务错误（`api_error`）才换另一档重试一次。 */
   async function getPlayback(request = {}) {
     const trackId = request.trackId ?? request.id;
     if (!isNonEmptyString(trackId)) return err("播放地址接口需要 trackId", MUSIC_ERROR_KINDS.missingParam);
@@ -1651,8 +1655,24 @@ export function createMusicApi(options = {}) {
     if (qualityType === undefined) {
       return err(`不支持的音质：${String(quality).slice(0, 20)}（只认 standard / lossless）`, MUSIC_ERROR_KINDS.qualityUnsupported);
     }
+
+    const first = await playbackOnce(trackId.trim(), qualityType);
+    if (first.ok) return first;
+    if (first.error?.kind !== MUSIC_ERROR_KINDS.apiError) return first;
+
+    const retryQuality = quality === "lossless" ? "standard" : "lossless";
+    log(playbackFailureLine(quality, first.error));
+    log(`播放地址换一档重试：quality=${quality} → ${retryQuality}`);
+    const second = await playbackOnce(trackId.trim(), MUSIC_QUALITY_TYPES[retryQuality]);
+    if (second.ok) return second;
+    log(playbackFailureLine(retryQuality, second.error));
+    return second;
+  }
+
+  /** 单次取址（一档音质一次请求）：响应里没有可用地址同样算失败。 */
+  async function playbackOnce(contentCode, qualityType) {
     const result = await call("playback", {
-      params: { contentCode: trackId.trim(), contentType: "1", qualityType },
+      params: { contentCode, contentType: "1", qualityType },
     });
     if (!result.ok) return result;
     return parsePlaybackPayload(result.data, { isSafeUrl, flagKeys });

@@ -3,6 +3,7 @@
  * 端口全部注入：`audio`、`resolveUrl(trackId)`、`guardUrl(url)`（缺它就抛，闸门不能可选）、
  * `persistQueue`/`loadQueue`、`log`（只写该打扰的失败，绝不写播放地址）、`random`/`now`/`schedule`。
  * 状态里没有音频地址；每次装载领一个令牌，乱序应答整包丢掉；换队列 = 停止播放。
+ * 取不到地址时按当前模式自动跳下一首（连续最多 3 首），用 `notice` 说明而非错误；都失败才停回 error。
  */
 import { queueEntriesOf, queueRecordOf, restoredEntries, sanitizeQueueRecord } from "./queue.mjs";
 import { LYRICS_STATUS } from "../lyrics/lyrics-window.mjs";
@@ -49,6 +50,9 @@ export const POSITION_WRITE_INTERVAL_MS = 5000;
 
 /** 恢复位置至少要留下这么多可播时间；离结尾更近就当"听完了"，从 0 开始。 */
 export const RESUME_TAIL_MS = 3000;
+
+/** 连续跳歌上限：三首都取不到地址就停住，把最后那个失败交给界面。 */
+export const MAX_CONSECUTIVE_SKIPS = 3;
 
 /** 音频端口会发的事件（真实元素的适配见 audio-element.mjs）。 */
 export const PLAYER_AUDIO_EVENTS = ["ended", "error", "loadedmetadata", "durationchange", "timeupdate", "playing", "waiting"];
@@ -98,6 +102,20 @@ function textOf(cause) {
 
 function kindOf(cause) {
   return cause !== null && typeof cause === "object" && typeof cause.kind === "string" ? cause.kind : null;
+}
+
+/** 提示里的曲目称呼：有名字用名字，没有就用标识。 */
+function trackLabelOf(entry) {
+  if (entry !== null && typeof entry === "object") {
+    if (typeof entry.name === "string" && entry.name.trim() !== "") return entry.name.trim();
+    if (typeof entry.id === "string" && entry.id.trim() !== "") return entry.id.trim();
+  }
+  return "当前曲目";
+}
+
+/** 跳歌说明：不是错误，状态仍是 playing。 */
+function skipNoticeOf(skippedLabels) {
+  return `${skippedLabels.map((label) => `「${label}」`).join("、")}暂时无法播放，已跳到下一首`;
 }
 
 /**
@@ -175,6 +193,7 @@ export function createPlayer(options = {}) {
    * @type {{
    *   status: string,
    *   error: {kind: string, message: string}|null,
+   *   notice: string|null,
    *   entries: Array<import("./queue.mjs").QueueEntry>,
    *   index: number,
    *   track: import("./queue.mjs").QueueEntry|null,
@@ -193,6 +212,7 @@ export function createPlayer(options = {}) {
   let state = Object.freeze({
     status: PLAYER_STATUS.idle,
     error: null,
+    notice: null,
     entries: [],
     index: -1,
     track: null,
@@ -353,6 +373,24 @@ export function createPlayer(options = {}) {
   }
 
   /**
+   * 取不到地址时"下一首"落在哪（按当前模式）；单曲循环也前进，到头同样停住，没有下一首就是 `null`。
+   * @returns {number|null}
+   */
+  function skipTargetOf(index) {
+    const length = state.entries.length;
+    if (length <= 1) return null;
+    const target =
+      state.mode === "shuffle"
+        ? shuffleNext()
+        : state.mode === "list-loop"
+          ? (index + 1) % length
+          : index + 1;
+    // 绕回自己（只有单曲队列会这样，上面已经挡掉）或越界都不算"还有下一首"
+    if (!Number.isInteger(target) || target < 0 || target >= length || target === index) return null;
+    return target;
+  }
+
+  /**
    * 取地址 → 过闸门。任何一步失败都回结构化错误，**且消息里没有地址**。
    * @returns {Promise<{ok: true, url: string} | {ok: false, error: {kind: string, message: string}}>}
    */
@@ -437,8 +475,9 @@ export function createPlayer(options = {}) {
 
   /**
    * 装载并播放第 `index` 首（`manual: true` 在随机模式下以这一首开头重开一轮）。
+   * `skipped` 只在自动跳歌的递归里传（已跳过的曲目称呼）。
    */
-  async function start(index, { manual = true } = {}) {
+  async function start(index, { manual = true, skipped = [] } = {}) {
     if (state.entries.length === 0) {
       return failEmpty(PLAYER_ERROR_KINDS.queueEmpty, "播放队列是空的（先在列表里双击一首歌）");
     }
@@ -461,6 +500,8 @@ export function createPlayer(options = {}) {
       track: entry,
       playbackGeneration: state.playbackGeneration + 1,
       error: null,
+      // 一次新的开始 = 上一条跳歌说明到此为止（真跳过的会在装载成功后重新写上）
+      notice: null,
       ...(sameLoaded
         ? {}
         : {
@@ -475,7 +516,19 @@ export function createPlayer(options = {}) {
     if (!sameLoaded) {
       const resolved = await resolveAddress(entry.id);
       if (activeToken !== token) return done({ stale: true });
-      if (!resolved.ok) return failPlayback(resolved.error.kind, resolved.error.message);
+      if (!resolved.ok) {
+        const skippedLabels = [...skipped, trackLabelOf(entry)];
+        // 到连跳上限就不再往下翻（否则坏队列会被一路刷到底）
+        const exhausted = skippedLabels.length >= MAX_CONSECUTIVE_SKIPS;
+        const target = exhausted ? null : skipTargetOf(index);
+        // 没有下一首或已试满三首：走原来的失败路径，留下最后一次的错
+        if (target === null) {
+          log(`播放地址取不到，不再跳歌：${entry.id}｜${resolved.error.kind}｜连试 ${skippedLabels.length} 首`);
+          return failPlayback(resolved.error.kind, resolved.error.message);
+        }
+        log(`播放地址取不到，自动跳下一首：${entry.id}｜${resolved.error.kind}`);
+        return start(target, { manual: false, skipped: skippedLabels });
+      }
 
       loadedId = entry.id;
       audio.setSource(resolved.url);
@@ -490,6 +543,8 @@ export function createPlayer(options = {}) {
       publish({ loaded: true });
     }
 
+    // 说清跳过了哪几首：这是说明不是故障，状态照常进 playing
+    if (skipped.length > 0) publish({ notice: skipNoticeOf(skipped) });
     return playAudio(activeToken);
   }
 
@@ -514,8 +569,9 @@ export function createPlayer(options = {}) {
       return done({ status: state.status });
     }
     audio.pause();
-    publish({ status: PLAYER_STATUS.paused });
-    // 暂停是"可能就此关掉应用"的时刻：那一刻的位置立刻落盘，不等节流
+    // 暂停了：上一条跳歌说明也过时了
+    publish({ status: PLAYER_STATUS.paused, notice: null });
+    // 暂停后可能就此关掉应用：位置立刻落盘，不等节流
     flushPosition();
     return done({ status: PLAYER_STATUS.paused });
   }
@@ -590,6 +646,7 @@ export function createPlayer(options = {}) {
       currentTimeMs: 0,
       durationMs: totalDurationMsOf(index >= 0 ? entries[index] : null, 0),
       error: null,
+      notice: null,
     });
     persist();
     return done({ queueLength: entries.length, index });
@@ -676,6 +733,7 @@ export function createPlayer(options = {}) {
       currentTimeMs: 0,
       durationMs: 0,
       error: null,
+      notice: null,
     });
     persist();
     return done({ queueLength: 0 });

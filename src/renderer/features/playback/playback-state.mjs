@@ -45,11 +45,13 @@ export const PLAYER_STATUS_TEXT = {
   error: "播放出错。",
 };
 
-/** 状态 → 副标题；有错误时优先显示错误的人话。 */
+/** 状态 → 副标题：优先错误，其次 `notice`（更值得占这一行），最后才是状态本身。 */
 export function playerStatusText(state) {
   if (state !== null && typeof state === "object" && state.error !== null && state.error !== undefined) {
     return playbackFailureText(state.error);
   }
+  const notice = state !== null && typeof state === "object" ? state.notice : null;
+  if (typeof notice === "string" && notice.trim() !== "") return notice.trim();
   const status = state !== null && typeof state === "object" ? state.status : null;
   return PLAYER_STATUS_TEXT[status] ?? PLAYER_STATUS_TEXT.idle;
 }
