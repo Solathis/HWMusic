@@ -118,6 +118,7 @@ import {
 import { VIEW, createView, viewParam } from "./features/library/views.mjs"
 import { THEME_CHOICES, themeLabel } from "./features/theme/theme.mjs"
 import { useThemeChoice } from "./features/theme/use-theme-choice.ts"
+import { hasPlayable, offlineSetOf } from "./features/playback/offline.mjs"
 import {
   LYRICS_MODES,
   modeLabel,
@@ -488,7 +489,7 @@ export function PlaylistDetailPage({
   const title = playlistDetailTitleOf(playlist, viewParam(view, "name"))
   /** 两个动作的曲目：整表在内存时就是整张歌单，否则退回已加载的那批。 */
   const actionSongs = state.full ?? songs
-  const actionsDisabled = actionSongs.length === 0
+  const actionsDisabled = actionSongs.length === 0 || !hasPlayable(actionSongs, offlineSetOf(navigation.offlineIds))
 
   return (
     <div className="flex flex-col" data-testid="playlist-detail">

@@ -12,6 +12,10 @@ export function offlineSkippedText(count) {
   return `已跳过 ${count} 首已下架的歌曲`;
 }
 
+export function restoredOfflineText(count) {
+  return `上次的播放队列里有 ${count} 首已下架，已移出`;
+}
+
 /**
  * 下架清单 → 集合：只收非空字符串，去首尾空白；不是数组就是空集合。
  * @param {unknown} ids
@@ -52,6 +56,10 @@ export function partitionPlayable(items, offline) {
     else playable.push(item);
   }
   return { playable, dropped };
+}
+
+export function hasPlayable(items, offline) {
+  return Array.isArray(items) && items.some((item) => !isOfflineItem(item, offline));
 }
 
 /**

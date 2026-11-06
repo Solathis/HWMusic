@@ -140,12 +140,11 @@ export function restoredEntries(record) {
   });
 }
 
-/** 恢复队列时跳过文件已不在的本地曲目；被丢的正好是当前曲目就退到它前面最近的一首，进度字段一并清掉；全丢光回 null。 */
-export function dropUnavailableLocalEntries(raw, availableIds) {
+/** 恢复队列时按谓词跳过曲目；被丢的正好是当前曲目就退到它前面最近的一首，进度字段一并清掉；全丢光回 null。 */
+export function dropQueueEntries(raw, shouldDrop) {
   const clean = sanitizeQueueRecord(raw);
   if (clean === null) return { record: null, skipped: 0 };
 
-  const available = availableIds instanceof Set ? availableIds : new Set(availableIds ?? []);
   const kept = [];
   let currentAt = null;
   let fallbackAt = null;
@@ -153,14 +152,13 @@ export function dropUnavailableLocalEntries(raw, availableIds) {
 
   for (let position = 0; position < clean.ids.length; position += 1) {
     const id = clean.ids[position];
-    const isLocal = typeof id === "string" && id.startsWith("local:");
-    if (isLocal && !available.has(id)) {
+    if (shouldDrop(id)) {
       skipped += 1;
       continue;
     }
     if (position <= clean.index) fallbackAt = kept.length;
     if (position === clean.index) currentAt = kept.length;
-    kept.push({ id, metadata: clean.metadata?.[position] ?? null, origin: position });
+    kept.push({ id, metadata: clean.metadata?.[position] ?? null });
   }
 
   if (skipped === 0) return { record: clean, skipped: 0 };
@@ -183,4 +181,10 @@ export function dropUnavailableLocalEntries(raw, availableIds) {
     },
     skipped,
   };
+}
+
+/** 恢复队列时跳过文件已不在的本地曲目。 */
+export function dropUnavailableLocalEntries(raw, availableIds) {
+  const available = availableIds instanceof Set ? availableIds : new Set(availableIds ?? []);
+  return dropQueueEntries(raw, (id) => id.startsWith("local:") && !available.has(id));
 }
