@@ -15,11 +15,6 @@ function groupForProcess(process) {
   const directory = (match[1] ?? match[2]).replaceAll("\\", "/").replaceAll(/^\/+|\/+$/g, "");
   const withoutDrive = directory.replace(/^[A-Za-z]:\/?/, "");
   const parts = withoutDrive.split("/").filter(Boolean);
-  if (parts.length === 1 && parts[0].endsWith("EBWebView")) {
-    const compressed = parts[0].slice(0, -"EBWebView".length);
-    const parent = compressed.match(/webview2(.+)$/i)?.[1] ?? compressed;
-    return `webview:${parent}/EBWebView`;
-  }
   return `webview:${parts.slice(-2).join("/")}`;
 }
 
