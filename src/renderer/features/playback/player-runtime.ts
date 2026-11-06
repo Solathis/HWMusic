@@ -163,6 +163,7 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
     persistOfflineIds: async (ids: string[]) => {
       await writeSettingsPatch({ offlineTracks: ids });
     },
+    notify: deps.notify ?? ((text: string) => log(text)),
     log,
   });
 

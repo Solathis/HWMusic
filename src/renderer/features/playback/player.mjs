@@ -1,14 +1,16 @@
 /**
  * 播放状态机：一个 Audio 实例的全部行为都在这里，但这里没有 Audio。
  * 端口全部注入：`audio`、`resolveUrl(trackId)`、`guardUrl(url)`（缺它就抛，闸门不能可选）、
- * `persistQueue`/`loadQueue`、`log`（只写该打扰的失败，绝不写播放地址）、`random`/`now`/`schedule`。
+ * `persistQueue`/`loadQueue`、`log`（只写该打扰的失败，绝不写播放地址）、`notify`（一句话提示，缺省写日志）、`random`/`now`/`schedule`。
  * 状态里没有音频地址；每次装载领一个令牌，乱序应答整包丢掉；换队列 = 停止播放。
  * 取不到地址时按当前模式自动跳下一首（连续最多 3 首），用 `notice` 说明而非错误；都失败才停回 error。
  * 服务端已判定的下架/不存在曲目不占那 3 首（另有 30 首的天花板），换档与重试对它们没有意义。
- * 这些曲目的 id 会进状态的 `offlineIds`（列表据此变灰并禁播），并尽力落盘到设置里；那份清单只用于灰显。
+ * 这些曲目的 id 会进状态的 `offlineIds`（列表据此变灰并禁播），并尽力落盘到设置里；这份清单用于灰显、入队过滤与本地跳过。
+ * 入队、插队、整队替换时剔除已知下架的曲目并用 `notify` 说一句，轮到已知下架的那首就本地跳过、不再请求播放地址。
  * 音质只说服务端明确声明的那一档（`actualQuality`）：`unknown` / 缺失 / 本地曲目一律是 null，界面不许虚标。
  */
 import { queueEntriesOf, queueRecordOf, restoredEntries, sanitizeQueueRecord } from "./queue.mjs";
+import { ALL_OFFLINE_TEXT, offlineSkippedText, partitionPlayable, playableStartIndex } from "./offline.mjs";
 import { LYRICS_STATUS } from "../lyrics/lyrics-window.mjs";
 import { trackDurationOf } from "../library/track-fields.mjs";
 
@@ -172,6 +174,7 @@ function skipNoticeOf(skipped) {
  * @param {string[]} [options.initialOfflineIds] 启动时已知的下架曲目 id（读设置得到；之后靠 hydrateOfflineIds 补）
  * @param {(ids: string[]) => unknown} [options.persistOfflineIds] 下架曲目清单变长时落盘（fire-and-forget）
  * @param {(...parts: unknown[]) => void} [options.log]
+ * @param {(text: string) => void} [options.notify] 一句话提示（入队时剔除了已知下架曲目；不给就写日志）
  * @param {() => number} [options.random]
  * @param {() => number} [options.now]
  * @param {(callback: () => void, delayMs: number) => (() => void)} [options.schedule]
@@ -199,9 +202,10 @@ export function createPlayer(options = {}) {
 
   const persistQueue = typeof options.persistQueue === "function" ? options.persistQueue : async () => null;
   const loadQueue = typeof options.loadQueue === "function" ? options.loadQueue : async () => null;
-  /** 下架清单的落盘口（不给就只在本次进程里灰显，重启后重新"第一次遇到"再记一次）。 */
+  /** 下架清单的落盘口（不给就只在本次进程里认得这些曲目，重启后重新"第一次遇到"再记一次）。 */
   const persistOfflineIds = typeof options.persistOfflineIds === "function" ? options.persistOfflineIds : null;
   const log = typeof options.log === "function" ? options.log : () => {};
+  const notify = typeof options.notify === "function" ? options.notify : (text) => log(text);
   const random = typeof options.random === "function" ? options.random : Math.random;
   const now = typeof options.now === "function" ? options.now : () => Date.now();
   const schedule =
@@ -233,6 +237,9 @@ export function createPlayer(options = {}) {
   /** 位置变了但还没落盘的标记，以及那次尾随写的取消句柄。 */
   let positionDirty = false;
   let trailingCancel = null;
+  const initialOfflineIds = offlineIdsOf(options.initialOfflineIds);
+  /** 已知下架曲目的集合：与 `state.offlineIds` 同源、一起更新（入队过滤与本地跳过按它查）。 */
+  let offlineSet = new Set(initialOfflineIds);
 
   /**
    * 状态是不可变替换的：React 的 useSyncExternalStore 靠引用比较认变化。
@@ -267,7 +274,7 @@ export function createPlayer(options = {}) {
     track: null,
     loaded: false,
     quality: null,
-    offlineIds: offlineIdsOf(options.initialOfflineIds),
+    offlineIds: initialOfflineIds,
     currentTimeMs: 0,
     durationMs: 0,
     volume: DEFAULT_VOLUME,
@@ -334,15 +341,16 @@ export function createPlayer(options = {}) {
   }
 
   /**
-   * 记住一首"服务端已判下架/不存在"的曲目：进状态（列表据此变灰），并 fire-and-forget 落盘。
+   * 记住一首"服务端已判下架/不存在"的曲目：用于灰显、入队过滤与本地跳过，并 fire-and-forget 落盘。
    * 写不进去只是下次启动少了灰显，绝不影响这一首的跳歌——所以只记一行日志。
    */
   function rememberOffline(trackId) {
     if (typeof trackId !== "string" || trackId.trim() === "") return;
     const id = trackId.trim();
-    if (state.offlineIds.includes(id)) return;
+    if (offlineSet.has(id)) return;
     // 超过上限时丢最旧的：这份清单只求"最近见过的下架曲目"
     const offlineIds = [...state.offlineIds, id].slice(-MAX_OFFLINE_IDS);
+    offlineSet = new Set(offlineIds);
     publish({ offlineIds });
     if (persistOfflineIds === null) return;
     try {
@@ -362,6 +370,7 @@ export function createPlayer(options = {}) {
    */
   function hydrateOfflineIds(ids) {
     const merged = offlineIdsOf([...state.offlineIds, ...offlineIdsOf(ids)]);
+    offlineSet = new Set(merged);
     if (merged.length !== state.offlineIds.length) publish({ offlineIds: merged });
     return done({ offlineCount: merged.length });
   }
@@ -559,6 +568,27 @@ export function createPlayer(options = {}) {
   }
 
   /**
+   * 已知失败后按原有跳歌上限继续，或在无目标/到上限时停在错误态。
+   */
+  function skipOrFail(index, entry, error, skipped, { local = false } = {}) {
+    const skippedItems = [...skipped, { label: trackLabelOf(entry), kind: error.kind }];
+    const transient = skippedItems.filter((item) => !UNPLAYABLE_SKIP_KINDS.has(item.kind)).length;
+    const unplayable = skippedItems.length - transient;
+    const exhausted = transient >= MAX_CONSECUTIVE_SKIPS || unplayable >= MAX_UNPLAYABLE_SKIPS;
+    const target = exhausted ? null : skipTargetOf(index);
+    if (target === null) {
+      if (!local) {
+        log(`播放地址取不到，不再跳歌：${entry.id}｜${error.kind}｜临时失败 ${transient} 首、不可播 ${unplayable} 首`);
+      }
+      return failPlayback(error.kind, error.message);
+    }
+    if (!local) {
+      log(`播放地址取不到，自动跳下一首：${entry.id}｜${error.kind}｜临时失败 ${transient} 首、不可播 ${unplayable} 首`);
+    }
+    return start(target, { manual: false, skipped: skippedItems });
+  }
+
+  /**
    * 装载并播放第 `index` 首（`manual: true` 在随机模式下以这一首开头重开一轮）。
    * `skipped` 只在自动跳歌的递归里传（已跳过的曲目 `{label, kind}` 列表）。
    */
@@ -575,6 +605,15 @@ export function createPlayer(options = {}) {
     if (state.mode === "shuffle" && manual) rebuildOrder(index);
 
     const activeToken = (token += 1);
+    if (offlineSet.has(entry.id)) {
+      return skipOrFail(
+        index,
+        entry,
+        { kind: "content_offline", message: "已知已下架，本地跳过（未请求播放地址）" },
+        skipped,
+        { local: true },
+      );
+    }
     const resumeMs = !sameLoaded && resume !== null && resume.trackId === entry.id ? resume.positionMs : null;
     // 换到别的曲目：盘上的那个位置只属于恢复时的这一首，不许跟着走
     if (resume !== null && resume.trackId !== entry.id) resume = null;
@@ -606,21 +645,7 @@ export function createPlayer(options = {}) {
       if (!resolved.ok) {
         // 服务端已判下架/不存在：记进清单（列表据此变灰并禁播），再按原有规则决定跳不跳
         if (UNPLAYABLE_SKIP_KINDS.has(resolved.error.kind)) rememberOffline(entry.id);
-        const skippedItems = [...skipped, { label: trackLabelOf(entry), kind: resolved.error.kind }];
-        // 下架/不存在不是"临时失败"：它们不占连跳三首的额度，只有自己的天花板（失效歌单不该被刷到底）
-        const transient = skippedItems.filter((item) => !UNPLAYABLE_SKIP_KINDS.has(item.kind)).length;
-        const unplayable = skippedItems.length - transient;
-        const exhausted = transient >= MAX_CONSECUTIVE_SKIPS || unplayable >= MAX_UNPLAYABLE_SKIPS;
-        const target = exhausted ? null : skipTargetOf(index);
-        // 没有下一首或已到上限：走原来的失败路径，留下最后一次的错
-        if (target === null) {
-          log(
-            `播放地址取不到，不再跳歌：${entry.id}｜${resolved.error.kind}｜临时失败 ${transient} 首、不可播 ${unplayable} 首`,
-          );
-          return failPlayback(resolved.error.kind, resolved.error.message);
-        }
-        log(`播放地址取不到，自动跳下一首：${entry.id}｜${resolved.error.kind}｜临时失败 ${transient} 首、不可播 ${unplayable} 首`);
-        return start(target, { manual: false, skipped: skippedItems });
+        return skipOrFail(index, entry, resolved.error, skipped);
       }
 
       loadedId = entry.id;
@@ -719,8 +744,14 @@ export function createPlayer(options = {}) {
   }
 
   function setQueue(items, startIndex = 0) {
-    const entries = queueEntriesOf(items);
-    const index = entries.length === 0 ? -1 : clamp(Math.trunc(Number(startIndex) || 0), 0, entries.length - 1);
+    const { playable, dropped } = partitionPlayable(items, offlineSet);
+    if (playable.length === 0 && dropped > 0) {
+      notify(ALL_OFFLINE_TEXT);
+      return { ok: false, error: { kind: "content_offline", message: ALL_OFFLINE_TEXT } };
+    }
+    if (dropped > 0) notify(offlineSkippedText(dropped));
+    const entries = queueEntriesOf(playable);
+    const index = entries.length === 0 ? -1 : playableStartIndex(items, startIndex, offlineSet);
     // 换队列 = 停止播放：音频里装着的还是上一首，装作没发生只会播错歌
     token += 1;
     loadedId = null;
@@ -743,7 +774,7 @@ export function createPlayer(options = {}) {
       notice: null,
     });
     persist();
-    return done({ queueLength: entries.length, index });
+    return done({ queueLength: entries.length, index, ...(dropped > 0 ? { skippedOffline: dropped } : {}) });
   }
 
   async function playQueue(items, startIndex = 0) {
@@ -752,18 +783,22 @@ export function createPlayer(options = {}) {
     if (queued.data.queueLength === 0) {
       return failEmpty(PLAYER_ERROR_KINDS.queueEmpty, "播放队列是空的（先在列表里双击一首歌）");
     }
-    return start(queued.data.index, { manual: true });
+    const result = await start(queued.data.index, { manual: true });
+    if (!result.ok || queued.data.skippedOffline === undefined) return result;
+    return { ...result, data: { ...result.data, skippedOffline: queued.data.skippedOffline } };
   }
 
   /**
    * 往队列末尾追加：只动落点，不动正在播的那一首。
    * 空队列时追加 = 建立队列并停在第一首（不自动开播），不去重、不排序，已装载的那首不动；空列表不写盘。
-   * @returns {{ok: true, data: {added: number, queueLength: number, index: number}}}
+   * @returns {{ok: true, data: {added: number, queueLength: number, index: number, skippedOffline?: number}}}
    */
   function enqueue(items) {
-    const appended = queueEntriesOf(items);
+    const { playable, dropped } = partitionPlayable(items, offlineSet);
+    if (dropped > 0) notify(offlineSkippedText(dropped));
+    const appended = queueEntriesOf(playable);
     if (appended.length === 0) {
-      return done({ added: 0, queueLength: state.entries.length, index: state.index });
+      return done({ added: 0, queueLength: state.entries.length, index: state.index, ...(dropped > 0 ? { skippedOffline: dropped } : {}) });
     }
     const entries = [...state.entries, ...appended];
     // 原本空队列：索引指向新队列的第一首（状态从"没得放"变成"可以放"，但仍不自动开播）
@@ -777,16 +812,18 @@ export function createPlayer(options = {}) {
       error: null,
     });
     persist();
-    return done({ added: appended.length, queueLength: entries.length, index });
+    return done({ added: appended.length, queueLength: entries.length, index, ...(dropped > 0 ? { skippedOffline: dropped } : {}) });
   }
 
   /**
    * 插到当前曲目之后（「下一首播放」）：与 `enqueue` 只差落点，其余纪律一致。
    */
   function playNext(items) {
-    const appended = queueEntriesOf(items);
+    const { playable, dropped } = partitionPlayable(items, offlineSet);
+    if (dropped > 0) notify(offlineSkippedText(dropped));
+    const appended = queueEntriesOf(playable);
     if (appended.length === 0) {
-      return done({ added: 0, queueLength: state.entries.length, index: state.index });
+      return done({ added: 0, queueLength: state.entries.length, index: state.index, ...(dropped > 0 ? { skippedOffline: dropped } : {}) });
     }
     const at = state.index < 0 ? 0 : state.index + 1;
     const shiftOrder = state.index >= 0 && order.length === state.entries.length;
@@ -806,7 +843,7 @@ export function createPlayer(options = {}) {
       error: null,
     });
     persist();
-    return done({ added: appended.length, queueLength: entries.length, index });
+    return done({ added: appended.length, queueLength: entries.length, index, ...(dropped > 0 ? { skippedOffline: dropped } : {}) });
   }
 
   function clear() {
