@@ -283,6 +283,18 @@ function coverUrlOf(item, isSafeUrl) {
   return null;
 }
 
+/** 小封面地址：按 300px、较大图与旧字段顺序取第一个通过 CDN 白名单的地址。 */
+export function thumbUrlOf(item, isSafeUrl = isSafeMediaUrl) {
+  if (!isObject(item)) return null;
+  const picture = isObject(item.picture) ? item.picture : {};
+  const candidates = [picture.smallImgURL, picture.middleImgURL, picture.bigImgURL, item.coverUrl, item.cover];
+  for (const candidate of candidates) {
+    const value = textOf(candidate);
+    if (value !== null && isSafeUrl(value)) return value;
+  }
+  return null;
+}
+
 /**
  * 时长上限（秒）：超过 24 小时的"时长"一律是坏数据，宁可显示占位符。
  */
@@ -383,6 +395,7 @@ export function normalizeTrack(item, options = {}) {
   const albumId = textOf(item.albumID ?? item.albumId ?? albumPair?.id ?? albumPair?.albumID);
   const albumName = textOf(item.albumName ?? albumPair?.name ?? albumPair?.albumName);
   const coverUrl = coverUrlOf(item, isSafeUrl);
+  const thumbUrl = thumbUrlOf(item, isSafeUrl);
   if (typeof options.onLyricAddress === "function") {
     const lyricAddress = lyricAddressOf(item, { isSafeUrl });
     if (lyricAddress !== null) options.onLyricAddress(id, lyricAddress);
@@ -394,6 +407,7 @@ export function normalizeTrack(item, options = {}) {
   if (albumId !== null) track.albumId = albumId;
   if (albumName !== null) track.albumName = albumName;
   if (coverUrl !== null) track.coverUrl = coverUrl;
+  if (thumbUrl !== null) track.thumbUrl = thumbUrl;
   const duration = durationOfEntry(item);
   if (duration !== null) track.duration = duration;
   return track;
@@ -412,10 +426,12 @@ export function normalizePlaylist(item, options = {}) {
   const contentType = item.contentType === undefined || item.contentType === null ? null : String(item.contentType);
   const count = numberOrNull(item.totalCount ?? item.songCount ?? item.count);
   const coverUrl = coverUrlOf(item, isSafeUrl);
+  const thumbUrl = thumbUrlOf(item, isSafeUrl);
   const playlist = { id, name, kind: PLAYLIST_KINDS[contentType] ?? "unknown" };
   if (contentType !== null) playlist.contentType = contentType;
   if (count !== null) playlist.count = count;
   if (coverUrl !== null) playlist.coverUrl = coverUrl;
+  if (thumbUrl !== null) playlist.thumbUrl = thumbUrl;
   const description = textOf(item.listDesc ?? item.description);
   if (description !== null) playlist.description = description;
   return playlist;

@@ -138,6 +138,12 @@ export function trackCoverUrlOf(item) {
   return null;
 }
 
+/** 列表小封面优先读协议层预先筛过的 300px 图，老数据与本地曲目退回完整封面。 */
+export function trackThumbUrlOf(item) {
+  if (!isObject(item)) return null;
+  return textOf(item.thumbUrl) ?? trackCoverUrlOf(item);
+}
+
 /** 时长读数只认 `duration` 秒数：单位与键名换算都在协议层收口，越界值回 null 而不是原样返回。 */
 const TRACK_DURATION_SECONDS_LIMIT = 24 * 3600;
 

@@ -55,6 +55,7 @@ import {
   trackArtistsOf,
   trackCoverUrlOf,
   trackDurationOf,
+  trackThumbUrlOf,
   trackIdOf,
   trackNameOf,
   formatDuration,
@@ -298,7 +299,7 @@ export function TrackTable({
                   <TableCell className="font-medium">
                     {/* 小封面：`<img>` + 占位兜底见 CoverArt，地址来自协议层的白名单投影 */}
                     <div className="flex min-w-0 items-center gap-2">
-                      <CoverArt coverUrl={trackCoverUrlOf(song)} className="size-9 rounded-md" iconClassName="size-4" />
+                      <CoverArt coverUrl={trackThumbUrlOf(song)} className="size-9 rounded-md" iconClassName="size-4" />
                       <TrackTitle text={trackNameOf(song)} offline={isOffline} />
                       {/* 文件不在就写在这里，行本身留着（用户还看得见、还能移除） */}
                       {isUnavailable ? (
