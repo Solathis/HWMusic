@@ -6030,11 +6030,10 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       await bar.getByRole("button", { name: "暂停", exact: true }).click();
       await resumePage.waitForTimeout(300);
       const writes = await resumePage.evaluate(() => window.__guard.settingsWrites());
-      const lastQueue = writes.at(-1)?.patch?.queue ?? null;
+      const lastPosition = writes.at(-1)?.patch?.queuePosition ?? null;
       add("r64-pause-persists-position",
-        lastQueue !== null && lastQueue.positionTrackId === "guard-b" && lastQueue.positionMs > 5000
-          && lastQueue.index === 1,
-        JSON.stringify({ lastQueue, writes: writes.length, resumed: resumed.currentTimeMs }));
+        lastPosition !== null && lastPosition.trackId === "guard-b" && lastPosition.positionMs > 5000,
+        JSON.stringify({ lastPosition, writes: writes.length, resumed: resumed.currentTimeMs }));
       add("r64-no-runtime-errors", resumeErrors.length === 0, JSON.stringify(resumeErrors.slice(0, 3)));
       await resumePage.close();
     });
