@@ -3,8 +3,9 @@
  * 单例在模块层、不在 useRef：严格模式会双挂载，音频元素 / 媒体会话 / 广播订阅建在 ref 里就会有两个 Audio 同时出声。
  * 用 useSyncExternalStore：状态机每次变化都换新状态对象，引用比较就是可靠的「变没变」判据。
  */
-import { useSyncExternalStore } from "react";
+import { useMemo, useSyncExternalStore } from "react";
 
+import { createSelectorCache, selectShellView } from "./player-view.mjs";
 import { getPlayerRuntime, type PlayerRuntime } from "./player-runtime.ts";
 
 /**
@@ -35,4 +36,20 @@ export function usePlayer(): PlayerBinding {
     () => runtime.player.snapshot(),
   );
   return { runtime, state };
+}
+
+export function usePlayerSelector<T>(select: (state: PlayerState) => T): T {
+  const runtime = getPlayerRuntime();
+  const cache = useMemo(() => createSelectorCache(select), [select]);
+  return useSyncExternalStore(
+    (listener) => runtime.player.subscribe(listener),
+    () => cache(runtime.player.snapshot()),
+    () => cache(runtime.player.snapshot()),
+  );
+}
+
+export function usePlayerShell(): { runtime: PlayerRuntime; queue: ReturnType<typeof selectShellView> } {
+  const runtime = getPlayerRuntime();
+  const queue = usePlayerSelector(selectShellView);
+  return { runtime, queue };
 }

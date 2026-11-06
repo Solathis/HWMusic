@@ -3,7 +3,7 @@
  * 滚动到哨兵就加载下一页；总数与已加载数分开显示——没走完分页只能说"已加载 N 首"。
  * 失败不清空已加载内容、不自动重试（离线时那是请求风暴），只给一个重试按钮。
  */
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 
 import { Alert, AlertDescription } from "./components/ui/alert"
 import { Button } from "./components/ui/button"
@@ -49,7 +49,7 @@ export interface FavoritesPageProps extends TrackRowActions {
   offlineIds?: string[]
 }
 
-export function FavoritesPage({
+function FavoritesPageView({
   active,
   onActivateTrack,
   onOpenAlbum,
@@ -194,3 +194,5 @@ export function FavoritesPage({
     </div>
   )
 }
+
+export const FavoritesPage = memo(FavoritesPageView)

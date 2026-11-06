@@ -3,7 +3,7 @@
  *
  * checking → 中性启动屏；logged_out → LoginGate；logged_in → app-shell（LibraryShell 必须晚于判定挂载）。
  */
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   FileMusicIcon,
   HistoryIcon,
@@ -84,7 +84,9 @@ import {
   accountNameText,
   accountVipText,
 } from "./features/auth/account.mjs"
-import { usePlayer } from "./features/playback/use-player.ts"
+import { usePlayer, usePlayerShell } from "./features/playback/use-player.ts"
+import type { PlayerBarProps } from "./components.tsx"
+import type { PlaybackStageProps } from "./playback-stage.tsx"
 import { useLyricsWindow } from "./use-lyrics-window.ts"
 import {
   NAV_LIST_TESTID,
@@ -142,6 +144,51 @@ const NAV_ICONS = {
  * 侧栏顶部的常驻搜索入口，必须是一个在 SidebarProvider 之内的组件（useSidebar 只在那里可用）。
  * 窄轨形态只留一枚图标按钮：点它先展开侧栏，再把光标交给输入框。
  */
+function LivePlayerBar({ onOpenStage, lyrics }: Pick<PlayerBarProps, "onOpenStage" | "lyrics">) {
+  const { runtime, state } = usePlayer()
+  return <PlayerBar runtime={runtime} state={state} onOpenStage={onOpenStage} lyrics={lyrics} />
+}
+
+function LivePlaybackStage({ open, onClose, lyrics }: Pick<PlaybackStageProps, "open" | "onClose" | "lyrics">) {
+  const { runtime, state } = usePlayer()
+  return <PlaybackStage open={open} runtime={runtime} state={state} onClose={onClose} lyrics={lyrics} />
+}
+
+function useLyricsWindowBinding(runtime: Parameters<typeof useLyricsWindow>[0], playback: Parameters<typeof useLyricsWindow>[1]) {
+  return useLyricsWindow(runtime, playback)
+}
+
+function createRowActions(onPlayNext: (songs: unknown[]) => void, onEnqueue: (songs: unknown[]) => void) {
+  const rowActions = { onPlayNext, onEnqueue }
+  return rowActions
+}
+
+function QueuePanelView({
+  queue,
+  runtime,
+  rowActions,
+}: {
+  queue: ReturnType<typeof import("./features/playback/player-view.mjs").selectShellView>
+  runtime: PlayerBarProps["runtime"]
+  rowActions: ReturnType<typeof createRowActions>
+}) {
+  const playback = queue
+  return (
+    <QueuePanel
+      entries={playback.entries}
+      index={playback.index}
+      offlineIds={playback.offlineIds}
+      onSelect={(position) => {
+        void runtime.player.playAt(position)
+      }}
+      onClear={() => {
+        runtime.player.clear()
+      }}
+      {...rowActions}
+    />
+  )
+}
+
 function SidebarSearch({
   keyword,
   onKeywordChange,
@@ -219,12 +266,12 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
    * 运行日志：订阅留在这里（设置页只在切到设置时挂载），外壳收、页面只渲染。
    */
   const notices = useNoticeLog()
-  // 播放运行时是模块级单例（音频/媒体会话/广播都只能有一份），hook 只负责订阅状态
-  const { runtime, state: playback } = usePlayer()
+  // 播放运行时是模块级单例（音频/媒体会话/广播都只能有一份），外壳只订阅队列投影
+  const { runtime, queue } = usePlayerShell()
   /**
    * 桌面歌词窗的接线：托盘勾选 → 建/显/隐窗口，歌词文本与进度推送共用 player.setLyrics。
    */
-  const lyrics = useLyricsWindow(runtime, playback)
+  const lyrics = useLyricsWindowBinding(runtime, queue)
 
   const navigate = useCallback((next: unknown) => {
     setView(normalizeView(next))
@@ -335,13 +382,15 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
   )
 
   /** 行菜单的动作包：页面够不到播放运行时，外壳随 `navigation` 一起交下去。 */
-  const rowActions = { onPlayNext, onEnqueue }
+  const rowActions = useMemo(() => createRowActions(onPlayNext, onEnqueue), [onPlayNext, onEnqueue])
   /**
    * 已知下架的曲目 id（播放状态里那份）：随 `navigation` 交给各页面，列表据此把行变灰。
    * 只透传，不是第二份状态——判据只有播放状态一处。
    */
-  const offlineIds = playback.offlineIds
-  const navigation = { onActivateTrack, onOpenAlbum, onOpenArtist, rowActions, offlineIds }
+  const navigation = useMemo(
+    () => ({ onActivateTrack, onOpenAlbum, onOpenArtist, rowActions, offlineIds: queue.offlineIds }),
+    [onActivateTrack, onOpenAlbum, onOpenArtist, rowActions, queue.offlineIds],
+  )
 
   /** 账号资料的四项投影（缺什么兜什么，绝不编：见 features/auth/account.mjs）。 */
   const accountName = accountNameText(profile)
@@ -381,7 +430,7 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
         // 托盘可用性、桌面歌词配置、运行日志同理：查一次、交下去。
         return (
           <SettingsPage
-            queue={playback}
+            queue={queue}
             trayAvailable={trayAvailable ?? TRAY_AVAILABLE}
             lyrics={lyrics}
             notices={notices}
@@ -516,18 +565,7 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
                   <SheetTitle>播放队列</SheetTitle>
                   <SheetDescription>双击列表里的曲目会替换整个队列。</SheetDescription>
                 </SheetHeader>
-                <QueuePanel
-                  entries={playback.entries}
-                  index={playback.index}
-                  offlineIds={playback.offlineIds}
-                  onSelect={(position) => {
-                    void runtime.player.playAt(position)
-                  }}
-                  onClear={() => {
-                    runtime.player.clear()
-                  }}
-                  {...rowActions}
-                />
+                <QueuePanelView queue={queue} runtime={runtime} rowActions={rowActions} />
               </SheetContent>
             </Sheet>
           </div>
@@ -541,21 +579,15 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
             onActivateTrack={onActivateTrack}
             onOpenAlbum={onOpenAlbum}
             onOpenArtist={onOpenArtist}
-            offlineIds={playback.offlineIds}
+            offlineIds={queue.offlineIds}
             {...rowActions}
           />
         </div>
 
         {/* 封面/曲目信息也是进入播放页的入口；`lyrics` 是外壳唯一的 binding，两处共用。 */}
-        <PlayerBar runtime={runtime} state={playback} onOpenStage={() => setStageOpen(true)} lyrics={lyrics} />
+        <LivePlayerBar onOpenStage={() => setStageOpen(true)} lyrics={lyrics} />
       </SidebarInset>
-      <PlaybackStage
-        open={stageOpen}
-        runtime={runtime}
-        state={playback}
-        onClose={() => setStageOpen(false)}
-        lyrics={lyrics}
-      />
+      <LivePlaybackStage open={stageOpen} onClose={() => setStageOpen(false)} lyrics={lyrics} />
     </SidebarProvider>
   )
 }
