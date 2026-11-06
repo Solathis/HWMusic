@@ -784,8 +784,8 @@ export function createPlayer(options = {}) {
       return failEmpty(PLAYER_ERROR_KINDS.queueEmpty, "播放队列是空的（先在列表里双击一首歌）");
     }
     const result = await start(queued.data.index, { manual: true });
-    if (!result.ok || queued.data.skippedOffline === undefined) return result;
-    return { ...result, data: { ...result.data, skippedOffline: queued.data.skippedOffline } };
+    if (queued.data.skippedOffline === undefined) return result;
+    return { ...result, data: { ...(result.data ?? {}), skippedOffline: queued.data.skippedOffline } };
   }
 
   /**
