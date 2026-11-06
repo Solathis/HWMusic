@@ -371,6 +371,13 @@ export function normalizeTrack(item, options = {}) {
   if (!isObject(item)) return null;
   const id = textOf(item.contentID ?? item.contentId ?? item.songCode) ?? trackIdOf(item);
   if (id === null) return null;
+  if (typeof options.inspectItem === "function") {
+    try {
+      options.inspectItem(id, item);
+    } catch {
+      // 诊断口不能改变列表归一化结果。
+    }
+  }
   const name = textOf(item.contentName ?? item.songName) ?? textOf(item.name);
   const albumPair = isObject(item.albumNamePair) ? item.albumNamePair : null;
   const albumId = textOf(item.albumID ?? item.albumId ?? albumPair?.id ?? albumPair?.albumID);
@@ -598,6 +605,26 @@ function contentExInfoOf(raw) {
   return null;
 }
 
+function availabilityValueOf(value) {
+  return value === undefined || value === null ? "-" : String(value).slice(0, 8);
+}
+
+/** 只读取列表条目里七个待取证字段；缺失为 `-`，不对任何字段作可播判定。 */
+export function availabilitySignatureOf(raw) {
+  const extra = contentExInfoOf(raw);
+  return [
+    ["status", raw?.status],
+    ["sub", extra?.substatus],
+    ["stream", extra?.minPrivilege?.streaming],
+    ["download", extra?.minPrivilege?.download],
+    ["dimmed", extra?.dimmedField?.length],
+    ["vip", extra?.vip],
+    ["fragment", extra?.playFragmentFlag],
+  ]
+    .map(([key, value]) => `${key}=${availabilityValueOf(value)}`)
+    .join("|");
+}
+
 /** 歌词候选容器：响应本体与内嵌 songInfo（同一曲目条目形状），取出的地址都要过 CDN 白名单。 */
 function lyricContainersOf(raw) {
   const containers = [raw];
@@ -692,6 +719,7 @@ function favoritesHasMore(received, limit) {
  *          isSafeUrl?: (url: string) => boolean, timeoutMs?: number,
  *          discoveryLimit?: number, discoveryPageCap?: number,
  *          lyricIndexLimit?: number, lyricMemoryLimit?: number, log?: Function,
+ *          inspectListItem?: (id: string, raw: object) => void,
  *          lyricsCache?: object|null, lyricsFallback?: Function|null}} options
  */
 export function createMusicApi(options = {}) {
@@ -938,7 +966,11 @@ export function createMusicApi(options = {}) {
   }
 
   /** 曲目归一化的共同选项：白名单校验 + 顺手把歌词地址记进索引（唯一一处拼它）。 */
-  const trackOptions = { isSafeUrl, onLyricAddress: rememberLyricAddress };
+  const trackOptions = {
+    isSafeUrl,
+    onLyricAddress: rememberLyricAddress,
+    ...(typeof options.inspectListItem === "function" ? { inspectItem: options.inspectListItem } : {}),
+  };
 
   /** 当前音乐会话（对象或"返回对象的函数"两种传法都认）。 */
   function currentSession() {

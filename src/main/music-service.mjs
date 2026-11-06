@@ -85,6 +85,7 @@ function sessionOf(session) {
  * @param {Function} [options.now] 注入时钟（Digest created）
  * @param {object} [options.lyricsCache] 歌词磁盘缓存端口
  * @param {Function} [options.lyricsFallback] 第三方歌词回退
+ * @param {Function} [options.inspectListItem] 列表条目诊断探针
  */
 export function createMusicService({
   settingsData,
@@ -97,6 +98,7 @@ export function createMusicService({
   log,
   lyricsCache,
   lyricsFallback,
+  inspectListItem,
 } = {}) {
   const { endpoints, disabled } = resolveMusicEndpoints(settingsData);
 
@@ -125,6 +127,7 @@ export function createMusicService({
     ...(pageSize === undefined ? {} : { pageSize }),
     // 诊断口：只记键名；协议层不写日志，装配处不给就没有输出。
     ...(typeof log === "function" ? { log } : {}),
+    ...(typeof inspectListItem === "function" ? { inspectListItem } : {}),
     // 歌词的磁盘缓存与第三方回退（都是可选端口：不给就是默认行为）。
     ...(lyricsCache === undefined || lyricsCache === null ? {} : { lyricsCache }),
     ...(typeof lyricsFallback === "function" ? { lyricsFallback } : {}),
