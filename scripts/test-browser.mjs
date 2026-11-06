@@ -4613,13 +4613,13 @@ export async function checkLibraryPagination(page, guardDir, add) {
     && (await failure.count()) === 0 && (await rowCount()) === 50,
   JSON.stringify({ failureText: failureText.slice(0, 30), albumCalls: albumCalls.map((call) => call.page) }));
 
-  // ⑧ 歌手页：后端不分页（一次响应 120 首），本地每批 50，页面不挂说明文案
+  // ⑧ 歌手页：后端不分页（一次响应 120 首），本地每批 50，工具栏显示已揭示条数
   await table.getByRole("button", { name: "守卫艺人", exact: true }).first().click();
   await visibleRowsIn(50);
   const artistStatus = await statusText();
   const artistCalls = await callsOf("library:artist");
   add("pagination-local-reveal-first-batch", artistCalls.length === 1 && (await rowCount()) === 50
-    && artistStatus === "" && (await page.getByTestId("list-pagination-status").count()) === 0,
+    && artistStatus.trim() === "共 50 首" && (await page.getByTestId("list-pagination-status").count()) === 1,
   JSON.stringify({ artistCalls: artistCalls.length, artistStatus }));
   await wheelContent(20000);
   await visibleRowsIn(100);
@@ -4635,7 +4635,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
   await visibleRowsIn(50);
   const historyStatus = await statusText();
   add("pagination-history-local-batch", (await callsOf("library:history")).length === 1
-    && (await rowCount()) === 50 && historyStatus === "",
+    && (await rowCount()) === 50 && historyStatus.trim() === "共 50 首",
   JSON.stringify({ historyStatus }));
   await page.screenshot({ path: path.join(guardDir, "r55-playlist-history.png") });
 
@@ -5327,7 +5327,7 @@ export async function checkLocalSongs(page, port, guardDir, add) {
 
   // ——— ③ 空态：没有本地曲目时那句话 + 导入按钮 ———
   await open("empty");
-  const emptyNode = pageRoot.getByRole("status");
+  const emptyNode = pageRoot.getByText("还没有导入本地歌曲。", { exact: true });
   await emptyNode.waitFor();
   const emptyText = ((await emptyNode.textContent()) ?? "").trim();
   add("r65-local-empty-state",

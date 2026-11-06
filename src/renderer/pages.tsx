@@ -34,7 +34,7 @@ import {
 } from "./components/ui/select"
 import { Switch } from "./components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs"
-import { CoverArt, EmptyState, ListSkeleton, LoadFailed, TrackTable } from "./components"
+import { CoverArt, EmptyState, ListSkeleton, LoadFailed, TrackListToolbar, TrackTable } from "./components"
 import { AmllBackground } from "./AmllBackground.tsx"
 import type { TrackRowActions } from "./track-menu.tsx"
 import { LogTerminal } from "./log-terminal.tsx"
@@ -108,6 +108,7 @@ import {
   markSentinelAway,
   nextPageOf,
   paginationNoticeText,
+  listCountText,
   resetPagination,
   retryPagination,
   revealMore,
@@ -379,17 +380,9 @@ function BrowsableTrackList({
 }) {
   return (
     <div className="flex flex-col">
+      <TrackListToolbar status={status} statusTestId={PAGINATION_STATUS_TESTID} />
       {error === null ? null : (
-        <Alert variant="destructive" className="mx-4 mb-3" data-testid={PAGINATION_FAILURE_TESTID}>
-          <AlertDescription>{error}</AlertDescription>
-          {onRetry === undefined ? null : (
-            <AlertAction>
-              <Button variant="secondary" size="sm" onClick={onRetry} data-testid={PAGINATION_RETRY_TESTID}>
-                重试
-              </Button>
-            </AlertAction>
-          )}
-        </Alert>
+        <LoadFailed text={error} onRetry={onRetry} testId={PAGINATION_FAILURE_TESTID} retryTestId={PAGINATION_RETRY_TESTID} />
       )}
 
       {items.length === 0 ? (
@@ -418,15 +411,6 @@ function BrowsableTrackList({
       )}
 
       {loading && items.length > 0 ? <ListSkeleton count={2} /> : null}
-      {status === "" ? null : (
-        <p
-          className="px-4 py-3 text-xs text-muted-foreground"
-          role="status"
-          data-testid={PAGINATION_STATUS_TESTID}
-        >
-          {status}
-        </p>
-      )}
       {observe ? (
         <div ref={sentinelRef} className="h-px w-full" aria-hidden="true" data-testid={PAGINATION_SENTINEL_TESTID} />
       ) : null}
@@ -626,7 +610,7 @@ export function ArtistPage({ view, ...navigation }: { view: View } & PageNavigat
   const reveal = useLocalReveal(resource.data ?? NO_ITEMS)
 
   if (resource.status === "loading") return <ListSkeleton />
-  if (resource.status === "error") return <LoadFailed text={libraryFailureText(resource.failure)} />
+  if (resource.status === "error") return <LoadFailed text={libraryFailureText(resource.failure)} onRetry={resource.reload} />
 
   return (
     <BrowsableTrackList
@@ -634,7 +618,7 @@ export function ArtistPage({ view, ...navigation }: { view: View } & PageNavigat
       queueItems={resource.data ?? undefined}
       emptyText={libraryEmptyText(view)}
       navigation={navigation}
-      status=""
+      status={listCountText(visibleItemsOf(reveal.state).length)}
       sentinelRef={reveal.sentinelRef}
       observe={hasRevealableItems(reveal.state)}
     />
@@ -651,7 +635,7 @@ export function HistoryPage({ ...navigation }: PageNavigationProps) {
   const reveal = useLocalReveal(resource.data ?? NO_ITEMS)
 
   if (resource.status === "loading") return <ListSkeleton />
-  if (resource.status === "error") return <LoadFailed text={libraryFailureText(resource.failure)} />
+  if (resource.status === "error") return <LoadFailed text={libraryFailureText(resource.failure)} onRetry={resource.reload} />
 
   return (
     <BrowsableTrackList
@@ -659,7 +643,7 @@ export function HistoryPage({ ...navigation }: PageNavigationProps) {
       queueItems={resource.data ?? undefined}
       emptyText={libraryEmptyText(view)}
       navigation={navigation}
-      status=""
+      status={listCountText(visibleItemsOf(reveal.state).length)}
       sentinelRef={reveal.sentinelRef}
       observe={hasRevealableItems(reveal.state)}
     />
@@ -744,25 +728,22 @@ export function LocalSongsPage({ ...navigation }: PageNavigationProps) {
 
   return (
     <div className="flex flex-col" data-testid="local-songs-page">
-      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-3">
-        <p className="text-sm text-muted-foreground" data-testid="local-songs-status">
-          {status === "" ? (state.tracks.length === 0 ? "" : `共 ${state.tracks.length} 首本地歌曲。`) : status}
-        </p>
-        <div className="flex items-center gap-2">
-          <Button variant="secondary" size="sm" disabled={busy} onClick={() => void onImport(false)} data-testid="local-import-files">
-            导入文件…
-          </Button>
-          <Button variant="ghost" size="sm" disabled={busy} onClick={() => void onImport(true)} data-testid="local-import-folder">
-            导入文件夹…
-          </Button>
-        </div>
-      </div>
+      <TrackListToolbar
+        status={status === "" ? listCountText(state.tracks.length) : status}
+        statusTestId="local-songs-status"
+        actions={
+          <>
+            <Button variant="secondary" size="sm" disabled={busy} onClick={() => void onImport(false)} data-testid="local-import-files">
+              导入文件…
+            </Button>
+            <Button variant="ghost" size="sm" disabled={busy} onClick={() => void onImport(true)} data-testid="local-import-folder">
+              导入文件夹…
+            </Button>
+          </>
+        }
+      />
 
-      {failure === null ? null : (
-        <Alert variant="destructive" className="mx-4 mb-3" data-testid="local-songs-failure">
-          <AlertDescription>{failure}</AlertDescription>
-        </Alert>
-      )}
+      {failure === null ? null : <LoadFailed text={failure} testId="local-songs-failure" onRetry={() => void reload()} />}
 
       {loading ? (
         <ListSkeleton />

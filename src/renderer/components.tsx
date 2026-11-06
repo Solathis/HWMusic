@@ -4,7 +4,7 @@
  * 收藏的写入接口还没确认，没接 `onToggleFavorite` 时按钮禁用并直接说明原因，不做乐观更新。
  */
 import { useState } from "react"
-import type { ComponentType, ReactElement } from "react"
+import type { ComponentType, ReactElement, ReactNode } from "react"
 import {
   CaptionsOffIcon,
   ChevronDownIcon,
@@ -26,7 +26,7 @@ import {
   VolumeXIcon,
 } from "lucide-react"
 
-import { Alert, AlertDescription } from "./components/ui/alert"
+import { Alert, AlertAction, AlertDescription } from "./components/ui/alert"
 import { Badge } from "./components/ui/badge"
 import { Button } from "./components/ui/button"
 import {
@@ -123,11 +123,40 @@ export function CoverArt({
   )
 }
 
-/** 失败态：结构化错误的人话（core 侧已清洗过 message，这里不做二次编造）。 */
-export function LoadFailed({ text }: { text: string }) {
+/** 列表顶部工具栏：状态在左、动作在右；没有内容时不占布局。 */
+export function TrackListToolbar({ status, statusTestId, actions }: {
+  status: string
+  statusTestId?: string
+  actions?: ReactNode
+}) {
+  if (status === "" && actions == null) return null
   return (
-    <Alert variant="destructive" className="m-4" data-testid="load-failed">
+    <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-3">
+      <p role="status" className="text-sm text-muted-foreground" data-testid={statusTestId}>
+        {status}
+      </p>
+      <div className="flex items-center gap-2">{actions}</div>
+    </div>
+  )
+}
+
+/** 失败态：结构化错误的人话（core 侧已清洗过 message，这里不做二次编造）。 */
+export function LoadFailed({ text, onRetry, testId = "load-failed", retryTestId }: {
+  text: string
+  onRetry?: () => void
+  testId?: string
+  retryTestId?: string
+}) {
+  return (
+    <Alert variant="destructive" className="mx-4 mb-3" data-testid={testId}>
       <AlertDescription>{text}</AlertDescription>
+      {onRetry === undefined ? null : (
+        <AlertAction>
+          <Button variant="secondary" size="sm" onClick={onRetry} data-testid={retryTestId}>
+            重试
+          </Button>
+        </AlertAction>
+      )}
     </Alert>
   )
 }

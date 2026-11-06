@@ -5,9 +5,8 @@
  */
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 
-import { Alert, AlertDescription } from "./components/ui/alert"
 import { Button } from "./components/ui/button"
-import { EmptyState, ListSkeleton, TrackTable } from "./components"
+import { EmptyState, ListSkeleton, LoadFailed, TrackListToolbar, TrackTable } from "./components"
 import type { TrackRowActions } from "./track-menu.tsx"
 import { coreCall } from "./host-api"
 import { LIBRARY_FAVORITES } from "../shared/request-channels.ts"
@@ -128,29 +127,20 @@ function FavoritesPageView({
     // 作者样式的 display:flex 会盖过它 —— 元素就"隐藏不掉"了。所以显隐层与布局层分开。
     <div className="h-full min-h-0" data-resident="favorites" hidden={!active}>
       <div className="flex h-full min-h-0 flex-col" data-testid={FAVORITES_PAGE_TESTID}>
-        <div className="flex shrink-0 items-center justify-between gap-2 px-4 py-3">
-          <p className="text-sm text-muted-foreground" data-testid="favorites-counts">
-            {initial ? FAVORITES_LOADING_TEXT : describeFavoritesCounts(summary)}
-          </p>
-          {summary.failure === null ? null : (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => {
-                const cleared = clearFavoritesFailure(stateRef.current)
-                setState(cleared)
-                void requestNextPage(cleared)
-              }}
-            >
-              重试
-            </Button>
-          )}
-        </div>
-
+        <TrackListToolbar
+          status={initial ? FAVORITES_LOADING_TEXT : describeFavoritesCounts(summary)}
+          statusTestId="favorites-counts"
+        />
         {summary.failure === null ? null : (
-          <Alert variant="destructive" className="mx-4 mb-3" data-testid="favorites-failure">
-            <AlertDescription>{summary.failure}</AlertDescription>
-          </Alert>
+          <LoadFailed
+            text={summary.failure}
+            testId="favorites-failure"
+            onRetry={() => {
+              const cleared = clearFavoritesFailure(stateRef.current)
+              setState(cleared)
+              void requestNextPage(cleared)
+            }}
+          />
         )}
 
         <div
@@ -161,7 +151,7 @@ function FavoritesPageView({
           data-testid={FAVORITES_SCROLL_TESTID}
         >
           {state.songs.length === 0 ? (
-            // 四种"还没有歌"要分开：首屏加载（骨架）、翻页加载（骨架）、失败（上面那条 Alert
+            // 四种"还没有歌"要分开：首屏加载（骨架）、翻页加载（骨架）、失败（上面那条失败态
             // 已经说了原因）、真的空（空态文案）。把前三种显示成"还没有收藏歌曲"都是假空态。
             initial || summary.loading ? (
               <ListSkeleton />
@@ -180,7 +170,7 @@ function FavoritesPageView({
               offlineIds={offlineIds}
             />
           )}
-          {summary.loading && state.songs.length > 0 ? <ListSkeleton /> : null}
+          {summary.loading && state.songs.length > 0 ? <ListSkeleton count={2} /> : null}
           {summary.isComplete ? null : (
             <div
               ref={sentinelRef}

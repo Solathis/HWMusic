@@ -215,6 +215,11 @@ export function retryPagination(state) {
 // 文案（诚实的部分）
 // ---------------------------------------------------------------------------
 
+/** 有歌时给列表页一个简短的总数状态；空列表不制造额外文案。 */
+export function listCountText(count) {
+  return count > 0 ? `共 ${count} 首` : "";
+}
+
 /** `已加载 N 首`——说的是"页面上现在有多少条"，不是"这张歌单有多少首"。 */
 export function loadedTracksText(count) {
   const loaded = Number.isInteger(count) && count >= 0 ? count : 0;
