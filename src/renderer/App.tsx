@@ -389,8 +389,8 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
    * 只透传，不是第二份状态——判据只有播放状态一处。
    */
   const navigation = useMemo(
-    () => ({ onActivateTrack, onOpenAlbum, onOpenArtist, rowActions, offlineIds: queue.offlineIds }),
-    [onActivateTrack, onOpenAlbum, onOpenArtist, rowActions, queue.offlineIds],
+    () => ({ onActivateTrack, onOpenAlbum, onOpenArtist, onPlayAll, rowActions, offlineIds: queue.offlineIds }),
+    [onActivateTrack, onOpenAlbum, onOpenArtist, onPlayAll, rowActions, queue.offlineIds],
   )
 
   /** 账号资料的四项投影（缺什么兜什么，绝不编：见 features/auth/account.mjs）。 */
@@ -413,7 +413,7 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
   function renderPage() {
     switch (view.id) {
       case VIEW.playlistDetail:
-        return <PlaylistDetailPage view={view} onPlayAll={onPlayAll} onEnqueue={onEnqueue} {...navigation} />
+        return <PlaylistDetailPage view={view} {...navigation} />
       case VIEW.search:
         // 关键字从视图参数来（侧栏那个常驻输入框提交的就是它）：页面自己不存检索词，见 submitSearch
         return <SearchPage view={view} {...navigation} />
@@ -580,6 +580,7 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
             onActivateTrack={onActivateTrack}
             onOpenAlbum={onOpenAlbum}
             onOpenArtist={onOpenArtist}
+            onPlayAll={onPlayAll}
             offlineIds={queue.offlineIds}
             {...rowActions}
           />

@@ -6,7 +6,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 
 import { Button } from "./components/ui/button"
-import { EmptyState, ListSkeleton, LoadFailed, TrackListToolbar, TrackTable } from "./components"
+import { EmptyState, ListSkeleton, LoadFailed, TrackListActions, TrackListToolbar, TrackTable } from "./components"
 import type { TrackRowActions } from "./track-menu.tsx"
 import { coreCall } from "./host-api"
 import { LIBRARY_FAVORITES } from "../shared/request-channels.ts"
@@ -44,6 +44,7 @@ export interface FavoritesPageProps extends TrackRowActions {
   onActivateTrack: (song: unknown, index: number, songs: unknown[]) => void
   onOpenAlbum: (albumId: string, song: unknown) => void
   onOpenArtist: (artistId: string, song: unknown) => void
+  onPlayAll?: (songs: unknown[]) => void
   /** 已知下架的曲目 id（外壳从播放状态交下来）：这些行变灰、不许激活 */
   offlineIds?: string[]
 }
@@ -53,6 +54,7 @@ function FavoritesPageView({
   onActivateTrack,
   onOpenAlbum,
   onOpenArtist,
+  onPlayAll,
   onPlayNext,
   onEnqueue,
   offlineIds = [],
@@ -130,6 +132,14 @@ function FavoritesPageView({
         <TrackListToolbar
           status={initial ? FAVORITES_LOADING_TEXT : describeFavoritesCounts(summary)}
           statusTestId="favorites-counts"
+          actions={
+            <TrackListActions
+              songs={state.songs}
+              offlineIds={offlineIds}
+              onPlayAll={onPlayAll}
+              onEnqueue={onEnqueue}
+            />
+          }
         />
         {summary.failure === null ? null : (
           <LoadFailed

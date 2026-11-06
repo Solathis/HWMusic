@@ -4,8 +4,8 @@
  * 所有页面都走 `useLibraryResource` 一次取一页；加载中 / 失败 / 真空调分开渲染。
  * 歌单详情 / 搜索 / 专辑走服务端分页，歌手 / 历史接口本身不分页，只本地分批揭示。
  */
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
-import { ListPlusIcon, ListMusicIcon, PlayIcon } from "lucide-react"
+import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
+import { ListMusicIcon } from "lucide-react"
 
 import {
   LIBRARY_ALBUM,
@@ -34,7 +34,7 @@ import {
 } from "./components/ui/select"
 import { Switch } from "./components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs"
-import { CoverArt, EmptyState, ListSkeleton, LoadFailed, TrackListToolbar, TrackTable } from "./components"
+import { CoverArt, EmptyState, ListSkeleton, LoadFailed, TrackListActions, TrackListToolbar, TrackTable } from "./components"
 import { AmllBackground } from "./AmllBackground.tsx"
 import type { TrackRowActions } from "./track-menu.tsx"
 import { LogTerminal } from "./log-terminal.tsx"
@@ -53,8 +53,6 @@ import {
 import { fetchLocalLibrary, importLocalTracks, removeLocalTrack } from "./features/library/local-bridge.ts"
 import { useLibraryResource } from "./features/library/use-library-resource.ts"
 import {
-  PLAYLIST_ENQUEUE_LABEL,
-  PLAYLIST_PLAY_ALL_LABEL,
   playlistCoverUrlOf,
   playlistDetailMetaText,
   playlistDetailTitleOf,
@@ -119,7 +117,6 @@ import {
 import { VIEW, createView, viewParam } from "./features/library/views.mjs"
 import { THEME_CHOICES, themeLabel } from "./features/theme/theme.mjs"
 import { useThemeChoice } from "./features/theme/use-theme-choice.ts"
-import { hasPlayable, offlineSetOf } from "./features/playback/offline.mjs"
 import {
   LYRICS_MODES,
   modeLabel,
@@ -357,6 +354,7 @@ function BrowsableTrackList({
   emptyText,
   navigation,
   status,
+  actions,
   sentinelRef,
   loading = false,
   initialLoading = false,
@@ -369,6 +367,8 @@ function BrowsableTrackList({
   queueItems?: unknown[]
   emptyText: string
   navigation: PageNavigationProps
+  /** 工具栏右侧动作：曲目基准由各页面按双击队列语义传入。 */
+  actions?: ReactNode
   /** 状态行：已加载 N 首（服务端分页）；空串 = 这一页不挂状态行（歌手/历史） */
   status: string
   sentinelRef: RefObject<HTMLDivElement | null>
@@ -380,7 +380,7 @@ function BrowsableTrackList({
 }) {
   return (
     <div className="flex flex-col">
-      <TrackListToolbar status={status} statusTestId={PAGINATION_STATUS_TESTID} />
+      <TrackListToolbar status={status} statusTestId={PAGINATION_STATUS_TESTID} actions={actions} />
       {error === null ? null : (
         <LoadFailed text={error} onRetry={onRetry} testId={PAGINATION_FAILURE_TESTID} retryTestId={PAGINATION_RETRY_TESTID} />
       )}
@@ -423,6 +423,7 @@ export interface PageNavigationProps {
   onActivateTrack: (song: unknown, index: number, songs: unknown[]) => void
   onOpenAlbum: (albumId: string, song: unknown) => void
   onOpenArtist: (artistId: string, song: unknown) => void
+  onPlayAll?: (songs: unknown[]) => void
   /** 行菜单的两个播放动作（外壳提供，页面只转给曲目表，不自己实现） */
   rowActions?: TrackRowActions
   /**
@@ -445,18 +446,7 @@ export interface PlaylistDetailData {
   hasMore: boolean
 }
 
-export function PlaylistDetailPage({
-  view,
-  onPlayAll,
-  onEnqueue,
-  ...navigation
-}: {
-  view: View
-  /** 播放全部：把整张歌单的曲目整队替换并播放第一首 */
-  onPlayAll?: (songs: unknown[]) => void
-  /** 加入队列：追加到队尾（不动正在播的那一首），同样作用于整张歌单 */
-  onEnqueue?: (songs: unknown[]) => void
-} & PageNavigationProps) {
+export function PlaylistDetailPage({ view, ...navigation }: { view: View } & PageNavigationProps) {
   const playlistId = viewParam(view, "playlistId")
   const paging = usePaginatedTracks({
     channel: LIBRARY_PLAYLIST_DETAIL,
@@ -471,9 +461,8 @@ export function PlaylistDetailPage({
   const hasMore = state.hasMore === true
   const coverUrl = playlistCoverUrlOf(playlist)
   const title = playlistDetailTitleOf(playlist, viewParam(view, "name"))
-  /** 两个动作的曲目：整表在内存时就是整张歌单，否则退回已加载的那批。 */
+  /** 两个动作与双击使用同一基准：整表在内存时就是整张歌单，否则退回已加载的那批。 */
   const actionSongs = state.full ?? songs
-  const actionsDisabled = actionSongs.length === 0 || !hasPlayable(actionSongs, offlineSetOf(navigation.offlineIds))
 
   return (
     <div className="flex flex-col" data-testid="playlist-detail">
@@ -496,18 +485,12 @@ export function PlaylistDetailPage({
             <CardTitle className="truncate text-2xl">{title}</CardTitle>
             <CardDescription>{playlistDetailMetaText(playlist, songs.length, hasMore)}</CardDescription>
             <div className="flex flex-wrap items-center gap-2 pt-1">
-              <Button disabled={actionsDisabled || onPlayAll === undefined} onClick={() => onPlayAll?.(actionSongs)}>
-                <PlayIcon />
-                {PLAYLIST_PLAY_ALL_LABEL}
-              </Button>
-              <Button
-                variant="secondary"
-                disabled={actionsDisabled || onEnqueue === undefined}
-                onClick={() => onEnqueue?.(actionSongs)}
-              >
-                <ListPlusIcon />
-                {PLAYLIST_ENQUEUE_LABEL}
-              </Button>
+              <TrackListActions
+                songs={actionSongs}
+                offlineIds={navigation.offlineIds}
+                onPlayAll={navigation.onPlayAll}
+                onEnqueue={navigation.rowActions?.onEnqueue}
+              />
             </div>
           </div>
         </CardContent>
@@ -553,6 +536,14 @@ export function SearchPage({ view, ...navigation }: { view: View } & PageNavigat
       items={paging.state.items}
       emptyText={libraryEmptyText(view, { searched: true })}
       navigation={navigation}
+      actions={
+        <TrackListActions
+          songs={paging.state.items}
+          offlineIds={navigation.offlineIds}
+          onPlayAll={navigation.onPlayAll}
+          onEnqueue={navigation.rowActions?.onEnqueue}
+        />
+      }
       status={paginationNoticeText({ loaded: paging.state.items.length, hasMore: paging.state.hasMore })}
       sentinelRef={paging.sentinelRef}
       loading={paging.state.loading}
@@ -584,6 +575,14 @@ export function AlbumPage({ view, ...navigation }: { view: View } & PageNavigati
       items={paging.state.items}
       emptyText={libraryEmptyText(view)}
       navigation={navigation}
+      actions={
+        <TrackListActions
+          songs={paging.state.items}
+          offlineIds={navigation.offlineIds}
+          onPlayAll={navigation.onPlayAll}
+          onEnqueue={navigation.rowActions?.onEnqueue}
+        />
+      }
       status={paginationNoticeText({ loaded: paging.state.items.length, hasMore: paging.state.hasMore })}
       sentinelRef={paging.sentinelRef}
       loading={paging.state.loading}
@@ -618,6 +617,14 @@ export function ArtistPage({ view, ...navigation }: { view: View } & PageNavigat
       queueItems={resource.data ?? undefined}
       emptyText={libraryEmptyText(view)}
       navigation={navigation}
+      actions={
+        <TrackListActions
+          songs={resource.data ?? NO_ITEMS}
+          offlineIds={navigation.offlineIds}
+          onPlayAll={navigation.onPlayAll}
+          onEnqueue={navigation.rowActions?.onEnqueue}
+        />
+      }
       status={listCountText(visibleItemsOf(reveal.state).length)}
       sentinelRef={reveal.sentinelRef}
       observe={hasRevealableItems(reveal.state)}
@@ -643,6 +650,14 @@ export function HistoryPage({ ...navigation }: PageNavigationProps) {
       queueItems={resource.data ?? undefined}
       emptyText={libraryEmptyText(view)}
       navigation={navigation}
+      actions={
+        <TrackListActions
+          songs={resource.data ?? NO_ITEMS}
+          offlineIds={navigation.offlineIds}
+          onPlayAll={navigation.onPlayAll}
+          onEnqueue={navigation.rowActions?.onEnqueue}
+        />
+      }
       status={listCountText(visibleItemsOf(reveal.state).length)}
       sentinelRef={reveal.sentinelRef}
       observe={hasRevealableItems(reveal.state)}
@@ -733,6 +748,12 @@ export function LocalSongsPage({ ...navigation }: PageNavigationProps) {
         statusTestId="local-songs-status"
         actions={
           <>
+            <TrackListActions
+              songs={state.tracks}
+              offlineIds={navigation.offlineIds}
+              onPlayAll={navigation.onPlayAll}
+              onEnqueue={navigation.rowActions?.onEnqueue}
+            />
             <Button variant="secondary" size="sm" disabled={busy} onClick={() => void onImport(false)} data-testid="local-import-files">
               导入文件…
             </Button>

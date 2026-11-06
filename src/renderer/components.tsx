@@ -10,6 +10,7 @@ import {
   ChevronDownIcon,
   HeartIcon,
   ListMusicIcon,
+  ListPlusIcon,
   MusicIcon,
   PanelBottomIcon,
   PauseIcon,
@@ -61,6 +62,8 @@ import {
   formatDuration,
 } from "./features/library/track-fields.mjs"
 import { PLAYBACK_MODES } from "./features/playback/player.mjs"
+import { PLAYLIST_ENQUEUE_LABEL, PLAYLIST_PLAY_ALL_LABEL } from "./features/library/playlist-fields.mjs"
+import { hasPlayable, offlineSetOf } from "./features/playback/offline.mjs"
 import { lyricsTargetOf } from "./features/lyrics/lyrics-window.mjs"
 import { TRACK_MENU_TARGET } from "./features/shell/track-menu.mjs"
 import {
@@ -137,6 +140,27 @@ export function TrackListToolbar({ status, statusTestId, actions }: {
       </p>
       <div className="flex items-center gap-2">{actions}</div>
     </div>
+  )
+}
+
+export function TrackListActions({ songs, offlineIds = [], onPlayAll, onEnqueue }: {
+  songs: unknown[]
+  offlineIds?: string[]
+  onPlayAll?: (songs: unknown[]) => void
+  onEnqueue?: (songs: unknown[]) => void
+}) {
+  const disabled = !hasPlayable(songs, offlineSetOf(offlineIds))
+  return (
+    <>
+      <Button size="sm" disabled={disabled || onPlayAll === undefined} onClick={() => onPlayAll?.(songs)}>
+        <PlayIcon />
+        {PLAYLIST_PLAY_ALL_LABEL}
+      </Button>
+      <Button variant="secondary" size="sm" disabled={disabled || onEnqueue === undefined} onClick={() => onEnqueue?.(songs)}>
+        <ListPlusIcon />
+        {PLAYLIST_ENQUEUE_LABEL}
+      </Button>
+    </>
   )
 }
 
