@@ -1819,8 +1819,15 @@ async function stableTextBox(page, selector) {
   }).catch(() => null);
 }
 
+/** 等待内容淡入结束，避免截图把 enter 动画中间帧当成像素基线。 */
+export async function waitForEnterAnimations(page) {
+  await page.waitForFunction(() => document.getAnimations().every((animation) => animation.animationName !== "enter" || animation.playState === "finished"));
+}
+
 /** 裁到文字 Range；与隐藏同一文字后的像素比较，不能把背景/表格误算成歌词。 */
 async function textPixels(page, selector, theme, file) {
+  await waitForEnterAnimations(page)
+
   const box = await stableTextBox(page, selector);
   if (!box || box.width <= 0 || box.height <= 0) return { ink: 0, changed: 0, box };
   const target = page.locator(selector).first();
@@ -1851,6 +1858,7 @@ async function textPixels(page, selector, theme, file) {
  * 所以问的是可读性本身（墨色亮度 vs 背景亮度 ≥ 40），不是"必须比某条阈值深"。
  */
 async function inkContrast(page, selector, file) {
+  await waitForEnterAnimations(page)
   const box = await stableTextBox(page, selector);
   if (!box || box.width <= 0 || box.height <= 0) return { changed: 0, inkMean: null, backdropMean: null, contrast: 0, box };
   const target = page.locator(selector).first();
@@ -1892,6 +1900,7 @@ async function inkContrast(page, selector, file) {
 
 /** 兼容旧名字：主窗舞台那几项仍然用"深/浅两类像素"的口径（不透明舞台，含 canvas）。 */
 async function inkColor(page, selector, file) {
+  await waitForEnterAnimations(page)
   const box = await stableTextBox(page, selector);
   if (!box || box.width <= 0 || box.height <= 0) return { count: 0, mean: null, box };
   const target = page.locator(selector).first();
@@ -2750,6 +2759,7 @@ export async function checkDesktopInteraction(page, guardDir, add) {
   // ⑦e 逐字扫亮：同一行两个时刻，已唱的字变多、像素有差异、未唱的字更淡
   await showVertical(FIXTURE_LRC, 400);
   const karaokeEarly = await verticalGeometry();
+  await waitForEnterAnimations(page);
   const earlyPng = await page.screenshot({ path: path.join(guardDir, "r61-vertical-karaoke-early.png") });
   await setVerticalTime(2600);
   const karaokeLate = await verticalGeometry();
@@ -3638,6 +3648,7 @@ export async function checkImmersiveKaraoke(page, guardDir, add) {
     await page.waitForTimeout(800);
     return page.screenshot(karaokeBox ? { clip: karaokeBox, path: path.join(guardDir, file) } : { path: path.join(guardDir, file) });
   };
+  await waitForEnterAnimations(page);
   const earlyShot = await shotAt(300, "r46-immersive-karaoke-early.png");
   const lateShot = await shotAt(2600, "r46-immersive-karaoke-late.png");
   const fillDiff = pixelDiffRatio(await sharp(earlyShot).raw().toBuffer(), await sharp(lateShot).raw().toBuffer());
@@ -4662,6 +4673,35 @@ export async function checkLibraryPagination(page, guardDir, add) {
   add("pagination-dblclick-favorites-loaded-only", favoritesRows === 36
     && favoritesQueue.length === favoritesRows && favoritesQueue.index === 1, JSON.stringify({ ...favoritesQueue, favoritesRows }));
 
+  // D1：换页内容淡入统一尊重减少动效；正常动效在 50ms 内应确实启动一次。
+  const observePageTransition = async (reducedMotion) => {
+    await page.emulateMedia({ reducedMotion });
+    await page.getByRole("button", { name: "我的收藏", exact: true }).click();
+    await page.getByTestId("favorites-page").waitFor();
+    const before = await page.evaluate(() => document.querySelector('[data-testid="page-scroll"]')?.getAnimations().length ?? 0);
+    const box = page.getByRole("textbox", { name: "搜索关键字" });
+    await box.fill(reducedMotion === "reduce" ? "减少动效守卫" : "正常动效守卫");
+    await box.press("Enter");
+    if (reducedMotion === "reduce") {
+      await page.waitForTimeout(50);
+    }
+    const started = reducedMotion === "reduce" ? null : await page.waitForFunction(() => {
+      const animation = [...(document.querySelector('[data-testid="page-scroll"]')?.getAnimations() ?? [])]
+        .find((candidate) => candidate.animationName === "enter");
+      return animation && typeof animation.currentTime === "number" && animation.currentTime <= 50
+        ? { elapsed: animation.currentTime, state: animation.playState }
+        : false;
+    }, null, { timeout: guardScaledMs(1000), polling: 1 }).then((handle) => handle.jsonValue());
+    const animations = await page.evaluate(() => [...(document.querySelector('[data-testid="page-scroll"]')?.getAnimations() ?? [])]
+      .map((animation) => ({ name: animation.animationName, state: animation.playState })));
+    return { before, started, animations };
+  };
+  const reducedMotion = await observePageTransition("reduce");
+  add("d1-reduced-motion-no-page-fade", reducedMotion.animations.every((animation) => animation.name !== "enter"), JSON.stringify(reducedMotion));
+  const normalMotion = await observePageTransition("no-preference");
+  add("d1-normal-motion-page-fade", normalMotion.started !== null && normalMotion.animations.some((animation) => animation.name === "enter"), JSON.stringify(normalMotion));
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+
   // ⑩ 换关键词：旧查询的迟到响应必须被丢掉（新结果里不许混进旧词的行）
   await scrollToTop();
   const box = page.getByRole("textbox", { name: "搜索关键字" });
@@ -5003,6 +5043,7 @@ export async function checkRowContextMenus(page, port, guardDir, add) {
     await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
     await page.getByTestId("main-content").waitFor();
     await table.locator("tbody tr").first().waitFor();
+    await waitForEnterAnimations(page);
     /** 记下每次 contextmenu 的默认行为有没有被吃掉；监听挂**冒泡**阶段：守卫那一条是捕获阶段（先跑），radix 的触发器在行上（更先跑），所以这里读到的是「最后到底拦没拦」。 */
     await page.evaluate(() => {
       window.__ctxProbe = [];
@@ -6191,6 +6232,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       add(`${theme}-paused-text-pixels`, pixels.ink > 60, JSON.stringify(pixels));
       await page.screenshot({ path: path.join(guardDir, `${theme}-stage.png`) });
 
+      await waitForEnterAnimations(page);
       const before = await page.screenshot();
       await page.locator(underlay).evaluateAll((elements) => elements.forEach((element) => { element.style.filter = "invert(1)"; }));
       const inverted = await page.screenshot();

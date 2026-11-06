@@ -78,6 +78,8 @@ import type { PlayerState } from "./features/playback/use-player.ts"
 import type { LyricsToggleSurface, LyricsWindowBinding } from "./use-lyrics-window.ts"
 import { TrackRowMenu, type TrackRowActions } from "./track-menu.tsx"
 
+export const CONTENT_FADE_IN = "motion-safe:animate-in motion-safe:fade-in-0 motion-safe:duration-150"
+
 /** 空态：一句话（文案来自纯逻辑模块，克制且不冒充）。 */
 export function EmptyState({ text }: { text: string }) {
   return (
@@ -300,8 +302,9 @@ export function TrackTable({
      * 表头 sticky 需要在调用点放开 shadcn 容器的 `overflow`，让它跟随页面滚动根；不改生成原语。
      */
     <div className="px-4 [&>[data-slot=table-container]]:overflow-visible">
-      <Table className="table-fixed" data-testid="track-table">
-        <TableHeader className="sticky top-0 z-10 bg-background">
+      <div className={CONTENT_FADE_IN}>
+        <Table className="table-fixed" data-testid="track-table">
+          <TableHeader className="sticky top-0 z-10 bg-background">
           <TableRow>
             <TableHead className={`${TRACK_COLUMN_WIDTHS.index} text-center`}>#</TableHead>
             <TableHead className={TRACK_COLUMN_WIDTHS.title}>标题</TableHead>
@@ -344,7 +347,7 @@ export function TrackTable({
                   }}
                   className={
                     isOffline
-                      ? "opacity-50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                      ? "opacity-50 transition-opacity motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
                       : "focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
                   }
                 >
@@ -430,8 +433,9 @@ export function TrackTable({
               </TrackRowMenu>
             )
           })}
-        </TableBody>
-      </Table>
+          </TableBody>
+        </Table>
+      </div>
     </div>
   )
 }
@@ -543,7 +547,7 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
 
   /** 左区：封面 + 曲目信息（整块可点 = 进歌词舞台）。 */
   const trackInfo = (
-    <>
+    <div key={state.track?.id ?? "none"} className={`flex min-w-0 items-center gap-3 ${CONTENT_FADE_IN}`}>
       <CoverArt coverUrl={trackCoverUrlOf(state.track)} className="size-10 rounded-md" />
       <div className="flex min-w-0 flex-col">
         <span className="truncate text-sm font-medium">{trackTitleOf(state.track)}</span>
@@ -556,7 +560,7 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
             : `${trackArtistOf(state.track)} · ${playerStatusText(state)}${qualityText === null ? "" : ` · ${qualityText}`}`}
         </span>
       </div>
-    </>
+    </div>
   )
 
   return (
@@ -781,7 +785,7 @@ export function QueuePanel({ entries, index, onSelect, onClear, onPlayNext, offl
                   <Button
                     variant={position === index ? "secondary" : "ghost"}
                     size="sm"
-                    className={`w-full min-w-0 max-w-full justify-start ${isOffline ? "opacity-50" : ""}`}
+                    className={`w-full min-w-0 max-w-full justify-start ${isOffline ? "opacity-50 transition-opacity motion-reduce:transition-none" : ""}`}
                     aria-current={position === index ? "true" : undefined}
                     aria-disabled={isOffline ? true : undefined}
                     onClick={() => {
