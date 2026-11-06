@@ -14,7 +14,7 @@ import { guardMediaUrl } from "./media-url.mjs";
 import { createMediaSession } from "./media-session.mjs";
 import { createPlayer } from "./player.mjs";
 import { applyPlayerCommand } from "./player-commands.mjs";
-import { dropQueueEntries, dropUnavailableLocalEntries, QUEUE_SETTING_KEY } from "./queue.mjs";
+import { dropQueueEntries, dropUnavailableLocalEntries, mergeQueuePosition, QUEUE_POSITION_SETTING_KEY, QUEUE_SETTING_KEY } from "./queue.mjs";
 import { isOfflineItem, offlineSetOf, restoredOfflineText } from "./offline.mjs";
 
 /** core 调用的返回形状（`settings:get` / `settings:set`）。 */
@@ -111,7 +111,7 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
   }
 
   /**
-   * `settings:set` 的**唯一**写入口：队列与下架曲目清单都经它落盘。
+   * `settings:set` 的**唯一**写入口：队列、进度与下架清单都经它落盘。
    * 写盘标签只有这两个（源码扫描按这一处判"别的地方不碰设置写入"）。
    */
   async function writeSettingsPatch(patch: Record<string, unknown>): Promise<void> {
@@ -145,14 +145,19 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
     persistQueue: async (record: import("./queue.mjs").QueueRecord | null) => {
       await writeSettingsPatch({ [QUEUE_SETTING_KEY]: record });
     },
+    persistPosition: async (position: import("./queue.mjs").QueuePosition | null) => {
+      await writeSettingsPatch({ [QUEUE_POSITION_SETTING_KEY]: position });
+    },
     loadQueue: async () => {
       const answer = (await readSettingsOnce()) as SettingsAnswer | null;
       const data = answer?.settings?.data;
       const record = data !== null && typeof data === "object" ? (data[QUEUE_SETTING_KEY] ?? null) : null;
+      const queuePosition = data !== null && typeof data === "object" ? (data[QUEUE_POSITION_SETTING_KEY] ?? null) : null;
+      const merged = mergeQueuePosition(record, queuePosition);
       // 恢复时跳过「文件已不在」的本地曲目；曲库读不到（`null`）就整段跳过判定。
       const availableIds = await localAvailableIds();
       const filteredLocal =
-        availableIds === null ? { record, skipped: 0 } : dropUnavailableLocalEntries(record, availableIds);
+        availableIds === null ? { record: merged, skipped: 0 } : dropUnavailableLocalEntries(merged, availableIds);
       const dataForOffline = data !== null && typeof data === "object" ? data : null;
       const offline = offlineSetOf(dataForOffline?.offlineTracks);
       const filtered = dropQueueEntries(filteredLocal.record, (id: string) => isOfflineItem({ id }, offline));

@@ -14,6 +14,7 @@ import { guardMediaUrl } from "./media-url.mjs";
 /** @typedef {{ids: string[], index: number, metadata?: Array<QueueEntry|null>, positionMs?: number, positionTrackId?: string}} QueueRecord */
 
 export const QUEUE_SETTING_KEY = "queue";
+export const QUEUE_POSITION_SETTING_KEY = "queuePosition";
 const METADATA_KEYS = ["name", "artists", "duration", "coverUrl", "albumId", "albumName"];
 
 function textOf(value) {
@@ -89,16 +90,42 @@ function positionOf(value, trackId) {
 }
 
 /** @returns {QueueRecord|null} */
-export function queueRecordOf(entries, index, position = null) {
+export function queueStructureOf(entries, index) {
   const projected = queueEntriesOf(entries);
   if (projected.length === 0) return null;
   const metadata = projected.map((entry) => snapshotOf(entry, entry.id));
   const at = clampIndex(index, projected.length);
-  const resume = positionOf(position, projected[at].id);
   return {
     ids: projected.map((entry) => entry.id),
     index: at,
     ...(metadata.some((entry) => entry !== null) ? { metadata } : {}),
+  };
+}
+
+/** @returns {QueuePosition|null} */
+export function queuePositionOf(trackId, positionMs) {
+  const id = textOf(trackId);
+  if (id === null || typeof positionMs !== "number" || !Number.isFinite(positionMs) || positionMs <= 0) return null;
+  return { trackId: id, positionMs: Math.round(positionMs) };
+}
+
+/** @returns {QueueRecord|null} */
+export function mergeQueuePosition(record, position) {
+  const clean = sanitizeQueueRecord(record);
+  if (clean === null) return null;
+  const currentId = clean.ids[clean.index];
+  const next = queuePositionOf(position?.trackId, position?.positionMs);
+  if (next === null || next.trackId !== currentId) return clean;
+  return { ...clean, positionMs: next.positionMs, positionTrackId: next.trackId };
+}
+
+/** @returns {QueueRecord|null} */
+export function queueRecordOf(entries, index, position = null) {
+  const structure = queueStructureOf(entries, index);
+  if (structure === null) return null;
+  const resume = positionOf(position, structure.ids[structure.index]);
+  return {
+    ...structure,
     ...(resume === null ? {} : { positionMs: resume.positionMs, positionTrackId: resume.trackId }),
   };
 }

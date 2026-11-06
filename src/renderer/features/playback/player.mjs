@@ -9,7 +9,7 @@
  * 入队、插队、整队替换时剔除已知下架的曲目并用 `notify` 说一句，轮到已知下架的那首就本地跳过、不再请求播放地址。
  * 音质只说服务端明确声明的那一档（`actualQuality`）：`unknown` / 缺失 / 本地曲目一律是 null，界面不许虚标。
  */
-import { queueEntriesOf, queueRecordOf, restoredEntries, sanitizeQueueRecord } from "./queue.mjs";
+import { queueEntriesOf, queuePositionOf, queueRecordOf, queueStructureOf, restoredEntries, sanitizeQueueRecord } from "./queue.mjs";
 import { ALL_OFFLINE_TEXT, offlineSkippedText, partitionPlayable, playableStartIndex } from "./offline.mjs";
 import { LYRICS_STATUS } from "../lyrics/lyrics-window.mjs";
 import { trackDurationOf } from "../library/track-fields.mjs";
@@ -170,6 +170,7 @@ function skipNoticeOf(skipped) {
  * @param {(trackId: string) => Promise<{ok: true, data: {url?: unknown, actualQuality?: unknown}} | {ok: false, error: {message?: string, kind?: string}}>} options.resolveUrl
  * @param {(url: string) => (string|null)} options.guardUrl 媒体白名单闸门（放行回归一化地址，否则 null）
  * @param {(record: import("./queue.mjs").QueueRecord|null) => unknown} [options.persistQueue]
+ * @param {(position: import("./queue.mjs").QueuePosition|null) => unknown} [options.persistPosition]
  * @param {() => Promise<unknown>} [options.loadQueue]
  * @param {string[]} [options.initialOfflineIds] 启动时已知的下架曲目 id（读设置得到；之后靠 hydrateOfflineIds 补）
  * @param {(ids: string[]) => unknown} [options.persistOfflineIds] 下架曲目清单变长时落盘（fire-and-forget）
@@ -201,6 +202,7 @@ export function createPlayer(options = {}) {
   }
 
   const persistQueue = typeof options.persistQueue === "function" ? options.persistQueue : async () => null;
+  const persistPosition = typeof options.persistPosition === "function" ? options.persistPosition : null;
   const loadQueue = typeof options.loadQueue === "function" ? options.loadQueue : async () => null;
   /** 下架清单的落盘口（不给就只在本次进程里认得这些曲目，重启后重新"第一次遇到"再记一次）。 */
   const persistOfflineIds = typeof options.persistOfflineIds === "function" ? options.persistOfflineIds : null;
@@ -222,6 +224,9 @@ export function createPlayer(options = {}) {
   let token = 0;
   /** 上次真正写盘的记录（去重：拖进度、改音量都不该写盘，队列没变更不该写）。 */
   let persistedKey = "\u0000initial";
+  let persistedStructureEntries;
+  let persistedStructureIndex;
+  let persistedPositionKey = JSON.stringify(null);
   /** 随机模式的轮换排列与游标（一轮内不重复，且"上一首"退得回去）。 */
   let order = [];
   let cursor = 0;
@@ -319,24 +324,60 @@ export function createPlayer(options = {}) {
 
   /** 当前曲目的进度（只存毫秒；0 与"没有位置"是同一件事）。 */
   function currentPosition() {
-    if (state.track === null || state.currentTimeMs <= 0) return null;
-    return { trackId: state.track.id, positionMs: state.currentTimeMs };
+    if (state.track === null) return null;
+    return queuePositionOf(state.track.id, state.currentTimeMs);
   }
 
   /** 写盘：同步发起（不阻塞状态更新），失败只记日志且不含地址。 */
-  function persist() {
-    const record = queueRecordOf(state.entries, state.index, currentPosition());
-    const key = JSON.stringify(record);
+  function persist({ forcePosition = false, forceStructure = false } = {}) {
+    const position = currentPosition();
     lastWriteAt = now();
-    if (key === persistedKey) return;
-    persistedKey = key;
+    if (persistPosition === null) {
+      const record = queueRecordOf(state.entries, state.index, position);
+      const key = JSON.stringify(record);
+      if (key === persistedKey) return;
+      persistedKey = key;
+      try {
+        const answer = persistQueue(record);
+        if (answer !== null && typeof answer === "object" && typeof answer.then === "function") {
+          answer.catch((cause) => log("队列持久化失败（队列仍在内存里，下次启动恢复不了）：", textOf(cause)));
+        }
+      } catch (cause) {
+        log("队列持久化失败（队列仍在内存里，下次启动恢复不了）：", textOf(cause));
+      }
+      return;
+    }
+
+    const structure = queueStructureOf(state.entries, state.index);
+    const structureChanged =
+      forceStructure ||
+      (structure === null
+        ? persistedStructureEntries !== null || persistedStructureIndex !== null
+        : persistedStructureEntries !== state.entries || persistedStructureIndex !== state.index);
+    if (structureChanged) {
+      persistedStructureEntries = structure === null ? null : state.entries;
+      persistedStructureIndex = structure === null ? null : state.index;
+      persistedKey = JSON.stringify(structure);
+      try {
+        const answer = persistQueue(structure);
+        if (answer !== null && typeof answer === "object" && typeof answer.then === "function") {
+          answer.catch((cause) => log("队列持久化失败（队列仍在内存里，下次启动恢复不了）：", textOf(cause)));
+        }
+      } catch (cause) {
+        log("队列持久化失败（队列仍在内存里，下次启动恢复不了）：", textOf(cause));
+      }
+    }
+
+    const positionKey = JSON.stringify(position);
+    if (!forcePosition && positionKey === persistedPositionKey) return;
+    persistedPositionKey = positionKey;
     try {
-      const answer = persistQueue(record);
+      const answer = persistPosition(position);
       if (answer !== null && typeof answer === "object" && typeof answer.then === "function") {
-        answer.catch((cause) => log("队列持久化失败（队列仍在内存里，下次启动恢复不了）：", textOf(cause)));
+        answer.catch((cause) => log("播放进度持久化失败（队列仍在内存里，下次启动恢复不了）：", textOf(cause)));
       }
     } catch (cause) {
-      log("队列持久化失败（队列仍在内存里，下次启动恢复不了）：", textOf(cause));
+      log("播放进度持久化失败（队列仍在内存里，下次启动恢复不了）：", textOf(cause));
     }
   }
 
@@ -867,7 +908,7 @@ export function createPlayer(options = {}) {
       error: null,
       notice: null,
     });
-    persist();
+    persist({ forcePosition: persistPosition !== null, forceStructure: persistPosition !== null });
     return done({ queueLength: 0 });
   }
 
@@ -919,6 +960,9 @@ export function createPlayer(options = {}) {
     });
     // 读回来的东西不写回去：同内容重写只是多一次磁盘写入（写坏 settings.json 的机会 +1）
     persistedKey = JSON.stringify(queueRecordOf(entries, clean.index, savedPosition));
+    persistedStructureEntries = entries;
+    persistedStructureIndex = clean.index;
+    persistedPositionKey = JSON.stringify(savedPosition === null ? null : { trackId: savedPosition.trackId, positionMs: savedPosition.positionMs });
     return done({ restored: true, queueLength: entries.length });
   }
 
