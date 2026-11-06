@@ -606,7 +606,9 @@ function contentExInfoOf(raw) {
 }
 
 function availabilityValueOf(value) {
-  return value === undefined || value === null ? "-" : String(value).slice(0, 8);
+  if (typeof value === "number") return Number.isInteger(value) && value >= 0 && value <= 99_999_999 ? String(value) : "-";
+  if (typeof value !== "string" || !/^[0-9]{1,8}$/.test(value)) return "-";
+  return value;
 }
 
 /** 只读取列表条目里七个待取证字段；缺失为 `-`，不对任何字段作可播判定。 */
