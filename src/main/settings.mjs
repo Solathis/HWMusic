@@ -342,12 +342,13 @@ export function createSettingsStore({
    *   `blocked` 非空 = 原文件不该被覆盖（坏 JSON / 读不了 / schemaVersion 不认识）。
    */
   async function applyQueue(document) {
+    const legacyQueue = document.data[QUEUE_DATA_KEY];
     const loaded = await loadQueue();
     if (loaded.exists) {
       if (loaded.queue === undefined) delete document.data[QUEUE_DATA_KEY];
       else document.data[QUEUE_DATA_KEY] = loaded.queue;
     }
-    return { document, queueExists: loaded.exists };
+    return { document, queueExists: loaded.exists, legacyQueue };
   }
 
   async function load() {
@@ -495,14 +496,14 @@ export function createSettingsStore({
       if (!persistent) {
         fail(CORE_ERROR_KINDS.internal, "没有数据目录：设置无法落盘（宿主必须把 --data-dir 交给 sidecar）");
       }
-      const { document, queueExists, blocked } = await load();
+      const { document, queueExists, legacyQueue, blocked } = await load();
       if (blocked !== null) fail(blocked.kind, blocked.message);
       if (!isPlainObject(patch)) {
         fail(CORE_ERROR_KINDS.invalidPayload, "设置 patch 必须是普通对象");
       }
 
       const hasQueue = Object.prototype.hasOwnProperty.call(patch, QUEUE_DATA_KEY);
-      const legacyQueue = !queueExists ? document.data[QUEUE_DATA_KEY] : undefined;
+      const legacyQueueForMigration = !queueExists ? legacyQueue : undefined;
       const nextPatch = hasQueue ? Object.fromEntries(
         Object.entries(patch).filter(([key]) => key !== QUEUE_DATA_KEY),
       ) : patch;
@@ -514,15 +515,17 @@ export function createSettingsStore({
         else await writeQueue(patch[QUEUE_DATA_KEY]);
         if (legacyQueue !== undefined) await writeDocument(next);
         else if (Object.keys(nextPatch).length > 0) await writeDocument(next);
-      } else if (legacyQueue !== undefined) {
+      } else if (legacyQueueForMigration !== undefined) {
         try {
-          await writeQueue(legacyQueue);
+          await writeQueue(legacyQueueForMigration);
         } catch (cause) {
           log(`queue.json 写入失败（旧队列仍留在 settings.json）：${describe(cause)}`);
-          const preserved = { ...next, data: { ...next.data, [QUEUE_DATA_KEY]: legacyQueue } };
+          const preserved = { ...next, data: { ...next.data, [QUEUE_DATA_KEY]: legacyQueueForMigration } };
           await writeDocument(preserved);
           return preserved;
         }
+        await writeDocument(next);
+      } else if (legacyQueue !== undefined) {
         await writeDocument(next);
       } else {
         await writeDocument(next);
@@ -533,7 +536,7 @@ export function createSettingsStore({
         data: {
           ...next.data,
           ...(hasQueue && patch[QUEUE_DATA_KEY] !== null ? { [QUEUE_DATA_KEY]: patch[QUEUE_DATA_KEY] } : {}),
-          ...(!hasQueue && legacyQueue !== undefined ? { [QUEUE_DATA_KEY]: legacyQueue } : {}),
+          ...(!hasQueue && legacyQueueForMigration !== undefined ? { [QUEUE_DATA_KEY]: legacyQueueForMigration } : {}),
           ...(!hasQueue && queueExists && document.data[QUEUE_DATA_KEY] !== undefined
             ? { [QUEUE_DATA_KEY]: document.data[QUEUE_DATA_KEY] }
             : {}),
