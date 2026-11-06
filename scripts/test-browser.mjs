@@ -4578,6 +4578,27 @@ export async function checkLibraryPagination(page, guardDir, add) {
     && !repeatedDetail.includes("共 50 首") && (await sentinelCount()) === 0,
   JSON.stringify({ repeatedStatus, claimsTotal: repeatedDetail.includes("共 50 首"), sentinel: await sentinelCount() }));
 
+  // C1：非常驻内容区按歌单 viewKey 重挂，换歌单回到顶部
+  const playlistItemByName = (name) => page.getByTestId("sidebar-playlist-item").filter({
+    has: page.getByTestId("sidebar-playlist-name").getByText(name, { exact: true }),
+  });
+  await playlistItemByName("守卫歌单").click();
+  await page.getByTestId("playlist-detail").waitFor();
+  await visibleRowsIn(50);
+  const firstPlaylistScrollTop = await page.evaluate(() => {
+    const target = document.querySelector('[data-testid="page-scroll"]');
+    if (!target) return -1;
+    target.scrollTop = target.scrollHeight;
+    return target.scrollTop;
+  });
+  add("c1-playlist-scrolls", firstPlaylistScrollTop > 0, JSON.stringify({ firstPlaylistScrollTop }));
+
+  await playlistItemByName("重复页守卫歌单").click();
+  await page.getByTestId("playlist-detail").waitFor();
+  await visibleRowsIn(50);
+  const repeatedPlaylistScrollTop = await page.evaluate(() => document.querySelector('[data-testid="page-scroll"]')?.scrollTop ?? -1);
+  add("c1-playlist-switch-resets-scroll", repeatedPlaylistScrollTop === 0, JSON.stringify({ repeatedPlaylistScrollTop }));
+
   // ⑦ 专辑页：第一次失败 → 可点重试 → 第二次成功（失败不自动重试）
   await table.getByRole("button", { name: "守卫专辑", exact: true }).first().click();
   await failure.waitFor();

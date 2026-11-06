@@ -95,6 +95,7 @@ import {
   createView,
   isResidentView,
   normalizeView,
+  viewKey,
   viewParam,
   viewTitle,
 } from "./features/library/views.mjs"
@@ -573,7 +574,7 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
 
         {/* 收藏页常驻（切走只是 hidden），其余页面按视图重挂 */}
         <div className="relative min-h-0 flex-1 overflow-hidden" data-testid="main-content">
-          {isResidentView(view) ? null : <div className="h-full min-h-0 overflow-y-auto">{renderPage()}</div>}
+          {isResidentView(view) ? null : <div key={viewKey(view)} data-testid="page-scroll" className="h-full min-h-0 overflow-y-auto">{renderPage()}</div>}
           <FavoritesPage
             active={isResidentView(view)}
             onActivateTrack={onActivateTrack}
