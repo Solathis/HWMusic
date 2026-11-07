@@ -19,7 +19,6 @@ import { createLoginHost } from "../main/huawei.ts";
 import { createLyricsCache } from "../main/lyrics-cache.mjs";
 import { createThirdPartyLyrics } from "../main/lyrics-fallback.mjs";
 import { createLocalLyricsResolver } from "../main/local-lyrics.mjs";
-import { createAvailabilityProbe } from "../main/availability-probe.mjs";
 import { createMusicService } from "../main/music-service.mjs";
 import { applyStartupProxy, testProxyConnection } from "../main/proxy.mjs";
 import { createMusicSessionVerifier } from "../main/session-verifier.mjs";
@@ -109,19 +108,6 @@ dispatcher.register(SETTINGS_SET, async (request) => {
 let musicSessionSource = null;
 const lyricsCache = createLyricsCache({ dir: dataDir, log });
 const lyricsFallback = createThirdPartyLyrics({ log });
-const availabilityProbeEnabled = process.env.HWMUSIC_AVAILABILITY_PROBE === "1";
-let availabilityProbeApi = null;
-const availabilityProbe = availabilityProbeEnabled
-  ? createAvailabilityProbe({
-      knownOffline: new Set(settings.data.offlineTracks ?? []),
-      log,
-      verify: async (id) => {
-        if (availabilityProbeApi === null) return "unknown";
-        const answer = await availabilityProbeApi.getPlayback({ trackId: id });
-        return answer.ok ? "ok" : answer.error?.kind ?? "unknown";
-      },
-    })
-  : null;
 const musicService = createMusicService({
   settingsData: settings.data,
   session: () => (musicSessionSource === null ? null : musicSessionSource()),
@@ -129,9 +115,7 @@ const musicService = createMusicService({
   log,
   lyricsCache,
   lyricsFallback,
-  ...(availabilityProbe === null ? {} : { inspectListItem: availabilityProbe }),
 });
-availabilityProbeApi = musicService.api;
 for (const [channel, handler] of Object.entries(createLibraryHandlers({ api: musicService.api }))) {
   dispatcher.register(channel, handler);
 }
@@ -194,15 +178,8 @@ const sessionStore =
 // 会话验证器：`createAuthManager` 的 `verifySession` 插座，登录换会话后与启动恢复后各判一次会话是否还有效。
 // 会话来源按调用时取（赋值在 `createAuthManager` 之后），且用「本次要验的那个会话」再装配一份 music api。
 const verifySession = createMusicSessionVerifier({
-  createApi: (sessionSource) => {
-    const service = createMusicService({
-      settingsData: settings.data,
-      session: sessionSource,
-      ...(availabilityProbe === null ? {} : { inspectListItem: availabilityProbe }),
-    });
-    availabilityProbeApi = service.api;
-    return service.api;
-  },
+  createApi: (sessionSource) =>
+    createMusicService({ settingsData: settings.data, session: sessionSource }).api,
   sessionSource: () => (musicSessionSource === null ? null : musicSessionSource()),
 });
 
