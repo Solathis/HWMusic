@@ -14,6 +14,7 @@ import { guardMediaUrl } from "./media-url.mjs";
 /** @typedef {{ids: string[], index: number, metadata?: Array<QueueEntry|null>, positionMs?: number, positionTrackId?: string}} QueueRecord */
 
 export const QUEUE_SETTING_KEY = "queue";
+export const QUEUE_POSITION_SETTING_KEY = "queuePosition";
 const METADATA_KEYS = ["name", "artists", "duration", "coverUrl", "albumId", "albumName"];
 
 function textOf(value) {
@@ -89,16 +90,57 @@ function positionOf(value, trackId) {
 }
 
 /** @returns {QueueRecord|null} */
-export function queueRecordOf(entries, index, position = null) {
+export function queueStructureOf(entries, index) {
   const projected = queueEntriesOf(entries);
   if (projected.length === 0) return null;
   const metadata = projected.map((entry) => snapshotOf(entry, entry.id));
   const at = clampIndex(index, projected.length);
-  const resume = positionOf(position, projected[at].id);
   return {
     ids: projected.map((entry) => entry.id),
     index: at,
     ...(metadata.some((entry) => entry !== null) ? { metadata } : {}),
+  };
+}
+
+/** @returns {QueuePosition|null} */
+export function queuePositionOf(trackId, positionMs) {
+  const id = textOf(trackId);
+  if (id === null || typeof positionMs !== "number" || !Number.isFinite(positionMs) || positionMs <= 0) return null;
+  return { trackId: id, positionMs: Math.round(positionMs) };
+}
+
+/**
+ * 独立进度（settings 的 `queuePosition`）并入持久队列。
+ * `explicit` = 设置里**确实出现过**这个键（哪怕是 `null` 或归零）：一旦写过独立进度，旧的内联进度就到此为止——
+ * 归零是用户的选择，不是"没记过"。`explicit` 缺省（老数据、没有这个键）时内联进度照旧兼容。
+ * @param {unknown} record
+ * @param {unknown} position
+ * @param {{explicit?: boolean}} [options]
+ * @returns {QueueRecord|null}
+ */
+export function mergeQueuePosition(record, position, { explicit = false } = {}) {
+  const clean = sanitizeQueueRecord(record);
+  if (clean === null) return null;
+  const currentId = clean.ids[clean.index];
+  const next = queuePositionOf(position?.trackId, position?.positionMs);
+  const usable = next !== null && next.trackId === currentId ? next : null;
+  if (!explicit) {
+    if (usable === null) return clean;
+    return { ...clean, positionMs: usable.positionMs, positionTrackId: usable.trackId };
+  }
+  // 显式写过：内联的那一对字段整对丢掉（它只可能是迁移前留下来的旧进度）
+  const { positionMs: _inlineMs, positionTrackId: _inlineId, ...withoutInline } = clean;
+  if (usable === null) return withoutInline;
+  return { ...withoutInline, positionMs: usable.positionMs, positionTrackId: usable.trackId };
+}
+
+/** @returns {QueueRecord|null} */
+export function queueRecordOf(entries, index, position = null) {
+  const structure = queueStructureOf(entries, index);
+  if (structure === null) return null;
+  const resume = positionOf(position, structure.ids[structure.index]);
+  return {
+    ...structure,
     ...(resume === null ? {} : { positionMs: resume.positionMs, positionTrackId: resume.trackId }),
   };
 }
@@ -140,12 +182,11 @@ export function restoredEntries(record) {
   });
 }
 
-/** 恢复队列时跳过文件已不在的本地曲目；被丢的正好是当前曲目就退到它前面最近的一首，进度字段一并清掉；全丢光回 null。 */
-export function dropUnavailableLocalEntries(raw, availableIds) {
+/** 恢复队列时按谓词跳过曲目；被丢的正好是当前曲目就退到它前面最近的一首，进度字段一并清掉；全丢光回 null。 */
+export function dropQueueEntries(raw, shouldDrop) {
   const clean = sanitizeQueueRecord(raw);
   if (clean === null) return { record: null, skipped: 0 };
 
-  const available = availableIds instanceof Set ? availableIds : new Set(availableIds ?? []);
   const kept = [];
   let currentAt = null;
   let fallbackAt = null;
@@ -153,14 +194,13 @@ export function dropUnavailableLocalEntries(raw, availableIds) {
 
   for (let position = 0; position < clean.ids.length; position += 1) {
     const id = clean.ids[position];
-    const isLocal = typeof id === "string" && id.startsWith("local:");
-    if (isLocal && !available.has(id)) {
+    if (shouldDrop(id)) {
       skipped += 1;
       continue;
     }
     if (position <= clean.index) fallbackAt = kept.length;
     if (position === clean.index) currentAt = kept.length;
-    kept.push({ id, metadata: clean.metadata?.[position] ?? null, origin: position });
+    kept.push({ id, metadata: clean.metadata?.[position] ?? null });
   }
 
   if (skipped === 0) return { record: clean, skipped: 0 };
@@ -183,4 +223,10 @@ export function dropUnavailableLocalEntries(raw, availableIds) {
     },
     skipped,
   };
+}
+
+/** 恢复队列时跳过文件已不在的本地曲目。 */
+export function dropUnavailableLocalEntries(raw, availableIds) {
+  const available = availableIds instanceof Set ? availableIds : new Set(availableIds ?? []);
+  return dropQueueEntries(raw, (id) => id.startsWith("local:") && !available.has(id));
 }

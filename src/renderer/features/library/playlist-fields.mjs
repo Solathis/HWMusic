@@ -54,6 +54,12 @@ export function playlistCoverUrlOf(playlist) {
   return null;
 }
 
+/** 侧栏小封面优先读协议层预先筛过的 300px 图，老数据退回完整封面。 */
+export function playlistThumbUrlOf(playlist) {
+  if (!isObject(playlist)) return null;
+  return textOf(playlist.thumbUrl) ?? playlistCoverUrlOf(playlist);
+}
+
 // ---------------------------------------------------------------------------
 // 歌单详情页头部：标题、元信息与两个动作的文案
 // ---------------------------------------------------------------------------

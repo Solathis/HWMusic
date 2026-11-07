@@ -3,11 +3,10 @@
  * 滚动到哨兵就加载下一页；总数与已加载数分开显示——没走完分页只能说"已加载 N 首"。
  * 失败不清空已加载内容、不自动重试（离线时那是请求风暴），只给一个重试按钮。
  */
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 
-import { Alert, AlertDescription } from "./components/ui/alert"
 import { Button } from "./components/ui/button"
-import { EmptyState, ListSkeleton, TrackTable } from "./components"
+import { CONTENT_FADE_IN, EmptyState, ListSkeleton, LoadFailed, TrackListActions, TrackListToolbar, TrackTable } from "./components"
 import type { TrackRowActions } from "./track-menu.tsx"
 import { coreCall } from "./host-api"
 import { LIBRARY_FAVORITES } from "../shared/request-channels.ts"
@@ -45,15 +44,17 @@ export interface FavoritesPageProps extends TrackRowActions {
   onActivateTrack: (song: unknown, index: number, songs: unknown[]) => void
   onOpenAlbum: (albumId: string, song: unknown) => void
   onOpenArtist: (artistId: string, song: unknown) => void
+  onPlayAll?: (songs: unknown[]) => void
   /** 已知下架的曲目 id（外壳从播放状态交下来）：这些行变灰、不许激活 */
   offlineIds?: string[]
 }
 
-export function FavoritesPage({
+function FavoritesPageView({
   active,
   onActivateTrack,
   onOpenAlbum,
   onOpenArtist,
+  onPlayAll,
   onPlayNext,
   onEnqueue,
   offlineIds = [],
@@ -127,30 +128,29 @@ export function FavoritesPage({
     // 外层只管显隐：`hidden` 属性是 UA 的 display:none，一旦同一个元素上再写 `flex`，
     // 作者样式的 display:flex 会盖过它 —— 元素就"隐藏不掉"了。所以显隐层与布局层分开。
     <div className="h-full min-h-0" data-resident="favorites" hidden={!active}>
-      <div className="flex h-full min-h-0 flex-col" data-testid={FAVORITES_PAGE_TESTID}>
-        <div className="flex shrink-0 items-center justify-between gap-2 px-4 py-3">
-          <p className="text-sm text-muted-foreground" data-testid="favorites-counts">
-            {initial ? FAVORITES_LOADING_TEXT : describeFavoritesCounts(summary)}
-          </p>
-          {summary.failure === null ? null : (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => {
-                const cleared = clearFavoritesFailure(stateRef.current)
-                setState(cleared)
-                void requestNextPage(cleared)
-              }}
-            >
-              重试
-            </Button>
-          )}
-        </div>
-
+      <div className={`flex h-full min-h-0 flex-col ${CONTENT_FADE_IN}`} data-testid={FAVORITES_PAGE_TESTID}>
+        <TrackListToolbar
+          status={initial ? FAVORITES_LOADING_TEXT : describeFavoritesCounts(summary)}
+          statusTestId="favorites-counts"
+          actions={
+            <TrackListActions
+              songs={state.songs}
+              offlineIds={offlineIds}
+              onPlayAll={onPlayAll}
+              onEnqueue={onEnqueue}
+            />
+          }
+        />
         {summary.failure === null ? null : (
-          <Alert variant="destructive" className="mx-4 mb-3" data-testid="favorites-failure">
-            <AlertDescription>{summary.failure}</AlertDescription>
-          </Alert>
+          <LoadFailed
+            text={summary.failure}
+            testId="favorites-failure"
+            onRetry={() => {
+              const cleared = clearFavoritesFailure(stateRef.current)
+              setState(cleared)
+              void requestNextPage(cleared)
+            }}
+          />
         )}
 
         <div
@@ -161,7 +161,7 @@ export function FavoritesPage({
           data-testid={FAVORITES_SCROLL_TESTID}
         >
           {state.songs.length === 0 ? (
-            // 四种"还没有歌"要分开：首屏加载（骨架）、翻页加载（骨架）、失败（上面那条 Alert
+            // 四种"还没有歌"要分开：首屏加载（骨架）、翻页加载（骨架）、失败（上面那条失败态
             // 已经说了原因）、真的空（空态文案）。把前三种显示成"还没有收藏歌曲"都是假空态。
             initial || summary.loading ? (
               <ListSkeleton />
@@ -180,7 +180,7 @@ export function FavoritesPage({
               offlineIds={offlineIds}
             />
           )}
-          {summary.loading && state.songs.length > 0 ? <ListSkeleton /> : null}
+          {summary.loading && state.songs.length > 0 ? <ListSkeleton count={2} /> : null}
           {summary.isComplete ? null : (
             <div
               ref={sentinelRef}
@@ -194,3 +194,5 @@ export function FavoritesPage({
     </div>
   )
 }
+
+export const FavoritesPage = memo(FavoritesPageView)

@@ -339,7 +339,7 @@ export function StartupChecking({ gate }: { gate: AuthGate }) {
       aria-busy="true"
       aria-label={STARTUP_CHECKING_LABEL}
     >
-      <Loader2Icon className="size-6 animate-spin text-muted-foreground" aria-hidden="true" />
+      <Loader2Icon className="size-6 motion-safe:animate-spin text-muted-foreground" aria-hidden="true" />
       {notice.text === null ? null : (
         <p className="max-w-sm text-center text-sm text-muted-foreground" data-testid={STARTUP_NOTICE_TESTID}>
           {notice.text}
@@ -452,7 +452,7 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
           <p className="flex items-center justify-center gap-2 text-center text-sm text-muted-foreground" role="status">
             {opening.showing ? (
               <Loader2Icon
-                className="size-4 animate-spin"
+                className="size-4 motion-safe:animate-spin"
                 aria-hidden="true"
                 data-testid={LOGIN_OPENING_TESTID}
               />

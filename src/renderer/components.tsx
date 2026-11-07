@@ -4,12 +4,13 @@
  * 收藏的写入接口还没确认，没接 `onToggleFavorite` 时按钮禁用并直接说明原因，不做乐观更新。
  */
 import { useState } from "react"
-import type { ComponentType, ReactElement } from "react"
+import type { ComponentType, ReactElement, ReactNode } from "react"
 import {
   CaptionsOffIcon,
   ChevronDownIcon,
   HeartIcon,
   ListMusicIcon,
+  ListPlusIcon,
   MusicIcon,
   PanelBottomIcon,
   PauseIcon,
@@ -26,7 +27,7 @@ import {
   VolumeXIcon,
 } from "lucide-react"
 
-import { Alert, AlertDescription } from "./components/ui/alert"
+import { Alert, AlertAction, AlertDescription } from "./components/ui/alert"
 import { Badge } from "./components/ui/badge"
 import { Button } from "./components/ui/button"
 import {
@@ -55,11 +56,14 @@ import {
   trackArtistsOf,
   trackCoverUrlOf,
   trackDurationOf,
+  trackThumbUrlOf,
   trackIdOf,
   trackNameOf,
   formatDuration,
 } from "./features/library/track-fields.mjs"
 import { PLAYBACK_MODES } from "./features/playback/player.mjs"
+import { PLAYLIST_ENQUEUE_LABEL, PLAYLIST_PLAY_ALL_LABEL } from "./features/library/playlist-fields.mjs"
+import { hasPlayable, offlineSetOf } from "./features/playback/offline.mjs"
 import { lyricsTargetOf } from "./features/lyrics/lyrics-window.mjs"
 import { TRACK_MENU_TARGET } from "./features/shell/track-menu.mjs"
 import {
@@ -73,6 +77,8 @@ import type { PlayerRuntime } from "./features/playback/player-runtime.ts"
 import type { PlayerState } from "./features/playback/use-player.ts"
 import type { LyricsToggleSurface, LyricsWindowBinding } from "./use-lyrics-window.ts"
 import { TrackRowMenu, type TrackRowActions } from "./track-menu.tsx"
+
+export const CONTENT_FADE_IN = "motion-safe:animate-in motion-safe:fade-in-0 motion-safe:duration-150"
 
 /** 空态：一句话（文案来自纯逻辑模块，克制且不冒充）。 */
 export function EmptyState({ text }: { text: string }) {
@@ -122,11 +128,61 @@ export function CoverArt({
   )
 }
 
-/** 失败态：结构化错误的人话（core 侧已清洗过 message，这里不做二次编造）。 */
-export function LoadFailed({ text }: { text: string }) {
+/** 列表顶部工具栏：状态在左、动作在右；没有内容时不占布局。 */
+export function TrackListToolbar({ status, statusTestId, actions }: {
+  status: string
+  statusTestId?: string
+  actions?: ReactNode
+}) {
+  if (status === "" && actions == null) return null
   return (
-    <Alert variant="destructive" className="m-4" data-testid="load-failed">
+    <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-3">
+      <p role="status" className="text-sm text-muted-foreground" data-testid={statusTestId}>
+        {status}
+      </p>
+      <div className="flex items-center gap-2">{actions}</div>
+    </div>
+  )
+}
+
+export function TrackListActions({ songs, offlineIds = [], onPlayAll, onEnqueue }: {
+  songs: unknown[]
+  offlineIds?: string[]
+  onPlayAll?: (songs: unknown[]) => void
+  onEnqueue?: (songs: unknown[]) => void
+}) {
+  const disabled = !hasPlayable(songs, offlineSetOf(offlineIds))
+  return (
+    <>
+      <Button size="sm" disabled={disabled || onPlayAll === undefined} onClick={() => onPlayAll?.(songs)}>
+        <PlayIcon />
+        {PLAYLIST_PLAY_ALL_LABEL}
+      </Button>
+      <Button variant="secondary" size="sm" disabled={disabled || onEnqueue === undefined} onClick={() => onEnqueue?.(songs)}>
+        <ListPlusIcon />
+        {PLAYLIST_ENQUEUE_LABEL}
+      </Button>
+    </>
+  )
+}
+
+/** 失败态：结构化错误的人话（core 侧已清洗过 message，这里不做二次编造）。 */
+export function LoadFailed({ text, onRetry, testId = "load-failed", retryTestId }: {
+  text: string
+  onRetry?: () => void
+  testId?: string
+  retryTestId?: string
+}) {
+  return (
+    <Alert variant="destructive" className="mx-4 mb-3" data-testid={testId}>
       <AlertDescription>{text}</AlertDescription>
+      {onRetry === undefined ? null : (
+        <AlertAction>
+          <Button variant="secondary" size="sm" onClick={onRetry} data-testid={retryTestId}>
+            重试
+          </Button>
+        </AlertAction>
+      )}
     </Alert>
   )
 }
@@ -244,10 +300,14 @@ export function TrackTable({
     /*
      * 页面级横向留白 `px-4`，让曲目表与其余页面左边缘一致，hover 底色仍铺满整栏。
      * 表头 sticky 需要在调用点放开 shadcn 容器的 `overflow`，让它跟随页面滚动根；不改生成原语。
+     * 放开 `overflow` 的选择器是**直接子选择器**，所以它必须写在 `data-slot=table-container` 的**直接父元素**上：
+     * 淡入包裹层就是那一层（`CONTENT_FADE_IN` 与覆盖写在同一个 className 里），中间再插一层就会掉回 `overflow-x-auto`，
+     * 表头从此不粘（sticky 改跟一个不纵向滚动的容器走）。真浏览器守卫按计算样式与滚动几何钉这一条。
      */
-    <div className="px-4 [&>[data-slot=table-container]]:overflow-visible">
-      <Table className="table-fixed" data-testid="track-table">
-        <TableHeader className="sticky top-0 z-10 bg-background">
+    <div className="px-4">
+      <div className={`${CONTENT_FADE_IN} [&>[data-slot=table-container]]:overflow-visible`}>
+        <Table className="table-fixed" data-testid="track-table">
+          <TableHeader className="sticky top-0 z-10 bg-background">
           <TableRow>
             <TableHead className={`${TRACK_COLUMN_WIDTHS.index} text-center`}>#</TableHead>
             <TableHead className={TRACK_COLUMN_WIDTHS.title}>标题</TableHead>
@@ -288,17 +348,13 @@ export function TrackTable({
                     event.preventDefault()
                     onActivate?.(song, index)
                   }}
-                  className={
-                    isOffline
-                      ? "opacity-50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-                      : "focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-                  }
+                  className={`transition-opacity motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none${isOffline ? " opacity-50" : ""}`}
                 >
                   <TableCell className="text-center tabular-nums text-muted-foreground">{index + 1}</TableCell>
                   <TableCell className="font-medium">
                     {/* 小封面：`<img>` + 占位兜底见 CoverArt，地址来自协议层的白名单投影 */}
                     <div className="flex min-w-0 items-center gap-2">
-                      <CoverArt coverUrl={trackCoverUrlOf(song)} className="size-9 rounded-md" iconClassName="size-4" />
+                      <CoverArt coverUrl={trackThumbUrlOf(song)} className="size-9 rounded-md" iconClassName="size-4" />
                       <TrackTitle text={trackNameOf(song)} offline={isOffline} />
                       {/* 文件不在就写在这里，行本身留着（用户还看得见、还能移除） */}
                       {isUnavailable ? (
@@ -376,8 +432,9 @@ export function TrackTable({
               </TrackRowMenu>
             )
           })}
-        </TableBody>
-      </Table>
+          </TableBody>
+        </Table>
+      </div>
     </div>
   )
 }
@@ -489,7 +546,7 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
 
   /** 左区：封面 + 曲目信息（整块可点 = 进歌词舞台）。 */
   const trackInfo = (
-    <>
+    <div key={state.track?.id ?? "none"} className={`flex min-w-0 items-center gap-3 ${CONTENT_FADE_IN}`}>
       <CoverArt coverUrl={trackCoverUrlOf(state.track)} className="size-10 rounded-md" />
       <div className="flex min-w-0 flex-col">
         <span className="truncate text-sm font-medium">{trackTitleOf(state.track)}</span>
@@ -502,7 +559,7 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
             : `${trackArtistOf(state.track)} · ${playerStatusText(state)}${qualityText === null ? "" : ` · ${qualityText}`}`}
         </span>
       </div>
-    </>
+    </div>
   )
 
   return (
@@ -727,7 +784,7 @@ export function QueuePanel({ entries, index, onSelect, onClear, onPlayNext, offl
                   <Button
                     variant={position === index ? "secondary" : "ghost"}
                     size="sm"
-                    className={`w-full min-w-0 max-w-full justify-start ${isOffline ? "opacity-50" : ""}`}
+                    className={`w-full min-w-0 max-w-full justify-start transition-opacity motion-reduce:transition-none${isOffline ? " opacity-50" : ""}`}
                     aria-current={position === index ? "true" : undefined}
                     aria-disabled={isOffline ? true : undefined}
                     onClick={() => {

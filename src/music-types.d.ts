@@ -17,6 +17,7 @@ export interface Song {
   albumId?: string;
   albumName?: string;
   coverUrl?: string;
+  thumbUrl?: string;
   /** 秒（真接口的字段单位未变） */
   duration?: number;
   [key: string]: unknown;
@@ -29,6 +30,7 @@ export interface Playlist {
   kind?: "collected" | "owned" | "chart" | "unknown";
   count?: number;
   coverUrl?: string;
+  thumbUrl?: string;
   description?: string;
   [key: string]: unknown;
 }

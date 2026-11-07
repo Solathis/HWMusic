@@ -1819,8 +1819,15 @@ async function stableTextBox(page, selector) {
   }).catch(() => null);
 }
 
+/** 等待内容淡入结束，避免截图把 enter 动画中间帧当成像素基线。 */
+export async function waitForEnterAnimations(page) {
+  await page.waitForFunction(() => document.getAnimations().every((animation) => animation.animationName !== "enter" || animation.playState === "finished"));
+}
+
 /** 裁到文字 Range；与隐藏同一文字后的像素比较，不能把背景/表格误算成歌词。 */
 async function textPixels(page, selector, theme, file) {
+  await waitForEnterAnimations(page)
+
   const box = await stableTextBox(page, selector);
   if (!box || box.width <= 0 || box.height <= 0) return { ink: 0, changed: 0, box };
   const target = page.locator(selector).first();
@@ -1851,6 +1858,7 @@ async function textPixels(page, selector, theme, file) {
  * 所以问的是可读性本身（墨色亮度 vs 背景亮度 ≥ 40），不是"必须比某条阈值深"。
  */
 async function inkContrast(page, selector, file) {
+  await waitForEnterAnimations(page)
   const box = await stableTextBox(page, selector);
   if (!box || box.width <= 0 || box.height <= 0) return { changed: 0, inkMean: null, backdropMean: null, contrast: 0, box };
   const target = page.locator(selector).first();
@@ -1892,6 +1900,7 @@ async function inkContrast(page, selector, file) {
 
 /** 兼容旧名字：主窗舞台那几项仍然用"深/浅两类像素"的口径（不透明舞台，含 canvas）。 */
 async function inkColor(page, selector, file) {
+  await waitForEnterAnimations(page)
   const box = await stableTextBox(page, selector);
   if (!box || box.width <= 0 || box.height <= 0) return { count: 0, mean: null, box };
   const target = page.locator(selector).first();
@@ -2750,6 +2759,7 @@ export async function checkDesktopInteraction(page, guardDir, add) {
   // ⑦e 逐字扫亮：同一行两个时刻，已唱的字变多、像素有差异、未唱的字更淡
   await showVertical(FIXTURE_LRC, 400);
   const karaokeEarly = await verticalGeometry();
+  await waitForEnterAnimations(page);
   const earlyPng = await page.screenshot({ path: path.join(guardDir, "r61-vertical-karaoke-early.png") });
   await setVerticalTime(2600);
   const karaokeLate = await verticalGeometry();
@@ -3638,6 +3648,7 @@ export async function checkImmersiveKaraoke(page, guardDir, add) {
     await page.waitForTimeout(800);
     return page.screenshot(karaokeBox ? { clip: karaokeBox, path: path.join(guardDir, file) } : { path: path.join(guardDir, file) });
   };
+  await waitForEnterAnimations(page);
   const earlyShot = await shotAt(300, "r46-immersive-karaoke-early.png");
   const lateShot = await shotAt(2600, "r46-immersive-karaoke-late.png");
   const fillDiff = pixelDiffRatio(await sharp(earlyShot).raw().toBuffer(), await sharp(lateShot).raw().toBuffer());
@@ -4578,6 +4589,27 @@ export async function checkLibraryPagination(page, guardDir, add) {
     && !repeatedDetail.includes("共 50 首") && (await sentinelCount()) === 0,
   JSON.stringify({ repeatedStatus, claimsTotal: repeatedDetail.includes("共 50 首"), sentinel: await sentinelCount() }));
 
+  // C1：非常驻内容区按歌单 viewKey 重挂，换歌单回到顶部
+  const playlistItemByName = (name) => page.getByTestId("sidebar-playlist-item").filter({
+    has: page.getByTestId("sidebar-playlist-name").getByText(name, { exact: true }),
+  });
+  await playlistItemByName("守卫歌单").click();
+  await page.getByTestId("playlist-detail").waitFor();
+  await visibleRowsIn(50);
+  const firstPlaylistScrollTop = await page.evaluate(() => {
+    const target = document.querySelector('[data-testid="page-scroll"]');
+    if (!target) return -1;
+    target.scrollTop = target.scrollHeight;
+    return target.scrollTop;
+  });
+  add("c1-playlist-scrolls", firstPlaylistScrollTop > 0, JSON.stringify({ firstPlaylistScrollTop }));
+
+  await playlistItemByName("重复页守卫歌单").click();
+  await page.getByTestId("playlist-detail").waitFor();
+  await visibleRowsIn(50);
+  const repeatedPlaylistScrollTop = await page.evaluate(() => document.querySelector('[data-testid="page-scroll"]')?.scrollTop ?? -1);
+  add("c1-playlist-switch-resets-scroll", repeatedPlaylistScrollTop === 0, JSON.stringify({ repeatedPlaylistScrollTop }));
+
   // ⑦ 专辑页：第一次失败 → 可点重试 → 第二次成功（失败不自动重试）
   await table.getByRole("button", { name: "守卫专辑", exact: true }).first().click();
   await failure.waitFor();
@@ -4592,13 +4624,13 @@ export async function checkLibraryPagination(page, guardDir, add) {
     && (await failure.count()) === 0 && (await rowCount()) === 50,
   JSON.stringify({ failureText: failureText.slice(0, 30), albumCalls: albumCalls.map((call) => call.page) }));
 
-  // ⑧ 歌手页：后端不分页（一次响应 120 首），本地每批 50，页面不挂说明文案
+  // ⑧ 歌手页：后端不分页（一次响应 120 首），本地每批 50，工具栏显示已揭示条数
   await table.getByRole("button", { name: "守卫艺人", exact: true }).first().click();
   await visibleRowsIn(50);
   const artistStatus = await statusText();
   const artistCalls = await callsOf("library:artist");
   add("pagination-local-reveal-first-batch", artistCalls.length === 1 && (await rowCount()) === 50
-    && artistStatus === "" && (await page.getByTestId("list-pagination-status").count()) === 0,
+    && artistStatus.trim() === "共 50 首" && (await page.getByTestId("list-pagination-status").count()) === 1,
   JSON.stringify({ artistCalls: artistCalls.length, artistStatus }));
   await wheelContent(20000);
   await visibleRowsIn(100);
@@ -4614,7 +4646,7 @@ export async function checkLibraryPagination(page, guardDir, add) {
   await visibleRowsIn(50);
   const historyStatus = await statusText();
   add("pagination-history-local-batch", (await callsOf("library:history")).length === 1
-    && (await rowCount()) === 50 && historyStatus === "",
+    && (await rowCount()) === 50 && historyStatus.trim() === "共 50 首",
   JSON.stringify({ historyStatus }));
   await page.screenshot({ path: path.join(guardDir, "r55-playlist-history.png") });
 
@@ -4640,6 +4672,40 @@ export async function checkLibraryPagination(page, guardDir, add) {
   await page.evaluate(() => window.__guard.pause());
   add("pagination-dblclick-favorites-loaded-only", favoritesRows === 36
     && favoritesQueue.length === favoritesRows && favoritesQueue.index === 1, JSON.stringify({ ...favoritesQueue, favoritesRows }));
+
+  // D1：换页内容淡入统一尊重减少动效；正常动效在 50ms 内应确实启动一次。
+  const observePageTransition = async (reducedMotion) => {
+    await page.emulateMedia({ reducedMotion });
+    await page.getByRole("button", { name: "我的收藏", exact: true }).click();
+    await page.getByTestId("favorites-page").waitFor();
+    const before = await page.evaluate(() => document.querySelector('[data-testid="page-scroll"]')?.getAnimations().length ?? 0);
+    const box = page.getByRole("textbox", { name: "搜索关键字" });
+    await box.fill(reducedMotion === "reduce" ? "减少动效守卫" : "正常动效守卫");
+    await box.press("Enter");
+    if (reducedMotion === "reduce") {
+      await page.waitForTimeout(50);
+    }
+    const started = reducedMotion === "reduce" ? null : await page.waitForFunction(() => {
+      const animation = [...(document.querySelector('[data-testid="page-scroll"]')?.getAnimations() ?? [])]
+        .find((candidate) => candidate.animationName === "enter");
+      return animation && typeof animation.currentTime === "number" && animation.currentTime <= 50
+        ? { elapsed: animation.currentTime, state: animation.playState }
+        : false;
+    }, null, { timeout: guardScaledMs(1000), polling: 1 }).then((handle) => handle.jsonValue());
+    const animations = await page.evaluate(() => [...(document.querySelector('[data-testid="page-scroll"]')?.getAnimations() ?? [])]
+      .map((animation) => ({ name: animation.animationName, state: animation.playState })));
+    return { before, started, animations };
+  };
+  const reducedMotion = await observePageTransition("reduce");
+  add("d1-reduced-motion-no-page-fade", reducedMotion.animations.every((animation) => animation.name !== "enter"), JSON.stringify(reducedMotion));
+  const normalMotion = await observePageTransition("no-preference");
+  /**
+   * 正常动效的判据只有一条：那一次轮询**捕获到** `enter` 真的启动过（当时 currentTime ≤ 50ms）。
+   * 不再要求"稍后几轮往返之后 animation 还在"——150ms 的淡入完全可能已经播完并从 `getAnimations()` 里消失，
+   * 再要它还在就是在赌时序（慢渲染必红、快机器偶发绿），那是假失败/假通过而不是证据。
+   */
+  add("d1-normal-motion-page-fade", normalMotion.started !== null, JSON.stringify(normalMotion));
+  await page.emulateMedia({ reducedMotion: "no-preference" });
 
   // ⑩ 换关键词：旧查询的迟到响应必须被丢掉（新结果里不许混进旧词的行）
   await scrollToTop();
@@ -4683,6 +4749,85 @@ export async function checkLibraryPagination(page, guardDir, add) {
     await window.__guard.ready();
     window.__guard.pause();
   });
+}
+
+/**
+ * 曲目表表头 sticky 的**真浏览器**守卫（真组件 + 真产物 CSS，量的是计算样式与滚动几何，不是标记）。
+ *
+ * 生成原语 `components/ui/table.tsx` 自带 `overflow-x-auto`：那一层会成为 `position: sticky` 认的滚动容器，
+ * 而它纵向并不滚动——表头于是跟着页面一起卷走。调用点在**table-container 的直接父元素**上把 overflow 放开，
+ * 选择器是直接子选择器，所以父元素必须是那一层（中间再插一层淡入包裹层就会掉回 `overflow-x-auto`）。
+ * 这里把两处真实滚动根各走一遍：歌单详情页的 `page-scroll` 与收藏页自己的 `favorites-scroll-root`。
+ */
+export async function checkTableSticky(page, guardDir, add) {
+  const visibleTable = () => page.locator('[data-testid="track-table"]:visible');
+  /** 淡入是 150ms 的动画：等它播完再量几何（落地判据与动效无关，这里只是不在动的时候量）。 */
+  const settleFade = () => page.waitForFunction(() => {
+    const wrapper = document.querySelector('[data-slot="table-container"]')?.parentElement;
+    return !wrapper || wrapper.getAnimations().every((animation) => animation.playState === "finished");
+  }, null, { timeout: GUARD_TIMEOUT_MS });
+
+  /**
+   * 在 `rootSelector` 这个**真实滚动根**里量一次：
+   * table-container 的计算 overflow 必须不是 auto/scroll（否则它才是滚动容器），
+   * 滚下半个屏幕之后 thead 的顶边仍贴住滚动根的顶边，而首行已经钻到表头底下。
+   */
+  const probe = (rootSelector) => page.evaluate((selector) => {
+    const root = document.querySelector(selector);
+    if (!root) return { found: false, reason: `找不到滚动根 ${selector}` };
+    const table = [...document.querySelectorAll('[data-testid="track-table"]')]
+      .find((node) => node.getClientRects().length > 0);
+    const container = table?.closest('[data-slot="table-container"]') ?? null;
+    const header = table?.querySelector("thead") ?? null;
+    const firstRow = table?.querySelector("tbody tr") ?? null;
+    if (!table || !container || !header || !firstRow) return { found: false, reason: "看不见曲目表 / table-container / thead" };
+    if (!root.contains(table)) return { found: false, reason: "曲目表不在这个滚动根里" };
+    const style = getComputedStyle(container);
+    const offset = Math.max(1, Math.round(root.clientHeight / 2));
+    root.scrollTop = offset;
+    const atRoot = (node) => Math.round(node.getBoundingClientRect().top - root.getBoundingClientRect().top);
+    return {
+      found: true,
+      overflowX: style.overflowX,
+      overflowY: style.overflowY,
+      scrolled: Math.round(root.scrollTop),
+      offset,
+      scrollable: root.scrollHeight - root.clientHeight,
+      headerTop: atRoot(header),
+      firstRowTop: atRoot(firstRow),
+      headerHeight: Math.round(header.getBoundingClientRect().height),
+    };
+  }, rootSelector);
+
+  /** 判据：容器不是滚动容器（overflow 不是 auto/scroll），且表头仍贴在滚动根顶上、首行已在它下面卷过。 */
+  const stickyOk = (row) => row.found === true && row.scrolled > 0
+    && row.overflowX !== "auto" && row.overflowX !== "scroll"
+    && row.overflowY !== "auto" && row.overflowY !== "scroll"
+    && Math.abs(row.headerTop) <= 2 && row.firstRowTop < 0;
+
+  // 侧栏窄轨里没有歌单与导航文案：先展开
+  if (await page.getByTestId("sidebar-search-rail").count()) await page.getByTestId("sidebar-search-rail").click();
+
+  // ① 歌单详情页：滚动根是外壳内容区的 `page-scroll`（首屏 50 行，足够滚半屏）
+  await page.getByTestId("sidebar-playlist-item").first().click();
+  await page.getByTestId("playlist-detail").waitFor();
+  await visibleTable().first().waitFor();
+  await settleFade();
+  const pageRow = await probe('[data-testid="page-scroll"]');
+  add("f4-sticky-header-page-scroll", stickyOk(pageRow), JSON.stringify(pageRow));
+  await page.screenshot({ path: path.join(guardDir, "f4-sticky-playlist.png") });
+
+  // ② 收藏页：它常驻挂载、滚动根是自己的 `favorites-scroll-root`（另一条滚动根，同样要粘）
+  await page.getByRole("button", { name: "我的收藏", exact: true }).click();
+  await page.getByTestId("favorites-page").waitFor();
+  await visibleTable().first().waitFor();
+  await settleFade();
+  const favoritesRow = await probe('[data-testid="favorites-scroll-root"]');
+  add("f4-sticky-header-favorites", stickyOk(favoritesRow), JSON.stringify(favoritesRow));
+  await page.screenshot({ path: path.join(guardDir, "f4-sticky-favorites.png") });
+
+  // 收尾：把收藏页的滚动位置放回去，后面按页面几何/滚动量的验收从干净状态开始
+  await page.getByTestId("favorites-scroll-root").evaluate((element) => { element.scrollTop = 0; });
 }
 
 /**
@@ -4982,6 +5127,7 @@ export async function checkRowContextMenus(page, port, guardDir, add) {
     await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
     await page.getByTestId("main-content").waitFor();
     await table.locator("tbody tr").first().waitFor();
+    await waitForEnterAnimations(page);
     /** 记下每次 contextmenu 的默认行为有没有被吃掉；监听挂**冒泡**阶段：守卫那一条是捕获阶段（先跑），radix 的触发器在行上（更先跑），所以这里读到的是「最后到底拦没拦」。 */
     await page.evaluate(() => {
       window.__ctxProbe = [];
@@ -5306,7 +5452,7 @@ export async function checkLocalSongs(page, port, guardDir, add) {
 
   // ——— ③ 空态：没有本地曲目时那句话 + 导入按钮 ———
   await open("empty");
-  const emptyNode = pageRoot.getByRole("status");
+  const emptyNode = pageRoot.getByText("还没有导入本地歌曲。", { exact: true });
   await emptyNode.waitFor();
   const emptyText = ((await emptyNode.textContent()) ?? "").trim();
   add("r65-local-empty-state",
@@ -6030,11 +6176,10 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       await bar.getByRole("button", { name: "暂停", exact: true }).click();
       await resumePage.waitForTimeout(300);
       const writes = await resumePage.evaluate(() => window.__guard.settingsWrites());
-      const lastQueue = writes.at(-1)?.patch?.queue ?? null;
+      const lastPosition = writes.at(-1)?.patch?.queuePosition ?? null;
       add("r64-pause-persists-position",
-        lastQueue !== null && lastQueue.positionTrackId === "guard-b" && lastQueue.positionMs > 5000
-          && lastQueue.index === 1,
-        JSON.stringify({ lastQueue, writes: writes.length, resumed: resumed.currentTimeMs }));
+        lastPosition !== null && lastPosition.trackId === "guard-b" && lastPosition.positionMs > 5000,
+        JSON.stringify({ lastPosition, writes: writes.length, resumed: resumed.currentTimeMs }));
       add("r64-no-runtime-errors", resumeErrors.length === 0, JSON.stringify(resumeErrors.slice(0, 3)));
       await resumePage.close();
     });
@@ -6171,6 +6316,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       add(`${theme}-paused-text-pixels`, pixels.ink > 60, JSON.stringify(pixels));
       await page.screenshot({ path: path.join(guardDir, `${theme}-stage.png`) });
 
+      await waitForEnterAnimations(page);
       const before = await page.screenshot();
       await page.locator(underlay).evaluateAll((elements) => elements.forEach((element) => { element.style.filter = "invert(1)"; }));
       const inverted = await page.screenshot();
@@ -6429,6 +6575,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     await checkLyricsTargetMenus(browser, port, guardDir, add);
     /** 库列表触底分页（真滚轮 + 真 IPC 计数）；它会把主界面导航走，而后面的桌面窗验收本来就要重挂整个壳。 */
     await checkLibraryPagination(page, guardDir, add);
+    /** 曲目表表头 sticky 的真几何（生成原语自带 overflow-x-auto，调用点在直接父元素上放开）。它把主界面导航走，而后面本来就要重挂整个壳。 */
+    await checked("f4-sticky-header", () => checkTableSticky(page, guardDir, add));
     await page.evaluate(() => window.__guard.desktopBeforeMount());
     await page.getByTestId("lyrics-window").waitFor();
     await page.waitForTimeout(900);

@@ -2,7 +2,7 @@
  * 侧栏「我的歌单」的展示投影：名字/封面/数量都从协议层归一化过的歌单读，数量数不出来就是 null。
  * 自建/收藏只认协议层的 `kind`（`normalizePlaylist` 给的 owned/collected），认不出就不标。
  */
-import { playlistCoverUrlOf, playlistIdOf, playlistNameOf, playlistSongCountOf } from "./playlist-fields.mjs";
+import { playlistIdOf, playlistNameOf, playlistSongCountOf, playlistThumbUrlOf } from "./playlist-fields.mjs";
 
 export const SIDEBAR_PLAYLISTS_LABEL = "我的歌单";
 export const SIDEBAR_PLAYLISTS_EMPTY_TEXT = "还没有歌单。";
@@ -54,7 +54,7 @@ export function sidebarPlaylistItems(playlists) {
     items.push({
       id,
       name: playlistNameOf(playlist),
-      coverUrl: playlistCoverUrlOf(playlist),
+      coverUrl: playlistThumbUrlOf(playlist),
       metaText: sidebarPlaylistMetaText(playlist),
       tooltipText: sidebarPlaylistTooltipText(playlist),
       source: playlist,

@@ -1,12 +1,12 @@
 /**
- * `settings.json`：设置的单一真源（读/清洗/归一/落盘）。
+ * `settings.json`：设置真源；播放队列单独落在 `queue.json`（读/清洗/归一/落盘）。
  *
  * 磁盘形状是固定契约（Rust `webview_proxy.rs` 读同一份），三条不猜的规矩：
  * 形状不认识就当没配；凭据原样保留且绝不进日志；认不出的文件不覆盖（写时报结构化错误并保留原文件）。
  */
 import * as nodeFs from "node:fs/promises";
 import { isIPv6 } from "node:net";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 
 import { DEFAULT_PLAYBACK_QUALITY, PLAYBACK_QUALITIES, isPlaybackQuality } from "../shared/playback-quality.mjs";
 import { proxyModeAndScope } from "../shared/proxy-mode.mjs";
@@ -14,6 +14,15 @@ import { CORE_ERROR_KINDS, err, ok } from "../shared/result.ts";
 
 /** 设置文件名（Rust `webview_proxy.rs` 的同名字面量，两侧由测试互钉）。 */
 export const SETTINGS_FILE_NAME = "settings.json";
+/** 播放队列文件名：队列更新不应重写 Rust 读取的设置文件。 */
+export const QUEUE_FILE_NAME = "queue.json";
+/** 设置文档中队列字段的键名（与渲染层各自定义，靠测试互钉）。 */
+export const QUEUE_DATA_KEY = "queue";
+/**
+ * 独立播放进度的键名（与渲染层 `QUEUE_POSITION_SETTING_KEY` 各自定义，靠测试互钉）。
+ * 这个键的 `null` 是**显式语义**（"没有进度"），必须留在盘上：删掉它会让下一次启动退回队列里内联的旧进度。
+ */
+export const QUEUE_POSITION_DATA_KEY = "queuePosition";
 /** schema 版本：只认这一个（Rust 侧同名字面量）。 */
 export const SETTINGS_SCHEMA_VERSION = 1;
 /** 文件权限：只给当前用户读写（文件里有代理密码）。 */
@@ -244,6 +253,12 @@ export function mergeSettings(document, patch) {
       data.offlineTracks = normalizeOfflineTracks(value);
       continue;
     }
+    if (key === QUEUE_POSITION_DATA_KEY) {
+      // 与其它键不同：这里的 `null` 是"显式没有进度"（用户归零/清空过），写进盘而不是删键。
+      // 删键之后渲染层无法区分「没记过」与「记过归零」，旧队列里的内联进度就会被重新捡起来。
+      data[key] = value === null ? null : value;
+      continue;
+    }
     if (value === null) {
       delete data[key];
       continue;
@@ -289,30 +304,77 @@ export function createSettingsStore({
   }
 
   const settingsPath = () => (persistent ? join(dir, SETTINGS_FILE_NAME) : null);
+  const queuePath = () => (persistent ? join(dir, QUEUE_FILE_NAME) : null);
   let tempCounter = 0;
   /** 临时文件必须与目标同目录：跨分区的 rename 不是原子的。 */
-  const tempPath = () => {
+  const tempPath = (fileName) => {
     tempCounter += 1;
-    return join(dirname(settingsPath()), `${SETTINGS_FILE_NAME}.${process.pid}.${tempCounter}.tmp`);
+    return join(dir, `${fileName}.${process.pid}.${tempCounter}.tmp`);
   };
+
+  /**
+   * 读 queue.json：坏文件按没有队列处理，不阻断 settings.json。
+   * `exists` 区分「还没迁移的旧队列」与「已有坏队列文件」。
+   */
+  async function loadQueue() {
+    if (!persistent) return { exists: false, queue: undefined };
+
+    let text;
+    try {
+      text = await fs.readFile(queuePath(), "utf8");
+    } catch (cause) {
+      if (cause?.code === "ENOENT") return { exists: false, queue: undefined };
+      log(`读取 ${QUEUE_FILE_NAME} 失败（${describe(cause)}）：按「没有队列」处理`);
+      return { exists: true, queue: undefined };
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      log(`${QUEUE_FILE_NAME} 不是合法 JSON：按「没有队列」处理`);
+      return { exists: true, queue: undefined };
+    }
+    if (
+      !isPlainObject(parsed) ||
+      parsed.schemaVersion !== SETTINGS_SCHEMA_VERSION ||
+      !isPlainObject(parsed.queue)
+    ) {
+      log(`${QUEUE_FILE_NAME} 的形状不认识：按「没有队列」处理`);
+      return { exists: true, queue: undefined };
+    }
+    return { exists: true, queue: parsed.queue };
+  }
 
   /**
    * 读磁盘 + 判定能否写回去。
    *
-   * @returns {Promise<{document: object, blocked: {kind: string, message: string}|null}>}
+   * @returns {Promise<{document: object, queueExists: boolean, blocked: {kind: string, message: string}|null}>}
    *   `blocked` 非空 = 原文件不该被覆盖（坏 JSON / 读不了 / schemaVersion 不认识）。
    */
+  async function applyQueue(document) {
+    const legacyQueue = document.data[QUEUE_DATA_KEY];
+    const loaded = await loadQueue();
+    if (loaded.exists) {
+      if (loaded.queue === undefined) delete document.data[QUEUE_DATA_KEY];
+      else document.data[QUEUE_DATA_KEY] = loaded.queue;
+    }
+    return { document, queueExists: loaded.exists, legacyQueue };
+  }
+
   async function load() {
-    if (!persistent) return { document: normalizeSettingsDocument(null), blocked: null };
+    if (!persistent) return { document: normalizeSettingsDocument(null), blocked: null, queueExists: false };
 
     let text;
     try {
       text = await fs.readFile(settingsPath(), "utf8");
     } catch (cause) {
-      if (cause?.code === "ENOENT") return { document: normalizeSettingsDocument(null), blocked: null };
+      if (cause?.code === "ENOENT") {
+        return { ...(await applyQueue(normalizeSettingsDocument(null))), blocked: null };
+      }
       const message = `读取 ${SETTINGS_FILE_NAME} 失败（${describe(cause)}）：本次按「没配」处理，且不覆盖原文件`;
       log(message);
-      return { document: normalizeSettingsDocument(null), blocked: { kind: CORE_ERROR_KINDS.internal, message } };
+      return { ...(await applyQueue(normalizeSettingsDocument(null))), blocked: { kind: CORE_ERROR_KINDS.internal, message } };
     }
 
     let parsed;
@@ -322,7 +384,7 @@ export function createSettingsStore({
       const message = `${SETTINGS_FILE_NAME} 不是合法 JSON：本次按「没配」处理，且不覆盖原文件（请手工修好或删掉）`;
       log(message);
       return {
-        document: normalizeSettingsDocument(null),
+        ...(await applyQueue(normalizeSettingsDocument(null))),
         blocked: { kind: CORE_ERROR_KINDS.invalidEnvelope, message },
       };
     }
@@ -337,11 +399,11 @@ export function createSettingsStore({
         `本版本只认 ${SETTINGS_SCHEMA_VERSION}）：本次按「没配」处理，且不覆盖原文件`;
       log(message);
       return {
-        document: normalizeSettingsDocument(parsed),
+        ...(await applyQueue(normalizeSettingsDocument(parsed))),
         blocked: { kind: CORE_ERROR_KINDS.invalidEnvelope, message },
       };
     }
-    return { document: normalizeSettingsDocument(parsed), blocked: null };
+    return { ...(await applyQueue(normalizeSettingsDocument(parsed))), blocked: null };
   }
 
   /**
@@ -361,9 +423,9 @@ export function createSettingsStore({
   }
 
   /** 原子写：临时文件（创建即 0600）→ rename 替换。失败保留原文件。 */
-  async function writeDocument(document) {
-    const target = settingsPath();
-    const temp = tempPath();
+  async function writeFileAtomically(fileName, document) {
+    const target = join(dir, fileName);
+    const temp = tempPath(fileName);
     const payload = `${JSON.stringify(document, null, 2)}\n`;
     try {
       await fs.mkdir(dir, { recursive: true, mode: SETTINGS_DIR_MODE });
@@ -375,7 +437,7 @@ export function createSettingsStore({
       } catch {
         // 清理路径：原始失败原因更重要
       }
-      fail(CORE_ERROR_KINDS.internal, `设置落盘失败（${describe(cause)}）：已保留原文件`);
+      throw cause;
     }
     try {
       await fs.chmod(target, SETTINGS_FILE_MODE);
@@ -385,6 +447,32 @@ export function createSettingsStore({
         `无法把 ${basename(target)} 收紧到 0${SETTINGS_FILE_MODE.toString(8)}（${describe(cause)}）：` +
           "文件里有代理密码，改由用户目录 ACL 兜底",
       );
+    }
+  }
+
+  async function writeDocument(document) {
+    try {
+      await writeFileAtomically(SETTINGS_FILE_NAME, document);
+    } catch (cause) {
+      fail(CORE_ERROR_KINDS.internal, `设置落盘失败（${describe(cause)}）：已保留原文件`);
+    }
+  }
+
+  async function writeQueue(queue) {
+    try {
+      await writeFileAtomically(QUEUE_FILE_NAME, { schemaVersion: SETTINGS_SCHEMA_VERSION, [QUEUE_DATA_KEY]: queue });
+    } catch (cause) {
+      fail(CORE_ERROR_KINDS.internal, `queue.json 写入失败（${describe(cause)}）：已保留原文件`);
+    }
+  }
+
+  async function deleteQueue() {
+    try {
+      await fs.unlink(queuePath());
+    } catch (cause) {
+      if (cause?.code !== "ENOENT") {
+        fail(CORE_ERROR_KINDS.internal, `queue.json 删除失败（${describe(cause)}）：已保留原文件`);
+      }
     }
   }
 
@@ -419,11 +507,52 @@ export function createSettingsStore({
       if (!persistent) {
         fail(CORE_ERROR_KINDS.internal, "没有数据目录：设置无法落盘（宿主必须把 --data-dir 交给 sidecar）");
       }
-      const { document, blocked } = await load();
+      const { document, queueExists, legacyQueue, blocked } = await load();
       if (blocked !== null) fail(blocked.kind, blocked.message);
-      const next = mergeSettings(document, patch);
-      await writeDocument(next);
-      return next;
+      if (!isPlainObject(patch)) {
+        fail(CORE_ERROR_KINDS.invalidPayload, "设置 patch 必须是普通对象");
+      }
+
+      const hasQueue = Object.prototype.hasOwnProperty.call(patch, QUEUE_DATA_KEY);
+      const legacyQueueForMigration = !queueExists ? legacyQueue : undefined;
+      const nextPatch = hasQueue ? Object.fromEntries(
+        Object.entries(patch).filter(([key]) => key !== QUEUE_DATA_KEY),
+      ) : patch;
+      const next = mergeSettings(document, nextPatch);
+      delete next.data[QUEUE_DATA_KEY];
+
+      if (hasQueue) {
+        if (patch[QUEUE_DATA_KEY] === null) await deleteQueue();
+        else await writeQueue(patch[QUEUE_DATA_KEY]);
+        if (legacyQueue !== undefined) await writeDocument(next);
+        else if (Object.keys(nextPatch).length > 0) await writeDocument(next);
+      } else if (legacyQueueForMigration !== undefined) {
+        try {
+          await writeQueue(legacyQueueForMigration);
+        } catch (cause) {
+          log(`queue.json 写入失败（旧队列仍留在 settings.json）：${describe(cause)}`);
+          const preserved = { ...next, data: { ...next.data, [QUEUE_DATA_KEY]: legacyQueueForMigration } };
+          await writeDocument(preserved);
+          return preserved;
+        }
+        await writeDocument(next);
+      } else if (legacyQueue !== undefined) {
+        await writeDocument(next);
+      } else {
+        await writeDocument(next);
+      }
+
+      return {
+        ...next,
+        data: {
+          ...next.data,
+          ...(hasQueue && patch[QUEUE_DATA_KEY] !== null ? { [QUEUE_DATA_KEY]: patch[QUEUE_DATA_KEY] } : {}),
+          ...(!hasQueue && legacyQueueForMigration !== undefined ? { [QUEUE_DATA_KEY]: legacyQueueForMigration } : {}),
+          ...(!hasQueue && queueExists && document.data[QUEUE_DATA_KEY] !== undefined
+            ? { [QUEUE_DATA_KEY]: document.data[QUEUE_DATA_KEY] }
+            : {}),
+        },
+      };
     });
   }
 

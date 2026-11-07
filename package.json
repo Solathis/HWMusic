@@ -1,7 +1,7 @@
 {
   "name": "huawei-music-desktop",
   "private": true,
-  "version": "0.3.5",
+  "version": "0.3.6",
   "type": "module",
   "description": "华为音乐第三方桌面客户端（Tauri v2 + React）。显示名见 src/shared/app-name.mjs。",
   "engines": {
@@ -23,7 +23,8 @@
     "check:nsis": "node scripts/check-nsis-package.mjs",
     "release:checksums": "node scripts/release-checksums.mjs",
     "release:assets": "node scripts/release-assets.mjs",
-    "verify:update-signature": "node scripts/update-signature.mjs"
+    "verify:update-signature": "node scripts/update-signature.mjs",
+    "measure:resources": "node scripts/measure-resources.mjs"
   },
   "dependencies": {
     "@applemusic-like-lyrics/core": "0.6.0",
@@ -40,6 +41,7 @@
     "@tauri-apps/api": "2.12.4",
     "class-variance-authority": "^0.7.1",
     "cn": "^0.5.0",
+    "framer-motion": "13.5.1",
     "jotai": "2.20.3",
     "lucide-react": "0.468.0",
     "next-themes": "^0.4.6",

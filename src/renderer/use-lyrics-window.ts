@@ -55,7 +55,7 @@ export interface LyricsWindowBinding {
 
 const log = (...parts: unknown[]) => console.warn("[hwmusic-lyrics]", ...parts)
 
-export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): LyricsWindowBinding {
+export function useLyricsWindow(runtime: PlayerRuntime, state: { track: PlayerState["track"] }): LyricsWindowBinding {
   const bridge = getLyricsBridge()
   const [windowStatus, setWindowStatus] = useState(() => bridge.snapshot())
   const { config, visible, requestedVisible, taskbar, saveError } = windowStatus
@@ -67,10 +67,6 @@ export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): Lyr
     () => trackId === null ? null : { trackId, title, artist, durationSeconds },
     [trackId, title, artist, durationSeconds],
   )
-
-  /** 播放状态的最新值：歌词窗就绪重放时读它（不进 effect 依赖）。 */
-  const stateRef = useRef(state)
-  stateRef.current = state
 
   /** 宿主状态的最新值：意图机按它算"当前是开还是关"（异步回执里读，不能用渲染闭包）。 */
   const statusRef = useRef(windowStatus)
@@ -104,7 +100,7 @@ export function useLyricsWindow(runtime: PlayerRuntime, state: PlayerState): Lyr
   }
   const intent = intentRef.current
 
-  useEffect(() => bridge.observe(setWindowStatus, () => stateRef.current), [bridge])
+  useEffect(() => bridge.observe(setWindowStatus, () => runtime.player.snapshot()), [bridge, runtime])
 
   // 3. 歌词数据链：曲目变化 → 取文本 → 官方解析 → 主窗面板与歌词窗共用同一份行（取词时带上曲目元信息供严格匹配）。
   useEffect(() => {

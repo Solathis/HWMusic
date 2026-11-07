@@ -1,6 +1,6 @@
 [package]
 name = "huawei-music-desktop"
-version = "0.3.5"
+version = "0.3.6"
 description = "华为音乐第三方桌面客户端（非官方）"
 license = "AGPL-3.0-only"
 edition = "2021"
