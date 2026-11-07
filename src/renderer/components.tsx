@@ -550,15 +550,20 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
       <CoverArt coverUrl={trackCoverUrlOf(state.track)} className="size-10 rounded-md" />
       <div className="flex min-w-0 flex-col">
         <span className="truncate text-sm font-medium">{trackTitleOf(state.track)}</span>
-        {/*
-         * 「艺人 · 状态」，服务端明确声明了音质时再补一句（错误/没声明都不补：这一行归当下那件事）。
-         */}
-        <span className="truncate text-xs text-muted-foreground">
+        {/* 「艺人 · 状态」这一行会被截断，所以音质**不放在这里**：它单独成一枚不收缩的 Badge（见下） */}
+        <span className="truncate text-xs text-muted-foreground" data-testid="player-bar-status">
           {state.track === null
             ? playerStatusText(state)
-            : `${trackArtistOf(state.track)} · ${playerStatusText(state)}${qualityText === null ? "" : ` · ${qualityText}`}`}
+            : `${trackArtistOf(state.track)} · ${playerStatusText(state)}`}
         </span>
       </div>
+      {/*
+       * 实际音质独立显示：长艺人名把左边那列挤到截断时，这枚 Badge 照旧完整可见。
+       * 只有服务端明确声明了实际档位才渲染（出错 / 没声明一律不补——设置里的期望档位不算实际音质）。
+       */}
+      {qualityText === null ? null : (
+        <Badge variant="outline" className="shrink-0" data-testid="player-bar-quality">{qualityText}</Badge>
+      )}
     </div>
   )
 

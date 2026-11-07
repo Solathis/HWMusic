@@ -125,6 +125,47 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
     return settingsRead;
   }
 
+  /**
+   * 合并写：同一时刻最多一次在飞，写盘期间的多次变更合成"最后一次"。
+   *
+   * 拖动音量滑块会连着改几十次——每次都重写 settings.json 既慢又没必要，但**最后那个值**必须真的落盘。
+   * 第一笔立刻发（用户停一下就落盘），之后只在上一笔回来时补发最新值；失败交给 `onError`，不重排重试。
+   */
+  function createCoalescedWriter<T>(write: (value: T) => Promise<void>, onError: (cause: unknown) => void): (value: T) => void {
+    let pending: { value: T } | null = null;
+    let running = false;
+    return (value: T): void => {
+      pending = { value };
+      if (running) return;
+      running = true;
+      void (async () => {
+        try {
+          while (pending !== null) {
+            const next = pending;
+            pending = null;
+            try {
+              await write(next.value);
+            } catch (cause) {
+              onError(cause);
+            }
+          }
+        } finally {
+          running = false;
+        }
+      })();
+    };
+  }
+
+  /** 音量/静音的落盘口：写 `playerVolume` / `playerMuted` 两个键，走与队列同一个 `settings:set`。 */
+  const writePlayerVolume = createCoalescedWriter<number>(
+    (volume) => writeSettingsPatch({ playerVolume: volume }),
+    (cause) => log("音量落盘失败（下次启动回默认音量）：", cause),
+  );
+  const writePlayerMuted = createCoalescedWriter<boolean>(
+    (muted) => writeSettingsPatch({ playerMuted: muted }),
+    (cause) => log("静音设置落盘失败（下次启动按不静音）：", cause),
+  );
+
   const player = createPlayer({
     audio: createAudio() as never,
     // coreCall 成功时直接给 data；失败时**抛出** core 错误（kind/message 会被状态机原样保留）
@@ -176,6 +217,9 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
     persistOfflineIds: async (ids: string[]) => {
       await writeSettingsPatch({ offlineTracks: ids });
     },
+    // 音量/静音落盘：合并写（拖动一次只落盘一两笔），失败只留痕，绝不影响这次播放
+    persistVolume: (volume: number) => writePlayerVolume(volume),
+    persistMuted: (muted: boolean) => writePlayerMuted(muted),
     notify: deps.notify ?? ((text: string) => log(text)),
     log,
   });
@@ -250,11 +294,27 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
     }
   }
 
+  /**
+   * 读设置里的音量与静音并交给状态机（压到真实音频端口上）。
+   * 读不到只留痕：这是"这次启动按默认音量"，不是启动失败；用户已经动过的那一项也不会被覆盖。
+   */
+  async function hydrateAudioPreference(): Promise<void> {
+    try {
+      const answer = (await readSettingsOnce()) as SettingsAnswer | null;
+      const data = answer?.settings?.data;
+      const stored = data !== null && typeof data === "object" ? data : null;
+      player.hydrateAudioPreference({ volume: stored?.playerVolume, muted: stored?.playerMuted });
+    } catch (cause) {
+      log("音量设置读不到（本次启动按默认音量）：", cause);
+    }
+  }
+
   async function initialize(): Promise<void> {
     if (initialized) return;
     initialized = true;
     await player.restore();
     await hydrateOfflineIds();
+    await hydrateAudioPreference();
   }
 
   function dispose(): void {

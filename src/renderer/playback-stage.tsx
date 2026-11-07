@@ -10,7 +10,7 @@ import { Avatar, AvatarFallback } from "./components/ui/avatar"
 import { Alert, AlertDescription } from "./components/ui/alert"
 import { Button } from "./components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from "./components/ui/dropdown-menu"
-import { AmllBackground, useAlbumImage } from "./AmllBackground.tsx"
+import { AmllBackground, useCoverImage } from "./AmllBackground.tsx"
 import { AmllLyricsPanel } from "./AmllLyricsPanel.tsx"
 import { LyricsTargetMenu, LyricsToggleIcon, lyricsToggleView } from "./components.tsx"
 import { useMainChrome } from "./use-main-chrome.ts"
@@ -52,7 +52,9 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
     if (!open) setExiting(true)
   }
   const stageVisible = open || exiting
-  const coverImage = useAlbumImage(stageVisible ? coverUrl : null)
+  // 显示与取色分开：封面能不能显示只看普通图片加载（无 ACAO 的 CDN 图照样显示），
+  // 背景取色仍是 AmllBackground 里那条带 CORS 的加载；坏图/缺图才落到「暂无封面」占位。
+  const coverImage = useCoverImage(stageVisible ? coverUrl : null)
   // 用户要求减少动效时不走过场：时长 0，直接到位
   const reduceMotion = useReducedMotion()
   const stageTransition = { duration: reduceMotion ? 0 : 0.22, ease: "easeOut" as const }

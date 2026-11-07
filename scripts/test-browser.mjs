@@ -289,6 +289,12 @@ let localBaseUrlCalls = 0;
 /** 宿主两条命令都收 "local:" 前缀与裸 id 两种写法（Rust 侧自己剥前缀）。 */
 const localIdOf = (value) => String(value ?? "").replace(/^local:/, "");
 const localSnapshot = () => localTracks.map((track) => ({ ...track }));
+/**
+ * playback:resolve-url 的实测音质夹具：null = 接口没声明实际音质（默认那一路，界面一个字都不加）。
+ * 非 null 时按真接口同形回 actualQuality（parsePlaybackPayload 的产物字段），
+ * 底栏「只说实际档位、不拿设置里的期望档位充数」全靠它量。
+ */
+let resolvedQuality = null;
 mockWindows("main");
 mockIPC(async (command, args) => {
   if (command === "core_local_base_url") {
@@ -373,7 +379,10 @@ mockIPC(async (command, args) => {
         libraryCalls.push({ channel: "library:history", page: 1, pageSize: 50, keyword: null });
         return { songs: guardTracks("历史", PAGED_TOTAL), hasMore: false, skipped: 0, reportedTotal: PAGED_TOTAL };
       }
-      case "playback:resolve-url": return { url: "https://music.dbankcdn.cn/guard.wav" };
+      case "playback:resolve-url": return {
+        url: "https://music.dbankcdn.cn/guard.wav",
+        ...(resolvedQuality === null ? {} : { actualQuality: resolvedQuality }),
+      };
       case "playback:lyrics": return { text: LRC };
       default: throw new Error("未提供守卫 IPC：" + args.channel);
     }
@@ -510,6 +519,22 @@ function Guard() {
         await runtime.player.playQueue(songs.map((song) => ({ ...song, coverUrl: "https://music.dbankcdn.cn/guard-cover-broken.png" })), 0);
         runtime.player.pause();
         runtime.player.seek(700);
+      },
+      /**
+       * 无 Access-Control-Allow-Origin 的封面（真实 CDN 上确实有这类图）：
+       * 普通图片加载能显示，带 crossOrigin 的取色加载会被浏览器拒——两种加载的分工只能这样量。
+       */
+      async setCoverNoCors() {
+        await runtime.player.playQueue(songs.map((song) => ({ ...song, coverUrl: "https://music.dbankcdn.cn/guard-cover-nocors.png" })), 0);
+        runtime.player.pause();
+        runtime.player.seek(700);
+      },
+      /** 音质夹具（null = 接口没声明实际音质）；改完要重新取一次地址才进状态（ready() 或切歌）。 */
+      setResolvedQuality(value) { resolvedQuality = typeof value === "string" && value !== "" ? value : null; },
+      /** 长艺人名的单曲：窄窗底下「实际音质不许被挤掉」只能拿真艺人名去挤。 */
+      async queueWithLongArtist(artists) {
+        await runtime.player.playQueue([{ id: "quality-long", name: "长艺人曲目", artists, duration: 12 }], 0);
+        runtime.player.pause();
       },
       setLyrics: (status) => runtime.player.setLyrics([], status),
       /**
@@ -6095,6 +6120,23 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     await page.route("https://music.dbankcdn.cn/guard-cover-broken.png", (route) => route.fulfill({
       status: 200, contentType: "image/png", body: Buffer.from("invalid image"), headers: { "access-control-allow-origin": "*" },
     }));
+    const noCorsCover = await sharp({ create: { width: 256, height: 256, channels: 3, background: { r: 24, g: 200, b: 64 } } }).png().toBuffer();
+    /**
+     * 无 ACAO 的封面：这里**故意不给** `access-control-allow-origin`。
+     *
+     * 为什么还要在路由里按模式分流：Playwright 的 `route.fulfill` 是浏览器网络栈代答，缺 ACAO 也照样把字节交给页面，
+     * 于是"真机上必然失败的 CORS 取色加载"在这里会被放行——那样这条守卫就永远量不到缺陷。
+     * 所以按真实服务器的结果模拟：CORS 模式（`crossOrigin` 那条路）的请求一律失败（浏览器对缺 ACAO 的响应就是这么丢的），
+     * 普通图片加载（`no-cors`）照常给图。两次计数一起证明「显示走普通加载、背景仍只走 CORS」。
+     */
+    const noCorsCoverRequests = { cors: 0, plain: 0 };
+    await page.route("https://music.dbankcdn.cn/guard-cover-nocors.png", (route) => {
+      const headers = route.request().headers();
+      const corsMode = (headers["sec-fetch-mode"] ?? "") === "cors" || "origin" in headers;
+      noCorsCoverRequests[corsMode ? "cors" : "plain"] += 1;
+      if (corsMode) return route.abort("failed");
+      return route.fulfill({ contentType: "image/png", body: noCorsCover });
+    });
     /**
      * 启动三态（独立页面 + 独立错误收集）：主守卫页挂的是 `LibraryShell`（登录之后那一块），根本不经过 `startupViewOf`。
      * 放主页面里跑还会把它导航到登录页/主界面，污染后面每一项的基线。
@@ -6184,9 +6226,79 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       await resumePage.close();
     });
 
+    /**
+     * 音量与静音的设置持久化（独立一页 + 真重载 + `settings:set` 夹具）。
+     * 夹具里预先放好「音量 35%、静音」，而且**没有任何队列**：重载后底栏必须按存下来的那一份显示；
+     * 再动一次静音按钮与音量滑块，`settings:set` 必须写出 `playerVolume` / `playerMuted`（用户最后选的那一档）。
+     */
+    await checked("r81-volume-restore", async () => {
+      const volumePage = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
+      volumePage.setDefaultTimeout(GUARD_TIMEOUT_MS);
+      const volumeErrors = [];
+      volumePage.on("pageerror", (error) => volumeErrors.push(error.message));
+      await routeGuardAudio(volumePage, audio);
+      // 恢复发生在页面加载时，夹具必须在页面脚本之前就落进 localStorage
+      await volumePage.addInitScript(() => {
+        try {
+          localStorage.setItem("guard-settings", JSON.stringify({ playerVolume: 0.35, playerMuted: true }));
+        } catch {}
+      });
+      await volumePage.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
+      await volumePage.waitForFunction(() => window.__guard !== undefined, null, { timeout: GUARD_TIMEOUT_MS });
+      await volumePage.waitForFunction(
+        () => window.__guard.snapshot().volume === 0.35 && window.__guard.snapshot().muted === true,
+        null,
+        { timeout: GUARD_TIMEOUT_MS },
+      );
+      const readVolumeUi = () => volumePage.evaluate(() => {
+        const bar = document.querySelector('[data-testid="player-bar"]');
+        const thumb = bar?.querySelector('[data-slot="slider"][aria-label="音量"] [data-slot="slider-thumb"]');
+        const mute = bar?.querySelector('button[aria-label="取消静音"], button[aria-label="静音"]');
+        return {
+          volume: window.__guard.snapshot().volume,
+          muted: window.__guard.snapshot().muted,
+          entries: window.__guard.snapshot().entries.length,
+          thumb: thumb?.getAttribute("aria-valuenow") ?? null,
+          muteLabel: mute?.getAttribute("aria-label") ?? null,
+        };
+      });
+      const restoredVolume = await readVolumeUi();
+      add("r81-volume-restore", restoredVolume.volume === 0.35 && restoredVolume.muted === true
+        && restoredVolume.entries === 0 && restoredVolume.thumb === "0" && restoredVolume.muteLabel === "取消静音",
+      JSON.stringify(restoredVolume));
+
+      // 用户操作：取消静音 → 点音量滑块的 60% 处
+      await volumePage.getByRole("button", { name: "取消静音", exact: true }).click();
+      await volumePage.waitForFunction(() => window.__guard.snapshot().muted === false);
+      const volumeBox = await volumePage.locator('[data-testid="player-bar"] [data-slot="slider"][aria-label="音量"]').boundingBox();
+      if (volumeBox) await volumePage.mouse.click(volumeBox.x + volumeBox.width * .6, volumeBox.y + volumeBox.height / 2);
+      await volumePage.waitForFunction(() => {
+        const value = window.__guard.snapshot().volume;
+        return value > 0.4 && value < 0.8;
+      });
+      const afterAction = await readVolumeUi();
+      const writes = await volumePage.evaluate(() => ({
+        writes: window.__guard.settingsWrites().filter((entry) => "playerVolume" in entry.patch || "playerMuted" in entry.patch),
+        stored: window.__guard.settingsData(),
+      }));
+      const lastVolumePatch = writes.writes.filter((entry) => "playerVolume" in entry.patch).at(-1)?.patch.playerVolume ?? null;
+      add("r81-volume-persisted", writes.writes.some((entry) => entry.patch.playerMuted === false)
+        && lastVolumePatch === afterAction.volume
+        && writes.stored.playerVolume === afterAction.volume && writes.stored.playerMuted === false,
+      JSON.stringify({ afterAction, lastVolumePatch, stored: writes.stored, writes: writes.writes }));
+      add("r81-volume-no-runtime-errors", volumeErrors.length === 0, JSON.stringify(volumeErrors.slice(0, 3)));
+      await volumePage.close();
+    });
+
     const stage = page.getByTestId("playback-stage");
     const activeLine = '[data-testid="amll-lyrics-panel"] [class*="lyricMainLine"][class*="active"]';
     const underlay = '[data-slot="sidebar-container"], [data-slot="sidebar-inset"] > header, [data-slot="sidebar-inset"] > .relative, [data-slot="sidebar-inset"] > [data-testid="player-bar"]';
+    /**
+     * 无 ACAO 封面用例**故意**让背景取色的 CORS 加载失败，Chromium 会为每次失败留一条
+     * `Failed to load resource: net::ERR_FAILED`（这行 console 文本里不含 URL，所以只能按"预期条数"核对）。
+     * 这里累计预期条数，最后那条 `no-runtime-errors` 用它做等值判断：多了算失败，少了也说明用例没真的跑到。
+     */
+    let expectedNoCorsCoverLoadFailures = 0;
     for (const theme of ["light", "dark"]) {
       await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
       await page.waitForFunction(() => window.__guard !== undefined, null, { timeout: GUARD_TIMEOUT_MS });
@@ -6240,6 +6352,64 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
           nextRight: Math.round(n.right), toggle: Math.round(t.left), trailing: [Math.round(trail.left), Math.round(trail.right)],
         };
       }).then((geometry) => geometry.ok), "传输组 模式→上一首→播放→下一首；歌词开关在尾部工具区（下一首右侧）");
+      /**
+       * 底栏音质：只说接口声明的**实际**档位，独立成一枚 Badge，不挤在会被截断的「艺人 · 状态」那行里。
+       * 三档逐一验文案，并验同一行里查不到它（说明它真的不在可截断的位置）；接口没声明就一个标签都不留。
+       */
+      const qualityOfBar = () => page.evaluate(() => {
+        const bar = document.querySelector('[data-testid="player-bar"]');
+        const badge = bar?.querySelector('[data-testid="player-bar-quality"]');
+        const status = bar?.querySelector('[data-testid="player-bar-status"]');
+        const rect = (node) => {
+          if (!node) return null;
+          const b = node.getBoundingClientRect();
+          return { left: Math.round(b.left), right: Math.round(b.right), width: Math.round(b.width), height: Math.round(b.height) };
+        };
+        return {
+          badgeText: badge?.textContent?.trim() ?? null,
+          statusText: status?.textContent?.trim() ?? null,
+          badge: rect(badge),
+          // 状态行真的被截断时 scrollWidth > clientWidth：量的是"这行放不下"，不是猜的
+          statusOverflow: status ? status.scrollWidth - status.clientWidth : null,
+          barRight: rect(bar)?.right ?? null,
+        };
+      });
+      for (const [quality, text] of [["standard", "标准音质"], ["high", "高音质"], ["lossless", "无损音质"]]) {
+        await page.evaluate((value) => window.__guard.setResolvedQuality(value), quality);
+        await page.evaluate(() => window.__guard.ready());
+        await page.waitForFunction((expected) => window.__guard.snapshot().quality === expected, quality);
+        const shown = await qualityOfBar();
+        add(`${theme}-bar-quality-${quality}`, shown.badgeText === text
+          && typeof shown.statusText === "string" && !shown.statusText.includes(text)
+          && typeof shown.badge?.width === "number" && shown.badge.width > 0,
+        JSON.stringify(shown));
+      }
+      /** 换歌后不残留旧档位：下一首的应答里没有音质，标签必须消失，状态行也不许补一句。 */
+      await page.evaluate(async () => { window.__guard.setResolvedQuality(null); await window.__guard.nextTrack(); });
+      await page.waitForFunction(() => window.__guard.snapshot().quality === null);
+      const droppedQuality = await qualityOfBar();
+      add(`${theme}-bar-quality-gone`, droppedQuality.badgeText === null && !/音质/.test(droppedQuality.statusText ?? ""),
+        JSON.stringify(droppedQuality));
+      /**
+       * 长艺人名 + 主窗最小宽度（`lib.rs` 的 MAIN_WINDOW_MIN_WIDTH = 960）：
+       * 艺人/状态行必须被截断，实际音质那枚 Badge 必须完整可见且落在底栏里。
+       */
+      await page.evaluate(() => window.__guard.setResolvedQuality("lossless"));
+      await page.evaluate(() => window.__guard.queueWithLongArtist("这是一个名字很长很长很长很长的艺人名".repeat(3)));
+      await page.waitForFunction(() => window.__guard.snapshot().quality === "lossless");
+      await page.setViewportSize({ width: 960, height: 720 });
+      await page.waitForTimeout(400);
+      const narrowQuality = await qualityOfBar();
+      add(`${theme}-bar-quality-narrow`, narrowQuality.badgeText === "无损音质"
+        && typeof narrowQuality.statusOverflow === "number" && narrowQuality.statusOverflow > 0
+        && typeof narrowQuality.badge?.width === "number" && narrowQuality.badge.width > 0
+        && typeof narrowQuality.badge?.right === "number" && typeof narrowQuality.barRight === "number"
+        && narrowQuality.badge.right <= narrowQuality.barRight,
+      JSON.stringify(narrowQuality));
+      await page.setViewportSize({ width: 1280, height: 800 });
+      await page.waitForTimeout(200);
+      await page.evaluate(() => { window.__guard.setResolvedQuality(null); return window.__guard.ready(); });
+      await page.waitForFunction(() => window.__guard.snapshot().quality === null && window.__guard.snapshot().index === 0);
       await page.getByRole("button", { name: "歌词", exact: true }).click();
       await page.mouse.move(0, 0);
       await page.waitForTimeout(1000);
@@ -6545,6 +6715,43 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       const fallback = await stage.getByTestId("playback-stage-cover-fallback").count();
       const fallbackInk = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-cover-fallback-line.png`));
       add(`${theme}-cover-fallback`, fallback === 1 && fallbackInk.ink > 60, JSON.stringify({ fallback, ink: fallbackInk.ink }));
+      /**
+       * 无 ACAO 的跨域封面：显示层必须照常把这张图画出来（普通图片加载不需要 CORS），
+       * 而背景取色那条 CORS 加载**该被浏览器拒绝**——画布绝不能拿到污染图像（那会是 getImageData 的 SecurityError）。
+       */
+      const noCorsErrorsBefore = consoleErrors.length;
+      const noCorsAttemptsBefore = { ...noCorsCoverRequests };
+      await page.evaluate(() => window.__guard.setCoverNoCors());
+      await page.waitForTimeout(1200);
+      const noCorsCover = await page.evaluate(() => {
+        const cover = document.querySelector('[data-testid="playback-stage-cover"]');
+        const fallbackNode = document.querySelector('[data-testid="playback-stage-cover-fallback"]');
+        const painted = cover !== null && [cover, ...cover.querySelectorAll("*")].some((node) => getComputedStyle(node).backgroundImage.includes("guard-cover-nocors.png"));
+        const b = cover?.getBoundingClientRect();
+        return { cover: b ? { x: b.x, y: b.y, width: b.width, height: b.height } : null, fallback: fallbackNode !== null, painted };
+      });
+      let noCorsPixels = { mean: [] };
+      if (noCorsCover.cover?.width > 0) {
+        const { x, y, width, height } = noCorsCover.cover;
+        const shot = await page.screenshot({ clip: { x: Math.round(x + width * .3), y: Math.round(y + height * .3), width: Math.round(width * .4), height: Math.round(height * .4) } });
+        noCorsPixels = { mean: (await sharp(shot).stats()).channels.slice(0, 3).map((channel) => Math.round(channel.mean)) };
+      }
+      const noCorsMessages = consoleErrors.slice(noCorsErrorsBefore);
+      const taintedCanvas = noCorsMessages.filter((text) => /tainted|SecurityError|getImageData/i.test(text));
+      const abortedResourceLoads = noCorsMessages.filter((text) => /Failed to load resource|ERR_FAILED/i.test(text)).length;
+      expectedNoCorsCoverLoadFailures += abortedResourceLoads;
+      const corsAttempts = noCorsCoverRequests.cors - noCorsAttemptsBefore.cors;
+      const plainAttempts = noCorsCoverRequests.plain - noCorsAttemptsBefore.plain;
+      // 夹具图是纯绿（24,200,64）：G 通道远高于 R/B，占位灰底或默认封面都给不出这个比例
+      const noCorsVisible = noCorsPixels.mean.length === 3
+        && noCorsPixels.mean[1] > noCorsPixels.mean[0] + 100 && noCorsPixels.mean[1] > noCorsPixels.mean[2] + 100;
+      add(`${theme}-cover-no-cors`, noCorsCover.cover !== null && !noCorsCover.fallback && noCorsCover.painted
+        && noCorsVisible && corsAttempts > 0 && plainAttempts > 0 && taintedCanvas.length === 0,
+      JSON.stringify({ cover: noCorsCover.cover !== null, fallback: noCorsCover.fallback, painted: noCorsCover.painted,
+        pixels: noCorsPixels.mean, corsAttempts, plainAttempts, abortedResourceLoads, tainted: taintedCanvas.slice(0, 2) }));
+      // 回到正常封面夹具（后面的步骤按 guard-cover-warm 判像素）
+      await page.evaluate(() => window.__guard.ready());
+      await page.waitForFunction(() => window.__guard.snapshot().index === 0);
       await stage.getByRole("button", { name: "收起歌词", exact: true }).click();
       await page.getByRole("button", { name: "播放队列", exact: true }).click();
       await page.locator('[data-slot="sheet-content"]').waitFor();
@@ -6678,8 +6885,16 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     });
     /** 没有 lyrics binding 的挂载点（另一页，见 checkNoBindingSurface 的说明）。 */
     await checkNoBindingSurface(page, port, add);
-    add("no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,
-      `console error ${consoleErrors.length} 条、pageerror ${pageErrors.length} 条${[...consoleErrors, ...pageErrors].slice(0, 3).map((text) => `\n      ${text.slice(0, 200)}`).join("")}`);
+    /**
+     * 无 ACAO 封面用例**故意**让背景取色的 CORS 加载失败，Chromium 每次都会留一条
+     * `Failed to load resource: net::ERR_FAILED`（console 文本里不含 URL，只能按预期条数核对）。
+     * 所以这里按"预期条数等值"判：多一条（别处也挂了资源）或少一条（用例没真跑到）都算失败。
+     */
+    const isResourceLoadFailure = (text) => /^Failed to load resource: net::ERR_FAILED$/i.test(text.trim());
+    const resourceLoadFailures = consoleErrors.filter((text) => isResourceLoadFailure(text));
+    const unexpectedConsoleErrors = consoleErrors.filter((text) => !isResourceLoadFailure(text));
+    add("no-runtime-errors", unexpectedConsoleErrors.length === 0 && resourceLoadFailures.length === expectedNoCorsCoverLoadFailures && pageErrors.length === 0,
+      `console error ${unexpectedConsoleErrors.length} 条（另有无 ACAO 封面用例故意制造的资源失败 ${resourceLoadFailures.length} 条 / 预期 ${expectedNoCorsCoverLoadFailures} 条）、pageerror ${pageErrors.length} 条${[...unexpectedConsoleErrors, ...pageErrors].slice(0, 3).map((text) => `\n      ${text.slice(0, 200)}`).join("")}`);
   } catch (cause) {
     if (fatalPage) await saveFatalDiagnostics(fatalPage, guardDir, log);
     throw cause;

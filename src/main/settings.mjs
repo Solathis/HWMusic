@@ -9,6 +9,12 @@ import { isIPv6 } from "node:net";
 import { basename, isAbsolute, join } from "node:path";
 
 import { DEFAULT_PLAYBACK_QUALITY, PLAYBACK_QUALITIES, isPlaybackQuality } from "../shared/playback-quality.mjs";
+import {
+  DEFAULT_PLAYER_MUTED,
+  DEFAULT_PLAYER_VOLUME,
+  isPlayerMuted,
+  isPlayerVolume,
+} from "../shared/playback-audio.mjs";
 import { proxyModeAndScope } from "../shared/proxy-mode.mjs";
 import { CORE_ERROR_KINDS, err, ok } from "../shared/result.ts";
 
@@ -186,6 +192,9 @@ export function normalizeSettingsDocument(raw) {
         ? "tray"
         : CLOSE_BEHAVIORS.includes(data.closeBehavior) ? data.closeBehavior : DEFAULT_CLOSE_BEHAVIOR,
       playbackQuality: isPlaybackQuality(data.playbackQuality) ? data.playbackQuality : DEFAULT_PLAYBACK_QUALITY,
+      // 音量/静音：0 与 false 都是用户的选择，只有"认不出"才回默认
+      playerVolume: isPlayerVolume(data.playerVolume) ? data.playerVolume : DEFAULT_PLAYER_VOLUME,
+      playerMuted: isPlayerMuted(data.playerMuted) ? data.playerMuted : DEFAULT_PLAYER_MUTED,
       offlineTracks: normalizeOfflineTracks(data.offlineTracks),
     },
   };
@@ -237,6 +246,28 @@ export function mergeSettings(document, patch) {
         );
       }
       data.playbackQuality = value;
+      continue;
+    }
+    if (key === "playerVolume") {
+      if (value === null) {
+        data.playerVolume = DEFAULT_PLAYER_VOLUME;
+        continue;
+      }
+      if (!isPlayerVolume(value)) {
+        fail(CORE_ERROR_KINDS.invalidPayload, `playerVolume 只接受 0 .. 1 之间的数字（收到 ${JSON.stringify(value)}）`);
+      }
+      data.playerVolume = value;
+      continue;
+    }
+    if (key === "playerMuted") {
+      if (value === null) {
+        data.playerMuted = DEFAULT_PLAYER_MUTED;
+        continue;
+      }
+      if (!isPlayerMuted(value)) {
+        fail(CORE_ERROR_KINDS.invalidPayload, `playerMuted 只接受 true / false（收到 ${JSON.stringify(value)}）`);
+      }
+      data.playerMuted = value;
       continue;
     }
     if (key === "offlineTracks") {

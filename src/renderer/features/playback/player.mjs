@@ -1,7 +1,7 @@
 /**
  * 播放状态机：一个 Audio 实例的全部行为都在这里，但这里没有 Audio。
  * 端口全部注入：`audio`、`resolveUrl(trackId)`、`guardUrl(url)`（缺它就抛，闸门不能可选）、
- * `persistQueue`/`loadQueue`、`log`（只写该打扰的失败，绝不写播放地址）、`notify`（一句话提示，缺省写日志）、`random`/`now`/`schedule`。
+ * `persistQueue`/`loadQueue`、`persistVolume`/`persistMuted`、`log`（只写该打扰的失败，绝不写播放地址）、`notify`（一句话提示，缺省写日志）、`random`/`now`/`schedule`。
  * 状态里没有音频地址；每次装载领一个令牌，乱序应答整包丢掉；换队列 = 停止播放。
  * 取不到地址时按当前模式自动跳下一首（连续最多 3 首），用 `notice` 说明而非错误；都失败才停回 error。
  * 服务端已判定的下架/不存在曲目不占那 3 首（另有 30 首的天花板），换档与重试对它们没有意义。
@@ -13,6 +13,7 @@ import { queueEntriesOf, queuePositionOf, queueRecordOf, queueStructureOf, resto
 import { ALL_OFFLINE_TEXT, offlineSkippedText, partitionPlayable, playableStartIndex } from "./offline.mjs";
 import { LYRICS_STATUS } from "../lyrics/lyrics-window.mjs";
 import { trackDurationOf } from "../library/track-fields.mjs";
+import { DEFAULT_PLAYER_MUTED, DEFAULT_PLAYER_VOLUME, isPlayerMuted, isPlayerVolume } from "../../../shared/playback-audio.mjs";
 
 /** 歌词状态词表（唯一真源在 features/lyrics/lyrics-window.mjs）：认不出的值一律不写进状态。 */
 const LYRICS_STATUSES = Object.values(LYRICS_STATUS);
@@ -47,8 +48,9 @@ export const PLAYER_ERROR_KINDS = {
   invalidCommand: "invalid_command",
 };
 
-/** 默认音量：不加不减地放出来（"默认 70%"是拍脑袋，用户没调过就别替他调）。 */
-export const DEFAULT_VOLUME = 1;
+/** 默认音量与默认静音的真源在 `shared/playback-audio.mjs`（设置读写走同一份判定）；这里保留旧名字给调用方。 */
+export const DEFAULT_VOLUME = DEFAULT_PLAYER_VOLUME;
+export const DEFAULT_MUTED = DEFAULT_PLAYER_MUTED;
 
 /** 进度写盘的最短间隔：播放中每 5 秒最多一次；异常退出最多丢掉这个窗口的进度。 */
 export const POSITION_WRITE_INTERVAL_MS = 5000;
@@ -171,6 +173,8 @@ function skipNoticeOf(skipped) {
  * @param {(url: string) => (string|null)} options.guardUrl 媒体白名单闸门（放行回归一化地址，否则 null）
  * @param {(record: import("./queue.mjs").QueueRecord|null) => unknown} [options.persistQueue]
  * @param {(position: import("./queue.mjs").QueuePosition|null) => unknown} [options.persistPosition]
+ * @param {(volume: number) => unknown} [options.persistVolume] 音量落盘口（fire-and-forget；不给就是"重启回默认"）
+ * @param {(muted: boolean) => unknown} [options.persistMuted] 静音落盘口（同上）
  * @param {() => Promise<unknown>} [options.loadQueue]
  * @param {string[]} [options.initialOfflineIds] 启动时已知的下架曲目 id（读设置得到；之后靠 hydrateOfflineIds 补）
  * @param {(ids: string[]) => unknown} [options.persistOfflineIds] 下架曲目清单变长时落盘（fire-and-forget）
@@ -203,6 +207,9 @@ export function createPlayer(options = {}) {
 
   const persistQueue = typeof options.persistQueue === "function" ? options.persistQueue : async () => null;
   const persistPosition = typeof options.persistPosition === "function" ? options.persistPosition : null;
+  /** 音量/静音的落盘口：不给就是"这次进程里改得动，重启回默认"（与队列落盘口同一档纪律）。 */
+  const persistVolume = typeof options.persistVolume === "function" ? options.persistVolume : null;
+  const persistMuted = typeof options.persistMuted === "function" ? options.persistMuted : null;
   const loadQueue = typeof options.loadQueue === "function" ? options.loadQueue : async () => null;
   /** 下架清单的落盘口（不给就只在本次进程里认得这些曲目，重启后重新"第一次遇到"再记一次）。 */
   const persistOfflineIds = typeof options.persistOfflineIds === "function" ? options.persistOfflineIds : null;
@@ -245,6 +252,12 @@ export function createPlayer(options = {}) {
   const initialOfflineIds = offlineIdsOf(options.initialOfflineIds);
   /** 已知下架曲目的集合：与 `state.offlineIds` 同源、一起更新（入队过滤与本地跳过按它查）。 */
   let offlineSet = new Set(initialOfflineIds);
+  /**
+   * 用户这一次真的调过音量/静音没有。
+   * 读设置是异步的，恢复结果常常**晚于**用户第一次拖动：晚到的那一份不许盖掉用户刚做的选择。
+   */
+  let volumeTouched = false;
+  let mutedTouched = false;
 
   /**
    * 状态是不可变替换的：React 的 useSyncExternalStore 靠引用比较认变化。
@@ -283,7 +296,7 @@ export function createPlayer(options = {}) {
     currentTimeMs: 0,
     durationMs: 0,
     volume: DEFAULT_VOLUME,
-    muted: false,
+    muted: DEFAULT_MUTED,
     mode: DEFAULT_PLAYBACK_MODE,
     seekGeneration: 0,
     playbackGeneration: 0,
@@ -993,20 +1006,62 @@ export function createPlayer(options = {}) {
     const number = typeof value === "number" ? value : Number(value);
     if (!Number.isFinite(number)) return rejectCommand("音量必须是 0..1 之间的数字");
     const volume = clamp(number, 0, 1);
+    volumeTouched = true;
     audio.setVolume(volume);
     publish({ volume });
+    persistAudioPreference(persistVolume, volume);
     return done({ volume });
   }
 
   function setMuted(value) {
     const muted = value === true;
+    mutedTouched = true;
     audio.setMuted(muted);
     publish({ muted });
+    persistAudioPreference(persistMuted, muted);
     return done({ muted });
   }
 
   function toggleMute() {
     return setMuted(!state.muted);
+  }
+
+  /**
+   * 音量/静音落盘：fire-and-forget，失败只留痕——写不进设置不该让这一首歌停下来，也不该变成播放错误。
+   * @param {((value: never) => unknown)|null} write
+   * @param {unknown} value
+   */
+  function persistAudioPreference(write, value) {
+    if (write === null) return;
+    try {
+      const answer = write(value);
+      if (answer !== null && typeof answer === "object" && typeof answer.then === "function") {
+        answer.catch((cause) => log(`音量设置落盘失败（这次播放照旧）：${textOf(cause)}`));
+      }
+    } catch (cause) {
+      log(`音量设置落盘失败（这次播放照旧）：${textOf(cause)}`);
+    }
+  }
+
+  /**
+   * 启动时把设置里的音量与静音恢复进**真实音频端口**（空队列照样恢复：音量与队列是两件事）。
+   * 只补用户还没动过的那一项；认不出的存盘值不猜、也不下发。只读不写：读回来的值不写回去。
+   * @param {{volume?: unknown, muted?: unknown}|null} preference
+   */
+  function hydrateAudioPreference(preference) {
+    const stored = preference !== null && typeof preference === "object" ? preference : {};
+    /** @type {{volume?: number, muted?: boolean}} */
+    const applied = {};
+    if (!volumeTouched && isPlayerVolume(stored.volume)) {
+      audio.setVolume(stored.volume);
+      applied.volume = stored.volume;
+    }
+    if (!mutedTouched && isPlayerMuted(stored.muted)) {
+      audio.setMuted(stored.muted);
+      applied.muted = stored.muted;
+    }
+    if (Object.keys(applied).length > 0) publish(applied);
+    return done({ volume: state.volume, muted: state.muted, applied });
   }
 
   function setMode(mode) {
@@ -1112,6 +1167,7 @@ export function createPlayer(options = {}) {
     setVolume,
     setMuted,
     toggleMute,
+    hydrateAudioPreference,
     setMode,
     setLyrics,
     hydrateOfflineIds,
