@@ -63,8 +63,11 @@ export function hasPlayable(items, offline) {
 }
 
 /**
- * 起点在 `partitionPlayable` 的 `playable` 里的下标：起点能播就是它自己；起点下架就取它后面最近一首能播的，
- * 后面没有就取它前面最近一首；一首都不能播是 -1。起点先按整队替换的口径取整、夹进列表范围。
+ * 起点在**最终队列**里的下标。最终队列 = `queueEntriesOf(partitionPlayable(items, offline).playable)`：
+ * 无 id 的条目（`queueEntryOf` 给 null）与已知下架的条目都不进队列，所以两者都用**同一个映射**数下标——
+ * 起点能进队列就是它自己那一份（重复出现的曲目各算各的）；进不去就取它后面最近一条能进队列的，
+ * 后面没有就取它前面最近一条；一条都进不去是 -1（调用方保持旧队列不动）。
+ * 起点先按整队替换的口径取整、夹进原始列表范围。
  * @param {unknown[]} items
  * @param {number} startIndex
  * @param {Set<string>} offline
@@ -73,12 +76,26 @@ export function playableStartIndex(items, startIndex, offline) {
   const list = Array.isArray(items) ? items : [];
   if (list.length === 0) return -1;
   const start = Math.min(Math.max(Math.trunc(Number(startIndex) || 0), 0), list.length - 1);
-  let before = 0;
-  for (let position = 0; position < start; position += 1) {
-    if (!isOfflineItem(list[position], offline)) before += 1;
+  /** 原始下标 → 队列下标（只有真的进队列的那几条有值）。 */
+  const queuedAt = new Map();
+  for (let position = 0; position < list.length; position += 1) {
+    const item = list[position];
+    if (trackIdOf(item) === null) continue;
+    if (isOfflineItem(item, offline)) continue;
+    queuedAt.set(position, queuedAt.size);
   }
-  for (let position = start; position < list.length; position += 1) {
-    if (!isOfflineItem(list[position], offline)) return before;
+  if (queuedAt.size === 0) return -1;
+  const exact = queuedAt.get(start);
+  if (exact !== undefined) return exact;
+  // 向后找最近一条
+  for (let position = start + 1; position < list.length; position += 1) {
+    const after = queuedAt.get(position);
+    if (after !== undefined) return after;
   }
-  return before - 1;
+  // 再向前找最近一条（`start` 之后全被过滤掉了）
+  for (let position = start - 1; position >= 0; position -= 1) {
+    const before = queuedAt.get(position);
+    if (before !== undefined) return before;
+  }
+  return -1;
 }

@@ -111,8 +111,8 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
   }
 
   /**
-   * `settings:set` 的**唯一**写入口：队列、进度与下架清单都经它落盘。
-   * 写盘标签只有这两个（源码扫描按这一处判"别的地方不碰设置写入"）。
+   * `settings:set` 的**唯一**写入口：队列结构、播放进度与下架清单都经它落盘（三个 key 一视同仁）。
+   * 源码扫描按这一处判"别的地方不碰设置写入"。
    */
   async function writeSettingsPatch(patch: Record<string, unknown>): Promise<void> {
     await callCore(SETTINGS_SET, { patch });
@@ -151,15 +151,17 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
     loadQueue: async () => {
       const answer = (await readSettingsOnce()) as SettingsAnswer | null;
       const data = answer?.settings?.data;
-      const record = data !== null && typeof data === "object" ? (data[QUEUE_SETTING_KEY] ?? null) : null;
-      const queuePosition = data !== null && typeof data === "object" ? (data[QUEUE_POSITION_SETTING_KEY] ?? null) : null;
-      const merged = mergeQueuePosition(record, queuePosition);
+      const dataOf = data !== null && typeof data === "object" ? data : null;
+      const record = dataOf === null ? null : (dataOf[QUEUE_SETTING_KEY] ?? null);
+      // 键**在不在**比它的值更有信息：`null` 是"用户归零过"，缺键才是"还没迁到独立进度"（那时才认旧的内联进度）
+      const explicitPosition = dataOf !== null && Object.prototype.hasOwnProperty.call(dataOf, QUEUE_POSITION_SETTING_KEY);
+      const queuePosition = dataOf === null || !explicitPosition ? null : dataOf[QUEUE_POSITION_SETTING_KEY];
+      const merged = mergeQueuePosition(record, queuePosition, { explicit: explicitPosition });
       // 恢复时跳过「文件已不在」的本地曲目；曲库读不到（`null`）就整段跳过判定。
       const availableIds = await localAvailableIds();
       const filteredLocal =
         availableIds === null ? { record: merged, skipped: 0 } : dropUnavailableLocalEntries(merged, availableIds);
-      const dataForOffline = data !== null && typeof data === "object" ? data : null;
-      const offline = offlineSetOf(dataForOffline?.offlineTracks);
+      const offline = offlineSetOf(dataOf?.offlineTracks);
       const filtered = dropQueueEntries(filteredLocal.record, (id: string) => isOfflineItem({ id }, offline));
       if (filteredLocal.skipped > 0 || filtered.skipped > 0) {
         const text = filteredLocal.skipped > 0

@@ -300,9 +300,12 @@ export function TrackTable({
     /*
      * 页面级横向留白 `px-4`，让曲目表与其余页面左边缘一致，hover 底色仍铺满整栏。
      * 表头 sticky 需要在调用点放开 shadcn 容器的 `overflow`，让它跟随页面滚动根；不改生成原语。
+     * 放开 `overflow` 的选择器是**直接子选择器**，所以它必须写在 `data-slot=table-container` 的**直接父元素**上：
+     * 淡入包裹层就是那一层（`CONTENT_FADE_IN` 与覆盖写在同一个 className 里），中间再插一层就会掉回 `overflow-x-auto`，
+     * 表头从此不粘（sticky 改跟一个不纵向滚动的容器走）。真浏览器守卫按计算样式与滚动几何钉这一条。
      */
-    <div className="px-4 [&>[data-slot=table-container]]:overflow-visible">
-      <div className={CONTENT_FADE_IN}>
+    <div className="px-4">
+      <div className={`${CONTENT_FADE_IN} [&>[data-slot=table-container]]:overflow-visible`}>
         <Table className="table-fixed" data-testid="track-table">
           <TableHeader className="sticky top-0 z-10 bg-background">
           <TableRow>
@@ -345,11 +348,7 @@ export function TrackTable({
                     event.preventDefault()
                     onActivate?.(song, index)
                   }}
-                  className={
-                    isOffline
-                      ? "opacity-50 transition-opacity motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-                      : "focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-                  }
+                  className={`transition-opacity motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none${isOffline ? " opacity-50" : ""}`}
                 >
                   <TableCell className="text-center tabular-nums text-muted-foreground">{index + 1}</TableCell>
                   <TableCell className="font-medium">
@@ -785,7 +784,7 @@ export function QueuePanel({ entries, index, onSelect, onClear, onPlayNext, offl
                   <Button
                     variant={position === index ? "secondary" : "ghost"}
                     size="sm"
-                    className={`w-full min-w-0 max-w-full justify-start ${isOffline ? "opacity-50 transition-opacity motion-reduce:transition-none" : ""}`}
+                    className={`w-full min-w-0 max-w-full justify-start transition-opacity motion-reduce:transition-none${isOffline ? " opacity-50" : ""}`}
                     aria-current={position === index ? "true" : undefined}
                     aria-disabled={isOffline ? true : undefined}
                     onClick={() => {

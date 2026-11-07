@@ -109,14 +109,29 @@ export function queuePositionOf(trackId, positionMs) {
   return { trackId: id, positionMs: Math.round(positionMs) };
 }
 
-/** @returns {QueueRecord|null} */
-export function mergeQueuePosition(record, position) {
+/**
+ * 独立进度（settings 的 `queuePosition`）并入持久队列。
+ * `explicit` = 设置里**确实出现过**这个键（哪怕是 `null` 或归零）：一旦写过独立进度，旧的内联进度就到此为止——
+ * 归零是用户的选择，不是"没记过"。`explicit` 缺省（老数据、没有这个键）时内联进度照旧兼容。
+ * @param {unknown} record
+ * @param {unknown} position
+ * @param {{explicit?: boolean}} [options]
+ * @returns {QueueRecord|null}
+ */
+export function mergeQueuePosition(record, position, { explicit = false } = {}) {
   const clean = sanitizeQueueRecord(record);
   if (clean === null) return null;
   const currentId = clean.ids[clean.index];
   const next = queuePositionOf(position?.trackId, position?.positionMs);
-  if (next === null || next.trackId !== currentId) return clean;
-  return { ...clean, positionMs: next.positionMs, positionTrackId: next.trackId };
+  const usable = next !== null && next.trackId === currentId ? next : null;
+  if (!explicit) {
+    if (usable === null) return clean;
+    return { ...clean, positionMs: usable.positionMs, positionTrackId: usable.trackId };
+  }
+  // 显式写过：内联的那一对字段整对丢掉（它只可能是迁移前留下来的旧进度）
+  const { positionMs: _inlineMs, positionTrackId: _inlineId, ...withoutInline } = clean;
+  if (usable === null) return withoutInline;
+  return { ...withoutInline, positionMs: usable.positionMs, positionTrackId: usable.trackId };
 }
 
 /** @returns {QueueRecord|null} */

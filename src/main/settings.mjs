@@ -18,6 +18,11 @@ export const SETTINGS_FILE_NAME = "settings.json";
 export const QUEUE_FILE_NAME = "queue.json";
 /** 设置文档中队列字段的键名（与渲染层各自定义，靠测试互钉）。 */
 export const QUEUE_DATA_KEY = "queue";
+/**
+ * 独立播放进度的键名（与渲染层 `QUEUE_POSITION_SETTING_KEY` 各自定义，靠测试互钉）。
+ * 这个键的 `null` 是**显式语义**（"没有进度"），必须留在盘上：删掉它会让下一次启动退回队列里内联的旧进度。
+ */
+export const QUEUE_POSITION_DATA_KEY = "queuePosition";
 /** schema 版本：只认这一个（Rust 侧同名字面量）。 */
 export const SETTINGS_SCHEMA_VERSION = 1;
 /** 文件权限：只给当前用户读写（文件里有代理密码）。 */
@@ -246,6 +251,12 @@ export function mergeSettings(document, patch) {
         fail(CORE_ERROR_KINDS.invalidPayload, "offlineTracks 的元素只能是字符串（曲目 id）");
       }
       data.offlineTracks = normalizeOfflineTracks(value);
+      continue;
+    }
+    if (key === QUEUE_POSITION_DATA_KEY) {
+      // 与其它键不同：这里的 `null` 是"显式没有进度"（用户归零/清空过），写进盘而不是删键。
+      // 删键之后渲染层无法区分「没记过」与「记过归零」，旧队列里的内联进度就会被重新捡起来。
+      data[key] = value === null ? null : value;
       continue;
     }
     if (value === null) {

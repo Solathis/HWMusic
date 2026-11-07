@@ -4699,7 +4699,12 @@ export async function checkLibraryPagination(page, guardDir, add) {
   const reducedMotion = await observePageTransition("reduce");
   add("d1-reduced-motion-no-page-fade", reducedMotion.animations.every((animation) => animation.name !== "enter"), JSON.stringify(reducedMotion));
   const normalMotion = await observePageTransition("no-preference");
-  add("d1-normal-motion-page-fade", normalMotion.started !== null && normalMotion.animations.some((animation) => animation.name === "enter"), JSON.stringify(normalMotion));
+  /**
+   * 正常动效的判据只有一条：那一次轮询**捕获到** `enter` 真的启动过（当时 currentTime ≤ 50ms）。
+   * 不再要求"稍后几轮往返之后 animation 还在"——150ms 的淡入完全可能已经播完并从 `getAnimations()` 里消失，
+   * 再要它还在就是在赌时序（慢渲染必红、快机器偶发绿），那是假失败/假通过而不是证据。
+   */
+  add("d1-normal-motion-page-fade", normalMotion.started !== null, JSON.stringify(normalMotion));
   await page.emulateMedia({ reducedMotion: "no-preference" });
 
   // ⑩ 换关键词：旧查询的迟到响应必须被丢掉（新结果里不许混进旧词的行）
@@ -4744,6 +4749,85 @@ export async function checkLibraryPagination(page, guardDir, add) {
     await window.__guard.ready();
     window.__guard.pause();
   });
+}
+
+/**
+ * 曲目表表头 sticky 的**真浏览器**守卫（真组件 + 真产物 CSS，量的是计算样式与滚动几何，不是标记）。
+ *
+ * 生成原语 `components/ui/table.tsx` 自带 `overflow-x-auto`：那一层会成为 `position: sticky` 认的滚动容器，
+ * 而它纵向并不滚动——表头于是跟着页面一起卷走。调用点在**table-container 的直接父元素**上把 overflow 放开，
+ * 选择器是直接子选择器，所以父元素必须是那一层（中间再插一层淡入包裹层就会掉回 `overflow-x-auto`）。
+ * 这里把两处真实滚动根各走一遍：歌单详情页的 `page-scroll` 与收藏页自己的 `favorites-scroll-root`。
+ */
+export async function checkTableSticky(page, guardDir, add) {
+  const visibleTable = () => page.locator('[data-testid="track-table"]:visible');
+  /** 淡入是 150ms 的动画：等它播完再量几何（落地判据与动效无关，这里只是不在动的时候量）。 */
+  const settleFade = () => page.waitForFunction(() => {
+    const wrapper = document.querySelector('[data-slot="table-container"]')?.parentElement;
+    return !wrapper || wrapper.getAnimations().every((animation) => animation.playState === "finished");
+  }, null, { timeout: GUARD_TIMEOUT_MS });
+
+  /**
+   * 在 `rootSelector` 这个**真实滚动根**里量一次：
+   * table-container 的计算 overflow 必须不是 auto/scroll（否则它才是滚动容器），
+   * 滚下半个屏幕之后 thead 的顶边仍贴住滚动根的顶边，而首行已经钻到表头底下。
+   */
+  const probe = (rootSelector) => page.evaluate((selector) => {
+    const root = document.querySelector(selector);
+    if (!root) return { found: false, reason: `找不到滚动根 ${selector}` };
+    const table = [...document.querySelectorAll('[data-testid="track-table"]')]
+      .find((node) => node.getClientRects().length > 0);
+    const container = table?.closest('[data-slot="table-container"]') ?? null;
+    const header = table?.querySelector("thead") ?? null;
+    const firstRow = table?.querySelector("tbody tr") ?? null;
+    if (!table || !container || !header || !firstRow) return { found: false, reason: "看不见曲目表 / table-container / thead" };
+    if (!root.contains(table)) return { found: false, reason: "曲目表不在这个滚动根里" };
+    const style = getComputedStyle(container);
+    const offset = Math.max(1, Math.round(root.clientHeight / 2));
+    root.scrollTop = offset;
+    const atRoot = (node) => Math.round(node.getBoundingClientRect().top - root.getBoundingClientRect().top);
+    return {
+      found: true,
+      overflowX: style.overflowX,
+      overflowY: style.overflowY,
+      scrolled: Math.round(root.scrollTop),
+      offset,
+      scrollable: root.scrollHeight - root.clientHeight,
+      headerTop: atRoot(header),
+      firstRowTop: atRoot(firstRow),
+      headerHeight: Math.round(header.getBoundingClientRect().height),
+    };
+  }, rootSelector);
+
+  /** 判据：容器不是滚动容器（overflow 不是 auto/scroll），且表头仍贴在滚动根顶上、首行已在它下面卷过。 */
+  const stickyOk = (row) => row.found === true && row.scrolled > 0
+    && row.overflowX !== "auto" && row.overflowX !== "scroll"
+    && row.overflowY !== "auto" && row.overflowY !== "scroll"
+    && Math.abs(row.headerTop) <= 2 && row.firstRowTop < 0;
+
+  // 侧栏窄轨里没有歌单与导航文案：先展开
+  if (await page.getByTestId("sidebar-search-rail").count()) await page.getByTestId("sidebar-search-rail").click();
+
+  // ① 歌单详情页：滚动根是外壳内容区的 `page-scroll`（首屏 50 行，足够滚半屏）
+  await page.getByTestId("sidebar-playlist-item").first().click();
+  await page.getByTestId("playlist-detail").waitFor();
+  await visibleTable().first().waitFor();
+  await settleFade();
+  const pageRow = await probe('[data-testid="page-scroll"]');
+  add("f4-sticky-header-page-scroll", stickyOk(pageRow), JSON.stringify(pageRow));
+  await page.screenshot({ path: path.join(guardDir, "f4-sticky-playlist.png") });
+
+  // ② 收藏页：它常驻挂载、滚动根是自己的 `favorites-scroll-root`（另一条滚动根，同样要粘）
+  await page.getByRole("button", { name: "我的收藏", exact: true }).click();
+  await page.getByTestId("favorites-page").waitFor();
+  await visibleTable().first().waitFor();
+  await settleFade();
+  const favoritesRow = await probe('[data-testid="favorites-scroll-root"]');
+  add("f4-sticky-header-favorites", stickyOk(favoritesRow), JSON.stringify(favoritesRow));
+  await page.screenshot({ path: path.join(guardDir, "f4-sticky-favorites.png") });
+
+  // 收尾：把收藏页的滚动位置放回去，后面按页面几何/滚动量的验收从干净状态开始
+  await page.getByTestId("favorites-scroll-root").evaluate((element) => { element.scrollTop = 0; });
 }
 
 /**
@@ -6491,6 +6575,8 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     await checkLyricsTargetMenus(browser, port, guardDir, add);
     /** 库列表触底分页（真滚轮 + 真 IPC 计数）；它会把主界面导航走，而后面的桌面窗验收本来就要重挂整个壳。 */
     await checkLibraryPagination(page, guardDir, add);
+    /** 曲目表表头 sticky 的真几何（生成原语自带 overflow-x-auto，调用点在直接父元素上放开）。它把主界面导航走，而后面本来就要重挂整个壳。 */
+    await checked("f4-sticky-header", () => checkTableSticky(page, guardDir, add));
     await page.evaluate(() => window.__guard.desktopBeforeMount());
     await page.getByTestId("lyrics-window").waitFor();
     await page.waitForTimeout(900);

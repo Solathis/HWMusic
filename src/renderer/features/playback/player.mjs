@@ -348,13 +348,14 @@ export function createPlayer(options = {}) {
       return;
     }
 
-    const structure = queueStructureOf(state.entries, state.index);
+    // 先比身份与下标：只写进度的那些帧（每 5 秒一次）不该为了判「结构没变」再遍历一遍曲目元数据
     const structureChanged =
       forceStructure ||
-      (structure === null
+      (state.entries.length === 0
         ? persistedStructureEntries !== null || persistedStructureIndex !== null
         : persistedStructureEntries !== state.entries || persistedStructureIndex !== state.index);
     if (structureChanged) {
+      const structure = queueStructureOf(state.entries, state.index);
       persistedStructureEntries = structure === null ? null : state.entries;
       persistedStructureIndex = structure === null ? null : state.index;
       persistedKey = JSON.stringify(structure);
@@ -791,6 +792,8 @@ export function createPlayer(options = {}) {
       return { ok: false, error: { kind: "content_offline", message: ALL_OFFLINE_TEXT } };
     }
     if (dropped > 0) notify(offlineSkippedText(dropped));
+    // 队列与起点用的是**同一个映射**（无 id 与已知下架的条目都不进队列），所以下标一定落在 entries 里：
+    // 起点被过滤掉时向后找、再向前，绝不把越界下标 clamp 进队列（那会播出另一首歌）
     const entries = queueEntriesOf(playable);
     const index = entries.length === 0 ? -1 : playableStartIndex(items, startIndex, offlineSet);
     // 换队列 = 停止播放：音频里装着的还是上一首，装作没发生只会播错歌
