@@ -3695,11 +3695,13 @@ export async function checkImmersiveKaraoke(page, guardDir, add) {
   await configure({ ...DESKTOP_BASELINE });
   await page.evaluate(() => window.__guard.resetSettings());
   await page.evaluate(() => window.__guard.restoreLyrics());
-  await page.evaluate(() => window.__guard.setTime(700));
+  await page.evaluate(() => { window.__guard.pause(); window.__guard.setTime(700); });
   await page.waitForTimeout(300);
   await page.getByRole("button", { name: "歌词", exact: true }).click();
   await page.getByTestId("playback-stage").waitFor();
-  await page.waitForTimeout(1000);
+  await page.waitForFunction((selector) => [...document.querySelectorAll(selector + " span")]
+    .filter((node) => node.children.length === 0 && (node.textContent ?? "").length === 1)
+    .map((node) => node.textContent).join("") === "第一行歌词守卫", themeLine);
 
   const wordSpans = await page.locator(`${themeLine} span`).evaluateAll((nodes) =>
     nodes.filter((node) => node.children.length === 0 && (node.textContent ?? "").length === 1).map((node) => node.textContent));
@@ -6001,7 +6003,7 @@ const withMotionProvider = (source) => 'import { MotionProvider } from "../../sr
   + source.replaceAll("<StrictMode>", "<StrictMode><MotionProvider>").replaceAll("</StrictMode>", "</MotionProvider></StrictMode>");
 
 export async function runGuard({ root = ROOT, log = console.log, scope = "full" } = {}) {
-  if (!["full", "quality", "motion", "stage", "interactions", "feedback", "lyrics", "overlays", "pagination", "interruptions", "resources", "resize"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
+  if (!["full", "quality", "motion", "stage", "interactions", "feedback", "lyrics", "overlays", "pagination", "interruptions", "resources", "resize", "karaoke"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
   const guardDir = path.join(root, GUARD_DIR);
   await mkdir(guardDir, { recursive: true });
 
@@ -6193,6 +6195,7 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
         else if (scope === "interruptions") await runInterruptedMotionChecks({ page, add, theme });
         else if (scope === "resources") await runMotionResourceChecks({ page, add, theme });
         else if (scope === "resize") await runDelayedResizeChecks({ page, add, theme });
+        else if (scope === "karaoke") { await page.evaluate(() => window.__guard.ready()); await checkImmersiveKaraoke(page, guardDir, add); }
         else await runMotionChecks({ page, add, theme });
       }
       add(scope + "-no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,
