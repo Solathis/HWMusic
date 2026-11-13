@@ -467,10 +467,21 @@ export async function runOverlayMotionChecks({ page, add, theme }) {
   await page.locator('[data-slot="alert-dialog-content"]').waitFor({ state: "detached" });
 
   await page.mouse.move(0, 0);
+  await page.evaluate(() => document.activeElement?.blur());
+  await page.waitForFunction(() => document.querySelectorAll('[role="tooltip"]').length === 0);
+  await page.getByTestId("player-bar-quality").evaluate((node) => {
+    // Sample before the 400ms hint timer on the browser clock, avoiding RPC
+    // latency turning Node's 100ms wait into a much later observation in CI.
+    window.__tooltipIntentCheck = new Promise((resolve) => {
+      node.addEventListener("pointermove", () => {
+        window.setTimeout(() => resolve(document.querySelectorAll('[role="tooltip"]').length === 0), 100);
+      }, { once: true, capture: true });
+    });
+  });
   await page.getByTestId("player-bar-quality").hover();
-  await page.waitForTimeout(100);
-  add(theme + "-motion-tooltip-intent", await page.getByRole("tooltip").count() === 0, "短暂划过不弹提示");
-  await page.waitForTimeout(400);
+  const noEarlyHint = await page.evaluate(() => window.__tooltipIntentCheck);
+  add(theme + "-motion-tooltip-intent", noEarlyHint, "浏览器时钟100ms采样时不提前显示提示");
+  await page.waitForFunction(() => document.querySelectorAll('[role="tooltip"]').length === 1);
   add(theme + "-motion-tooltip-shows", await page.getByRole("tooltip").count() === 1, "明确悬停后显示提示");
   const themeButton = page.getByTestId("theme-toggle");
   const themeLabel = await themeButton.getAttribute("aria-label");
