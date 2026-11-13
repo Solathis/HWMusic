@@ -339,7 +339,7 @@ impl SettingsPopupState {
 
 /// 弹出窗的标题（Alt+Tab / 任务视图里的名字；不能留给 tao 的默认 "Tauri App"）。
 pub const SETTINGS_POPUP_TITLE: &str = "桌面歌词设置";
-pub const SETTINGS_PRESENTATION_EVENT: &str = "lyrics-settings:presentation";
+pub const SETTINGS_PRESENTATION_EVENT: &str = crate::bridge::LYRICS_SETTINGS_PRESENTATION;
 
 fn presentation<R: Runtime>(window: &WebviewWindow<R>, visible: bool) -> Value {
     let state = window.app_handle().state::<SettingsPopupState>();

@@ -302,6 +302,21 @@ export async function runOverlayMotionChecks({ page, add, theme }) {
   add(theme + "-motion-tooltip-intent", await page.getByRole("tooltip").count() === 0, "短暂划过不弹提示");
   await page.waitForTimeout(400);
   add(theme + "-motion-tooltip-shows", await page.getByRole("tooltip").count() === 1, "明确悬停后显示提示");
+  const themeButton = page.getByTestId("theme-toggle");
+  const themeLabel = await themeButton.getAttribute("aria-label");
+  await themeButton.hover();
+  const themeBox = await themeButton.boundingBox();
+  await page.mouse.move(themeBox.x + themeBox.width / 2 + 1, themeBox.y + themeBox.height / 2);
+  await page.waitForTimeout(80);
+  const tooltipDetails = await page.getByRole("tooltip").allTextContents();
+  const hitDetails = await themeButton.evaluate((node) => {
+    const b = node.getBoundingClientRect();
+    const hit = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2);
+    return { x: b.x, y: b.y, hit: hit?.closest("button")?.getAttribute("aria-label"),
+      hover: node.matches(":hover"), hiddenParent: Boolean(node.closest("[inert]")) };
+  });
+  add(theme + "-motion-tooltip-adjacent", await page.getByRole("tooltip").filter({ hasText: themeLabel }).count() === 1,
+    JSON.stringify({ themeLabel, tooltipDetails, hitDetails }));
   await page.mouse.move(0, 0);
   await page.waitForTimeout(200);
   const avatarFrames = await recordVisualFrames(page, '[data-testid="account-avatar"]', () =>

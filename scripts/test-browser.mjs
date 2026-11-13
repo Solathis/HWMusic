@@ -21,7 +21,7 @@ import sharp from "sharp";
 import { RUN_LOG_EMPTY_TEXT, RUN_LOG_FAILURE_TEXT } from "../src/renderer/features/settings/run-log.mjs";
 import { POPOVER_PAD_DIP } from "../src/renderer/features/lyrics/lyrics-popover.mjs";
 import { runPlaybackQualityChecks } from "./browser-guards/playback-quality.mjs";
-import { runMotionChecks, runStageMotionChecks, runPlaybackInteractionChecks, runFeedbackMotionChecks, runLyricsMotionChecks } from "./browser-guards/motion.mjs";
+import { runMotionChecks, runStageMotionChecks, runPlaybackInteractionChecks, runFeedbackMotionChecks, runLyricsMotionChecks, runOverlayMotionChecks } from "./browser-guards/motion.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** 守卫自己的中间产物（.gitignore 已含 .tmp/）。 */
@@ -1516,40 +1516,10 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
     JSON.stringify(menuLayering));
   add("playback-stage-menu-escape-keeps-stage", await stage.isVisible(), "菜单开着时 ESC 先关菜单，舞台留着");
 
-  // Sheet 打开时：收起按钮不压上层（Sheet 走的是官方 portal/z 层），ESC 先关 Sheet
   const queueTrigger = page.getByRole("button", { name: "播放队列", exact: true });
   await queueTrigger.focus();
-  await queueTrigger.press("Enter");
-  const sheet = page.locator('[data-slot="sheet-content"]');
-  await sheet.waitFor();
-  // 抽屉滑入时整块在视口外，中心点打不到它：慢机器上测得早就是假失败。先等它成为中心点的命中目标（有上限，超时照常量、照常判）
-  await page.waitForFunction(() => {
-    const content = document.querySelector('[data-slot="sheet-content"]');
-    if (!content) return false;
-    const s = content.getBoundingClientRect();
-    const hit = document.elementFromPoint(s.x + s.width / 2, s.y + s.height / 2);
-    return Boolean(hit && content.contains(hit));
-  }, null, { timeout: guardScaledMs(10000) }).catch(() => {});
-  const sheetLayering = await page.evaluate(() => {
-    const content = document.querySelector('[data-slot="sheet-content"]');
-    const button = document.querySelector('[data-testid="playback-stage-close-row"]');
-    // 收起入口是**整行**（横跨舞台），Sheet 是右侧抽屉，必然与行本身相交；
-    // 这里量的是「箭头这处可见入口没被上层盖住」。
-    const arrow = button?.querySelector("svg");
-    if (!content || !button || !arrow) return { ok: false };
-    const s = content.getBoundingClientRect();
-    const b = arrow.getBoundingClientRect();
-    const hit = document.elementFromPoint(s.x + s.width / 2, s.y + s.height / 2);
-    return {
-      ok: Boolean(hit && content.contains(hit)),
-      overlapsClose: !(b.right <= s.left || b.left >= s.right || b.bottom <= s.top || b.top >= s.bottom),
-    };
-  });
-  await page.keyboard.press("Escape");
-  await sheet.waitFor({ state: "detached" });
-  add("playback-stage-sheet-layering",
-    sheetLayering.ok && !sheetLayering.overlapsClose && await stage.isVisible(),
-    JSON.stringify(sheetLayering));
+  const isolated = await queueTrigger.evaluate((node) => document.activeElement !== node && Boolean(node.closest("[inert]")));
+  add("playback-stage-sheet-layering", isolated && await stage.isVisible(), "沉浸页隔离主壳的队列入口，舞台内菜单仍由其自身触发器操作");
 
   await page.keyboard.press("Escape");
   // 关门有约 220ms 的退场过场：等它真的从 DOM 里退掉，而不是要求瞬时消失
@@ -6032,7 +6002,7 @@ const withMotionProvider = (source) => 'import { MotionProvider } from "../../sr
   + source.replaceAll("<StrictMode>", "<StrictMode><MotionProvider>").replaceAll("</StrictMode>", "</MotionProvider></StrictMode>");
 
 export async function runGuard({ root = ROOT, log = console.log, scope = "full" } = {}) {
-  if (!["full", "quality", "motion", "stage", "interactions", "feedback", "lyrics"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
+  if (!["full", "quality", "motion", "stage", "interactions", "feedback", "lyrics", "overlays"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
   const guardDir = path.join(root, GUARD_DIR);
   await mkdir(guardDir, { recursive: true });
 
@@ -6219,6 +6189,7 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
         else if (scope === "interactions") await runPlaybackInteractionChecks({ page, add, theme });
         else if (scope === "feedback") await runFeedbackMotionChecks({ page, add, theme });
         else if (scope === "lyrics") await runLyricsMotionChecks({ page, add, theme });
+        else if (scope === "overlays") await runOverlayMotionChecks({ page, add, theme });
         else await runMotionChecks({ page, add, theme });
       }
       add(scope + "-no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,

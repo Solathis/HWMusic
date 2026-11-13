@@ -42,6 +42,7 @@ pub const LYRICS_DOCUMENT: &str = "lyrics:document";
 pub const LYRICS_PROGRESS: &str = "lyrics:progress";
 /// 歌词配置权威广播：`{config, visible, revision}`；`{ready:true}` 是单独的就绪握手。
 pub const LYRICS_STATE: &str = "lyrics:state";
+pub const LYRICS_SETTINGS_PRESENTATION: &str = "lyrics-settings:presentation";
 /// 锁定的桌面歌词：光标进出歌词窗 `{inside: bool}`（Rust 轮询光标后广播）。
 pub const LYRICS_POINTER: &str = "lyrics:pointer";
 /// 主题变化广播频道：`{theme: "light"|"dark"|"system"}` —— 目标态。
@@ -594,6 +595,7 @@ mod tests {
                 LYRICS_DOCUMENT,
                 LYRICS_PROGRESS,
                 LYRICS_STATE,
+                LYRICS_SETTINGS_PRESENTATION,
                 LYRICS_POINTER,
                 THEME_CHANGED,
                 UPDATE_PROGRESS

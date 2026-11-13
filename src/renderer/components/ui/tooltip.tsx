@@ -3,19 +3,27 @@
 import * as React from "react"
 import { cn } from "cn"
 import { Tooltip as TooltipPrimitive } from "radix-ui"
+const TooltipScope = React.createContext(false)
 
 function TooltipProvider({
-  delayDuration = 400,
-  skipDelayDuration = 300,
+  delayDuration,
+  skipDelayDuration,
+  disableHoverableContent,
   ...props
 }: React.ComponentProps<typeof TooltipPrimitive.Provider>) {
+  const hasProvider = React.useContext(TooltipScope)
+  // Standalone components get a provider; app children share hover intent.
+  if (hasProvider && delayDuration === undefined && skipDelayDuration === undefined && disableHoverableContent === undefined) return <>{props.children}</>
   return (
+    <TooltipScope.Provider value={true}>
     <TooltipPrimitive.Provider
       data-slot="tooltip-provider"
-      delayDuration={delayDuration}
-      skipDelayDuration={skipDelayDuration}
+      delayDuration={delayDuration ?? 400}
+      skipDelayDuration={skipDelayDuration ?? 300}
+      disableHoverableContent={disableHoverableContent ?? true}
       {...props}
     />
+    </TooltipScope.Provider>
   )
 }
 
