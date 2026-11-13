@@ -513,12 +513,35 @@ function hostOf(value) {
  * 三档各有实测/契约佐证：1+mp3 → standard、2+mp3 → high、3+flac → lossless；对不上就是 unknown。
  */
 export function confirmedPlaybackQuality(playQuality, declaredType) {
-  const quality = String(playQuality ?? "");
-  const normalized = typeof declaredType === "string" ? declaredType.trim().toLowerCase() : "";
-  const codec = /\bflac\b/.test(normalized) ? "flac" : /\bmp3\b/.test(normalized) || normalized === "audio/mpeg" ? "mp3" : undefined;
-  if (quality === "3" && codec === "flac") return "lossless";
-  if (quality === "2" && codec === "mp3") return "high";
-  if (quality === "1" && codec === "mp3") return "standard";
+  return playbackQualityOfPayload({ playQuality, type: declaredType });
+}
+
+/** 空声明可回退；显式非法码不能被另一个字段掩盖。 */
+function playbackQualityCode(value) {
+  if (value === null || value === undefined || (typeof value === "string" && value.trim() === "")) return null;
+  if (typeof value !== "number" && typeof value !== "string") return undefined;
+  const code = String(value).trim();
+  return /^[123]$/.test(code) ? code : undefined;
+}
+
+function playbackCodec(value) {
+  if (typeof value !== "string") return null;
+  const codec = value.trim().toLowerCase();
+  if (["mp3", "audio/mpeg", "audio/mp3"].includes(codec)) return "mp3";
+  if (["flac", "audio/flac", "audio/x-flac"].includes(codec)) return "flac";
+  return null;
+}
+
+/** 当前资源的所有可信声明必须一致；资源候选、URL 和请求偏好不参与。 */
+export function playbackQualityOfPayload(raw) {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return "unknown";
+  const codes = [raw.playQuality, raw.qualityType].map(playbackQualityCode).filter((code) => code !== null);
+  if (codes.length === 0 || codes.includes(undefined) || new Set(codes).size !== 1) return "unknown";
+  const codecs = [raw.type, raw.format].map(playbackCodec).filter((codec) => codec !== null);
+  if (codecs.length === 0 || new Set(codecs).size !== 1) return "unknown";
+  if (codes[0] === "3" && codecs[0] === "flac") return "lossless";
+  if (codes[0] === "2" && codecs[0] === "mp3") return "high";
+  if (codes[0] === "1" && codecs[0] === "mp3") return "standard";
   return "unknown";
 }
 
@@ -557,7 +580,7 @@ export function parsePlaybackPayload(raw, options = {}) {
     size: raw.size ?? null,
     bitrate: raw.bitrate ?? null,
     duration: raw.duration ?? songInfo?.duration ?? null,
-    actualQuality: confirmedPlaybackQuality(raw.playQuality ?? raw.qualityType, raw.type),
+    actualQuality: playbackQualityOfPayload(raw),
     auditionLikely: audition.auditionLikely,
     signals: audition.signals,
     warnings,

@@ -44,10 +44,11 @@ export interface PlaybackPayload {
   size?: number;
   bitrate?: number;
   duration?: number;
-  /** 接口回的音质码（"1"=standard、"3"=lossless） */
-  playQuality?: string;
+  /** 接口回的音质码（1=standard、2=high、3=lossless），数字/字符串等价 */
+  playQuality?: string | number;
+  qualityType?: string | number;
   /** 声明的内容类型（mp3/flac…）：**与 playQuality 对得上才算"已确认音质"** */
-  type?: string;
+  type?: string | number;
   songInfo?: { duration?: number | string; [key: string]: unknown };
   /** 试听时长（秒）；**不能单独**作为试听判定依据，见 `classifyAudition` */
   auditionTime?: number;
@@ -64,7 +65,7 @@ export interface PlaybackInfo {
   bitrate: number | null;
   duration: number | null;
   /** 声明的音质与实际返回对得上才算确认；否则 "unknown"（不虚标） */
-  actualQuality: "standard" | "lossless" | "unknown";
+  actualQuality: "standard" | "high" | "lossless" | "unknown";
   /** 仅当 auditionTime 与标志位两个信号齐备时为 true */
   auditionLikely: boolean;
   signals: string[];
