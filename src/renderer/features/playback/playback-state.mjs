@@ -6,6 +6,8 @@
  */
 
 /** 「取播放地址失败」的开头（业务错误那句要把码接在它后面，措辞只此一处）。 */
+import { isLocalTrackId } from "../../../shared/local-track.ts";
+
 const API_FAILURE_LEAD = "取播放地址失败";
 
 /** 失败类别 → 一句话（类别来自状态机的结构化错误，core 的类别原样透传）。 */
@@ -84,6 +86,18 @@ export function playbackQualityText(state) {
   const quality = state.quality;
   if (typeof quality !== "string" || !Object.hasOwn(PLAYBACK_QUALITY_TEXT, quality)) return null;
   return PLAYBACK_QUALITY_TEXT[quality];
+}
+
+/** @returns {null | {kind: "confirmed"|"loading"|"unknown"|"local", text: string, description: string}} */
+export function playbackQualityBadgeView(state) {
+  if (state === null || typeof state !== "object" || !state.track || state.error != null) return null;
+  const confirmed = playbackQualityText(state);
+  if (confirmed !== null) return { kind: "confirmed", text: confirmed, description: "当前歌曲的实际播放音质" };
+  if (isLocalTrackId(state.track.id)) return { kind: "local", text: "本地音频", description: "本地音频未提供可确认的品质档位" };
+  if (state.status === "loading" && state.loaded !== true) {
+    return { kind: "loading", text: "获取音质中", description: "正在获取当前歌曲的播放信息" };
+  }
+  return { kind: "unknown", text: "音质未知", description: "暂无可确认的音质信息" };
 }
 
 /** 曲目标题：只知道标识时就显示标识——说"曲目 1001"才是实话，说"未知歌曲"会让人以为队列坏了。 */

@@ -68,7 +68,6 @@ import { lyricsTargetOf } from "./features/lyrics/lyrics-window.mjs"
 import { TRACK_MENU_TARGET } from "./features/shell/track-menu.mjs"
 import {
   playbackModeLabel,
-  playbackQualityText,
   playerStatusText,
   trackArtistOf,
   trackTitleOf,
@@ -77,6 +76,7 @@ import type { PlayerRuntime } from "./features/playback/player-runtime.ts"
 import type { PlayerState } from "./features/playback/use-player.ts"
 import type { LyricsToggleSurface, LyricsWindowBinding } from "./use-lyrics-window.ts"
 import { TrackRowMenu, type TrackRowActions } from "./track-menu.tsx"
+import { PlaybackQualityBadge } from "./playback-quality-badge"
 
 export const CONTENT_FADE_IN = "motion-safe:animate-in motion-safe:fade-in-0 motion-safe:duration-150"
 
@@ -538,7 +538,6 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
 
   const playing = state.status === "playing"
   const hasTrack = state.track !== null
-  const qualityText = playbackQualityText(state)
   const durationMs = state.durationMs
   const shownMs = dragMs ?? state.currentTimeMs
   const ModeIcon = MODE_ICONS[state.mode as keyof typeof MODE_ICONS] ?? ListMusicIcon
@@ -548,7 +547,7 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
   const trackInfo = (
     <div key={state.track?.id ?? "none"} className={`flex min-w-0 items-center gap-3 ${CONTENT_FADE_IN}`}>
       <CoverArt coverUrl={trackCoverUrlOf(state.track)} className="size-10 rounded-md" />
-      <div className="flex min-w-0 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
         <span className="truncate text-sm font-medium">{trackTitleOf(state.track)}</span>
         {/* 「艺人 · 状态」这一行会被截断，所以音质**不放在这里**：它单独成一枚不收缩的 Badge（见下） */}
         <span className="truncate text-xs text-muted-foreground" data-testid="player-bar-status">
@@ -557,13 +556,6 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
             : `${trackArtistOf(state.track)} · ${playerStatusText(state)}`}
         </span>
       </div>
-      {/*
-       * 实际音质独立显示：长艺人名把左边那列挤到截断时，这枚 Badge 照旧完整可见。
-       * 只有服务端明确声明了实际档位才渲染（出错 / 没声明一律不补——设置里的期望档位不算实际音质）。
-       */}
-      {qualityText === null ? null : (
-        <Badge variant="outline" className="shrink-0" data-testid="player-bar-quality">{qualityText}</Badge>
-      )}
     </div>
   )
 
@@ -593,8 +585,8 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
        * 控件用绝对定位实现真居中：两侧等分只能让剩余空间相等，中点仍会随左侧文字长度漂移。
        */}
       <div className="relative flex items-center gap-3">
-        <div className="flex min-w-0 flex-1 items-center gap-3">
-          <div className="min-w-0 max-w-[calc(100%-6rem)]">
+        <div className="flex min-w-0 max-w-[calc(50%-6rem)] flex-1 items-center gap-2">
+          <div className="min-w-0 flex-1">
             {onOpenStage === undefined ? (
               <div className="flex w-fit min-w-0 max-w-full items-center gap-3" data-testid="player-track-info">
                 {trackInfo}
@@ -612,6 +604,7 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
               </Button>
             )}
           </div>
+          <PlaybackQualityBadge state={state} surface="player-bar" />
         </div>
 
         <div

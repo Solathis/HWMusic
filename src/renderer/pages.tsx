@@ -1074,7 +1074,7 @@ export function SettingsPage({
             <CardHeader>
               <CardTitle>音质</CardTitle>
               {/* 只有这一句说明：要会员的档位怎么处理，其余交给用户自己选。 */}
-              <CardDescription>需要会员的档位会自动改用标准音质。</CardDescription>
+              <CardDescription>用于后续播放，当前歌曲保持原音质。需要会员的档位会自动改用标准音质。</CardDescription>
             </CardHeader>
             <CardContent>
               <Select

@@ -10,7 +10,7 @@ import { getPlayerRuntime, type PlayerRuntime } from "./player-runtime.ts";
 
 /**
  * 播放状态的形状（唯一真源是 `player.mjs` 里的状态对象）。
- * `quality` 也在那份 JSDoc 里：给的是**服务端明确声明的**音质，`null` = 没声明（界面一个字都不说）。
+ * `quality` 是服务端已确认的音质，null 表示未知；展示投影用中性徽标解释未知状态。
  */
 export type PlayerState = ReturnType<PlayerRuntime["player"]["snapshot"]>;
 
