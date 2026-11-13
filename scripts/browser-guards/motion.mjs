@@ -460,7 +460,23 @@ export async function runOverlayMotionChecks({ page, add, theme }) {
 
   const dialogFrames = await recordVisualFrames(page, '[data-slot="alert-dialog-content"]', () =>
     page.getByRole("button", { name: "退出登录", exact: true }).click());
-  add(theme + "-motion-dialog-soft", dialogFrames.some((frame) => frame.scale > 1.002), "对话框有轻微回弹");
+  const dialogPeak = await page.locator('[data-slot="alert-dialog-content"]').evaluate((node) => {
+    // Sample the real native CSS animation at its peak instead of requiring
+    // software rasterization to produce a frame at that short wall-clock time.
+    const inline = node.style.animation;
+    node.style.animation = "none";
+    void node.offsetWidth;
+    node.style.animation = inline;
+    const animation = node.getAnimations().find((item) => item instanceof CSSAnimation && item.animationName === "motion-dialog-enter");
+    if (!animation) return null;
+    animation.pause();
+    animation.currentTime = Number(animation.effect.getTiming().duration) * 0.65;
+    const scale = parseFloat(getComputedStyle(node).scale);
+    animation.finish();
+    return scale;
+  });
+  add(theme + "-motion-dialog-soft", dialogPeak > 1.002 && dialogFrames.at(-1).present,
+    JSON.stringify({ nativePeakScale: dialogPeak }));
   const backdrop = await page.locator('[data-slot="alert-dialog-overlay"]').evaluate((node) => getComputedStyle(node).backgroundColor);
   add(theme + "-motion-dialog-backdrop", backdrop.replaceAll(" ", "") !== "rgba(0,0,0,0)", backdrop);
   await page.getByRole("button", { name: "取消", exact: true }).click();

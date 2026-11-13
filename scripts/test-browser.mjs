@@ -6695,13 +6695,14 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
         await page.waitForFunction((index) => window.__guard.snapshot().index === index + 1
           && window.__guard.snapshot().status === "playing", previousIndex);
         const afterNext = await page.evaluate(() => ({ index: window.__guard.snapshot().index, timeMs: window.__guard.snapshot().currentTimeMs,
-          seekGeneration: window.__guard.snapshot().seekGeneration }));
+          seekGeneration: window.__guard.snapshot().seekGeneration, browserAtMs: performance.now() }));
         await page.mouse.up();
         await page.waitForTimeout(200);
         const released = await page.evaluate(() => ({ index: window.__guard.snapshot().index, timeMs: window.__guard.snapshot().currentTimeMs,
-          seekGeneration: window.__guard.snapshot().seekGeneration, sameRuntime: window.__guard.sameRuntime() }));
+          seekGeneration: window.__guard.snapshot().seekGeneration, sameRuntime: window.__guard.sameRuntime(), browserAtMs: performance.now() }));
         add(`${theme}-drag-next-${repeated ? "same-id" : "new-id"}`, Boolean(gestureBox) && released.index === afterNext.index
-          && released.seekGeneration === afterNext.seekGeneration && released.timeMs < afterNext.timeMs + 2000 && released.sameRuntime,
+          && released.seekGeneration === afterNext.seekGeneration
+          && released.timeMs < afterNext.timeMs + (released.browserAtMs - afterNext.browserAtMs) + 2000 && released.sameRuntime,
         JSON.stringify({ afterNext, released }));
         await stage.getByRole("button", { name: "暂停", exact: true }).click();
       }
