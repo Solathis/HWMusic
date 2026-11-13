@@ -375,6 +375,16 @@ export async function runStageMotionChecks({ page, add, theme }) {
     const image = document.querySelector('[data-testid="player-track-info"] img');
     return image?.complete && image.naturalWidth > 0;
   });
+  // SwiftShader can compile its first lyric/background shaders during entry.
+  // Check cold creation/completion separately, then sample the warmed motion.
+  const cold = await recordVisualFrames(page, '[data-testid="cover-flight"]', () => source.click());
+  await page.waitForFunction(() => document.querySelector('[data-testid="playback-stage"]')?.dataset.coverMotion === "idle"
+    && !document.querySelector('[data-testid="cover-flight"]'));
+  add(theme + "-motion-cold-cover-entry", cold.some((frame) => frame.present)
+    && await page.getByTestId("playback-stage").isVisible(), "首次GPU初始化时仍创建并完成封面过渡");
+  await page.keyboard.press("Escape");
+  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+  await page.waitForFunction(() => !document.querySelector('[data-testid="cover-flight"]'));
   const frames = await recordVisualFrames(page, '[data-testid="cover-flight"]', () => source.click());
   const moving = frames.filter((frame) => frame.present);
   const diagnostics = await page.evaluate(() => ({
