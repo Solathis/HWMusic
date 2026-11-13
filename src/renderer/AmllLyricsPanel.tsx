@@ -4,6 +4,7 @@
  * 沉浸式歌词禁止改色：颜色恒为官方默认变量 + `amll-theme.css` 的令牌基线，改色能力只留给桌面歌词窗。
  */
 import { LyricPlayer } from "@applemusic-like-lyrics/react"
+import { useMotionPolicy } from "./features/motion/MotionProvider"
 import type { LyricLine } from "@applemusic-like-lyrics/lyric"
 import { useEffect, useMemo, useRef, useState } from "react"
 
@@ -21,6 +22,7 @@ export interface AmllLyricsPanelProps {
 }
 
 export function AmllLyricsPanel({ runtime, lines, playing, seekGeneration }: AmllLyricsPanelProps) {
+  const { reducedMotion } = useMotionPolicy()
   const player = runtime.player
   const [frame, setFrame] = useState({ time: 0, isSeeking: false })
   const syncRef = useRef<ReturnType<typeof createLyricSync> | null>(null)
@@ -60,6 +62,9 @@ export function AmllLyricsPanel({ runtime, lines, playing, seekGeneration }: Aml
         currentTime={frame.time}
         isSeeking={frame.isSeeking}
         playing={playing}
+        enableSpring={!reducedMotion}
+        enableScale={!reducedMotion}
+        enableBlur={!reducedMotion}
         alignAnchor="center"
         alignPosition={0.5}
         style={{ width: "100%", height: "100%" }}

@@ -7,6 +7,7 @@
  */
 import { BackgroundRender } from "@applemusic-like-lyrics/react"
 import { useEffect, useState } from "react"
+import { useMotionPolicy } from "./features/motion/MotionProvider"
 
 export interface AmllBackgroundProps {
   /** 在播状态（决定背景是否流动） */
@@ -78,6 +79,7 @@ export function useCoverImage(url: string | null | undefined): HTMLImageElement 
 }
 
 export function AmllBackground({ playing, hasLyric, albumArt, albumUrl }: AmllBackgroundProps) {
+  const { decorationsActive } = useMotionPolicy()
   const loaded = useAlbumImage(albumUrl)
   const album = albumArt ?? loaded ?? undefined
 
@@ -86,7 +88,7 @@ export function AmllBackground({ playing, hasLyric, albumArt, albumUrl }: AmllBa
       <BackgroundRender
         key={album?.src ?? "empty"}
         album={album}
-        staticMode={!playing}
+        staticMode={!playing || !decorationsActive}
         hasLyric={hasLyric}
         renderScale={0.5}
         style={{ width: "100%", height: "100%" }}

@@ -1,14 +1,18 @@
 export async function recordVisualFrames(page, selector, action) {
   const key = "__motionFrames_" + Math.random().toString(36).slice(2);
   await page.evaluate(({ key, selector }) => {
-    const record = { frames: [], done: false, finishAt: null };
+    const record = { frames: [], done: false, finishAt: null, seen: false };
     window[key] = record;
     const start = performance.now();
-    const tick = () => {
+    const sample = () => {
       const node = document.querySelector(selector);
       const rect = node?.getBoundingClientRect();
       const style = node ? getComputedStyle(node) : null;
       const transform = style?.transform ?? "none";
+      if (node && !record.seen) {
+        record.seen = true;
+        if (record.finishAt !== null) record.finishAt = Math.max(record.finishAt, performance.now() + 650);
+      }
       record.frames.push({
         timeMs: performance.now() - start,
         present: Boolean(node && node.getClientRects().length),
@@ -19,8 +23,16 @@ export async function recordVisualFrames(page, selector, action) {
         tableWrapperOpacity: node?.querySelector("table")?.parentElement?.parentElement
           ? Number(getComputedStyle(node.querySelector("table").parentElement.parentElement).opacity) : null,
       });
-      if (record.finishAt !== null && performance.now() >= record.finishAt) record.done = true;
-      else requestAnimationFrame(tick);
+    };
+    const observer = new MutationObserver(sample);
+    observer.observe(document.body, { attributes: true, childList: true, subtree: true });
+    const tick = () => {
+      sample();
+      if (record.finishAt !== null && performance.now() >= record.finishAt
+        && (record.seen || performance.now() - start >= 2000)) {
+        record.done = true;
+        observer.disconnect();
+      } else requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
   }, { key, selector });
@@ -61,6 +73,64 @@ export async function runMotionChecks(context) {
   await runMotionPolicyChecks(context);
   await runPageMotionChecks(context);
   await runOverlayMotionChecks(context);
+  await runStageMotionChecks(context);
+}
+
+export async function runStageMotionChecks({ page, add, theme }) {
+  await page.goto(page.url().split("?")[0], { waitUntil: "load" });
+  await page.waitForFunction(() => window.__guard !== undefined);
+  await page.evaluate((choice) => { document.documentElement.className = choice; return window.__guard.ready(); }, theme);
+  const source = page.getByRole("button", { name: "打开歌词", exact: true });
+  await page.waitForFunction(() => {
+    const image = document.querySelector('[data-testid="player-track-info"] img');
+    return image?.complete && image.naturalWidth > 0;
+  });
+  const frames = await recordVisualFrames(page, '[data-testid="cover-flight"]', () => source.click());
+  const moving = frames.filter((frame) => frame.present);
+  const diagnostics = await page.evaluate(() => ({
+    reason: document.querySelector('[data-testid="playback-stage"]')?.dataset.flightSkip ?? null,
+    source: document.querySelector('[data-testid="player-track-info"] img')?.getBoundingClientRect().width,
+    target: document.querySelector('[data-testid="playback-stage-cover"] img')?.getBoundingClientRect().width,
+  }));
+  add(theme + "-motion-cover-flight", new Set(moving.map((frame) => Math.round(frame.rect.y))).size >= 3,
+    JSON.stringify({ frames: moving.length, positions: new Set(moving.map((frame) => Math.round(frame.rect.y))).size, ...diagnostics }));
+  await page.waitForFunction(() => !document.querySelector('[data-testid="cover-flight"]'));
+  await page.screenshot({ path: ".tmp/browser-guard/expressive-stage-" + theme + ".png" });
+  add(theme + "-motion-stage-focus", await page.evaluate(() =>
+    Boolean(document.querySelector('[data-testid="nav-list"]').closest("[inert]"))
+    && Boolean(document.activeElement?.closest('[data-testid="playback-stage"]'))), "主壳停用，焦点进入沉浸页");
+  await page.keyboard.press("Escape");
+  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+  add(theme + "-motion-stage-focus-return", await source.evaluate((node) => document.activeElement === node), "焦点回到实际打开入口");
+
+  await source.click();
+  await page.waitForTimeout(100);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(60);
+  await source.click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="playback-stage"]')?.dataset.coverMotion === "idle"
+    && !document.querySelector('[data-testid="cover-flight"]'));
+  const reversed = { stages: await page.getByTestId("playback-stage").count(), flights: await page.getByTestId("cover-flight").count() };
+  add(theme + "-motion-stage-reverse", reversed.stages === 1 && reversed.flights === 0, JSON.stringify(reversed));
+  await page.keyboard.press("Escape");
+  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+
+  await source.click();
+  await page.waitForTimeout(80);
+  await page.setViewportSize({ width: 1100, height: 760 });
+  await page.waitForTimeout(100);
+  add(theme + "-motion-cover-resize-cancel", await page.getByTestId("cover-flight").count() === 0, "窗口改变尺寸取消旧封面飞行");
+  await page.keyboard.press("Escape");
+  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+  await page.setViewportSize({ width: 1280, height: 800 });
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.waitForFunction(() => document.documentElement.dataset.motion === "reduced");
+  await source.click();
+  add(theme + "-motion-stage-reduced", await page.getByTestId("cover-flight").count() === 0, "减少动效不生成飞行封面");
+  await page.keyboard.press("Escape");
+  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+  await page.emulateMedia({ reducedMotion: "no-preference" });
 }
 
 export async function runOverlayMotionChecks({ page, add, theme }) {

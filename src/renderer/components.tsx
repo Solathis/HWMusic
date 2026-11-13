@@ -4,7 +4,7 @@
  * 收藏的写入接口还没确认，没接 `onToggleFavorite` 时按钮禁用并直接说明原因，不做乐观更新。
  */
 import { useLayoutEffect, useRef, useState } from "react"
-import type { ComponentType, ReactElement, ReactNode } from "react"
+import type { ComponentType, ReactElement, ReactNode, RefObject } from "react"
 import {
   CaptionsOffIcon,
   ChevronDownIcon,
@@ -453,7 +453,8 @@ export interface PlayerBarProps {
   /**
    * 打开歌词舞台：封面与曲目信息整块都是入口，与头部那枚「歌词」按钮同一个 state；不传就是不接。
    */
-  onOpenStage?: () => void
+  onOpenStage?: (trigger: HTMLElement) => void
+  coverAnchorRef?: RefObject<HTMLDivElement | null>
   /**
    * 桌面/任务栏歌词的快捷开关：播放栏与沉浸页共用外壳那一个 binding，这里只读状态、只转一次 `setVisible`。
    * 不传 = 不渲染这枚按钮。
@@ -535,7 +536,7 @@ export function LyricsTargetMenu({ lyrics, surface, trigger }: {
   )
 }
 
-export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: PlayerBarProps) {
+export function PlayerBar({ runtime, state, onOpenStage, coverAnchorRef, lyrics = null }: PlayerBarProps) {
   const [dragMs, setDragMs] = useState<number | null>(null)
   const player = runtime.player
   const lyricsView = lyricsToggleView(lyrics)
@@ -550,7 +551,7 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
   /** 左区：封面 + 曲目信息（整块可点 = 进歌词舞台）。 */
   const trackInfo = (
     <div key={state.track?.id ?? "none"} className={`flex min-w-0 items-center gap-3 ${CONTENT_FADE_IN}`}>
-      <CoverArt coverUrl={trackCoverUrlOf(state.track)} className="size-10 rounded-md" />
+      <div ref={coverAnchorRef} className="shrink-0"><CoverArt coverUrl={trackCoverUrlOf(state.track)} className="size-10 rounded-md" /></div>
       <div className="flex min-w-0 flex-1 flex-col">
         <span className="truncate text-sm font-medium">{trackTitleOf(state.track)}</span>
         {/* 「艺人 · 状态」这一行会被截断，所以音质**不放在这里**：它单独成一枚不收缩的 Badge（见下） */}
@@ -602,7 +603,7 @@ export function PlayerBar({ runtime, state, onOpenStage, lyrics = null }: Player
                 className="flex h-auto w-fit min-w-0 max-w-full items-center justify-start gap-3 px-1 py-1 text-left"
                 aria-label="打开歌词"
                 data-testid="player-track-info"
-                onClick={onOpenStage}
+                onClick={(event) => onOpenStage(event.currentTarget)}
               >
                 {trackInfo}
               </Button>

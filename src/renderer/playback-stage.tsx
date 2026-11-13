@@ -1,7 +1,7 @@
 import { AutoLyricLayout, BouncingSlider, Cover, MediaButton, MusicInfo, VolumeControl } from "@applemusic-like-lyrics/react-full"
-import { AnimatePresence, MotionConfig, motion, useReducedMotion } from "framer-motion"
-import { useEffect, useRef, useState } from "react"
-import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react"
+import { AnimatePresence, motion } from "framer-motion"
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
+import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, RefObject } from "react"
 import { createPortal } from "react-dom"
 import { getCurrentWindow } from "@tauri-apps/api/window"
 import { ChevronDownIcon, CopyIcon, Disc3Icon, ListMusicIcon, MinusIcon, PauseIcon, PlayIcon, SkipBackIcon, SkipForwardIcon, SquareIcon, VolumeXIcon, XIcon } from "lucide-react"
@@ -16,6 +16,9 @@ import { LyricsTargetMenu, LyricsToggleIcon, lyricsToggleView } from "./componen
 import { useMainChrome } from "./use-main-chrome.ts"
 import { lyricsNoticeText, playbackModeLabel } from "./features/playback/playback-state.mjs"
 import { PlaybackQualityBadge } from "./playback-quality-badge"
+import { useMotionPolicy } from "./features/motion/MotionProvider"
+import { MotionRegion } from "./features/motion/primitives"
+import { CoverFlight, type CoverFlightRequest } from "./features/motion/cover-flight"
 import { PLAYBACK_MODES } from "./features/playback/player.mjs"
 import { formatDuration, trackAlbumOf, trackArtistsOf, trackCoverUrlOf, trackNameOf } from "./features/library/track-fields.mjs"
 import type { PlayerRuntime } from "./features/playback/player-runtime.ts"
@@ -27,6 +30,8 @@ export interface PlaybackStageProps {
   runtime: PlayerRuntime
   state: PlayerState
   onClose: () => void
+  coverSourceRef?: RefObject<HTMLDivElement | null>
+  openerRef?: RefObject<HTMLElement | null>
   /** 桌面/任务栏歌词的快捷开关：与播放栏共用同一个 binding，这里只读状态、只转一次 `setVisible`。 */
   lyrics?: LyricsWindowBinding | null
 }
@@ -43,7 +48,7 @@ function sliderKeyValue(event: ReactKeyboardEvent<HTMLDivElement>, value: number
   }
 }
 
-export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: PlaybackStageProps) {
+export function PlaybackStage({ open, runtime, state, onClose, coverSourceRef, openerRef, lyrics = null }: PlaybackStageProps) {
   const coverUrl = trackCoverUrlOf(state.track)
   // 退场 220ms 内保持画面：此时 open 已为 false，不能直接拿它取封面；演完 onExitComplete 再放开
   const [exiting, setExiting] = useState(false)
@@ -52,13 +57,106 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
     setLastOpen(open)
     if (!open) setExiting(true)
   }
-  const stageVisible = open || exiting
+  const [flight, setFlight] = useState<CoverFlightRequest | null>(null)
+  const stageVisible = open || exiting || flight !== null
   // 显示与取色分开：封面能不能显示只看普通图片加载（无 ACAO 的 CDN 图照样显示），
   // 背景取色仍是 AmllBackground 里那条带 CORS 的加载；坏图/缺图才落到「暂无封面」占位。
   const coverImage = useCoverImage(stageVisible ? coverUrl : null)
   // 用户要求减少动效时不走过场：时长 0，直接到位
-  const reduceMotion = useReducedMotion()
-  const stageTransition = { duration: reduceMotion ? 0 : 0.22, ease: "easeOut" as const }
+  const { reducedMotion: reduceMotion, transitionFor } = useMotionPolicy()
+  const stageRef = useRef<HTMLDivElement>(null)
+  const closeRef = useRef<HTMLButtonElement>(null)
+  const coverTargetRef = useRef<HTMLDivElement>(null)
+  const hiddenAnchors = useRef<Array<{ node: HTMLElement; visibility: string }>>([])
+  const flightGeneration = useRef(0)
+  const intent = useRef({ open: !open, url: coverUrl, done: false, at: 0 })
+  const restoreAnchors = useCallback(() => {
+    for (const item of hiddenAnchors.current) item.node.style.visibility = item.visibility
+    hiddenAnchors.current = []
+  }, [])
+  const finishFlight = useCallback((id: number) => {
+    if (id !== flightGeneration.current) return
+    if (stageRef.current) stageRef.current.dataset.coverMotion = "idle"
+    restoreAnchors()
+    setFlight(null)
+  }, [restoreAnchors])
+  useLayoutEffect(() => {
+    if (stageRef.current) {
+      stageRef.current.inert = !open
+      stageRef.current.dataset.stageActive = String(open)
+    }
+    if (open) closeRef.current?.focus({ preventScroll: true })
+    else openerRef?.current?.focus({ preventScroll: true })
+  }, [open, openerRef, stageVisible])
+  useLayoutEffect(() => {
+    if (intent.current.open !== open) {
+      flightGeneration.current += 1
+      const image = coverSourceRef?.current?.querySelector("img")
+      intent.current = { open, url: coverUrl, done: open && !(image?.complete && image.naturalWidth > 0), at: performance.now() }
+      if (stageRef.current) stageRef.current.dataset.coverMotion = intent.current.done ? "idle" : "pending"
+    }
+    if (intent.current.url !== coverUrl) {
+      intent.current.url = coverUrl
+      intent.current.done = true
+      flightGeneration.current += 1
+      restoreAnchors(); setFlight(null)
+      return
+    }
+    if (reduceMotion) { intent.current.done = true; flightGeneration.current += 1; restoreAnchors(); setFlight(null); if (stageRef.current) stageRef.current.dataset.coverMotion = "idle"; return }
+    if (intent.current.done || !coverUrl || !coverSourceRef?.current) return
+    let second = 0
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(function measure() {
+        const source = coverSourceRef.current
+        const target = coverTargetRef.current
+        if (!source || !target) {
+          intent.current.done = true; restoreAnchors(); setFlight(null)
+          if (stageRef.current) stageRef.current.dataset.coverMotion = "idle"
+          return
+        }
+        const sourceImage = source.querySelector("img") ?? source
+        const targetImage = target.querySelector<HTMLElement>('[role="img"]')
+        if (!targetImage) {
+          if (open && performance.now() - intent.current.at < 2000) { second = requestAnimationFrame(measure); return }
+          intent.current.done = true; restoreAnchors(); setFlight(null)
+          if (stageRef.current) stageRef.current.dataset.coverMotion = "idle"
+          return
+        }
+        const from = (open ? sourceImage : targetImage).getBoundingClientRect()
+        const to = (open ? targetImage : sourceImage).getBoundingClientRect()
+        if (!from.width || !from.height || !to.width || !to.height) {
+          intent.current.done = true
+          if (stageRef.current) stageRef.current.dataset.coverMotion = "idle"
+          return
+        }
+        const radius = (node: HTMLElement, width: number) => {
+          let current: HTMLElement | null = node
+          while (current) {
+            const value = parseFloat(getComputedStyle(current).borderTopLeftRadius)
+            if (value > 0) return value * width / (current.offsetWidth || width)
+            current = current.parentElement
+          }
+          return 8
+        }
+        if (hiddenAnchors.current.length === 0) {
+          for (const node of [source, target]) { hiddenAnchors.current.push({ node, visibility: node.style.visibility }); node.style.visibility = "hidden" }
+        }
+        intent.current.done = true
+        if (stageRef.current) stageRef.current.dataset.coverMotion = "running"
+        setFlight({ id: ++flightGeneration.current, phase: open ? "open" : "close", src: coverUrl,
+          from: { x: from.x, y: from.y, width: from.width, height: from.height },
+          to: { x: to.x, y: to.y, width: to.width, height: to.height },
+          fromRadius: radius(open ? sourceImage : targetImage, from.width),
+          toRadius: radius(open ? targetImage : sourceImage, to.width) })
+      })
+    })
+    return () => { cancelAnimationFrame(first); cancelAnimationFrame(second) }
+  }, [open, coverUrl, coverSourceRef, reduceMotion, restoreAnchors])
+  useEffect(() => {
+    const cancel = () => { flightGeneration.current += 1; intent.current.done = true; restoreAnchors(); setFlight(null); if (stageRef.current) stageRef.current.dataset.coverMotion = "idle" }
+    window.addEventListener("resize", cancel)
+    return () => { window.removeEventListener("resize", cancel); restoreAnchors() }
+  }, [restoreAnchors])
   const lyricsView = lyricsToggleView(lyrics)
   const seekOwner = useRef<number | null>(null)
   const chrome = useMainChrome(open)
@@ -67,9 +165,16 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
   useEffect(() => {
     if (!open) return undefined
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented) return
-      if (document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]')) return
-      onClose()
+      if (event.defaultPrevented) return
+      if (document.querySelector('[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"], [role="menu"][data-state="open"]')) return
+      if (event.key === "Escape") { event.preventDefault(); onClose(); return }
+      if (event.key !== "Tab" || !stageRef.current) return
+      const targets = [...stageRef.current.querySelectorAll<HTMLElement>('button:not([disabled]), [tabindex]:not([tabindex="-1"]), a[href], input:not([disabled])')]
+        .filter((node) => node.getClientRects().length && getComputedStyle(node).visibility !== "hidden")
+      const target = event.shiftKey ? targets.at(-1) : targets[0]
+      if (!stageRef.current.contains(document.activeElement) || document.activeElement === (event.shiftKey ? targets[0] : targets.at(-1))) {
+        event.preventDefault(); target?.focus()
+      }
     }
     document.addEventListener("keydown", closeOnEscape)
     return () => document.removeEventListener("keydown", closeOnEscape)
@@ -209,7 +314,8 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
       ) : null}
     </div>
   )
-  const musicControls = <div className="isolate flex min-w-0 flex-col gap-4">{info}{controls}</div>
+  const musicControls = <MotionRegion identity={state.track?.id ?? "none"} kind="page" active={open}
+    className="isolate flex min-w-0 flex-col gap-4">{info}{controls}</MotionRegion>
 
   // 窗口按钮与收起行同一种淡色半透明悬停
   const chromeButton = "h-10 w-11 rounded-none px-0 hover:bg-background/30 dark:hover:bg-foreground/10"
@@ -233,25 +339,29 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
   }
 
   return createPortal(
-    <MotionConfig reducedMotion="user">
-      {/* 开门/关门共用一条过场：opacity 0↔1、scale 0.985↔1，退场反向 */}
+    <>
+      {/* 背景、正文和封面各自过渡，正文保持原尺寸。 */}
       <AnimatePresence onExitComplete={() => setExiting(false)}>
         {open ? (
           <motion.div
             key="playback-stage"
-            initial={{ opacity: 0, scale: 0.985 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.985 }}
-            transition={stageTransition}
+            ref={stageRef} role="dialog" aria-modal="true" aria-label="沉浸歌词"
+            initial={{ opacity: 1 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={transitionFor("stageExit")}
             className="fixed inset-0 isolate z-40 overflow-hidden bg-background"
             data-testid="playback-stage"
           >
+            <motion.div className="absolute inset-0" aria-hidden="true" initial={{ opacity: reduceMotion ? 1 : 0 }}
+              animate={{ opacity: 1 }} transition={transitionFor("page")}>
             <AmllBackground playing={playing} hasLyric={hasLyric} albumUrl={trackCoverUrlOf(state.track)} />
             <div className="absolute inset-0 bg-background/40" data-testid="playback-stage-dim" aria-hidden="true" />
+            </motion.div>
             <AutoLyricLayout
               className="relative isolate h-full w-full"
               data-testid="playback-stage-layout"
-              coverSlot={coverImage ? (
+              coverSlot={<div ref={coverTargetRef} className="size-full">{coverImage ? (
                 <Cover
                   coverUrl={coverUrl ?? undefined}
                   musicPaused={!playing}
@@ -264,11 +374,11 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
                 <Avatar className="size-full rounded-md" data-testid="playback-stage-cover-fallback">
                   <AvatarFallback className="rounded-md" aria-label="暂无封面"><Disc3Icon className="size-12" /></AvatarFallback>
                 </Avatar>
-              )}
+              )}</div>}
               controlsSlot={musicControls}
               smallControlsSlot={musicControls}
               lyricSlot={(
-                <div className="relative isolate h-full min-h-0 w-full" data-testid="playback-stage-lyrics-slot">
+                <MotionRegion identity={state.track?.id ?? "none"} kind="page" active={open} className="relative isolate h-full min-h-0 w-full" data-testid="playback-stage-lyrics-slot">
                   {hasLyric ? (
                     <AmllLyricsPanel
                       runtime={runtime}
@@ -282,11 +392,12 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
                       <p role="status" className="max-w-md text-center text-sm text-foreground">{notice}</p>
                     </div>
                   )}
-                </div>
+                </MotionRegion>
               )}
             />
             {/* 收起 = 顶部整行：行高只占顶部一条带，箭头居中，行内任意位置可点（不用右上角叉号）。 */}
             <Button
+              ref={closeRef}
               variant="ghost"
               className="absolute inset-x-0 top-0 h-10 w-full rounded-none hover:bg-background/30 dark:hover:bg-foreground/10 motion-reduce:transition-none! motion-reduce:duration-0!"
               aria-label="收起歌词"
@@ -313,7 +424,8 @@ export function PlaybackStage({ open, runtime, state, onClose, lyrics = null }: 
           </motion.div>
         ) : null}
       </AnimatePresence>
-    </MotionConfig>,
+      <CoverFlight request={flight} onComplete={finishFlight} />
+    </>,
     document.body,
   )
 }

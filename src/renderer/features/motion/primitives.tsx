@@ -41,7 +41,9 @@ export function MotionRegion({ identity, kind = "content", active = true, childr
   const controls = useAnimationControls()
   const { reducedMotion, transitionFor } = useMotionPolicy()
   const parentEntry = useContext(EntryContext)
-  const entry = useRef<EntryState>({ entering: kind === "page" && active && !reducedMotion, resets: new Set() })
+  const present = useIsPresent()
+  const regionActive = active && present
+  const entry = useRef<EntryState>({ entering: kind === "page" && regionActive && !reducedMotion, resets: new Set() })
   useLayoutEffect(() => {
     if (kind !== "content" || parentEntry === null) return
     const reset = () => { controls.stop(); controls.set({ opacity: 1, y: 0 }) }
@@ -50,10 +52,10 @@ export function MotionRegion({ identity, kind = "content", active = true, childr
   }, [kind, parentEntry, controls])
   useLayoutEffect(() => {
     if (kind === "page") {
-      entry.current.entering = active && !reducedMotion
+      entry.current.entering = regionActive && !reducedMotion
       for (const reset of entry.current.resets) reset()
     }
-    if (!active || reducedMotion || (kind === "content" && parentEntry?.entering)) {
+    if (!regionActive || reducedMotion || (kind === "content" && parentEntry?.entering)) {
       controls.stop(); controls.set({ opacity: 1, y: 0 }); return
     }
     controls.set({ opacity: 0, y: kind === "page" ? 12 : 0 })
@@ -65,8 +67,8 @@ export function MotionRegion({ identity, kind = "content", active = true, childr
       })
     })
     return () => { live = false; cancelAnimationFrame(frame); entry.current.entering = false; controls.stop() }
-  }, [identity, kind, active, reducedMotion, transitionFor, controls, parentEntry])
-  const instant = !active || reducedMotion || (kind === "content" && parentEntry?.entering)
+  }, [identity, kind, regionActive, reducedMotion, transitionFor, controls, parentEntry])
+  const instant = !regionActive || reducedMotion || (kind === "content" && parentEntry?.entering)
   const region = <motion.div {...props} className={className}
     initial={instant ? false : { opacity: 0, y: kind === "page" ? 12 : 0 }} animate={controls}>{children}</motion.div>
   return kind === "page" ? <EntryContext.Provider value={entry.current}>{region}</EntryContext.Provider> : region

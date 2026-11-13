@@ -149,14 +149,14 @@ const NAV_ICONS = {
  * 侧栏顶部的常驻搜索入口，必须是一个在 SidebarProvider 之内的组件（useSidebar 只在那里可用）。
  * 窄轨形态只留一枚图标按钮：点它先展开侧栏，再把光标交给输入框。
  */
-function LivePlayerBar({ onOpenStage, lyrics }: Pick<PlayerBarProps, "onOpenStage" | "lyrics">) {
+function LivePlayerBar({ onOpenStage, coverAnchorRef, lyrics }: Pick<PlayerBarProps, "onOpenStage" | "coverAnchorRef" | "lyrics">) {
   const { runtime, state } = usePlayer()
-  return <PlayerBar runtime={runtime} state={state} onOpenStage={onOpenStage} lyrics={lyrics} />
+  return <PlayerBar runtime={runtime} state={state} onOpenStage={onOpenStage} coverAnchorRef={coverAnchorRef} lyrics={lyrics} />
 }
 
-function LivePlaybackStage({ open, onClose, lyrics }: Pick<PlaybackStageProps, "open" | "onClose" | "lyrics">) {
+function LivePlaybackStage({ open, onClose, coverSourceRef, openerRef, lyrics }: Pick<PlaybackStageProps, "open" | "onClose" | "coverSourceRef" | "openerRef" | "lyrics">) {
   const { runtime, state } = usePlayer()
-  return <PlaybackStage open={open} runtime={runtime} state={state} onClose={onClose} lyrics={lyrics} />
+  return <PlaybackStage open={open} runtime={runtime} state={state} onClose={onClose} coverSourceRef={coverSourceRef} openerRef={openerRef} lyrics={lyrics} />
 }
 
 function useLyricsWindowBinding(runtime: Parameters<typeof useLyricsWindow>[0], playback: Parameters<typeof useLyricsWindow>[1]) {
@@ -260,6 +260,9 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
   const { transitionFor } = useMotionPolicy()
   const [view, setView] = useState(() => createView(VIEW.favorites))
   const [stageOpen, setStageOpen] = useState(false)
+  const coverSourceRef = useRef<HTMLDivElement>(null)
+  const stageOpenerRef = useRef<HTMLElement>(null)
+  const openStage = useCallback((trigger: HTMLElement) => { stageOpenerRef.current = trigger; setStageOpen(true) }, [])
   const [queueOpen, setQueueOpen] = useState(false)
   /**
    * 侧栏搜索框里的文字，只活在输入框里；真正的检索词随 VIEW.search 的视图参数走。
@@ -451,7 +454,7 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
   }
 
   return (
-    <SidebarProvider className="h-full min-h-0">
+    <SidebarProvider className="h-full min-h-0" inert={stageOpen}>
       {/* `collapsible="icon"`：收起后留一条 48px 图标轨，导航项变成图标 + 悬停 tooltip。 */}
       <Sidebar collapsible="icon">
         {/* 侧栏顶部的常驻搜索框：入口在这里，结果在内容区。 */}
@@ -563,7 +566,7 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
               size="icon"
               aria-label="歌词"
               aria-pressed={stageOpen}
-              onClick={() => setStageOpen((open) => !open)}
+              onClick={(event) => openStage(event.currentTarget)}
             >
               <MicVocalIcon />
             </Button>
@@ -596,9 +599,9 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
         </div>
 
         {/* 封面/曲目信息也是进入播放页的入口；`lyrics` 是外壳唯一的 binding，两处共用。 */}
-        <LivePlayerBar onOpenStage={() => setStageOpen(true)} lyrics={lyrics} />
+        <LivePlayerBar onOpenStage={openStage} coverAnchorRef={coverSourceRef} lyrics={lyrics} />
       </SidebarInset>
-      <LivePlaybackStage open={stageOpen} onClose={() => setStageOpen(false)} lyrics={lyrics} />
+      <LivePlaybackStage open={stageOpen} onClose={() => setStageOpen(false)} coverSourceRef={coverSourceRef} openerRef={stageOpenerRef} lyrics={lyrics} />
     </SidebarProvider>
   )
 }
