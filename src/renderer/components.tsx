@@ -3,7 +3,7 @@
  * `TrackTable` 是曲目表的唯一实现；`PlayerBar` 不持有音频、不认识 core，动作全部转给 `features/playback`；`QueuePanel` 显示真实队列。
  * 收藏的写入接口还没确认，没接 `onToggleFavorite` 时按钮禁用并直接说明原因，不做乐观更新。
  */
-import { useState } from "react"
+import { useLayoutEffect, useRef, useState } from "react"
 import type { ComponentType, ReactElement, ReactNode } from "react"
 import {
   CaptionsOffIcon,
@@ -77,6 +77,7 @@ import type { PlayerState } from "./features/playback/use-player.ts"
 import type { LyricsToggleSurface, LyricsWindowBinding } from "./use-lyrics-window.ts"
 import { TrackRowMenu, type TrackRowActions } from "./track-menu.tsx"
 import { PlaybackQualityBadge } from "./playback-quality-badge"
+import { MotionRegion } from "./features/motion/primitives"
 
 export const CONTENT_FADE_IN = "motion-safe:animate-in motion-safe:fade-in-0 motion-safe:duration-150"
 
@@ -290,6 +291,9 @@ export function TrackTable({
   offlineIds = [],
   onRemove,
 }: TrackTableProps) {
+  const previousLength = useRef(songs.length)
+  const oldLength = previousLength.current
+  useLayoutEffect(() => { previousLength.current = songs.length }, [songs.length])
   if (songs.length === 0) return <EmptyState text={emptyText} />
 
   const favorited = new Set(favoritedIds)
@@ -305,7 +309,7 @@ export function TrackTable({
      * 表头从此不粘（sticky 改跟一个不纵向滚动的容器走）。真浏览器守卫按计算样式与滚动几何钉这一条。
      */
     <div className="px-4">
-      <div className={`${CONTENT_FADE_IN} [&>[data-slot=table-container]]:overflow-visible`}>
+      <MotionRegion identity="tracks-ready" kind="content" className="[&>[data-slot=table-container]]:overflow-visible">
         <Table className="table-fixed" data-testid="track-table">
           <TableHeader className="sticky top-0 z-10 bg-background">
           <TableRow>
@@ -348,7 +352,7 @@ export function TrackTable({
                     event.preventDefault()
                     onActivate?.(song, index)
                   }}
-                  className={`transition-opacity motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none${isOffline ? " opacity-50" : ""}`}
+                  className={`transition-opacity motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none${isOffline ? " opacity-50" : ""}${index >= oldLength ? " motion-safe:animate-row-appear" : ""}`}
                 >
                   <TableCell className="text-center tabular-nums text-muted-foreground">{index + 1}</TableCell>
                   <TableCell className="font-medium">
@@ -434,7 +438,7 @@ export function TrackTable({
           })}
           </TableBody>
         </Table>
-      </div>
+      </MotionRegion>
     </div>
   )
 }

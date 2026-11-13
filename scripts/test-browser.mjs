@@ -303,6 +303,7 @@ import { PLAYBACK_QUALITY_CASES } from "../../scripts/browser-guards/playback-qu
 import { createMusicApi as createQualityApi } from "../../src/protocols/music.mjs";
 import { createPlaybackHandlers } from "../../src/host/playback-handlers.mjs";
 let rawQualityCase = null;
+let favoriteRequests = 0;
 const qualityApi = createQualityApi({
   endpoints: { playback: "https://example.invalid/quality" },
   session: { token: "SYNTHETIC", snsUserID: "SYNTHETIC" },
@@ -347,7 +348,10 @@ mockIPC(async (command, args) => {
         persistSettings();
         return { settings: { schemaVersion: 1, data: settingsData } };
       }
-      case "library:favorites": return { songs, hasMore: false, skipped: 0, reportedTotal: songs.length };
+      case "library:favorites": {
+        favoriteRequests += 1;
+        return { songs, hasMore: false, skipped: 0, reportedTotal: songs.length };
+      }
       case "library:playlists": {
         playlistListCalls.push({ mode: playlistsMode, at: Math.round(performance.now()) });
         if (playlistFailuresLeft > 0) {
@@ -536,6 +540,7 @@ function Guard() {
   useEffect(() => {
     window.__guard = {
       snapshot: () => runtime.player.snapshot(),
+      favoritesRequestCount: () => favoriteRequests,
       setTime: (ms) => runtime.player.seek(ms),
       nextTrack: () => runtime.player.next(),
       prepareRepeatedQueue: () => runtime.player.playQueue([songs[0], songs[0]], 0),

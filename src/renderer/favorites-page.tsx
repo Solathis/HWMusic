@@ -6,7 +6,8 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 
 import { Button } from "./components/ui/button"
-import { CONTENT_FADE_IN, EmptyState, ListSkeleton, LoadFailed, TrackListActions, TrackListToolbar, TrackTable } from "./components"
+import { EmptyState, ListSkeleton, LoadFailed, TrackListActions, TrackListToolbar, TrackTable } from "./components"
+import { MotionRegion } from "./features/motion/primitives"
 import type { TrackRowActions } from "./track-menu.tsx"
 import { coreCall } from "./host-api"
 import { LIBRARY_FAVORITES } from "../shared/request-channels.ts"
@@ -128,7 +129,7 @@ function FavoritesPageView({
     // 外层只管显隐：`hidden` 属性是 UA 的 display:none，一旦同一个元素上再写 `flex`，
     // 作者样式的 display:flex 会盖过它 —— 元素就"隐藏不掉"了。所以显隐层与布局层分开。
     <div className="h-full min-h-0" data-resident="favorites" hidden={!active}>
-      <div className={`flex h-full min-h-0 flex-col ${CONTENT_FADE_IN}`} data-testid={FAVORITES_PAGE_TESTID}>
+      <MotionRegion identity="favorites" kind="page" active={active} className="flex h-full min-h-0 flex-col" data-testid={FAVORITES_PAGE_TESTID}>
         <TrackListToolbar
           status={initial ? FAVORITES_LOADING_TEXT : describeFavoritesCounts(summary)}
           statusTestId="favorites-counts"
@@ -190,7 +191,7 @@ function FavoritesPageView({
             />
           )}
         </div>
-      </div>
+      </MotionRegion>
     </div>
   )
 }

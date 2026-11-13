@@ -6,6 +6,8 @@
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 import { ListMusicIcon } from "lucide-react"
+import { motion } from "framer-motion"
+import { useMotionPolicy } from "./features/motion/MotionProvider"
 
 import {
   LIBRARY_ALBUM,
@@ -829,6 +831,8 @@ export function SettingsPage({
   lyrics = null,
   notices = [],
 }: SettingsPageProps) {
+  const [settingsTab, setSettingsTab] = useState(SETTINGS_TABS[0].id)
+  const { transitionFor } = useMotionPolicy()
   const [form, setForm] = useState(() => proxyFormFromSettings(null))
   const [closeBehavior, setCloseBehavior] = useState(() => closeBehaviorFromSettings(null))
   /** 播放音质（standard / high / lossless）：与关窗行为同一条"选中即保存"的路。 */
@@ -1026,11 +1030,14 @@ export function SettingsPage({
       ) : null}
 
       {/* 二级分类：单页 Tabs，不新开视图（分法与「日志为什么单独一类」见 SETTINGS_TABS） */}
-      <Tabs defaultValue={SETTINGS_TABS[0].id} className="flex flex-col gap-4" data-testid="settings-tabs">
+      <Tabs value={settingsTab} onValueChange={setSettingsTab} className="flex flex-col gap-4" data-testid="settings-tabs">
         <TabsList aria-label="设置分类">
           {SETTINGS_TABS.map((tab) => (
             <TabsTrigger key={tab.id} value={tab.id}>
-              {tab.label}
+              {settingsTab === tab.id ? <motion.span layoutId="settings-tab-indicator" aria-hidden="true"
+                className="pointer-events-none absolute inset-0 rounded-md bg-background shadow-sm"
+                transition={transitionFor("panel")} /> : null}
+              <span className="relative">{tab.label}</span>
             </TabsTrigger>
           ))}
         </TabsList>

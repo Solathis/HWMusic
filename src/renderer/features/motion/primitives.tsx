@@ -1,4 +1,4 @@
-import { useLayoutEffect } from "react"
+import { createContext, useContext, useLayoutEffect, useRef } from "react"
 import type { ComponentProps, ReactNode } from "react"
 import { AnimatePresence, motion, useAnimationControls, useIsPresent } from "framer-motion"
 import type { HTMLMotionProps } from "framer-motion"
@@ -8,6 +8,8 @@ import { useMotionPolicy } from "./MotionProvider"
 import type { MotionKind } from "./tokens.mjs"
 
 const AnimatedButton = motion.create(Button)
+interface EntryState { entering: boolean; resets: Set<() => void> }
+const EntryContext = createContext<EntryState | null>(null)
 export function MotionButton(props: ComponentProps<typeof AnimatedButton>) {
   const { reducedMotion, transitionFor } = useMotionPolicy()
   return <AnimatedButton {...props} data-motion-owner="js"
@@ -38,12 +40,29 @@ export function MotionRegion({ identity, kind = "content", active = true, childr
   }) {
   const controls = useAnimationControls()
   const { reducedMotion, transitionFor } = useMotionPolicy()
+  const parentEntry = useContext(EntryContext)
+  const entry = useRef<EntryState>({ entering: kind === "page" && active && !reducedMotion, resets: new Set() })
   useLayoutEffect(() => {
-    if (!active) { controls.stop(); return }
-    if (reducedMotion) { controls.set({ opacity: 1, y: 0 }); return }
+    if (kind !== "content" || parentEntry === null) return
+    const reset = () => { controls.stop(); controls.set({ opacity: 1, y: 0 }) }
+    parentEntry.resets.add(reset)
+    return () => { parentEntry.resets.delete(reset) }
+  }, [kind, parentEntry, controls])
+  useLayoutEffect(() => {
+    if (kind === "page") {
+      entry.current.entering = active && !reducedMotion
+      for (const reset of entry.current.resets) reset()
+    }
+    if (!active || reducedMotion || (kind === "content" && parentEntry?.entering)) {
+      controls.stop(); controls.set({ opacity: 1, y: 0 }); return
+    }
     controls.set({ opacity: 0, y: kind === "page" ? 12 : 0 })
-    void controls.start({ opacity: 1, y: 0, transition: transitionFor(kind) })
-    return () => controls.stop()
-  }, [identity, kind, active, reducedMotion, transitionFor, controls])
-  return <motion.div {...props} className={className} initial={false} animate={controls}>{children}</motion.div>
+    let live = true
+    void controls.start({ opacity: 1, y: 0, transition: transitionFor(kind) }).then(() => {
+      if (live) entry.current.entering = false
+    })
+    return () => { live = false; entry.current.entering = false; controls.stop() }
+  }, [identity, kind, active, reducedMotion, transitionFor, controls, parentEntry])
+  const region = <motion.div {...props} className={className} initial={false} animate={controls}>{children}</motion.div>
+  return kind === "page" ? <EntryContext.Provider value={entry.current}>{region}</EntryContext.Provider> : region
 }

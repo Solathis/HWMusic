@@ -52,7 +52,8 @@ import {
   useSidebar,
 } from "./components/ui/sidebar"
 import { TooltipProvider } from "./components/ui/tooltip"
-import { CONTENT_FADE_IN, EmptyState, PlayerBar, QueuePanel } from "./components"
+import { EmptyState, PlayerBar, QueuePanel } from "./components"
+import { MotionRegion } from "./features/motion/primitives"
 import { Toaster } from "./components/ui/sonner"
 import { SidebarPlaylists } from "./sidebar-playlists.tsx"
 import { PlaybackStage } from "./playback-stage.tsx"
@@ -275,7 +276,8 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
   const lyrics = useLyricsWindowBinding(runtime, queue)
 
   const navigate = useCallback((next: unknown) => {
-    setView(normalizeView(next))
+    const normalized = normalizeView(next)
+    setView((current) => viewKey(current) === viewKey(normalized) ? current : normalized)
   }, [])
 
   /**
@@ -574,7 +576,7 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
 
         {/* 收藏页常驻（切走只是 hidden），其余页面按视图重挂 */}
         <div className="relative min-h-0 flex-1 overflow-hidden" data-testid="main-content">
-          {isResidentView(view) ? null : <div key={viewKey(view)} data-testid="page-scroll" className={`h-full min-h-0 overflow-y-auto ${CONTENT_FADE_IN}`}>{renderPage()}</div>}
+          {isResidentView(view) ? null : <MotionRegion key={viewKey(view)} identity={viewKey(view)} kind="page" data-testid="page-scroll" className="h-full min-h-0 overflow-y-auto">{renderPage()}</MotionRegion>}
           <FavoritesPage
             active={isResidentView(view)}
             onActivateTrack={onActivateTrack}

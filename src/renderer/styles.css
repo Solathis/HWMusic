@@ -192,6 +192,22 @@
   }
 }
 
+@keyframes motion-page-enter {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes motion-row-appear {
+  from { opacity: 0; }
+  to { opacity: var(--row-opacity, 1); }
+}
+@theme {
+  --animate-row-appear: motion-row-appear var(--motion-content, 180ms) var(--ease-enter, ease-out) both;
+}
+tr[aria-disabled="true"] { --row-opacity: 0.5; }
+[data-slot="tabs-content"][data-state="active"] {
+  animation: motion-page-enter var(--motion-page, 240ms) var(--ease-enter, ease-out) both;
+}
+
 /* CSS must not interpolate each frame that Motion already owns. */
 [data-motion-owner="js"] {
   animation: none;
