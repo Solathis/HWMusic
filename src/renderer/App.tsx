@@ -4,6 +4,8 @@
  * checking → 中性启动屏；logged_out → LoginGate；logged_in → app-shell（LibraryShell 必须晚于判定挂载）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { motion } from "framer-motion"
+import { useMotionPolicy } from "./features/motion/MotionProvider"
 import {
   FileMusicIcon,
   HistoryIcon,
@@ -33,7 +35,8 @@ import {
 } from "./components/ui/alert-dialog"
 import { Avatar, AvatarFallback, AvatarImage } from "./components/ui/avatar"
 import { Badge } from "./components/ui/badge"
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "./components/ui/sheet"
+import { SheetDescription, SheetHeader, SheetTitle } from "./components/ui/sheet"
+import { QueueSheet } from "./queue-sheet"
 import {
   Sidebar,
   SidebarContent,
@@ -254,8 +257,10 @@ function SidebarSearch({
 }
 
 export function LibraryShell({ profile = null, sessionExpiresAt = null }: { profile?: AccountProfile; sessionExpiresAt?: number | null }) {
+  const { transitionFor } = useMotionPolicy()
   const [view, setView] = useState(() => createView(VIEW.favorites))
   const [stageOpen, setStageOpen] = useState(false)
+  const [queueOpen, setQueueOpen] = useState(false)
   /**
    * 侧栏搜索框里的文字，只活在输入框里；真正的检索词随 VIEW.search 的视图参数走。
    */
@@ -466,11 +471,16 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
                           悬停显示标签，展开时不显示——标签本来就在按钮上 */}
                       <SidebarMenuButton
                         tooltip={entry.label}
+                        className="relative"
+                        data-motion-navigation
                         isActive={view.id === entry.id}
                         onClick={() => navigate(createView(entry.id))}
                       >
-                        <Icon />
-                        <span>{entry.label}</span>
+                        {view.id === entry.id ? <motion.span layoutId="library-navigation-indicator" aria-hidden="true"
+                          className="pointer-events-none absolute inset-0 rounded-md bg-sidebar-accent"
+                          transition={transitionFor("panel")} /> : null}
+                        <Icon className="relative" />
+                        <span className="relative">{entry.label}</span>
                       </SidebarMenuButton>
                     </SidebarMenuItem>
                   )
@@ -487,7 +497,7 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
         <SidebarFooter>
           {/* 账号区：头像 + 名字 + 会员徽标 + 主题 + 退出登录；窄轨里只留头像。 */}
           <div
-            className="flex items-center gap-2 px-1 py-0.5 group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0"
+            className="flex items-center gap-2 px-1 py-0.5"
             data-testid={ACCOUNT_AREA_TESTID}
           >
             <Avatar size="sm" data-testid={ACCOUNT_AVATAR_TESTID}>
@@ -557,20 +567,17 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
             >
               <MicVocalIcon />
             </Button>
-            <Sheet>
-              <SheetTrigger asChild>
+            <QueueSheet open={queueOpen} onOpenChange={setQueueOpen} trigger={
                 <Button variant="ghost" size="icon" aria-label="播放队列">
                   <ListMusicIcon />
                 </Button>
-              </SheetTrigger>
-              <SheetContent side="right">
+              }>
                 <SheetHeader>
                   <SheetTitle>播放队列</SheetTitle>
                   <SheetDescription>双击列表里的曲目会替换整个队列。</SheetDescription>
                 </SheetHeader>
                 <QueuePanelView queue={queue} runtime={runtime} rowActions={rowActions} />
-              </SheetContent>
-            </Sheet>
+            </QueueSheet>
           </div>
         </header>
 

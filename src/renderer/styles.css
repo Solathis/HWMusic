@@ -20,6 +20,7 @@
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
   --font-heading: var(--font-sans);
   --color-background: var(--background);
+  --color-overlay: var(--overlay);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
   --color-card-foreground: var(--card-foreground);
@@ -60,6 +61,7 @@
 }
 
 :root {
+  --overlay: rgb(0 0 0 / 0.1);
   --radius: 0.625rem;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
@@ -207,6 +209,66 @@ tr[aria-disabled="true"] { --row-opacity: 0.5; }
 [data-slot="tabs-content"][data-state="active"] {
   animation: motion-page-enter var(--motion-page, 240ms) var(--ease-enter, ease-out) both;
 }
+
+
+/* Shared overlay rhythm; Radix owns presence, focus and collision placement. */
+:is([data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="dialog-overlay"],
+  [data-slot="alert-dialog-overlay"], [data-slot="sheet-overlay"], [data-slot="sheet-content"],
+  [data-slot="popover-content"], [data-slot="select-content"], [data-slot="dropdown-menu-content"],
+  [data-slot="dropdown-menu-sub-content"], [data-slot="context-menu-content"],
+  [data-slot="context-menu-sub-content"], [data-slot="tooltip-content"]):not([data-motion-owner="js"])[data-state="open"],
+[data-slot="tooltip-content"][data-state="delayed-open"] {
+  animation-duration: var(--motion-overlay, 180ms);
+  animation-timing-function: var(--ease-enter, ease-out);
+}
+:is([data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="dialog-overlay"],
+  [data-slot="alert-dialog-overlay"], [data-slot="sheet-overlay"], [data-slot="sheet-content"],
+  [data-slot="popover-content"], [data-slot="select-content"], [data-slot="dropdown-menu-content"],
+  [data-slot="dropdown-menu-sub-content"], [data-slot="context-menu-content"],
+  [data-slot="context-menu-sub-content"], [data-slot="tooltip-content"]):not([data-motion-owner="js"])[data-state="closed"] {
+  animation-duration: var(--motion-overlay-exit, 120ms);
+  animation-timing-function: var(--ease-exit, ease-in);
+}
+@keyframes motion-dialog-enter {
+  from { opacity: 0; scale: 0.94; }
+  65% { scale: 1.01; }
+  to { opacity: 1; scale: 1; }
+}
+@keyframes motion-dialog-exit {
+  from { opacity: 1; scale: 1; }
+  to { opacity: 0; scale: 0.94; }
+}
+:is([data-slot="dialog-content"], [data-slot="alert-dialog-content"])[data-state="open"] {
+  animation-name: motion-dialog-enter;
+  animation-duration: var(--motion-dialog, 280ms);
+}
+:is([data-slot="dialog-content"], [data-slot="alert-dialog-content"])[data-state="closed"] {
+  animation-name: motion-dialog-exit;
+  animation-duration: var(--motion-dialog-exit, 160ms);
+}
+[data-slot="dropdown-menu-content"], [data-slot="dropdown-menu-sub-content"] { transform-origin: var(--radix-dropdown-menu-content-transform-origin); }
+[data-slot="context-menu-content"], [data-slot="context-menu-sub-content"] { transform-origin: var(--radix-context-menu-content-transform-origin); }
+[data-slot="popover-content"] { transform-origin: var(--radix-popover-content-transform-origin); }
+[data-slot="select-content"] { transform-origin: var(--radix-select-content-transform-origin); }
+[data-slot="tooltip-content"] { transform-origin: var(--radix-tooltip-content-transform-origin); }
+:is([data-slot="sidebar-gap"], [data-slot="sidebar-container"]) {
+  transition-duration: var(--motion-sidebar, 280ms);
+  transition-timing-function: var(--ease-move, ease-in-out);
+}
+:is([data-slot="button"], [data-slot="sidebar-trigger"], [data-slot="sidebar-menu-button"],
+  [data-slot="toggle"], [data-slot="toggle-group-item"], [data-slot="tabs-trigger"]) {
+  transition-property: color, background-color, border-color, box-shadow, scale;
+  transition-duration: var(--motion-press, 120ms);
+  transition-timing-function: var(--ease-enter, ease-out);
+}
+:is([data-slot="button"], [data-slot="sidebar-trigger"]):not([disabled]):not([data-motion-owner="js"]):active {
+  scale: 0.96;
+  transition-duration: 0s;
+}
+[data-slot="switch-thumb"] { transition-duration: var(--motion-state, 180ms); transition-timing-function: var(--ease-enter, ease-out); }
+[data-slot="progress-indicator"] { transition: none; }
+:is([data-slot="dialog-overlay"], [data-slot="alert-dialog-overlay"], [data-slot="sheet-overlay"]) { background-color: var(--color-overlay); }
+[data-slot="sidebar-menu-button"][data-motion-navigation][data-active="true"] { background-color: transparent; }
 
 /* CSS must not interpolate each frame that Motion already owns. */
 [data-motion-owner="js"] {

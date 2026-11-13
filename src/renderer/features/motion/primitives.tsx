@@ -58,11 +58,16 @@ export function MotionRegion({ identity, kind = "content", active = true, childr
     }
     controls.set({ opacity: 0, y: kind === "page" ? 12 : 0 })
     let live = true
-    void controls.start({ opacity: 1, y: 0, transition: transitionFor(kind) }).then(() => {
-      if (live) entry.current.entering = false
+    const frame = requestAnimationFrame(() => {
+      if (!live) return
+      void controls.start({ opacity: 1, y: 0, transition: transitionFor(kind) }).then(() => {
+        if (live) entry.current.entering = false
+      })
     })
-    return () => { live = false; entry.current.entering = false; controls.stop() }
+    return () => { live = false; cancelAnimationFrame(frame); entry.current.entering = false; controls.stop() }
   }, [identity, kind, active, reducedMotion, transitionFor, controls, parentEntry])
-  const region = <motion.div {...props} className={className} initial={false} animate={controls}>{children}</motion.div>
+  const instant = !active || reducedMotion || (kind === "content" && parentEntry?.entering)
+  const region = <motion.div {...props} className={className}
+    initial={instant ? false : { opacity: 0, y: kind === "page" ? 12 : 0 }} animate={controls}>{children}</motion.div>
   return kind === "page" ? <EntryContext.Provider value={entry.current}>{region}</EntryContext.Provider> : region
 }

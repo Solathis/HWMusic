@@ -1,7 +1,7 @@
 export async function recordVisualFrames(page, selector, action) {
   const key = "__motionFrames_" + Math.random().toString(36).slice(2);
   await page.evaluate(({ key, selector }) => {
-    const record = { frames: [], done: false };
+    const record = { frames: [], done: false, finishAt: null };
     window[key] = record;
     const start = performance.now();
     const tick = () => {
@@ -14,17 +14,18 @@ export async function recordVisualFrames(page, selector, action) {
         present: Boolean(node && node.getClientRects().length),
         rect: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null,
         opacity: style ? Number(style.opacity) : null, transform,
-        scale: transform === "none" ? 1 : new DOMMatrixReadOnly(transform).a,
+        scale: (transform === "none" ? 1 : new DOMMatrixReadOnly(transform).a) * (parseFloat(style?.scale) || 1),
         focused: Boolean(node?.contains(document.activeElement)),
         tableWrapperOpacity: node?.querySelector("table")?.parentElement?.parentElement
           ? Number(getComputedStyle(node.querySelector("table").parentElement.parentElement).opacity) : null,
       });
-      if (performance.now() - start >= 650) record.done = true;
+      if (record.finishAt !== null && performance.now() >= record.finishAt) record.done = true;
       else requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
   }, { key, selector });
   await action();
+  await page.evaluate((key) => { window[key].finishAt = performance.now() + 650; }, key);
   await page.waitForFunction((key) => window[key]?.done, key);
   return page.evaluate((key) => { const frames = window[key].frames; delete window[key]; return frames; }, key);
 }
@@ -59,6 +60,67 @@ export async function runMotionPolicyChecks({ page, add, theme }) {
 export async function runMotionChecks(context) {
   await runMotionPolicyChecks(context);
   await runPageMotionChecks(context);
+  await runOverlayMotionChecks(context);
+}
+
+export async function runOverlayMotionChecks({ page, add, theme }) {
+  await page.goto(page.url().split("?")[0], { waitUntil: "load" });
+  await page.waitForFunction(() => window.__guard !== undefined);
+  await page.evaluate((choice) => { document.documentElement.className = choice; return window.__guard.ready(); }, theme);
+  const trigger = page.getByRole("button", { name: "播放队列", exact: true });
+  const opening = await recordVisualFrames(page, '[data-slot="sheet-content"]', () => trigger.click());
+  const xs = opening.filter((frame) => frame.present).map((frame) => frame.rect.x);
+  add(theme + "-motion-queue-space", Math.max(...xs) - Math.min(...xs) > 80, "队列从右侧完整进入");
+
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(80);
+  const free = await page.evaluate(() => ({
+    dialogs: document.querySelectorAll('[data-slot="sheet-content"]').length,
+    blocked: getComputedStyle(document.body).pointerEvents === "none",
+  }));
+  add(theme + "-motion-queue-releases-input", free.dialogs === 0 && !free.blocked, JSON.stringify(free));
+  await page.evaluate(() => document.querySelector('button[aria-label="播放队列"]').click());
+  await page.locator('[data-slot="sheet-content"]').waitFor();
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(700);
+  add(theme + "-motion-queue-clean", await page.locator('[data-slot="sheet-content"]').count() === 0
+    && await page.getByTestId("queue-exit-snapshot").count() === 0
+    && await trigger.evaluate((node) => document.activeElement === node), "反向开合后无残留，焦点回到入口");
+
+  const dialogFrames = await recordVisualFrames(page, '[data-slot="alert-dialog-content"]', () =>
+    page.getByRole("button", { name: "退出登录", exact: true }).click());
+  add(theme + "-motion-dialog-soft", dialogFrames.some((frame) => frame.scale > 1.002), "对话框有轻微回弹");
+  const backdrop = await page.locator('[data-slot="alert-dialog-overlay"]').evaluate((node) => getComputedStyle(node).backgroundColor);
+  add(theme + "-motion-dialog-backdrop", backdrop.replaceAll(" ", "") !== "rgba(0,0,0,0)", backdrop);
+  await page.getByRole("button", { name: "取消", exact: true }).click();
+  await page.locator('[data-slot="alert-dialog-content"]').waitFor({ state: "detached" });
+
+  await page.mouse.move(0, 0);
+  await page.getByTestId("player-bar-quality").hover();
+  await page.waitForTimeout(100);
+  add(theme + "-motion-tooltip-intent", await page.getByRole("tooltip").count() === 0, "短暂划过不弹提示");
+  await page.waitForTimeout(400);
+  add(theme + "-motion-tooltip-shows", await page.getByRole("tooltip").count() === 1, "明确悬停后显示提示");
+  await page.mouse.move(0, 0);
+  await page.waitForTimeout(200);
+  const avatarFrames = await recordVisualFrames(page, '[data-testid="account-avatar"]', () =>
+    page.locator('[data-slot="sidebar-trigger"]').click());
+  const rail = await page.locator('[data-slot="sidebar-container"]').boundingBox();
+  const avatar = await page.getByTestId("account-avatar").boundingBox();
+  const avatarXs = avatarFrames.filter((frame) => frame.present).map((frame) => frame.rect.x);
+  add(theme + "-motion-sidebar-avatar", Math.max(...avatarXs) - Math.min(...avatarXs) <= 2
+    && Math.abs(avatar.x + avatar.width / 2 - (rail.x + rail.width / 2)) <= 2, "头像折叠不跳动，窄轨保持居中");
+  await page.locator('[data-slot="sidebar-trigger"]').click();
+  await page.waitForTimeout(350);
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.waitForFunction(() => document.documentElement.dataset.motion === "reduced");
+  await trigger.click();
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(80);
+  add(theme + "-motion-overlay-reduced", await page.locator('[data-slot="sheet-content"]').count() === 0
+    && await page.getByTestId("queue-exit-snapshot").count() === 0, "减少动效立即开合并释放输入");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
 }
 
 export async function runPageMotionChecks({ page, add, theme }) {
@@ -80,6 +142,13 @@ export async function runPageMotionChecks({ page, add, theme }) {
     JSON.stringify({ range: Math.max(...ys) - Math.min(...ys), lastOpacity: frames.at(-1).opacity }));
   add(theme + "-motion-single-content-layer", frames.filter((frame) => frame.tableWrapperOpacity !== null)
     .every((frame) => frame.tableWrapperOpacity === 1), "新页面与表格不叠两层透明度");
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await nav("我的收藏").click();
+    const repeat = await recordVisualFrames(page, '[data-testid="page-scroll"]', () => nav("本地歌曲").click());
+    const positions = repeat.filter((frame) => frame.present).map((frame) => frame.rect.y);
+    add(theme + "-motion-page-repeat-" + attempt, Math.max(...positions) - Math.min(...positions) > 2
+      && repeat.at(-1).opacity === 1, "每次新页面挂载都有完整过渡");
+  }
 
   await recordVisualFrames(page, '[data-testid="favorites-page"]', () => nav("我的收藏").click());
   add(theme + "-motion-resident-preserved", await favorites.locator("tbody tr").count() === rows
