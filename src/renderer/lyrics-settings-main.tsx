@@ -6,6 +6,7 @@ import "./styles.css"
 import "./vertical-lyrics.css"
 
 import { StrictMode } from "react"
+import { MotionProvider } from "./features/motion/MotionProvider"
 import { createRoot } from "react-dom/client"
 
 import { themeFromSearch } from "./features/lyrics/lyrics-window.mjs"
@@ -27,6 +28,6 @@ if (!container) {
 
 createRoot(container).render(
   <StrictMode>
-    <LyricsSettingsPopup />
+    <MotionProvider><LyricsSettingsPopup /></MotionProvider>
   </StrictMode>
 )

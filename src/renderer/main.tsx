@@ -5,6 +5,7 @@ import "./amll-theme.css"
 import "./styles.css"
 
 import { StrictMode } from "react"
+import { MotionProvider } from "./features/motion/MotionProvider"
 import { createRoot } from "react-dom/client"
 
 import { APP_BRAND_LABEL } from "../shared/app-name.mjs"
@@ -34,6 +35,6 @@ if (!container) {
 
 createRoot(container).render(
   <StrictMode>
-    <App />
+    <MotionProvider><App /></MotionProvider>
   </StrictMode>
 )

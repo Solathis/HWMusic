@@ -21,6 +21,7 @@ import sharp from "sharp";
 import { RUN_LOG_EMPTY_TEXT, RUN_LOG_FAILURE_TEXT } from "../src/renderer/features/settings/run-log.mjs";
 import { POPOVER_PAD_DIP } from "../src/renderer/features/lyrics/lyrics-popover.mjs";
 import { runPlaybackQualityChecks } from "./browser-guards/playback-quality.mjs";
+import { runMotionChecks } from "./browser-guards/motion.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** 守卫自己的中间产物（.gitignore 已含 .tmp/）。 */
@@ -121,6 +122,7 @@ import { LibraryShell } from "../../src/renderer/App.tsx";
 import { LyricsWindow } from "../../src/renderer/LyricsWindow.tsx";
 import { PlayerBar } from "../../src/renderer/components.tsx";
 import { PlaybackStage } from "../../src/renderer/playback-stage.tsx";
+import { MotionButton, MotionRegion, MotionSwap } from "../../src/renderer/features/motion/primitives.tsx";
 import { TooltipProvider } from "../../src/renderer/components/ui/tooltip.tsx";
 import { getPlayerRuntime } from "../../src/renderer/features/playback/player-runtime.ts";
 import { installContextMenuGuard } from "../../src/renderer/features/shell/context-menu-guard.mjs";
@@ -505,6 +507,17 @@ mockIPC(async (command, args) => {
 }, { shouldMockEvents: true });
 const runtime = getPlayerRuntime();
 
+function MotionProbe() {
+  const [count, setCount] = useState(0);
+  return <main className="m-8 flex flex-col items-start gap-4">
+    <MotionButton data-testid="motion-probe-press" onClick={() => setCount((value) => value + 1)}>增加</MotionButton>
+    <MotionButton data-testid="motion-probe-disabled" disabled onClick={() => setCount((value) => value + 100)}>禁止</MotionButton>
+    <MotionRegion identity={count} data-testid="motion-probe-region">
+      <MotionSwap identity={count}>{count}</MotionSwap>
+    </MotionRegion>
+    <output data-testid="motion-probe-count">{count}</output>
+  </main>;
+}
 function Guard() {
   const [desktop, setDesktop] = useState(false);
   /**
@@ -718,6 +731,7 @@ function Guard() {
       },
     };
   }, []);
+  if (new URLSearchParams(location.search).has("motion-probe")) return <MotionProbe />;
   if (surface === "no-lyrics") {
     return (
       <TooltipProvider>
@@ -6000,8 +6014,11 @@ export async function checkAboutUpdate(page, guardDir, add) {
 }
 
 /** 跑全部检查，返回 {pass, fail, skipped, checks}。 */
+const withMotionProvider = (source) => 'import { MotionProvider } from "../../src/renderer/features/motion/MotionProvider.tsx";\n'
+  + source.replaceAll("<StrictMode>", "<StrictMode><MotionProvider>").replaceAll("</StrictMode>", "</MotionProvider></StrictMode>");
+
 export async function runGuard({ root = ROOT, log = console.log, scope = "full" } = {}) {
-  if (!["full", "quality"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
+  if (!["full", "quality", "motion"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
   const guardDir = path.join(root, GUARD_DIR);
   await mkdir(guardDir, { recursive: true });
 
@@ -6011,7 +6028,7 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
   process.env.TEMP = temp;
   process.env.TMP = temp;
 
-  await writeFile(path.join(guardDir, "guard.tsx"), harnessSource(), "utf8");
+  await writeFile(path.join(guardDir, "guard.tsx"), withMotionProvider(harnessSource()), "utf8");
   // 真协议层的夹具模块（假上游 + createMusicApi），由守卫页 import
   await writeFile(path.join(guardDir, "protocol-fixture.mjs"), protocolPlaylistFixtureSource(), "utf8");
   const built = await esbuild.build({
@@ -6030,7 +6047,7 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
   if (built.errors.length > 0) throw new Error(`守卫页面构建失败：${JSON.stringify(built.errors)}`);
 
   // 启动三态那一页（挂真 App，单独一个入口）
-  await writeFile(path.join(guardDir, "startup.tsx"), startupHarnessSource(), "utf8");
+  await writeFile(path.join(guardDir, "startup.tsx"), withMotionProvider(startupHarnessSource()), "utf8");
   const builtStartup = await esbuild.build({
     absWorkingDir: root,
     entryPoints: [`${GUARD_DIR}/startup.tsx`],
@@ -6047,7 +6064,7 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
   if (builtStartup.errors.length > 0) throw new Error(`启动守卫页面构建失败：${JSON.stringify(builtStartup.errors)}`);
 
   // 歌词设置弹出窗那一页（挂真 LyricsSettingsPopup，单独一扇窗 / 单独一份 IPC 夹具）
-  await writeFile(path.join(guardDir, "lyrics-settings.tsx"), lyricsSettingsHarnessSource(), "utf8");
+  await writeFile(path.join(guardDir, "lyrics-settings.tsx"), withMotionProvider(lyricsSettingsHarnessSource()), "utf8");
   const builtPopup = await esbuild.build({
     absWorkingDir: root,
     entryPoints: [`${GUARD_DIR}/lyrics-settings.tsx`],
@@ -6063,7 +6080,7 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
   });
   if (builtPopup.errors.length > 0) throw new Error(`弹出窗守卫页面构建失败：${JSON.stringify(builtPopup.errors)}`);
   // 账号区四态那一页（挂真 App，IPC 只给门禁与空列表）
-  await writeFile(path.join(guardDir, "account.tsx"), accountHarnessSource(), "utf8");
+  await writeFile(path.join(guardDir, "account.tsx"), withMotionProvider(accountHarnessSource()), "utf8");
   const builtAccount = await esbuild.build({
     absWorkingDir: root,
     entryPoints: [`${GUARD_DIR}/account.tsx`],
@@ -6175,17 +6192,18 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
      * 启动三态（独立页面 + 独立错误收集）：主守卫页挂的是 `LibraryShell`（登录之后那一块），根本不经过 `startupViewOf`。
      * 放主页面里跑还会把它导航到登录页/主界面，污染后面每一项的基线。
      */
-    if (scope === "quality") {
+    if (scope !== "full") {
       await page.route("http://hwlocal.localhost/**", (route) => route.fulfill({
         status: 200, contentType: "audio/wav", body: audio, headers: { "accept-ranges": "bytes" },
       }));
       for (const theme of ["light", "dark"]) {
-        await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
+        await page.goto(`http://127.0.0.1:${port}/index.html` + (scope === "motion" ? "?motion-probe=1" : ""), { waitUntil: "load" });
         await page.waitForFunction(() => window.__guard !== undefined);
         await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
-        await runPlaybackQualityChecks({ page, add, theme });
+        if (scope === "quality") await runPlaybackQualityChecks({ page, add, theme });
+        else await runMotionChecks({ page, add, theme });
       }
-      add("quality-no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,
+      add(scope + "-no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,
         JSON.stringify({ consoleErrors: consoleErrors.slice(0, 2), pageErrors }));
       return { pass: checks.filter((check) => check.ok).length, fail: checks.filter((check) => !check.ok).length, skipped: 0, checks };
     }
@@ -6954,6 +6972,8 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
   if (scope === "full") {
     const extra = await runGuard({ root, log, scope: "quality" });
     checks.push(...extra.checks);
+    const motion = await runGuard({ root, log, scope: "motion" });
+    checks.push(...motion.checks);
   }
   const pass = checks.filter((check) => check.ok).length;
   const fail = checks.filter((check) => !check.ok).length;

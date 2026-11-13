@@ -6,6 +6,7 @@
 import "./styles.css"
 
 import { StrictMode } from "react"
+import { MotionProvider } from "./features/motion/MotionProvider"
 import { createRoot } from "react-dom/client"
 
 import { chromeKindOf } from "../shared/login-chrome.mjs"
@@ -26,6 +27,6 @@ installContextMenuGuard()
 
 createRoot(container).render(
   <StrictMode>
-    <LoginChrome kind={chromeKindOf(window.location.search)} />
+    <MotionProvider><LoginChrome kind={chromeKindOf(window.location.search)} /></MotionProvider>
   </StrictMode>
 )

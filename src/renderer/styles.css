@@ -187,7 +187,23 @@
 @media (prefers-reduced-motion: no-preference) {
   ::view-transition-old(root),
   ::view-transition-new(root) {
-    animation-duration: 220ms;
+    animation-duration: var(--motion-theme, 220ms);
     animation-timing-function: ease-out;
+  }
+}
+
+/* CSS must not interpolate each frame that Motion already owns. */
+[data-motion-owner="js"] {
+  animation: none;
+  transition-property: color, background-color, border-color, box-shadow;
+}
+
+/* System preference also applies before React has mounted and to Radix/CSS loops. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition-duration: 0s !important;
+    transition-delay: 0s !important;
+    scroll-behavior: auto !important;
   }
 }
