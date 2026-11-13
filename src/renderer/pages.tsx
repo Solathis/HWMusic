@@ -1028,6 +1028,9 @@ export function SettingsPage({
           {notice}
         </p>
       ) : null}
+      {saving || testing ? <p className="text-sm text-muted-foreground" role="status" data-motion-notice>
+        {saving ? "正在保存…" : "正在测试连接…"}
+      </p> : null}
 
       {/* 二级分类：单页 Tabs，不新开视图（分法与「日志为什么单独一类」见 SETTINGS_TABS） */}
       <Tabs value={settingsTab} onValueChange={setSettingsTab} className="flex flex-col gap-4" data-testid="settings-tabs">

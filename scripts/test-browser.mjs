@@ -21,7 +21,7 @@ import sharp from "sharp";
 import { RUN_LOG_EMPTY_TEXT, RUN_LOG_FAILURE_TEXT } from "../src/renderer/features/settings/run-log.mjs";
 import { POPOVER_PAD_DIP } from "../src/renderer/features/lyrics/lyrics-popover.mjs";
 import { runPlaybackQualityChecks } from "./browser-guards/playback-quality.mjs";
-import { runMotionChecks, runStageMotionChecks, runPlaybackInteractionChecks } from "./browser-guards/motion.mjs";
+import { runMotionChecks, runStageMotionChecks, runPlaybackInteractionChecks, runFeedbackMotionChecks } from "./browser-guards/motion.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** 守卫自己的中间产物（.gitignore 已含 .tmp/）。 */
@@ -342,6 +342,7 @@ mockIPC(async (command, args) => {
       case "settings:set": {
         const patch = args.payload?.patch ?? {};
         settingsWrites.push({ patch: JSON.parse(JSON.stringify(patch)), atMs: Math.round(performance.now()) });
+        if (settingsSetPlan.delayMs) await new Promise((resolve) => setTimeout(resolve, settingsSetPlan.delayMs));
         if (settingsSetPlan.failTimes > 0) {
           settingsSetPlan = { ...settingsSetPlan, failTimes: settingsSetPlan.failTimes - 1 };
           throw { kind: "internal", message: "守卫夹具：这一次设置写入被故意拒绝" };
@@ -6027,7 +6028,7 @@ const withMotionProvider = (source) => 'import { MotionProvider } from "../../sr
   + source.replaceAll("<StrictMode>", "<StrictMode><MotionProvider>").replaceAll("</StrictMode>", "</MotionProvider></StrictMode>");
 
 export async function runGuard({ root = ROOT, log = console.log, scope = "full" } = {}) {
-  if (!["full", "quality", "motion", "stage", "interactions"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
+  if (!["full", "quality", "motion", "stage", "interactions", "feedback"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
   const guardDir = path.join(root, GUARD_DIR);
   await mkdir(guardDir, { recursive: true });
 
@@ -6212,6 +6213,7 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
         if (scope === "quality") await runPlaybackQualityChecks({ page, add, theme });
         else if (scope === "stage") await runStageMotionChecks({ page, add, theme });
         else if (scope === "interactions") await runPlaybackInteractionChecks({ page, add, theme });
+        else if (scope === "feedback") await runFeedbackMotionChecks({ page, add, theme });
         else await runMotionChecks({ page, add, theme });
       }
       add(scope + "-no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,

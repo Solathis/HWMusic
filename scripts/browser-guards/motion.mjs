@@ -75,6 +75,34 @@ export async function runMotionChecks(context) {
   await runOverlayMotionChecks(context);
   await runStageMotionChecks(context);
   await runPlaybackInteractionChecks(context);
+  await runFeedbackMotionChecks(context);
+}
+
+export async function runFeedbackMotionChecks({ page, add, theme }) {
+  await page.goto(page.url().split("?")[0], { waitUntil: "load" });
+  await page.waitForFunction(() => window.__guard !== undefined);
+  await page.evaluate((choice) => { document.documentElement.className = choice; return window.__guard.ready(); }, theme);
+  await page.getByTestId("nav-list").getByRole("button", { name: "设置", exact: true }).click();
+  const quality = page.getByRole("combobox", { name: "音质", exact: true });
+  await quality.waitFor();
+  const previousQuality = (await quality.textContent()).trim();
+  const targetQuality = previousQuality === "标准" ? "高" : "标准";
+  await page.evaluate(() => window.__guard.setSettingsPlan({ failTimes: 1, delayMs: 200 }));
+  await quality.click();
+  const frames = await recordVisualFrames(page, '[data-testid="settings-page"] [role="alert"]', () =>
+    page.getByRole("option", { name: targetQuality, exact: true }).click());
+  add(theme + "-feedback-failure-entry", frames.some((frame) => frame.present && frame.opacity > 0 && frame.opacity < 1), "保存失败有明确进入反馈");
+  add(theme + "-feedback-failure-rolls-back", (await quality.textContent()).trim() === previousQuality, "保存失败选择回到已生效档位");
+  await page.evaluate(() => window.__guard.setSettingsPlan({ failTimes: 0, delayMs: 0 }));
+  await quality.click();
+  await page.getByRole("option", { name: targetQuality, exact: true }).click();
+  await page.waitForTimeout(350);
+  const retry = await page.evaluate(() => ({
+    failure: document.querySelector('[data-testid="settings-page"] [role="alert"]')?.textContent?.trim() ?? null,
+    quality: document.querySelector('#playback-quality')?.textContent?.trim(),
+    writes: window.__guard.settingsWrites?.().filter((entry) => "playbackQuality" in entry.patch).map((entry) => entry.patch.playbackQuality) ?? null,
+  }));
+  add(theme + "-feedback-retry", !/保存/.test(retry.failure ?? "") && retry.quality === targetQuality, JSON.stringify(retry));
 }
 
 export async function runPlaybackInteractionChecks({ page, add, theme }) {

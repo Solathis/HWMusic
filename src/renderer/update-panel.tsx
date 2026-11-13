@@ -68,7 +68,7 @@ export function UpdatePanel() {
         </Button>
       </div>
       {view.showProgress ? (
-        <div className="flex flex-col gap-1">
+        <div className="flex flex-col gap-1" data-motion-notice>
           <Progress value={view.percent} aria-label="下载进度" />
           <span className="text-xs text-muted-foreground">{view.progressText}</span>
         </div>
@@ -80,7 +80,7 @@ export function UpdatePanel() {
         </Alert>
       ) : null}
       {groups.length > 0 ? (
-        <div className="flex flex-col gap-2 text-sm" data-testid="update-notes">
+        <div className="flex flex-col gap-2 text-sm" data-testid="update-notes" data-motion-notice>
           {groups.map((group, index) => (
             <div key={`${group.title}-${index}`} className="flex flex-col gap-1">
               {group.title ? <span className="font-medium">{group.title}</span> : null}

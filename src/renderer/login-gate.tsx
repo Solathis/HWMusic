@@ -335,6 +335,7 @@ export function StartupChecking({ gate }: { gate: AuthGate }) {
     <div
       className="flex h-full w-full flex-col items-center justify-center gap-3 bg-background px-6"
       data-testid={STARTUP_CHECKING_TESTID}
+      data-motion-screen="checking"
       role="status"
       aria-busy="true"
       aria-label={STARTUP_CHECKING_LABEL}
@@ -395,7 +396,7 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
   )
 
   return (
-    <div className="flex h-full w-full flex-col bg-background text-foreground">
+    <div className="flex h-full w-full flex-col bg-background text-foreground" data-motion-screen="login">
       {/* 顶部是门禁自己的标题区，右上角放主题控件。 */}
       <header className="flex items-center justify-end px-4" style={{ height: LOGIN_VIEW_TOP_INSET }}>
         <ThemeControl />

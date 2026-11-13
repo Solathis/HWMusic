@@ -7,6 +7,7 @@ import { MonitorIcon, MoonIcon, SunIcon } from "lucide-react"
 import type { ComponentType } from "react"
 
 import { Button } from "./components/ui/button"
+import { MotionSwap } from "./features/motion/primitives"
 import { Tooltip, TooltipContent, TooltipTrigger } from "./components/ui/tooltip"
 import {
   THEME_CHOICE,
@@ -41,7 +42,7 @@ export function ThemeToggle({ className }: { className?: string }) {
           data-theme-choice={choice}
           onClick={() => select(nextThemeChoice(choice))}
         >
-          <Icon />
+          <MotionSwap identity={choice}><Icon /></MotionSwap>
         </Button>
       </TooltipTrigger>
       <TooltipContent>{label}</TooltipContent>

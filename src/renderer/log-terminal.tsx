@@ -3,6 +3,7 @@
  * 文件条目自带级别，提示条目一律 info、来源「提示」；订阅仍留在外壳（`useNoticeLog`），因为设置页只在切到「日志」标签时才挂载。
  */
 import { useCallback, useEffect, useState } from "react"
+import { MotionRegion } from "./features/motion/primitives"
 
 import { ScrollArea } from "./components/ui/scroll-area"
 import { Input } from "./components/ui/input"
@@ -184,6 +185,7 @@ export function LogTerminal({ notices = [] }: { notices?: LogEntry[] }) {
           className="max-h-[60vh] rounded-md border [&>[data-slot=scroll-area-viewport]]:max-h-[60vh]"
           data-testid="log-lines"
         >
+          <MotionRegion identity={scope + "|" + query + "|" + levels.join(",")} kind="content">
           <ol className="flex flex-col gap-0.5 p-2 font-mono text-xs">
             {shown.map((entry, position) => (
               <li key={entry.id} className="flex items-baseline gap-2" data-testid="log-line">
@@ -213,6 +215,7 @@ export function LogTerminal({ notices = [] }: { notices?: LogEntry[] }) {
               </li>
             ))}
           </ol>
+          </MotionRegion>
         </ScrollArea>
       )}
     </div>
