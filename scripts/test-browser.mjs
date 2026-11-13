@@ -20,6 +20,7 @@ import sharp from "sharp";
 
 import { RUN_LOG_EMPTY_TEXT, RUN_LOG_FAILURE_TEXT } from "../src/renderer/features/settings/run-log.mjs";
 import { POPOVER_PAD_DIP } from "../src/renderer/features/lyrics/lyrics-popover.mjs";
+import { runPlaybackQualityChecks } from "./browser-guards/playback-quality.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** 守卫自己的中间产物（.gitignore 已含 .tmp/）。 */
@@ -295,6 +296,24 @@ const localSnapshot = () => localTracks.map((track) => ({ ...track }));
  * 底栏「只说实际档位、不拿设置里的期望档位充数」全靠它量。
  */
 let resolvedQuality = null;
+// Raw wire fields travel through the real protocol and host handler.
+import { PLAYBACK_QUALITY_CASES } from "../../scripts/browser-guards/playback-quality.mjs";
+import { createMusicApi as createQualityApi } from "../../src/protocols/music.mjs";
+import { createPlaybackHandlers } from "../../src/host/playback-handlers.mjs";
+let rawQualityCase = null;
+const qualityApi = createQualityApi({
+  endpoints: { playback: "https://example.invalid/quality" },
+  session: { token: "SYNTHETIC", snsUserID: "SYNTHETIC" },
+  fetchImpl: async (_url, init = {}) => {
+    const caseKey = String(JSON.parse(init.body).contentCode).replace(/^quality-/, "");
+    const fixture = PLAYBACK_QUALITY_CASES[caseKey] ?? PLAYBACK_QUALITY_CASES[rawQualityCase];
+    if (fixture.delayMs) await new Promise((resolve) => setTimeout(resolve, fixture.delayMs));
+    return new Response(JSON.stringify({
+      result: { resultCode: "000000" }, fileURL: "https://music.dbankcdn.cn/guard.wav", ...fixture.fields,
+    }), { headers: { "content-type": "application/json" } });
+  },
+});
+const qualityHandlers = createPlaybackHandlers({ api: qualityApi, playbackQuality: () => settingsData.playbackQuality ?? "high" });
 mockWindows("main");
 mockIPC(async (command, args) => {
   if (command === "core_local_base_url") {
@@ -379,10 +398,17 @@ mockIPC(async (command, args) => {
         libraryCalls.push({ channel: "library:history", page: 1, pageSize: 50, keyword: null });
         return { songs: guardTracks("历史", PAGED_TOTAL), hasMore: false, skipped: 0, reportedTotal: PAGED_TOTAL };
       }
-      case "playback:resolve-url": return {
+      case "playback:resolve-url": {
+        if (rawQualityCase !== null) {
+          const result = await qualityHandlers["playback:resolve-url"]({ payload: args.payload });
+          if (!result.ok) throw result.error;
+          return result.data;
+        }
+        return {
         url: "https://music.dbankcdn.cn/guard.wav",
         ...(resolvedQuality === null ? {} : { actualQuality: resolvedQuality }),
-      };
+        };
+      }
       case "playback:lyrics": return { text: LRC };
       default: throw new Error("未提供守卫 IPC：" + args.channel);
     }
@@ -530,7 +556,14 @@ function Guard() {
         runtime.player.seek(700);
       },
       /** 音质夹具（null = 接口没声明实际音质）；改完要重新取一次地址才进状态（ready() 或切歌）。 */
-      setResolvedQuality(value) { resolvedQuality = typeof value === "string" && value !== "" ? value : null; },
+      setResolvedQuality(value) { rawQualityCase = null; resolvedQuality = typeof value === "string" && value !== "" ? value : null; },
+      async playQualityCase(key) {
+        if (!Object.hasOwn(PLAYBACK_QUALITY_CASES, key)) throw new Error("Unknown quality fixture");
+        rawQualityCase = key;
+        const id = key === "local" ? "local:0123456789abcdef0123456789abcdef" : "quality-" + key;
+        await runtime.player.playQueue([{ id, name: "品质守卫", artists: "品质艺人", duration: 12, coverUrl: "https://music.dbankcdn.cn/guard-cover-warm.png" }], 0);
+        if (runtime.player.snapshot().status !== "error") runtime.player.pause();
+      },
       /** 长艺人名的单曲：窄窗底下「实际音质不许被挤掉」只能拿真艺人名去挤。 */
       async queueWithLongArtist(artists) {
         await runtime.player.playQueue([{ id: "quality-long", name: "长艺人曲目", artists, duration: 12 }], 0);
@@ -5967,7 +6000,8 @@ export async function checkAboutUpdate(page, guardDir, add) {
 }
 
 /** 跑全部检查，返回 {pass, fail, skipped, checks}。 */
-export async function runGuard({ root = ROOT, log = console.log } = {}) {
+export async function runGuard({ root = ROOT, log = console.log, scope = "full" } = {}) {
+  if (!["full", "quality"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
   const guardDir = path.join(root, GUARD_DIR);
   await mkdir(guardDir, { recursive: true });
 
@@ -6141,6 +6175,20 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
      * 启动三态（独立页面 + 独立错误收集）：主守卫页挂的是 `LibraryShell`（登录之后那一块），根本不经过 `startupViewOf`。
      * 放主页面里跑还会把它导航到登录页/主界面，污染后面每一项的基线。
      */
+    if (scope === "quality") {
+      await page.route("http://hwlocal.localhost/**", (route) => route.fulfill({
+        status: 200, contentType: "audio/wav", body: audio, headers: { "accept-ranges": "bytes" },
+      }));
+      for (const theme of ["light", "dark"]) {
+        await page.goto(`http://127.0.0.1:${port}/index.html`, { waitUntil: "load" });
+        await page.waitForFunction(() => window.__guard !== undefined);
+        await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
+        await runPlaybackQualityChecks({ page, add, theme });
+      }
+      add("quality-no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,
+        JSON.stringify({ consoleErrors: consoleErrors.slice(0, 2), pageErrors }));
+      return { pass: checks.filter((check) => check.ok).length, fail: checks.filter((check) => !check.ok).length, skipped: 0, checks };
+    }
     const startupPage = await browser.newPage({ viewport: { width: 1280, height: 800 }, colorScheme: "light" });
     startupPage.setDefaultTimeout(GUARD_TIMEOUT_MS);
     const startupErrors = [];
@@ -6388,7 +6436,7 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
       await page.evaluate(async () => { window.__guard.setResolvedQuality(null); await window.__guard.nextTrack(); });
       await page.waitForFunction(() => window.__guard.snapshot().quality === null);
       const droppedQuality = await qualityOfBar();
-      add(`${theme}-bar-quality-gone`, droppedQuality.badgeText === null && !/音质/.test(droppedQuality.statusText ?? ""),
+      add(`${theme}-bar-quality-gone`, droppedQuality.badgeText === "音质未知" && !/音质/.test(droppedQuality.statusText ?? ""),
         JSON.stringify(droppedQuality));
       /**
        * 长艺人名 + 主窗最小宽度（`lib.rs` 的 MAIN_WINDOW_MIN_WIDTH = 960）：
@@ -6903,13 +6951,18 @@ export async function runGuard({ root = ROOT, log = console.log } = {}) {
     server.close();
   }
 
+  if (scope === "full") {
+    const extra = await runGuard({ root, log, scope: "quality" });
+    checks.push(...extra.checks);
+  }
   const pass = checks.filter((check) => check.ok).length;
   const fail = checks.filter((check) => !check.ok).length;
   return { pass, fail, skipped: 0, checks };
 }
 
 async function main() {
-  const { pass, fail, skipped, checks } = await runGuard();
+  const scope = process.argv.find((arg) => arg.startsWith("--scope="))?.slice(8) ?? "full";
+  const { pass, fail, skipped, checks } = await runGuard({ scope });
   console.log(formatGuardSummary({ pass, fail, skipped }));
   const verdict = guardVerdict({ pass, fail, skipped });
   if (verdict !== "PASS") {
