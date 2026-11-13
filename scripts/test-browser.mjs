@@ -21,7 +21,7 @@ import sharp from "sharp";
 import { RUN_LOG_EMPTY_TEXT, RUN_LOG_FAILURE_TEXT } from "../src/renderer/features/settings/run-log.mjs";
 import { POPOVER_PAD_DIP } from "../src/renderer/features/lyrics/lyrics-popover.mjs";
 import { runPlaybackQualityChecks } from "./browser-guards/playback-quality.mjs";
-import { runMotionChecks, runStageMotionChecks } from "./browser-guards/motion.mjs";
+import { runMotionChecks, runStageMotionChecks, runPlaybackInteractionChecks } from "./browser-guards/motion.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** 守卫自己的中间产物（.gitignore 已含 .tmp/）。 */
@@ -134,6 +134,7 @@ let currentTheme = "light";
 const songs = Array.from({ length: 36 }, (_, index) => ({
   id: String(index + 1), name: "浏览器守卫曲目 " + (index + 1), artists: "守卫艺人", album: "守卫专辑", duration: 12,
   coverUrl: "https://music.dbankcdn.cn/guard-cover-" + (index % 2 === 0 ? "warm" : "cool") + ".png",
+  ...(new URLSearchParams(location.search).has("row-actions") ? { artistId: "AR-1", albumId: "AL-1", albumName: "守卫专辑" } : {}),
 }));
 let desktopConfig = { ...DEFAULT_LYRICS_CONFIG };
 let desktopRevision = 0;
@@ -304,6 +305,7 @@ import { createMusicApi as createQualityApi } from "../../src/protocols/music.mj
 import { createPlaybackHandlers } from "../../src/host/playback-handlers.mjs";
 let rawQualityCase = null;
 let favoriteRequests = 0;
+let playbackResolves = 0;
 const qualityApi = createQualityApi({
   endpoints: { playback: "https://example.invalid/quality" },
   session: { token: "SYNTHETIC", snsUserID: "SYNTHETIC" },
@@ -405,6 +407,7 @@ mockIPC(async (command, args) => {
         return { songs: guardTracks("历史", PAGED_TOTAL), hasMore: false, skipped: 0, reportedTotal: PAGED_TOTAL };
       }
       case "playback:resolve-url": {
+        playbackResolves += 1;
         if (rawQualityCase !== null) {
           const result = await qualityHandlers["playback:resolve-url"]({ payload: args.payload });
           if (!result.ok) throw result.error;
@@ -541,6 +544,7 @@ function Guard() {
     window.__guard = {
       snapshot: () => runtime.player.snapshot(),
       favoritesRequestCount: () => favoriteRequests,
+      playbackResolveCount: () => playbackResolves,
       setTime: (ms) => runtime.player.seek(ms),
       nextTrack: () => runtime.player.next(),
       prepareRepeatedQueue: () => runtime.player.playQueue([songs[0], songs[0]], 0),
@@ -6023,7 +6027,7 @@ const withMotionProvider = (source) => 'import { MotionProvider } from "../../sr
   + source.replaceAll("<StrictMode>", "<StrictMode><MotionProvider>").replaceAll("</StrictMode>", "</MotionProvider></StrictMode>");
 
 export async function runGuard({ root = ROOT, log = console.log, scope = "full" } = {}) {
-  if (!["full", "quality", "motion", "stage"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
+  if (!["full", "quality", "motion", "stage", "interactions"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
   const guardDir = path.join(root, GUARD_DIR);
   await mkdir(guardDir, { recursive: true });
 
@@ -6207,6 +6211,7 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
         await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
         if (scope === "quality") await runPlaybackQualityChecks({ page, add, theme });
         else if (scope === "stage") await runStageMotionChecks({ page, add, theme });
+        else if (scope === "interactions") await runPlaybackInteractionChecks({ page, add, theme });
         else await runMotionChecks({ page, add, theme });
       }
       add(scope + "-no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,

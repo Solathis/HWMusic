@@ -74,6 +74,59 @@ export async function runMotionChecks(context) {
   await runPageMotionChecks(context);
   await runOverlayMotionChecks(context);
   await runStageMotionChecks(context);
+  await runPlaybackInteractionChecks(context);
+}
+
+export async function runPlaybackInteractionChecks({ page, add, theme }) {
+  const base = page.url().split("?")[0] + "?row-actions=1";
+  const load = async () => {
+    await page.goto(base, { waitUntil: "load" });
+    await page.waitForFunction(() => window.__guard !== undefined);
+    await page.evaluate((choice) => { document.documentElement.className = choice; return window.__guard.ready(); }, theme);
+    await page.getByTestId("favorites-page").locator("tbody tr").first().waitFor();
+  };
+  await load();
+  let before = await page.evaluate(() => window.__guard.playbackResolveCount());
+  await page.getByTestId("favorites-page").getByRole("button", { name: "守卫艺人", exact: true }).first().focus();
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(200);
+  add(theme + "-row-inner-enter", await page.evaluate(() => window.__guard.playbackResolveCount()) === before
+    && await page.getByRole("heading", { name: "守卫艺人", exact: true }).count() === 1, "歌手按钮回车仅打开歌手，不播放整表");
+  await load();
+  before = await page.evaluate(() => window.__guard.playbackResolveCount());
+  await page.getByTestId("favorites-page").getByRole("button", { name: "守卫艺人", exact: true }).first()
+    .evaluate((node) => node.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+  await page.waitForTimeout(200);
+  add(theme + "-row-inner-double-click", await page.evaluate(() => window.__guard.playbackResolveCount()) === before, "内部按钮双击不激活曲目行");
+  const row = page.getByTestId("favorites-page").locator("tbody tr").first();
+  before = await page.evaluate(() => window.__guard.playbackResolveCount());
+  await row.focus(); await page.keyboard.press("Enter"); await page.waitForTimeout(150);
+  add(theme + "-row-own-enter", await page.evaluate(() => window.__guard.playbackResolveCount()) === before + 1, "曲目行自身回车只播放一次");
+  await page.getByRole("button", { name: "播放队列", exact: true }).click();
+  const panel = page.getByTestId("queue-panel");
+  const queueLength = await page.evaluate(() => window.__guard.snapshot().entries.length);
+  await panel.getByRole("button", { name: "清空", exact: true }).click();
+  const confirm = page.locator('[data-slot="alert-dialog-content"]');
+  const asks = await confirm.count() === 1;
+  add(theme + "-queue-clear-confirm", asks && await page.evaluate(() => window.__guard.snapshot().entries.length) === queueLength, "清空前确认，保留原队列");
+  if (asks) {
+    await confirm.getByRole("button", { name: "取消", exact: true }).click();
+    await confirm.waitFor({ state: "detached" });
+    add(theme + "-queue-clear-cancel", await page.evaluate(() => window.__guard.snapshot().entries.length) === queueLength, "取消不改变队列");
+    await panel.getByRole("button", { name: "清空", exact: true }).click();
+    await confirm.getByRole("button", { name: "清空", exact: true }).click();
+    await page.waitForFunction(() => window.__guard.snapshot().entries.length === 0);
+    add(theme + "-queue-clear-applies", true, "确认后清空并停止播放");
+  }
+  await page.keyboard.press("Escape");
+  await page.locator('[data-slot="sheet-content"]').waitFor({ state: "detached" });
+  await page.getByTestId("nav-list").getByRole("button", { name: "本地歌曲", exact: true }).click();
+  const missing = page.getByTestId("local-songs-page").locator("tbody tr").nth(2);
+  const previousTrack = await page.evaluate(() => window.__guard.snapshot().track?.id ?? null);
+  await missing.evaluate((node) => node.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+  await page.waitForTimeout(150);
+  add(theme + "-local-missing-inactive", await missing.getAttribute("aria-disabled") === "true"
+    && await page.evaluate(() => window.__guard.snapshot().track?.id ?? null) === previousTrack, "文件不在的曲目不可误触播放");
 }
 
 export async function runStageMotionChecks({ page, add, theme }) {

@@ -3,7 +3,7 @@
  * `TrackTable` 是曲目表的唯一实现；`PlayerBar` 不持有音频、不认识 core，动作全部转给 `features/playback`；`QueuePanel` 显示真实队列。
  * 收藏的写入接口还没确认，没接 `onToggleFavorite` 时按钮禁用并直接说明原因，不做乐观更新。
  */
-import { useLayoutEffect, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import type { ComponentType, ReactElement, ReactNode, RefObject } from "react"
 import {
   CaptionsOffIcon,
@@ -77,7 +77,8 @@ import type { PlayerState } from "./features/playback/use-player.ts"
 import type { LyricsToggleSurface, LyricsWindowBinding } from "./use-lyrics-window.ts"
 import { TrackRowMenu, type TrackRowActions } from "./track-menu.tsx"
 import { PlaybackQualityBadge } from "./playback-quality-badge"
-import { MotionRegion } from "./features/motion/primitives"
+import { MotionButton, MotionRegion, MotionSwap } from "./features/motion/primitives"
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "./components/ui/alert-dialog"
 
 export const CONTENT_FADE_IN = "motion-safe:animate-in motion-safe:fade-in-0 motion-safe:duration-150"
 
@@ -335,24 +336,29 @@ export function TrackTable({
                 key={`${id ?? "row"}-${index}`}
                 target={TRACK_MENU_TARGET.track}
                 songs={[song]}
-                canPlay={onActivate !== undefined && !isOffline}
+                canPlay={onActivate !== undefined && !isOffline && !isUnavailable}
                 onPlay={() => onActivate?.(song, index)}
-                onPlayNext={isOffline ? undefined : onPlayNext}
-                onEnqueue={isOffline ? undefined : onEnqueue}
+                onPlayNext={isOffline || isUnavailable ? undefined : onPlayNext}
+                onEnqueue={isOffline || isUnavailable ? undefined : onEnqueue}
               >
                 <TableRow
                   tabIndex={0}
                   aria-label={isOffline ? `${trackNameOf(song)}，已下架` : `${trackNameOf(song)}，双击播放`}
-                  aria-disabled={isOffline ? true : undefined}
+                  aria-disabled={isOffline || isUnavailable ? true : undefined}
                   // 下架那一行不响应双击/回车（激活动作整条摘掉，不是"点了没反应"）
-                  onDoubleClick={isOffline ? undefined : () => onActivate?.(song, index)}
+                  onDoubleClick={(event) => {
+                    if (isOffline || isUnavailable) return
+                    if (event.target instanceof Element && event.target.closest('button,a,input,select,textarea,[role="button"],[contenteditable="true"]')) return
+                    onActivate?.(song, index)
+                  }}
                   onKeyDown={(event) => {
-                    if (isOffline) return
+                    if (isOffline || isUnavailable || event.repeat) return
+                    if (event.target instanceof Element && event.target.closest('button,a,input,select,textarea,[role="button"],[contenteditable="true"]')) return
                     if (event.key !== "Enter" && event.key !== " ") return
                     event.preventDefault()
                     onActivate?.(song, index)
                   }}
-                  className={`transition-opacity motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none${isOffline ? " opacity-50" : ""}${index >= oldLength ? " motion-safe:animate-row-appear" : ""}`}
+                  className={`transition-opacity motion-reduce:transition-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none${isOffline ? " opacity-50" : ""}${isUnavailable ? " opacity-50" : ""}${index >= oldLength ? " motion-safe:animate-row-appear" : ""}`}
                 >
                   <TableCell className="text-center tabular-nums text-muted-foreground">{index + 1}</TableCell>
                   <TableCell className="font-medium">
@@ -509,7 +515,7 @@ export function LyricsToggleIcon({ view, className }: {
 }) {
   if (view === null) return null
   const Icon = LYRICS_TOGGLE_ICONS[lyricsToggleIconName(view)]
-  return <Icon className={className} />
+  return <MotionSwap identity={lyricsToggleIconName(view)}><Icon className={className} /></MotionSwap>
 }
 
 /** 歌词显示目标的快捷切换（播放栏与沉浸页共用，触发按钮由调用方给出）。 */
@@ -538,6 +544,7 @@ export function LyricsTargetMenu({ lyrics, surface, trigger }: {
 
 export function PlayerBar({ runtime, state, onOpenStage, coverAnchorRef, lyrics = null }: PlayerBarProps) {
   const [dragMs, setDragMs] = useState<number | null>(null)
+  useEffect(() => setDragMs(null), [state.track?.id])
   const player = runtime.player
   const lyricsView = lyricsToggleView(lyrics)
 
@@ -550,7 +557,7 @@ export function PlayerBar({ runtime, state, onOpenStage, coverAnchorRef, lyrics 
 
   /** 左区：封面 + 曲目信息（整块可点 = 进歌词舞台）。 */
   const trackInfo = (
-    <div key={state.track?.id ?? "none"} className={`flex min-w-0 items-center gap-3 ${CONTENT_FADE_IN}`}>
+    <MotionRegion identity={state.track?.id ?? "none"} kind="content" className="flex min-w-0 items-center gap-3">
       <div ref={coverAnchorRef} className="shrink-0"><CoverArt coverUrl={trackCoverUrlOf(state.track)} className="size-10 rounded-md" /></div>
       <div className="flex min-w-0 flex-1 flex-col">
         <span className="truncate text-sm font-medium">{trackTitleOf(state.track)}</span>
@@ -561,7 +568,7 @@ export function PlayerBar({ runtime, state, onOpenStage, coverAnchorRef, lyrics 
             : `${trackArtistOf(state.track)} · ${playerStatusText(state)}`}
         </span>
       </div>
-    </div>
+    </MotionRegion>
   )
 
   return (
@@ -577,12 +584,12 @@ export function PlayerBar({ runtime, state, onOpenStage, coverAnchorRef, lyrics 
       {lyrics?.toggleError && lyrics.toggleErrorSurface !== "playback-stage" ? (
         <Alert variant="destructive" className="flex flex-wrap items-center gap-2 py-2" data-testid="lyrics-toggle-error">
           <AlertDescription className="min-w-0 flex-1">{lyrics.toggleError}</AlertDescription>
-          <Button variant="outline" size="sm" data-testid="lyrics-toggle-retry" onClick={() => lyrics?.retryToggle?.()}>
+          <MotionButton variant="outline" size="sm" data-testid="lyrics-toggle-retry" onClick={() => lyrics?.retryToggle?.()}>
             重试
-          </Button>
-          <Button variant="ghost" size="sm" data-testid="lyrics-toggle-dismiss" onClick={() => lyrics?.dismissToggleError?.()}>
+          </MotionButton>
+          <MotionButton variant="ghost" size="sm" data-testid="lyrics-toggle-dismiss" onClick={() => lyrics?.dismissToggleError?.()}>
             知道了
-          </Button>
+          </MotionButton>
         </Alert>
       ) : null}
       {/*
@@ -597,7 +604,7 @@ export function PlayerBar({ runtime, state, onOpenStage, coverAnchorRef, lyrics 
                 {trackInfo}
               </div>
             ) : (
-              <Button
+              <MotionButton
                 variant="ghost"
                 size="sm"
                 className="flex h-auto w-fit min-w-0 max-w-full items-center justify-start gap-3 px-1 py-1 text-left"
@@ -606,7 +613,7 @@ export function PlayerBar({ runtime, state, onOpenStage, coverAnchorRef, lyrics 
                 onClick={(event) => onOpenStage(event.currentTarget)}
               >
                 {trackInfo}
-              </Button>
+              </MotionButton>
             )}
           </div>
           <PlaybackQualityBadge state={state} surface="player-bar" />
@@ -618,9 +625,9 @@ export function PlayerBar({ runtime, state, onOpenStage, coverAnchorRef, lyrics 
         >
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" aria-label={`播放模式：${playbackModeLabel(state.mode)}`}>
-                <ModeIcon />
-              </Button>
+              <MotionButton variant="ghost" size="icon" aria-label={`播放模式：${playbackModeLabel(state.mode)}`}>
+                <MotionSwap identity={state.mode}><ModeIcon /></MotionSwap>
+              </MotionButton>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuRadioGroup
@@ -638,7 +645,7 @@ export function PlayerBar({ runtime, state, onOpenStage, coverAnchorRef, lyrics 
             </DropdownMenuContent>
           </DropdownMenu>
 
-          <Button
+          <MotionButton
             variant="ghost"
             size="icon"
             aria-label="上一首"
@@ -646,20 +653,20 @@ export function PlayerBar({ runtime, state, onOpenStage, coverAnchorRef, lyrics 
             onClick={() => void player.previous()}
           >
             <SkipBackIcon />
-          </Button>
-          <Button
+          </MotionButton>
+          <MotionButton
             variant="ghost"
             size="icon"
             aria-label={playing ? "暂停" : "播放"}
             disabled={!hasTrack}
             onClick={() => void player.toggle()}
           >
-            {playing ? <PauseIcon /> : <PlayIcon />}
-          </Button>
+            <MotionSwap identity={state.status}>{playing ? <PauseIcon /> : <PlayIcon />}</MotionSwap>
+          </MotionButton>
           {/*
            * 传输组只放传输控件：模式 → 上一首 → 播放 → 下一首。
            */}
-          <Button
+          <MotionButton
             variant="ghost"
             size="icon"
             aria-label="下一首"
@@ -667,14 +674,14 @@ export function PlayerBar({ runtime, state, onOpenStage, coverAnchorRef, lyrics 
             onClick={() => void player.next()}
           >
             <SkipForwardIcon />
-          </Button>
+          </MotionButton>
         </div>
 
         {/* 歌词开关与显示目标在尾部工具区，与传输组隔开 */}
         <div className="flex min-w-0 flex-1 items-center justify-end gap-1" data-testid="player-bar-trailing">
           {lyricsView === null ? null : lyrics === null ? null : (
             <>
-              <Button
+              <MotionButton
                 variant="ghost"
                 size="icon"
                 aria-label={lyricsView.label}
@@ -684,11 +691,11 @@ export function PlayerBar({ runtime, state, onOpenStage, coverAnchorRef, lyrics 
               >
                 {/* 图标跟着模式走（关闭 / 桌面小窗 / 任务栏一条），尺寸交给按钮 */}
                 <LyricsToggleIcon view={lyricsView} />
-              </Button>
+              </MotionButton>
               <LyricsTargetMenu lyrics={lyrics} surface="player-bar" trigger={
-                <Button variant="ghost" size="icon-sm" aria-label="选择歌词显示位置" data-testid="player-lyrics-target">
+                <MotionButton variant="ghost" size="icon-sm" aria-label="选择歌词显示位置" data-testid="player-lyrics-target">
                   <ChevronDownIcon />
-                </Button>
+                </MotionButton>
               } />
             </>
           )}
@@ -713,19 +720,20 @@ export function PlayerBar({ runtime, state, onOpenStage, coverAnchorRef, lyrics 
             player.seek(next)
           }}
           onValueCommit={() => setDragMs(null)}
+          onPointerCancel={() => setDragMs(null)}
         />
         <span className="w-12 shrink-0 text-xs tabular-nums text-muted-foreground" data-testid="player-duration">
           {durationMs > 0 ? formatDuration(durationMs / 1000) : "—"}
         </span>
 
-        <Button
+        <MotionButton
           variant="ghost"
           size="icon-sm"
           aria-label={state.muted ? "取消静音" : "静音"}
           onClick={() => player.toggleMute()}
         >
-          <VolumeIcon />
-        </Button>
+          <MotionSwap identity={state.muted || state.volume === 0 ? "mute" : state.volume < 0.5 ? "quiet" : "loud"}><VolumeIcon /></MotionSwap>
+        </MotionButton>
         <Slider
           className="w-24 shrink-0"
           value={[state.muted ? 0 : state.volume * 100]}
@@ -751,6 +759,14 @@ export interface QueuePanelProps extends TrackRowActions {
 }
 
 export function QueuePanel({ entries, index, onSelect, onClear, onPlayNext, offlineIds = [] }: QueuePanelProps) {
+  const panelRef = useRef<HTMLDivElement>(null)
+  const clearing = useRef(false)
+  useEffect(() => {
+    if (entries.length > 0) {
+      clearing.current = false
+      panelRef.current?.querySelector<HTMLElement>('[aria-current="true"]')?.scrollIntoView({ block: "nearest", behavior: "auto" })
+    }
+  }, [entries.length > 0])
   if (entries.length === 0) {
     return (
       <div className="flex min-h-0 flex-1 flex-col gap-3 px-4 pb-4" data-testid="queue-panel">
@@ -763,12 +779,28 @@ export function QueuePanel({ entries, index, onSelect, onClear, onPlayNext, offl
   const offline = new Set(offlineIds)
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-2 px-4 pb-4" data-testid="queue-panel">
+    <div ref={panelRef} className="flex min-h-0 flex-1 flex-col gap-2 px-4 pb-4" data-testid="queue-panel">
       <div className="flex shrink-0 items-center justify-between gap-2">
         <p className="text-sm text-muted-foreground">{`队列 ${entries.length} 首`}</p>
-        <Button variant="ghost" size="sm" onClick={() => onClear?.()} disabled={onClear === undefined}>
-          清空
-        </Button>
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <MotionButton variant="ghost" size="sm" disabled={onClear === undefined}>清空</MotionButton>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>清空播放队列？</AlertDialogTitle>
+              <AlertDialogDescription>会停止当前播放并移除队列中的歌曲。</AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>取消</AlertDialogCancel>
+              <AlertDialogAction onClick={() => {
+                if (clearing.current) return
+                clearing.current = true
+                onClear?.()
+              }}>清空</AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
       <ScrollArea className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:!block">
         <ul className="flex min-w-0 flex-col gap-1 [&>li]:min-w-0">

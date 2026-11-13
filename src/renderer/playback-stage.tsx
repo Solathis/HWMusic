@@ -17,7 +17,7 @@ import { useMainChrome } from "./use-main-chrome.ts"
 import { lyricsNoticeText, playbackModeLabel } from "./features/playback/playback-state.mjs"
 import { PlaybackQualityBadge } from "./playback-quality-badge"
 import { useMotionPolicy } from "./features/motion/MotionProvider"
-import { MotionRegion } from "./features/motion/primitives"
+import { MotionRegion, MotionSwap } from "./features/motion/primitives"
 import { CoverFlight, type CoverFlightRequest } from "./features/motion/cover-flight"
 import { PLAYBACK_MODES } from "./features/playback/player.mjs"
 import { formatDuration, trackAlbumOf, trackArtistsOf, trackCoverUrlOf, trackNameOf } from "./features/library/track-fields.mjs"
@@ -250,7 +250,7 @@ export function PlaybackStage({ open, runtime, state, onClose, coverSourceRef, o
       <div className="flex items-center justify-evenly">
         <MediaButton className="size-10" aria-label="上一首" disabled={!hasTrack} onClick={() => void player.previous()}><SkipBackIcon /></MediaButton>
         <MediaButton className="size-14" aria-label={playing ? "暂停" : "播放"} disabled={!hasTrack} onClick={() => void player.toggle()}>
-          {playing ? <PauseIcon className="size-8" /> : <PlayIcon className="size-8" />}
+          <MotionSwap identity={state.status}>{playing ? <PauseIcon className="size-8" /> : <PlayIcon className="size-8" />}</MotionSwap>
         </MediaButton>
         <MediaButton className="size-10" aria-label="下一首" disabled={!hasTrack} onClick={() => void player.next()}><SkipForwardIcon /></MediaButton>
       </div>
