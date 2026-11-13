@@ -21,7 +21,7 @@ import sharp from "sharp";
 import { RUN_LOG_EMPTY_TEXT, RUN_LOG_FAILURE_TEXT } from "../src/renderer/features/settings/run-log.mjs";
 import { POPOVER_PAD_DIP } from "../src/renderer/features/lyrics/lyrics-popover.mjs";
 import { runPlaybackQualityChecks } from "./browser-guards/playback-quality.mjs";
-import { runMotionChecks, runStageMotionChecks, runPlaybackInteractionChecks, runFeedbackMotionChecks, runLyricsMotionChecks, runOverlayMotionChecks } from "./browser-guards/motion.mjs";
+import { runMotionChecks, runStageMotionChecks, runPlaybackInteractionChecks, runFeedbackMotionChecks, runLyricsMotionChecks, runOverlayMotionChecks, runInterruptedMotionChecks, runMotionResourceChecks, recordVisualFrames } from "./browser-guards/motion.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** 守卫自己的中间产物（.gitignore 已含 .tmp/）。 */
@@ -513,7 +513,20 @@ mockIPC(async (command, args) => {
   }
   throw new Error("未提供守卫命令：" + command);
 }, { shouldMockEvents: true });
+let audioInstances = 0;
+const NativeAudio = window.Audio;
+window.Audio = new Proxy(NativeAudio, {
+  construct(target, args) { audioInstances += 1; return Reflect.construct(target, args); },
+});
 const runtime = getPlayerRuntime();
+let livePlayerSubscriptions = 0;
+const nativeSubscribe = runtime.player.subscribe;
+runtime.player.subscribe = (listener) => {
+  livePlayerSubscriptions += 1;
+  const detach = nativeSubscribe(listener);
+  let active = true;
+  return () => { if (active) { active = false; livePlayerSubscriptions -= 1; detach(); } };
+};
 
 function MotionProbe() {
   const [count, setCount] = useState(0);
@@ -544,6 +557,8 @@ function Guard() {
   useEffect(() => {
     window.__guard = {
       snapshot: () => runtime.player.snapshot(),
+      resources: () => ({ audioInstances, playerSubscriptions: livePlayerSubscriptions,
+        canvases: document.querySelectorAll("canvas").length }),
       favoritesRequestCount: () => favoriteRequests,
       playbackResolveCount: () => playbackResolves,
       setTime: (ms) => runtime.player.seek(ms),
@@ -2896,8 +2911,7 @@ export async function checkDesktopInteraction(page, guardDir, add) {
   await setVerticalTime(sweepTime);
   const sweepReduced = await readSweep();
   add("r61-vertical-reduced-motion",
-    animated.property !== null && animated.property !== "none" && animated.duration !== "0s"
-      && (reducedMotion.property === "none" || reducedMotion.duration === "0s"),
+    animated.duration === "0s" && reducedMotion.duration === "0s",
     JSON.stringify({ animated, reduced: reducedMotion }));
   add("r70-vertical-reduced-motion-no-sweep",
     sweepReduced.background === "none" && sweepAnimated.background?.includes("linear-gradient") === true,
@@ -4729,38 +4743,23 @@ export async function checkLibraryPagination(page, guardDir, add) {
   add("pagination-dblclick-favorites-loaded-only", favoritesRows === 36
     && favoritesQueue.length === favoritesRows && favoritesQueue.index === 1, JSON.stringify({ ...favoritesQueue, favoritesRows }));
 
-  // D1：换页内容淡入统一尊重减少动效；正常动效在 50ms 内应确实启动一次。
+  // Observe actual UI frames: CSS animation names do not cover Motion's JS renderer.
   const observePageTransition = async (reducedMotion) => {
     await page.emulateMedia({ reducedMotion });
+    await page.waitForFunction((reduced) => document.documentElement.dataset.motion === (reduced ? "reduced" : "full"), reducedMotion === "reduce");
     await page.getByRole("button", { name: "我的收藏", exact: true }).click();
     await page.getByTestId("favorites-page").waitFor();
-    const before = await page.evaluate(() => document.querySelector('[data-testid="page-scroll"]')?.getAnimations().length ?? 0);
     const box = page.getByRole("textbox", { name: "搜索关键字" });
     await box.fill(reducedMotion === "reduce" ? "减少动效守卫" : "正常动效守卫");
-    await box.press("Enter");
-    if (reducedMotion === "reduce") {
-      await page.waitForTimeout(50);
-    }
-    const started = reducedMotion === "reduce" ? null : await page.waitForFunction(() => {
-      const animation = [...(document.querySelector('[data-testid="page-scroll"]')?.getAnimations() ?? [])]
-        .find((candidate) => candidate.animationName === "enter");
-      return animation && typeof animation.currentTime === "number" && animation.currentTime <= 50
-        ? { elapsed: animation.currentTime, state: animation.playState }
-        : false;
-    }, null, { timeout: guardScaledMs(1000), polling: 1 }).then((handle) => handle.jsonValue());
-    const animations = await page.evaluate(() => [...(document.querySelector('[data-testid="page-scroll"]')?.getAnimations() ?? [])]
-      .map((animation) => ({ name: animation.animationName, state: animation.playState })));
-    return { before, started, animations };
+    const frames = await recordVisualFrames(page, '[data-testid="page-scroll"]', () => box.press("Enter"));
+    const visible = frames.filter((frame) => frame.present);
+    return { samples: visible.length, entered: visible.some((frame) => frame.opacity > 0 && frame.opacity < 1),
+      instant: visible.every((frame) => frame.opacity === 1 && frame.transform === "none"), finalOpacity: visible.at(-1)?.opacity };
   };
   const reducedMotion = await observePageTransition("reduce");
-  add("d1-reduced-motion-no-page-fade", reducedMotion.animations.every((animation) => animation.name !== "enter"), JSON.stringify(reducedMotion));
+  add("d1-reduced-motion-no-page-fade", reducedMotion.instant && reducedMotion.finalOpacity === 1, JSON.stringify(reducedMotion));
   const normalMotion = await observePageTransition("no-preference");
-  /**
-   * 正常动效的判据只有一条：那一次轮询**捕获到** `enter` 真的启动过（当时 currentTime ≤ 50ms）。
-   * 不再要求"稍后几轮往返之后 animation 还在"——150ms 的淡入完全可能已经播完并从 `getAnimations()` 里消失，
-   * 再要它还在就是在赌时序（慢渲染必红、快机器偶发绿），那是假失败/假通过而不是证据。
-   */
-  add("d1-normal-motion-page-fade", normalMotion.started !== null, JSON.stringify(normalMotion));
+  add("d1-normal-motion-page-fade", normalMotion.entered && normalMotion.finalOpacity === 1, JSON.stringify(normalMotion));
   await page.emulateMedia({ reducedMotion: "no-preference" });
 
   // ⑩ 换关键词：旧查询的迟到响应必须被丢掉（新结果里不许混进旧词的行）
@@ -6002,7 +6001,7 @@ const withMotionProvider = (source) => 'import { MotionProvider } from "../../sr
   + source.replaceAll("<StrictMode>", "<StrictMode><MotionProvider>").replaceAll("</StrictMode>", "</MotionProvider></StrictMode>");
 
 export async function runGuard({ root = ROOT, log = console.log, scope = "full" } = {}) {
-  if (!["full", "quality", "motion", "stage", "interactions", "feedback", "lyrics", "overlays"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
+  if (!["full", "quality", "motion", "stage", "interactions", "feedback", "lyrics", "overlays", "pagination", "interruptions", "resources"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
   const guardDir = path.join(root, GUARD_DIR);
   await mkdir(guardDir, { recursive: true });
 
@@ -6190,6 +6189,9 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
         else if (scope === "feedback") await runFeedbackMotionChecks({ page, add, theme });
         else if (scope === "lyrics") await runLyricsMotionChecks({ page, add, theme });
         else if (scope === "overlays") await runOverlayMotionChecks({ page, add, theme });
+        else if (scope === "pagination") { await page.evaluate(() => window.__guard.ready()); await checkLibraryPagination(page, guardDir, add); }
+        else if (scope === "interruptions") await runInterruptedMotionChecks({ page, add, theme });
+        else if (scope === "resources") await runMotionResourceChecks({ page, add, theme });
         else await runMotionChecks({ page, add, theme });
       }
       add(scope + "-no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,

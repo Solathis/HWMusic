@@ -6,7 +6,8 @@ export function createPresentationAcceptor(apply) {
     if (!payload || typeof payload.visible !== "boolean" || !Number.isSafeInteger(payload.revision)
       || payload.revision <= revision || payload.revision < 0) return false;
     revision = payload.revision;
-    if (payload.visible !== visible) { visible = payload.visible; apply(visible); }
+    // A newer visible revision means a real reopen, even if its hide arrived late.
+    if (payload.visible || payload.visible !== visible) { visible = payload.visible; apply(visible); }
     return true;
   };
 }

@@ -77,6 +77,97 @@ export async function runMotionChecks(context) {
   await runPlaybackInteractionChecks(context);
   await runFeedbackMotionChecks(context);
   await runLyricsMotionChecks(context);
+  await runInterruptedMotionChecks(context);
+  await runMotionResourceChecks(context);
+}
+
+export async function runMotionResourceChecks({ page, add, theme }) {
+  await page.goto(page.url().split("?")[0], { waitUntil: "load" });
+  await page.waitForFunction(() => window.__guard !== undefined);
+  await page.evaluate((choice) => { document.documentElement.className = choice; return window.__guard.ready(); }, theme);
+  const stageTrigger = page.getByRole("button", { name: "打开歌词", exact: true });
+  const warmStage = async () => {
+    await stageTrigger.click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="playback-stage"]')?.dataset.coverMotion === "idle");
+    await page.keyboard.press("Escape");
+    await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+    await page.waitForFunction(() => !document.querySelector('[data-testid="cover-flight"]'));
+  };
+  await warmStage();
+  const before = await page.evaluate(() => window.__guard.resources());
+  for (let index = 0; index < 10; index += 1) await warmStage();
+  for (let index = 0; index < 10; index += 1) {
+    await page.getByRole("button", { name: "播放队列", exact: true }).click();
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => !document.querySelector('[data-slot="sheet-content"],[data-testid="queue-exit-snapshot"]'));
+  }
+  const after = await page.evaluate(() => ({
+    ...window.__guard.resources(),
+    stages: document.querySelectorAll('[data-testid="playback-stage"]').length,
+    ghosts: document.querySelectorAll('[data-testid="cover-flight"],[data-testid="queue-exit-snapshot"],[data-testid="queue-exit-scrim"]').length,
+  }));
+  add(theme + "-motion-ten-cycles-resources", before.audioInstances === 1 && after.audioInstances === 1
+    && after.playerSubscriptions === before.playerSubscriptions && after.canvases === before.canvases
+    && after.stages === 0 && after.ghosts === 0, JSON.stringify({ stageCycles: 10, queueCycles: 10, before, after }));
+  for (let index = 0; index < 10; index += 1) {
+    await page.evaluate(() => window.__guard.setDesktop(true));
+    await page.getByTestId("lyrics-window").waitFor();
+    await page.evaluate(() => window.__guard.setDesktop(false));
+    await page.getByTestId("main-content").waitFor();
+  }
+  const afterDesktop = await page.evaluate(() => window.__guard.resources());
+  add(theme + "-motion-desktop-ten-reopens", afterDesktop.audioInstances === before.audioInstances
+    && afterDesktop.playerSubscriptions === before.playerSubscriptions && afterDesktop.canvases === before.canvases,
+    JSON.stringify({ cycles: 10, before, after: afterDesktop }));
+  await page.goto(new URL("lyrics-settings.html", page.url()).href, { waitUntil: "load" });
+  await page.waitForFunction(() => window.__popupGuard !== undefined);
+  const panel = page.getByTestId("lyrics-appearance-panel");
+  await panel.waitFor();
+  const popupBefore = await panel.evaluate((node) => ({
+    nodes: node.querySelectorAll("*").length, presentations: Number(node.dataset.presentationCount ?? 0),
+  }));
+  for (let index = 0; index < 10; index += 1) {
+    await page.evaluate(async (index) => {
+      await window.__popupGuard.present(false, 2 + index * 2);
+      await window.__popupGuard.present(true, 3 + index * 2);
+    }, index);
+  }
+  await page.waitForFunction(() => document.querySelector('[data-testid="lyrics-appearance-panel"]').getAnimations()
+    .every((animation) => animation.playState === "finished"));
+  const popupAfter = await panel.evaluate((node) => ({
+    nodes: node.querySelectorAll("*").length, presentations: Number(node.dataset.presentationCount ?? 0),
+  }));
+  add(theme + "-motion-popup-ten-reopens", popupAfter.nodes === popupBefore.nodes
+    && popupAfter.presentations === popupBefore.presentations + 10, JSON.stringify({ cycles: 10, before: popupBefore, after: popupAfter }));
+}
+
+export async function runInterruptedMotionChecks({ page, add, theme }) {
+  await page.goto(page.url().split("?")[0], { waitUntil: "load" });
+  await page.waitForFunction(() => window.__guard !== undefined);
+  await page.evaluate((choice) => { document.documentElement.className = choice; return window.__guard.ready(); }, theme);
+  let beforeOpacity = 0;
+  const frames = await recordVisualFrames(page, '[data-testid="queue-exit-scrim"], body > .bg-overlay', async () => {
+    await page.getByRole("button", { name: "播放队列", exact: true }).evaluate((node) => node.click());
+    await page.waitForFunction(() => {
+      const node = document.querySelector('[data-slot="sheet-overlay"]');
+      return node && Number(getComputedStyle(node).opacity) === 1;
+    });
+    // Freeze a real rendered partial scrim; sampling a short tween by wall-clock
+    // time can miss every intermediate frame on software-rendered CI.
+    beforeOpacity = await page.evaluate(() => {
+      const node = document.querySelector('[data-slot="sheet-overlay"]');
+      const freeze = node.animate([{ opacity: 0.44 }, { opacity: 0.44 }], { duration: 1000, fill: "both" });
+      const opacity = Number(getComputedStyle(node).opacity);
+      document.querySelector('button[aria-label="关闭播放队列"]').click();
+      freeze.cancel();
+      return opacity;
+    });
+  });
+  const visible = frames.filter((frame) => frame.present);
+  const peak = visible.length ? Math.max(...visible.map((frame) => frame.opacity)) : null;
+  add(theme + "-motion-scrim-continuity", beforeOpacity > 0 && beforeOpacity < 1
+    && visible.length > 0 && peak <= beforeOpacity + 0.02,
+    JSON.stringify({ beforeOpacity, peak, samples: visible.length }));
 }
 
 export async function runLyricsMotionChecks({ page, add, theme }) {
@@ -93,15 +184,21 @@ export async function runLyricsMotionChecks({ page, add, theme }) {
     && frames.at(-1).opacity === 1, "外观窗重新显示有进入过渡");
   const count = await panel.getAttribute("data-presentation-count");
   await page.evaluate(async () => {
-    await window.__popupGuard.present(true, 4);
+    await window.__popupGuard.present(true, 3);
     await window.__popupGuard.present(false, 2);
     await window.__popupGuard.present(true, 3);
   });
   add(theme + "-lyrics-popup-no-replay", await panel.getAttribute("data-presentation-count") === count, "尺寸/旧可见性通知不重播");
+  await page.evaluate(async () => {
+    await window.__popupGuard.present(true, 5);
+    await window.__popupGuard.present(false, 4);
+  });
+  add(theme + "-lyrics-popup-out-of-order", Number(await panel.getAttribute("data-presentation-count")) === Number(count) + 1,
+    "迟到的隐藏通知不吞掉实际重显的进入反馈");
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.waitForFunction(() => document.documentElement.dataset.motion === "reduced");
   const reduced = await recordVisualFrames(page, '[data-testid="lyrics-appearance-panel"]', () =>
-    page.evaluate(async () => { await window.__popupGuard.present(false, 5); await window.__popupGuard.present(true, 6); }));
+    page.evaluate(async () => { await window.__popupGuard.present(false, 6); await window.__popupGuard.present(true, 7); }));
   add(theme + "-lyrics-popup-reduced", reduced.filter((frame) => frame.present).every((frame) => frame.opacity === 1),
     "独立外观窗减少动效直接到位");
   await page.emulateMedia({ reducedMotion: "no-preference" });
