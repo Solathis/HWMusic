@@ -33,6 +33,8 @@ import { createThemeAcceptor } from "./features/theme/theme-accept.mjs"
 import { applyThemeChoice } from "./features/theme/theme.mjs"
 import { cn } from "./lib/utils"
 import { VerticalLyricColumn } from "./VerticalLyricColumn.tsx"
+import { useMotionPolicy } from "./features/motion/MotionProvider"
+import { MotionRegion, MotionSwap } from "./features/motion/primitives"
 
 /** 广播进来的歌词文档（主窗转发的那一份）。 */
 interface LyricsDocument {
@@ -55,6 +57,7 @@ export const RESIZE_SAVE_DELAY_MS = 250
 
 export function LyricsWindow() {
   // 初值来自建窗时拼的查询串（Rust 侧按当前配置拼）：渲染层还没订阅事件时也不会丢配置
+  const { reducedMotion } = useMotionPolicy()
   const [config, setConfig] = useState(() => lyricsConfigFromSearch(window.location.search))
   // 光标是否落在歌词窗里（锁定后窗不接收鼠标，这个事实只能由 Rust 轮询广播过来）
   const [pointerInside, setPointerInside] = useState(false)
@@ -281,7 +284,7 @@ export function LyricsWindow() {
   const lockButton = (
     <Button variant="ghost" size="icon-sm" aria-pressed={config.locked}
       aria-label={config.locked ? "已锁定桌面歌词（点击解锁）" : "锁定桌面歌词"}
-      onClick={() => configure({ locked: !config.locked })}>{config.locked ? <Lock /> : <Unlock />}</Button>
+      onClick={() => configure({ locked: !config.locked })}><MotionSwap identity={config.locked ? "locked" : "unlocked"}>{config.locked ? <Lock /> : <Unlock />}</MotionSwap></Button>
   )
   /** 锁定后只有一个解锁按钮：光标进入歌词窗（Rust 广播）、悬停或键盘聚焦时才显示。 */
   const lockedControls = (
@@ -306,7 +309,7 @@ export function LyricsWindow() {
       {config.showControls ? <>
         <Button variant="ghost" size="icon-sm" aria-label="上一首" onClick={() => control("previous")}><SkipBack /></Button>
         <Button variant="ghost" size="icon-sm" aria-label={frame.playing ? "暂停" : "播放"} onClick={() => control("toggle")}>
-          {frame.playing ? <Pause /> : <Play />}
+        <MotionSwap identity={frame.playing ? "playing" : "paused"}>{frame.playing ? <Pause /> : <Play />}</MotionSwap>
         </Button>
         <Button variant="ghost" size="icon-sm" aria-label="下一首" onClick={() => control("next")}><SkipForward /></Button>
       </> : null}
@@ -319,16 +322,18 @@ export function LyricsWindow() {
   /** 竖版（桌面模式）改由自渲染的单列承担，横版与任务栏仍是官方 `LyricPlayer`。 */
   const vertical = config.mode === "desktop" && config.layout === "vertical"
   const content = (
-    <div className="relative isolate min-h-0 flex-1" onMouseDownCapture={startDrag}>
+    <MotionRegion identity={config.layout + "|" + config.size + "|" + config.style} kind="content"
+      active={config.mode === "desktop"} className="relative isolate min-h-0 flex-1" onMouseDownCapture={startDrag}
+      data-testid="lyrics-layout-content">
       {hasLyric && vertical ? <VerticalLyricColumn lines={playerLines} timeMs={frame.time} karaoke={appearance.karaoke} /> : null}
       {hasLyric && !vertical ? <LyricPlayer className="h-full w-full" lyricLines={playerLines}
         currentTime={frame.time} isSeeking={frame.isSeeking} playing={frame.playing}
-        enableBlur={config.enableBlur} enableScale={config.enableScale} enableSpring={config.enableSpring}
+        enableBlur={!reducedMotion && config.enableBlur} enableScale={!reducedMotion && config.enableScale} enableSpring={!reducedMotion && config.enableSpring}
         alignAnchor="center" alignPosition={0.5} /> : null}
       {notice === null ? null : <div className="absolute inset-0 flex items-center justify-center p-2">
         <p role="status" className="text-center text-sm text-muted-foreground">{notice}</p>
       </div>}
-    </div>
+    </MotionRegion>
   )
 
   /** 透明窗的可读性衬底：clean 用令牌底色、锁定时更淡；panel 锁定时卡片更淡；bare 不加衬底，只给歌词加阴影。 */

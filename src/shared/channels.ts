@@ -53,6 +53,8 @@ export const LYRICS_PROGRESS = "lyrics:progress" as const;
  * URL 只供初值，歌词窗订阅后 configure({}) 回读再发 `{ready:true}`，主窗补最新文档/进度/主题。
  */
 export const LYRICS_STATE = "lyrics:state" as const;
+/** 外观弹窗自己的可见性与表现代次，独立于歌词/config。 */
+export const LYRICS_SETTINGS_PRESENTATION = "lyrics-settings:presentation" as const;
 
 /** 锁定的桌面歌词：光标进出歌词窗 `{inside: boolean}`（Rust 轮询光标后广播）。 */
 export const LYRICS_POINTER = "lyrics:pointer" as const;
@@ -85,6 +87,7 @@ export const BROADCAST_CHANNELS = [
   LYRICS_DOCUMENT,
   LYRICS_PROGRESS,
   LYRICS_STATE,
+  LYRICS_SETTINGS_PRESENTATION,
   LYRICS_POINTER,
   THEME_CHANGED,
   UPDATE_PROGRESS,

@@ -6,7 +6,11 @@
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 
-import { LYRICS_STATE, THEME_CHANGED } from "../shared/channels.ts"
+import { LYRICS_STATE, LYRICS_SETTINGS_PRESENTATION, THEME_CHANGED } from "../shared/channels.ts"
+import { createPresentationAcceptor } from "./features/motion/presentation.mjs"
+import { useMotionPolicy } from "./features/motion/MotionProvider"
+import { MOTION_MS, MOTION_EASES } from "./features/motion/tokens.mjs"
+import { MotionRegion } from "./features/motion/primitives"
 import {
   coreLyricsConfigure,
   coreLyricsSettingsClose,
@@ -75,12 +79,29 @@ export function LyricsSettingsPopup() {
   const [saveError, setSaveError] = useState<string | null>(null)
   /** 权威配置读到之前不量尺寸：第一帧就得是用户真正的那份配置。 */
   const [ready, setReady] = useState(false)
+  const { reducedMotion } = useMotionPolicy()
+  const presentationRef = useRef<ReturnType<typeof createPresentationAcceptor> | null>(null)
+  const presentationCount = useRef(0)
+  if (presentationRef.current === null) presentationRef.current = createPresentationAcceptor((visible: boolean) => {
+    const node = contentRef.current
+    if (!node) return
+    node.getAnimations().forEach((animation) => animation.cancel())
+    if (visible && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      node.animate([{ opacity: 0, scale: "0.96" }, { opacity: 1, scale: "1" }],
+        { duration: MOTION_MS.overlay, easing: "cubic-bezier(" + MOTION_EASES.enter.join(",") + ")" })
+      presentationCount.current += 1
+      node.dataset.presentationCount = String(presentationCount.current)
+    }
+  })
   /** 面板量到的 CSS 尺寸：报给宿主，也用来算触发点（`side="top"` 时要减掉面板高度）。 */
   const [panel, setPanel] = useState({ width: 0, height: 0 })
   /** 宿主算好的气泡几何（方向 / 箭头 / 留边）；还没回执时用居中箭头的默认值。 */
   const [bubble, setBubble] = useState<null | { side: string; arrow: number; pad: number }>(null)
   const revisionRef = useRef(-1)
   const contentRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (reducedMotion) contentRef.current?.getAnimations().forEach((animation) => animation.cancel())
+  }, [reducedMotion])
   const [taskbarSupported, setTaskbarSupported] = useState(false)
 
   const themeHex = useTokenColorHex(config.color)
@@ -148,6 +169,7 @@ export function LyricsSettingsPopup() {
     }
     void Promise.all([
       onCoreEvent<unknown>(LYRICS_STATE, (payload) => { if (alive) acceptStatus(payload) }).then(keep),
+      onCoreEvent<unknown>(LYRICS_SETTINGS_PRESENTATION, (payload) => { if (alive) presentationRef.current?.(payload) }).then(keep),
       onCoreEvent<{ theme?: string; revision?: number }>(THEME_CHANGED, (payload) => {
         themeAcceptor.accept(payload)
       }).then(keep),
@@ -184,8 +206,9 @@ export function LyricsSettingsPopup() {
       last = { width, height }
       void coreLyricsSettingsResize(width, height)
         .then((answer) => {
-          const payload = answer as { geometry?: unknown } | null
+          const payload = answer as { geometry?: unknown; presentation?: unknown } | null
           setBubble(normalizeBubbleGeometry(payload?.geometry, width))
+          presentationRef.current?.(payload?.presentation)
         })
         .catch(() => setActionError("设置面板没能摆好，请关掉重开。"))
     }
@@ -235,6 +258,8 @@ export function LyricsSettingsPopup() {
           <PopoverTitle>桌面歌词外观</PopoverTitle>
         </PopoverHeader>
         <Separator />
+        <MotionRegion identity={config.mode + "|" + config.style + "|" + config.layout + "|" + config.size}
+          kind="content" className="flex flex-col gap-2">
 
         <Field label="位置">
           <ToggleGroup type="single" size="sm" variant="outline" value={config.mode}
@@ -318,6 +343,7 @@ export function LyricsSettingsPopup() {
         {/* 失败也要在这个窗里说一句：它是用户眼前唯一的东西（关掉之后才轮到歌词窗那条提示） */}
         {actionError === null ? null : <p role="alert" className="text-xs text-muted-foreground">{actionError}</p>}
         {saveError === null ? null : <p role="alert" className="text-xs text-muted-foreground">{saveError}</p>}
+        </MotionRegion>
       </PopoverContent>
     </Popover>
   )

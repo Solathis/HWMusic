@@ -21,7 +21,7 @@ import sharp from "sharp";
 import { RUN_LOG_EMPTY_TEXT, RUN_LOG_FAILURE_TEXT } from "../src/renderer/features/settings/run-log.mjs";
 import { POPOVER_PAD_DIP } from "../src/renderer/features/lyrics/lyrics-popover.mjs";
 import { runPlaybackQualityChecks } from "./browser-guards/playback-quality.mjs";
-import { runMotionChecks, runStageMotionChecks, runPlaybackInteractionChecks, runFeedbackMotionChecks } from "./browser-guards/motion.mjs";
+import { runMotionChecks, runStageMotionChecks, runPlaybackInteractionChecks, runFeedbackMotionChecks, runLyricsMotionChecks } from "./browser-guards/motion.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** 守卫自己的中间产物（.gitignore 已含 .tmp/）。 */
@@ -3250,7 +3250,8 @@ mockIPC(async (command, args) => {
   }
   if (command === "core_lyrics_settings_resize") {
     resizeCalls.push({ width: args.width, height: args.height, atMs: Math.round(performance.now()) });
-    return { applied: true, width: args.width, height: args.height, visible: true, geometry: geometryFor(args.width) };
+    return { applied: true, width: args.width, height: args.height, visible: true, geometry: geometryFor(args.width),
+      presentation: { visible: true, revision: 1 } };
   }
   if (command === "core_lyrics_settings_close") {
     closeCalls.push(Math.round(performance.now()));
@@ -3264,6 +3265,9 @@ mockIPC(async (command, args) => {
 }, { shouldMockEvents: true });
 
 window.__popupGuard = {
+  async present(visible, revision) {
+    await emit("core:event", { channel: "lyrics-settings:presentation", payload: { visible, revision } });
+  },
   configureCalls: () => configureCalls.map((patch) => ({ ...patch })),
   resizeCalls: () => resizeCalls.map((entry) => ({ ...entry })),
   closeCalls: () => closeCalls.slice(),
@@ -6028,7 +6032,7 @@ const withMotionProvider = (source) => 'import { MotionProvider } from "../../sr
   + source.replaceAll("<StrictMode>", "<StrictMode><MotionProvider>").replaceAll("</StrictMode>", "</MotionProvider></StrictMode>");
 
 export async function runGuard({ root = ROOT, log = console.log, scope = "full" } = {}) {
-  if (!["full", "quality", "motion", "stage", "interactions", "feedback"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
+  if (!["full", "quality", "motion", "stage", "interactions", "feedback", "lyrics"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
   const guardDir = path.join(root, GUARD_DIR);
   await mkdir(guardDir, { recursive: true });
 
@@ -6214,6 +6218,7 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
         else if (scope === "stage") await runStageMotionChecks({ page, add, theme });
         else if (scope === "interactions") await runPlaybackInteractionChecks({ page, add, theme });
         else if (scope === "feedback") await runFeedbackMotionChecks({ page, add, theme });
+        else if (scope === "lyrics") await runLyricsMotionChecks({ page, add, theme });
         else await runMotionChecks({ page, add, theme });
       }
       add(scope + "-no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,
@@ -6732,18 +6737,17 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
       add(`${theme}-menu-stack`, await page.evaluate(() => window.__guard.snapshot().mode === "list-loop"), "官方 MediaButton 触发的模式菜单 portal 在舞台上可点");
       const queueTrigger = page.getByRole("button", { name: "播放队列", exact: true });
       await queueTrigger.focus();
-      await queueTrigger.press("Enter");
-      await page.locator('[data-slot="sheet-content"]').waitFor();
+      const underlayFocus = await queueTrigger.evaluate((node) => document.activeElement === node);
+      add(`${theme}-stage-underlay-inert`, !underlayFocus && await page.locator('[data-slot="sheet-content"]').count() === 0,
+        "沉浸页打开时隐藏主壳不能被键盘聚焦或误操作");
+      await stage.getByRole("button", { name: /^播放模式：/ }).click();
       await page.keyboard.press("Escape");
-      await page.locator('[data-slot="sheet-content"]').waitFor({ state: "detached" });
-      add(`${theme}-sheet-escape-keeps-stage`, await stage.isVisible(), "ESC 先关闭上层 Sheet，不关闭舞台");
+      add(`${theme}-sheet-escape-keeps-stage`, await stage.isVisible(), "ESC 先关闭舞台自己的上层菜单");
       const logoutTrigger = page.getByRole("button", { name: "退出登录", exact: true });
       await logoutTrigger.focus();
-      await logoutTrigger.press("Enter");
-      await page.getByRole("alertdialog").waitFor();
-      await page.getByRole("button", { name: "取消", exact: true }).click();
-      await page.getByRole("alertdialog").waitFor({ state: "detached" });
-      add(`${theme}-overlapping-overlays`, await stage.isVisible(), "舞台仍打开时键盘激活 Sheet/Dialog，指针可关闭上层，舞台保留");
+      add(`${theme}-overlapping-overlays`, await stage.isVisible()
+        && !await logoutTrigger.evaluate((node) => document.activeElement === node)
+        && await page.getByRole("alertdialog").count() === 0, "舞台阻止隐藏主壳的退出登录入口");
 
       for (const status of ["empty", "failed", "loading", "unavailable"]) {
         await page.evaluate((value) => window.__guard.setLyrics(value), status);

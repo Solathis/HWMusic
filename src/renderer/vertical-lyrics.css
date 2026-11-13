@@ -25,7 +25,8 @@
   line-height: 1.15;
   /* 运行时量出来的平移量（VerticalLyricColumn 用 setProperty 写这一条自定义属性） */
   transform: translateY(var(--vertical-lyric-shift, 0px));
-  transition: transform 180ms linear;
+  /* 每帧位置已经由歌词时间推算，额外追赶会落后于正在唱的字。 */
+  transition: none;
 }
 
 .vertical-lyric__column {

@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tauri::{
+    Emitter,
     AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
@@ -269,6 +270,8 @@ struct PopupState {
     shutting_down: bool,
     /// 系统取色器正被页面确认开着：这期间宿主失焦不算"点了面板外面"。
     color_picking: bool,
+    visible: bool,
+    presentation_revision: u64,
 }
 
 impl SettingsPopupState {
@@ -282,6 +285,21 @@ impl SettingsPopupState {
 
     fn content(&self) -> Option<Size> {
         self.with(|state| state.content)
+    }
+
+    fn presentation(&self, visible: bool) -> (Value, bool) {
+        self.with(|state| {
+            let changed = state.visible != visible;
+            if changed {
+                state.visible = visible;
+                state.presentation_revision = state.presentation_revision.saturating_add(1);
+            }
+            (json!({ "visible": state.visible, "revision": state.presentation_revision }), changed)
+        })
+    }
+
+    fn presentation_snapshot(&self) -> Value {
+        self.with(|state| json!({ "visible": state.visible, "revision": state.presentation_revision }))
     }
 
     fn set_color_picking(&self, picking: bool) {
@@ -321,6 +339,19 @@ impl SettingsPopupState {
 
 /// 弹出窗的标题（Alt+Tab / 任务视图里的名字；不能留给 tao 的默认 "Tauri App"）。
 pub const SETTINGS_POPUP_TITLE: &str = "桌面歌词设置";
+pub const SETTINGS_PRESENTATION_EVENT: &str = "lyrics-settings:presentation";
+
+fn presentation<R: Runtime>(window: &WebviewWindow<R>, visible: bool) -> Value {
+    let state = window.app_handle().state::<SettingsPopupState>();
+    let (payload, changed) = state.presentation(visible);
+    if changed {
+        if let Err(error) = window.emit_to(LYRICS_SETTINGS_WINDOW_LABEL, crate::bridge::CORE_EVENT,
+            json!({ "channel": SETTINGS_PRESENTATION_EVENT, "payload": payload.clone() })) {
+            log::warn!("歌词设置可见性通知失败：{error}");
+        }
+    }
+    payload
+}
 
 /// 弹出窗的 webview 数据目录：`<数据根>/webview2/lyrics-settings`。
 /// 不与歌词窗共用：同目录建两个环境会让库锁互相牵制，每窗一份是本仓既有做法。
@@ -401,7 +432,7 @@ fn build_popup<R: Runtime>(
             }
             if let Some(window) = events.get_webview_window(LYRICS_SETTINGS_WINDOW_LABEL) {
                 if window.is_visible().unwrap_or(false) {
-                    let _ = window.hide();
+                    hide(&events);
                     if let Some(state) = events.try_state::<SettingsPopupState>() {
                         state.note_blur();
                     }
@@ -426,8 +457,9 @@ fn build_popup<R: Runtime>(
 /// 隐藏弹出窗（不存在就什么都不做）。**不销毁**：页面、位置、量好的尺寸都留着。
 pub fn hide<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window(LYRICS_SETTINGS_WINDOW_LABEL) {
-        if let Err(error) = window.hide() {
-            log::warn!("歌词设置弹出窗隐藏失败：{error}");
+        match window.hide() {
+            Ok(()) => { presentation(&window, false); }
+            Err(error) => log::warn!("歌词设置弹出窗隐藏失败：{error}"),
         }
     }
 }
@@ -493,6 +525,7 @@ fn show<R: Runtime>(window: &WebviewWindow<R>) {
     if let Err(error) = window.set_focus() {
         log::warn!("歌词设置弹出窗拿不到焦点（失焦关闭会失效）：{error}");
     }
+    presentation(window, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -626,6 +659,7 @@ pub async fn core_lyrics_settings_resize(
         "width": content.width,
         "height": content.height,
         "visible": window.is_visible().unwrap_or(false),
+        "presentation": state.presentation_snapshot(),
         "geometry": applied.ok().map(|geometry| geometry_payload(&geometry, scale)),
     }))
 }
@@ -656,6 +690,16 @@ pub async fn core_lyrics_settings_color_picking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn popup_presentation_changes_only_with_visibility() {
+        let state = SettingsPopupState::default();
+        assert_eq!(state.presentation(false), (json!({"visible":false,"revision":0}), false));
+        assert_eq!(state.presentation(true), (json!({"visible":true,"revision":1}), true));
+        assert_eq!(state.presentation(true), (json!({"visible":true,"revision":1}), false));
+        assert_eq!(state.presentation(false), (json!({"visible":false,"revision":2}), true));
+        assert_eq!(state.presentation(true), (json!({"visible":true,"revision":3}), true));
+    }
 
     fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
         Rect {
@@ -1031,7 +1075,7 @@ mod tests {
         let arm = &rest[..rest.find("WindowEvent::CloseRequested").expect("失焦分支之后是关闭分支")];
         let guard = arm.find("color_picking()").expect("失焦分支必须先问取色状态");
         assert!(arm.contains("state.color_picking()"), "问的是弹出窗自己那份状态");
-        assert!(guard < arm.find("window.hide()").expect("平时照旧 hide"), "取色中不许 hide");
+        assert!(guard < arm.find("hide(&events)").expect("平时通过统一隐藏入口关闭"), "取色中不许 hide");
         assert!(
             guard < arm.find("note_blur()").expect("平时要记失焦时刻"),
             "取色中不许记失焦时刻（否则紧跟着的那笔 open 会被拒）"

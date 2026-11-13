@@ -76,6 +76,56 @@ export async function runMotionChecks(context) {
   await runStageMotionChecks(context);
   await runPlaybackInteractionChecks(context);
   await runFeedbackMotionChecks(context);
+  await runLyricsMotionChecks(context);
+}
+
+export async function runLyricsMotionChecks({ page, add, theme }) {
+  const base = page.url().split("?")[0].replace(/index.html$/, "lyrics-settings.html");
+  await page.goto(base, { waitUntil: "load" });
+  await page.waitForFunction(() => window.__popupGuard !== undefined);
+  const panel = page.getByTestId("lyrics-appearance-panel");
+  await panel.waitFor();
+  await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
+  const frames = await recordVisualFrames(page, '[data-testid="lyrics-appearance-panel"]', async () => {
+    await page.evaluate(async () => { await window.__popupGuard.present(false, 2); await window.__popupGuard.present(true, 3); });
+  });
+  add(theme + "-lyrics-popup-reopen", frames.some((frame) => frame.opacity > 0 && frame.opacity < 1)
+    && frames.at(-1).opacity === 1, "外观窗重新显示有进入过渡");
+  const count = await panel.getAttribute("data-presentation-count");
+  await page.evaluate(async () => {
+    await window.__popupGuard.present(true, 4);
+    await window.__popupGuard.present(false, 2);
+    await window.__popupGuard.present(true, 3);
+  });
+  add(theme + "-lyrics-popup-no-replay", await panel.getAttribute("data-presentation-count") === count, "尺寸/旧可见性通知不重播");
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.waitForFunction(() => document.documentElement.dataset.motion === "reduced");
+  const reduced = await recordVisualFrames(page, '[data-testid="lyrics-appearance-panel"]', () =>
+    page.evaluate(async () => { await window.__popupGuard.present(false, 5); await window.__popupGuard.present(true, 6); }));
+  add(theme + "-lyrics-popup-reduced", reduced.filter((frame) => frame.present).every((frame) => frame.opacity === 1),
+    "独立外观窗减少动效直接到位");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+
+  const mainUrl = new URL("index.html", base).href;
+  await page.goto(mainUrl, { waitUntil: "load" });
+  await page.waitForFunction(() => window.__guard !== undefined);
+  await page.evaluate(() => window.__guard.ready());
+  await page.evaluate(() => window.__guard.configureDesktop({ mode: "desktop", locked: false, layout: "horizontal", size: "sm" }));
+  await page.evaluate(() => window.__guard.desktopBeforeMount());
+  await page.getByTestId("lyrics-window").waitFor();
+  await page.waitForFunction(() => document.querySelector('[data-testid="lyrics-window"]')?.dataset.lyricsSize === "sm");
+  await page.evaluate(() => window.__guard.desktopDocument());
+  const change = await recordVisualFrames(page, '[data-testid="lyrics-layout-content"]', () =>
+    page.evaluate(() => window.__guard.configureDesktop({ layout: "vertical", size: "lg" })));
+  add(theme + "-lyrics-layout-motion", change.some((frame) => frame.present && frame.opacity > 0 && frame.opacity < 1)
+    && change.at(-1).opacity === 1, "桌面歌词布局改变有短过渡");
+  await page.evaluate(() => window.__guard.configureDesktop({ mode: "taskbar" }));
+  const taskbar = await page.getByTestId("lyrics-layout-content").evaluate((node) => ({
+    transform: getComputedStyle(node).transform,
+    opacity: getComputedStyle(node).opacity,
+  }));
+  add(theme + "-lyrics-taskbar-still", taskbar.transform === "none" && taskbar.opacity === "1",
+    "任务栏歌词容器不位移缩放");
 }
 
 export async function runFeedbackMotionChecks({ page, add, theme }) {
