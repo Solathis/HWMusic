@@ -74,11 +74,73 @@ export async function runMotionChecks(context) {
   await runPageMotionChecks(context);
   await runOverlayMotionChecks(context);
   await runStageMotionChecks(context);
+  await runDelayedResizeChecks(context);
   await runPlaybackInteractionChecks(context);
   await runFeedbackMotionChecks(context);
   await runLyricsMotionChecks(context);
   await runInterruptedMotionChecks(context);
   await runMotionResourceChecks(context);
+}
+
+export async function runDelayedResizeChecks({ page, add, theme }) {
+  await page.goto(page.url().split("?")[0], { waitUntil: "load" });
+  await page.waitForFunction(() => window.__guard !== undefined);
+  await page.evaluate((choice) => { document.documentElement.className = choice; return window.__guard.ready(); }, theme);
+  await page.waitForFunction(() => {
+    const image = document.querySelector('[data-testid="player-track-info"] img');
+    return image?.complete && image.naturalWidth > 0;
+  });
+  const frames = await recordVisualFrames(page, '[data-testid="cover-flight"]', async () => {
+    await page.evaluate(() => {
+      const originalRequest = window.requestAnimationFrame;
+      const originalCancel = window.cancelAnimationFrame;
+      const held = new Map();
+      let next = -1;
+      const gate = { hold: true, held, restore() {
+        window.requestAnimationFrame = originalRequest;
+        window.cancelAnimationFrame = originalCancel;
+      }, release() {
+        gate.hold = false;
+        for (const [id, callback] of held) {
+          originalRequest.call(window, (time) => {
+            if (!held.has(id)) return;
+            held.delete(id);
+            callback(time);
+          });
+        }
+      } };
+      window.__resizeFrameGate = gate;
+      window.requestAnimationFrame = (callback) => {
+        if (!gate.hold) return originalRequest.call(window, callback);
+        const id = next--;
+        held.set(id, callback);
+        return id;
+      };
+      window.cancelAnimationFrame = (id) => {
+        if (id < 0) held.delete(id);
+        else originalCancel.call(window, id);
+      };
+    });
+    try {
+      await page.getByRole("button", { name: "打开歌词", exact: true }).evaluate((node) => node.click());
+      await page.waitForFunction(() => Boolean(document.querySelector('[data-testid="playback-stage-cover"]')),
+        null, { polling: 10 });
+      await page.evaluate(() => {
+        window.dispatchEvent(new Event("resize"));
+        window.__resizeFrameGate.release();
+      });
+    } catch (error) {
+      await page.evaluate(() => window.__resizeFrameGate?.restore());
+      throw error;
+    }
+  });
+  const shown = frames.filter((frame) => frame.present).length;
+  const motion = await page.getByTestId("playback-stage").getAttribute("data-cover-motion");
+  add(theme + "-motion-resize-before-measure", shown === 0 && motion === "idle",
+    JSON.stringify({ flightFramesAfterCancel: shown, finalMotion: motion }));
+  await page.evaluate(() => { window.__resizeFrameGate.restore(); delete window.__resizeFrameGate; });
+  await page.keyboard.press("Escape");
+  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
 }
 
 export async function runMotionResourceChecks({ page, add, theme }) {
@@ -346,7 +408,8 @@ export async function runStageMotionChecks({ page, add, theme }) {
   await source.click();
   await page.waitForTimeout(80);
   await page.setViewportSize({ width: 1100, height: 760 });
-  await page.waitForTimeout(100);
+  await page.waitForFunction(() => document.querySelector('[data-testid="playback-stage"]')?.dataset.coverMotion === "idle"
+    && !document.querySelector('[data-testid="cover-flight"]'));
   add(theme + "-motion-cover-resize-cancel", await page.getByTestId("cover-flight").count() === 0, "窗口改变尺寸取消旧封面飞行");
   await page.keyboard.press("Escape");
   await page.getByTestId("playback-stage").waitFor({ state: "detached" });

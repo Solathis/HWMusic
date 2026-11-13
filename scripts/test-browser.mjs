@@ -21,7 +21,7 @@ import sharp from "sharp";
 import { RUN_LOG_EMPTY_TEXT, RUN_LOG_FAILURE_TEXT } from "../src/renderer/features/settings/run-log.mjs";
 import { POPOVER_PAD_DIP } from "../src/renderer/features/lyrics/lyrics-popover.mjs";
 import { runPlaybackQualityChecks } from "./browser-guards/playback-quality.mjs";
-import { runMotionChecks, runStageMotionChecks, runPlaybackInteractionChecks, runFeedbackMotionChecks, runLyricsMotionChecks, runOverlayMotionChecks, runInterruptedMotionChecks, runMotionResourceChecks, recordVisualFrames } from "./browser-guards/motion.mjs";
+import { runMotionChecks, runStageMotionChecks, runPlaybackInteractionChecks, runFeedbackMotionChecks, runLyricsMotionChecks, runOverlayMotionChecks, runInterruptedMotionChecks, runMotionResourceChecks, runDelayedResizeChecks, recordVisualFrames } from "./browser-guards/motion.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** 守卫自己的中间产物（.gitignore 已含 .tmp/）。 */
@@ -6001,7 +6001,7 @@ const withMotionProvider = (source) => 'import { MotionProvider } from "../../sr
   + source.replaceAll("<StrictMode>", "<StrictMode><MotionProvider>").replaceAll("</StrictMode>", "</MotionProvider></StrictMode>");
 
 export async function runGuard({ root = ROOT, log = console.log, scope = "full" } = {}) {
-  if (!["full", "quality", "motion", "stage", "interactions", "feedback", "lyrics", "overlays", "pagination", "interruptions", "resources"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
+  if (!["full", "quality", "motion", "stage", "interactions", "feedback", "lyrics", "overlays", "pagination", "interruptions", "resources", "resize"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
   const guardDir = path.join(root, GUARD_DIR);
   await mkdir(guardDir, { recursive: true });
 
@@ -6192,6 +6192,7 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
         else if (scope === "pagination") { await page.evaluate(() => window.__guard.ready()); await checkLibraryPagination(page, guardDir, add); }
         else if (scope === "interruptions") await runInterruptedMotionChecks({ page, add, theme });
         else if (scope === "resources") await runMotionResourceChecks({ page, add, theme });
+        else if (scope === "resize") await runDelayedResizeChecks({ page, add, theme });
         else await runMotionChecks({ page, add, theme });
       }
       add(scope + "-no-runtime-errors", consoleErrors.length === 0 && pageErrors.length === 0,

@@ -104,9 +104,13 @@ export function PlaybackStage({ open, runtime, state, onClose, coverSourceRef, o
     }
     if (reduceMotion) { intent.current.done = true; flightGeneration.current += 1; restoreAnchors(); setFlight(null); if (stageRef.current) stageRef.current.dataset.coverMotion = "idle"; return }
     if (intent.current.done || !coverUrl || !coverSourceRef?.current) return
+    const measurementIntent = intent.current
+    const measurementGeneration = flightGeneration.current
     let second = 0
     const first = requestAnimationFrame(() => {
+      if (intent.current !== measurementIntent || measurementIntent.done || flightGeneration.current !== measurementGeneration) return
       second = requestAnimationFrame(function measure() {
+        if (intent.current !== measurementIntent || measurementIntent.done || flightGeneration.current !== measurementGeneration) return
         const source = coverSourceRef.current
         const target = coverTargetRef.current
         if (!source || !target) {
