@@ -13,6 +13,7 @@ import { withKaraokeWords } from "./features/lyrics/amll-adapter.ts"
 import type { PlayerRuntime } from "./features/playback/player-runtime.ts"
 
 export interface AmllLyricsPanelProps {
+  active?: boolean
   runtime: PlayerRuntime
   /** AMLL 的歌词行（由 features/lyrics/amll-adapter.ts 从 LRC 解析而来） */
   lines: LyricLine[]
@@ -21,14 +22,23 @@ export interface AmllLyricsPanelProps {
   seekGeneration: number
 }
 
-export function AmllLyricsPanel({ runtime, lines, playing, seekGeneration }: AmllLyricsPanelProps) {
+export function AmllLyricsPanel({ runtime, lines, playing, seekGeneration, active = true }: AmllLyricsPanelProps) {
   const { reducedMotion } = useMotionPolicy()
   const player = runtime.player
-  const [frame, setFrame] = useState({ time: 0, isSeeking: false })
+  const [frame, setFrame] = useState(() => ({ time: player.snapshot().currentTimeMs, isSeeking: true }))
   const syncRef = useRef<ReturnType<typeof createLyricSync> | null>(null)
-
-  // 进度泵：挂载就开跑，卸载就停帧（后台页不留 rAF）
+  const [laidOutLines, setLaidOutLines] = useState<LyricLine[] | null>(null)
   useEffect(() => {
+    let second = 0
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => setLaidOutLines(lines))
+    })
+    return () => { cancelAnimationFrame(first); cancelAnimationFrame(second) }
+  }, [lines])
+
+  useEffect(() => {
+    if (!active) return
+    setFrame({ time: player.snapshot().currentTimeMs, isSeeking: true })
     const sync = createLyricSync({
       readTime: () => player.snapshot().currentTimeMs,
       push: (patch: { time: number; isSeeking: boolean }) => setFrame(patch),
@@ -41,7 +51,7 @@ export function AmllLyricsPanel({ runtime, lines, playing, seekGeneration }: Aml
       sync.stop()
       syncRef.current = null
     }
-  }, [player])
+  }, [player, active])
 
   // 每一次 seek 都通知一次：连续拖动会不断续期，手停 200ms 后窗口自然关闭。
   // 挂载那一次不算：那时并没有发生跳转，标成 isSeeking 只会让 AMLL 白重排一次。
@@ -61,7 +71,8 @@ export function AmllLyricsPanel({ runtime, lines, playing, seekGeneration }: Aml
         lyricLines={playerLines}
         currentTime={frame.time}
         isSeeking={frame.isSeeking}
-        playing={playing}
+        playing={playing && active}
+        disabled={!active && laidOutLines === lines}
         enableSpring={!reducedMotion}
         enableScale={!reducedMotion}
         enableBlur={!reducedMotion}

@@ -10,6 +10,7 @@ import { useEffect, useState } from "react"
 import { useMotionPolicy } from "./features/motion/MotionProvider"
 
 export interface AmllBackgroundProps {
+  active?: boolean
   /** 在播状态（决定背景是否流动） */
   playing: boolean
   /** 这首歌是否有歌词（背景会据此变活跃；不知道时传 true） */
@@ -78,7 +79,7 @@ export function useCoverImage(url: string | null | undefined): HTMLImageElement 
   return useImageElement(url, false)
 }
 
-export function AmllBackground({ playing, hasLyric, albumArt, albumUrl }: AmllBackgroundProps) {
+export function AmllBackground({ playing, hasLyric, albumArt, albumUrl, active = true }: AmllBackgroundProps) {
   const { decorationsActive } = useMotionPolicy()
   const loaded = useAlbumImage(albumUrl)
   const album = albumArt ?? loaded ?? undefined
@@ -88,7 +89,8 @@ export function AmllBackground({ playing, hasLyric, albumArt, albumUrl }: AmllBa
       <BackgroundRender
         key={album?.src ?? "empty"}
         album={album}
-        staticMode={!playing || !decorationsActive}
+        playing={active && decorationsActive}
+        staticMode={!playing || !active || !decorationsActive}
         hasLyric={hasLyric}
         renderScale={0.5}
         style={{ width: "100%", height: "100%" }}

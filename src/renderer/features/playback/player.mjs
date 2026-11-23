@@ -14,6 +14,7 @@ import { ALL_OFFLINE_TEXT, offlineSkippedText, partitionPlayable, playableStartI
 import { LYRICS_STATUS } from "../lyrics/lyrics-window.mjs";
 import { trackDurationOf } from "../library/track-fields.mjs";
 import { DEFAULT_PLAYER_MUTED, DEFAULT_PLAYER_VOLUME, isPlayerMuted, isPlayerVolume } from "../../../shared/playback-audio.mjs";
+import { isPlaybackQuality, playbackAudioDetailsOf } from "../../../shared/playback-quality.mjs";
 
 /** 歌词状态词表（唯一真源在 features/lyrics/lyrics-window.mjs）：认不出的值一律不写进状态。 */
 const LYRICS_STATUSES = Object.values(LYRICS_STATUS);
@@ -124,7 +125,7 @@ function kindOf(cause) {
  * @returns {"standard"|"high"|"lossless"|null}
  */
 function declaredQualityOf(value) {
-  return value === "standard" || value === "high" || value === "lossless" ? value : null;
+  return isPlaybackQuality(value) ? value : null;
 }
 
 /** 提示里的曲目称呼：有名字用名字，没有就用标识。 */
@@ -233,6 +234,8 @@ export function createPlayer(options = {}) {
   let persistedKey = "\u0000initial";
   let persistedStructureEntries;
   let persistedStructureIndex;
+  let persistedPlaybackKey = JSON.stringify(null);
+  let qualityConfirmationToken = 0;
   let persistedPositionKey = JSON.stringify(null);
   /** 随机模式的轮换排列与游标（一轮内不重复，且"上一首"退得回去）。 */
   let order = [];
@@ -271,6 +274,8 @@ export function createPlayer(options = {}) {
    *   track: import("./queue.mjs").QueueEntry|null,
    *   loaded: boolean,
    *   quality: "standard"|"high"|"lossless"|null,
+   *   qualitySource: "restored"|"resolved"|null,
+   *   audioDetails: {format: string, sampleRate: number|null, fileSize: number|null, duration: number|null}|null,
    *   offlineIds: string[],
    *   currentTimeMs: number,
    *   durationMs: number,
@@ -292,6 +297,8 @@ export function createPlayer(options = {}) {
     track: null,
     loaded: false,
     quality: null,
+    qualitySource: null,
+    audioDetails: null,
     offlineIds: initialOfflineIds,
     currentTimeMs: 0,
     durationMs: 0,
@@ -344,9 +351,13 @@ export function createPlayer(options = {}) {
   /** 写盘：同步发起（不阻塞状态更新），失败只记日志且不含地址。 */
   function persist({ forcePosition = false, forceStructure = false } = {}) {
     const position = currentPosition();
+    const playback = state.track === null || state.quality === null
+      ? null
+      : { trackId: state.track.id, quality: state.quality, audioDetails: state.audioDetails };
+    const playbackKey = JSON.stringify(playback);
     lastWriteAt = now();
     if (persistPosition === null) {
-      const record = queueRecordOf(state.entries, state.index, position);
+      const record = queueRecordOf(state.entries, state.index, position, playback);
       const key = JSON.stringify(record);
       if (key === persistedKey) return;
       persistedKey = key;
@@ -364,13 +375,15 @@ export function createPlayer(options = {}) {
     // 先比身份与下标：只写进度的那些帧（每 5 秒一次）不该为了判「结构没变」再遍历一遍曲目元数据
     const structureChanged =
       forceStructure ||
+      playbackKey !== persistedPlaybackKey ||
       (state.entries.length === 0
         ? persistedStructureEntries !== null || persistedStructureIndex !== null
         : persistedStructureEntries !== state.entries || persistedStructureIndex !== state.index);
     if (structureChanged) {
-      const structure = queueStructureOf(state.entries, state.index);
+      const structure = queueStructureOf(state.entries, state.index, playback);
       persistedStructureEntries = structure === null ? null : state.entries;
       persistedStructureIndex = structure === null ? null : state.index;
+      persistedPlaybackKey = playbackKey;
       persistedKey = JSON.stringify(structure);
       try {
         const answer = persistQueue(structure);
@@ -383,7 +396,7 @@ export function createPlayer(options = {}) {
     }
 
     const positionKey = JSON.stringify(position);
-    if (!forcePosition && positionKey === persistedPositionKey) return;
+    if (!forcePosition && positionKey === persistedPositionKey && !(structureChanged && position !== null)) return;
     persistedPositionKey = positionKey;
     try {
       const answer = persistPosition(position);
@@ -540,7 +553,7 @@ export function createPlayer(options = {}) {
 
   /**
    * 取地址 → 过闸门。任何一步失败都回结构化错误，**且消息里没有地址**。
-   * @returns {Promise<{ok: true, url: string, quality: "standard"|"high"|"lossless"|null} | {ok: false, error: {kind: string, message: string}}>}
+   * @returns {Promise<{ok: true, url: string, quality: "standard"|"high"|"lossless"|null, audioDetails: object|null} | {ok: false, error: {kind: string, message: string}}>}
    */
   async function resolveAddress(trackId) {
     let answer;
@@ -591,7 +604,13 @@ export function createPlayer(options = {}) {
         },
       };
     }
-    return { ok: true, url: safe, quality: declaredQualityOf(data === null ? null : data.actualQuality) };
+    const quality = declaredQualityOf(data === null ? null : data.actualQuality);
+    return {
+      ok: true,
+      url: safe,
+      quality,
+      audioDetails: quality === null ? null : playbackAudioDetailsOf(data?.audioDetails),
+    };
   }
 
   /** 让音频真的出声（令牌对不上就丢弃：那是过期请求）。 */
@@ -687,6 +706,8 @@ export function createPlayer(options = {}) {
             loaded: false,
             // 新曲目还没装载：上一首的音质到此为止（装载成功后按解析结果重新写）
             quality: null,
+            qualitySource: null,
+            audioDetails: null,
             currentTimeMs: resumeMs ?? 0,
             durationMs: totalDurationMsOf(entry, reportedDurationMs),
             status: PLAYER_STATUS.loading,
@@ -713,7 +734,8 @@ export function createPlayer(options = {}) {
         audio.setCurrentTime(pendingMs);
         publish({ currentTimeMs: pendingMs, seekGeneration: state.seekGeneration + 1 });
       }
-      publish({ loaded: true, quality: resolved.quality });
+      publish({ loaded: true, quality: resolved.quality, qualitySource: resolved.quality === null ? null : "resolved", audioDetails: resolved.audioDetails });
+      persist();
     }
 
     // 说清跳过了哪几首：这是说明不是故障，状态照常进 playing
@@ -825,6 +847,8 @@ export function createPlayer(options = {}) {
       status: PLAYER_STATUS.idle,
       loaded: false,
       quality: null,
+      qualitySource: null,
+      audioDetails: null,
       currentTimeMs: 0,
       durationMs: totalDurationMsOf(index >= 0 ? entries[index] : null, 0),
       error: null,
@@ -919,6 +943,8 @@ export function createPlayer(options = {}) {
       status: PLAYER_STATUS.idle,
       loaded: false,
       quality: null,
+      qualitySource: null,
+      audioDetails: null,
       currentTimeMs: 0,
       durationMs: 0,
       error: null,
@@ -968,18 +994,44 @@ export function createPlayer(options = {}) {
       playbackGeneration: state.playbackGeneration + 1,
       status: PLAYER_STATUS.idle,
       loaded: false,
-      quality: null,
+      quality: clean.playback?.quality ?? null,
+      qualitySource: clean.playback ? "restored" : null,
+      audioDetails: clean.playback?.audioDetails ?? null,
       currentTimeMs: positionMs,
       durationMs,
       error: null,
       restored: true,
     });
     // 读回来的东西不写回去：同内容重写只是多一次磁盘写入（写坏 settings.json 的机会 +1）
-    persistedKey = JSON.stringify(queueRecordOf(entries, clean.index, savedPosition));
+    persistedKey = JSON.stringify(queueRecordOf(entries, clean.index, savedPosition, clean.playback));
     persistedStructureEntries = entries;
     persistedStructureIndex = clean.index;
+    persistedPlaybackKey = JSON.stringify(clean.playback ?? null);
     persistedPositionKey = JSON.stringify(savedPosition === null ? null : { trackId: savedPosition.trackId, positionMs: savedPosition.positionMs });
     return done({ restored: true, queueLength: entries.length });
+  }
+
+  function cancelQualityConfirmation() {
+    qualityConfirmationToken += 1;
+  }
+
+  async function confirmRestoredQuality(generation) {
+    if (!state.restored || state.loaded || state.status !== PLAYER_STATUS.idle || state.quality !== null ||
+      state.track === null || state.track.id.startsWith("local:") || state.playbackGeneration !== generation) {
+      return done({ confirmed: false });
+    }
+    const activeToken = token;
+    const activeQualityToken = ++qualityConfirmationToken;
+    const trackId = state.track.id;
+    const resolved = await resolveAddress(trackId);
+    if (activeToken !== token || activeQualityToken !== qualityConfirmationToken ||
+      state.playbackGeneration !== generation || state.track?.id !== trackId || state.loaded || state.status !== PLAYER_STATUS.idle) {
+      return done({ stale: true });
+    }
+    if (!resolved.ok || resolved.quality === null) return done({ confirmed: false });
+    publish({ quality: resolved.quality, qualitySource: "resolved", audioDetails: resolved.audioDetails });
+    persist();
+    return done({ confirmed: true });
   }
 
   function seek(ms) {
@@ -1173,5 +1225,7 @@ export function createPlayer(options = {}) {
     hydrateOfflineIds,
     clear,
     restore,
+    confirmRestoredQuality,
+    cancelQualityConfirmation,
   };
 }

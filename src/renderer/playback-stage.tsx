@@ -1,5 +1,5 @@
 import { AutoLyricLayout, BouncingSlider, Cover, MediaButton, MusicInfo, VolumeControl } from "@applemusic-like-lyrics/react-full"
-import { AnimatePresence, motion } from "framer-motion"
+import { motion } from "framer-motion"
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, RefObject } from "react"
 import { createPortal } from "react-dom"
@@ -17,7 +17,8 @@ import { useMainChrome } from "./use-main-chrome.ts"
 import { lyricsNoticeText, playbackModeLabel } from "./features/playback/playback-state.mjs"
 import { PlaybackQualityBadge } from "./playback-quality-badge"
 import { useMotionPolicy } from "./features/motion/MotionProvider"
-import { MotionRegion, MotionSwap } from "./features/motion/primitives"
+import { MotionSwap } from "./features/motion/primitives"
+import { stageLayerMotion } from "./features/motion/stage-motion"
 import { CoverFlight, type CoverFlightRequest } from "./features/motion/cover-flight"
 import { PLAYBACK_MODES } from "./features/playback/player.mjs"
 import { formatDuration, trackAlbumOf, trackArtistsOf, trackCoverUrlOf, trackNameOf } from "./features/library/track-fields.mjs"
@@ -50,28 +51,47 @@ function sliderKeyValue(event: ReactKeyboardEvent<HTMLDivElement>, value: number
 
 export function PlaybackStage({ open, runtime, state, onClose, coverSourceRef, openerRef, lyrics = null }: PlaybackStageProps) {
   const coverUrl = trackCoverUrlOf(state.track)
-  // 退场 220ms 内保持画面：此时 open 已为 false，不能直接拿它取封面；演完 onExitComplete 再放开
+  const [prepared, setPrepared] = useState(false)
+  useEffect(() => {
+    if (open) { setPrepared(true); return }
+    if (prepared || !state.track) return
+    if (typeof requestIdleCallback === "function") {
+      const handle = requestIdleCallback(() => setPrepared(true), { timeout: 1500 })
+      return () => cancelIdleCallback(handle)
+    }
+    const timer = setTimeout(() => setPrepared(true), 200)
+    return () => clearTimeout(timer)
+  }, [open, prepared, state.track])
+  const [flight, setFlight] = useState<CoverFlightRequest | null>(null)
+  const [entered, setEntered] = useState(false)
+  const { reducedMotion: reduceMotion } = useMotionPolicy()
   const [exiting, setExiting] = useState(false)
   const [lastOpen, setLastOpen] = useState(open)
   if (lastOpen !== open) {
     setLastOpen(open)
-    if (!open) setExiting(true)
+    if (!open) setExiting(entered || flight !== null)
   }
-  const [flight, setFlight] = useState<CoverFlightRequest | null>(null)
   const stageVisible = open || exiting || flight !== null
+  const chrome = useMainChrome(stageVisible)
+  const animateOpen = reduceMotion ? open : entered
   // 显示与取色分开：封面能不能显示只看普通图片加载（无 ACAO 的 CDN 图照样显示），
   // 背景取色仍是 AmllBackground 里那条带 CORS 的加载；坏图/缺图才落到「暂无封面」占位。
-  const coverImage = useCoverImage(stageVisible ? coverUrl : null)
+  const coverImage = useCoverImage(prepared || stageVisible ? coverUrl : null)
   // 用户要求减少动效时不走过场：时长 0，直接到位
-  const { reducedMotion: reduceMotion, transitionFor } = useMotionPolicy()
+  const latestOpen = useRef(open)
+  latestOpen.current = open
   const stageRef = useRef<HTMLDivElement>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
   const coverTargetRef = useRef<HTMLDivElement>(null)
-  const hiddenAnchors = useRef<Array<{ node: HTMLElement; visibility: string }>>([])
+  const coverGeometry = useRef<{
+    url: string; playing: boolean; viewportWidth: number; viewportHeight: number
+    source: DOMRect; target: DOMRect; sourceRadius: number; targetRadius: number
+  } | null>(null)
+  const hiddenAnchors = useRef<Array<{ node: HTMLElement; opacity: string }>>([])
   const flightGeneration = useRef(0)
-  const intent = useRef({ open: !open, url: coverUrl, done: false, at: 0 })
+  const intent = useRef({ open: false, url: coverUrl, done: true, at: 0 })
   const restoreAnchors = useCallback(() => {
-    for (const item of hiddenAnchors.current) item.node.style.visibility = item.visibility
+    for (const item of hiddenAnchors.current) item.node.style.opacity = item.opacity
     hiddenAnchors.current = []
   }, [])
   const finishFlight = useCallback((id: number) => {
@@ -85,10 +105,25 @@ export function PlaybackStage({ open, runtime, state, onClose, coverSourceRef, o
       stageRef.current.inert = !open
       stageRef.current.dataset.stageActive = String(open)
     }
-    if (open) closeRef.current?.focus({ preventScroll: true })
-    else openerRef?.current?.focus({ preventScroll: true })
-  }, [open, openerRef, stageVisible])
+  }, [open])
+  useEffect(() => {
+    if (!stageVisible) openerRef?.current?.focus({ preventScroll: true })
+  }, [stageVisible, openerRef])
   useLayoutEffect(() => {
+    if (!open && !stageVisible) {
+      setEntered(false)
+      intent.current.open = false
+      intent.current.done = true
+      flightGeneration.current += 1
+      restoreAnchors(); setFlight(null)
+      if (stageRef.current) stageRef.current.dataset.coverMotion = "idle"
+      return
+    }
+    if (open && !chrome.ready) return
+    const reveal = () => {
+      if (open) closeRef.current?.focus({ preventScroll: true })
+      setEntered(open)
+    }
     if (intent.current.open !== open) {
       flightGeneration.current += 1
       const image = coverSourceRef?.current?.querySelector("img")
@@ -99,71 +134,84 @@ export function PlaybackStage({ open, runtime, state, onClose, coverSourceRef, o
       intent.current.url = coverUrl
       intent.current.done = true
       flightGeneration.current += 1
-      restoreAnchors(); setFlight(null)
+      restoreAnchors(); setFlight(null); reveal()
+      if (stageRef.current) stageRef.current.dataset.coverMotion = "idle"
       return
     }
-    if (reduceMotion) { intent.current.done = true; flightGeneration.current += 1; restoreAnchors(); setFlight(null); if (stageRef.current) stageRef.current.dataset.coverMotion = "idle"; return }
-    if (intent.current.done || !coverUrl || !coverSourceRef?.current) return
+    if (reduceMotion) { intent.current.done = true; flightGeneration.current += 1; restoreAnchors(); setFlight(null); if (stageRef.current) stageRef.current.dataset.coverMotion = "idle"; reveal(); return }
+    if (intent.current.done || !coverUrl || !coverSourceRef?.current) {
+      if (stageRef.current && !flight) stageRef.current.dataset.coverMotion = "idle"
+      reveal(); return
+    }
     const measurementIntent = intent.current
     const measurementGeneration = flightGeneration.current
-    let second = 0
-    const first = requestAnimationFrame(() => {
+    let frame = requestAnimationFrame(function measure() {
       if (intent.current !== measurementIntent || measurementIntent.done || flightGeneration.current !== measurementGeneration) return
-      second = requestAnimationFrame(function measure() {
-        if (intent.current !== measurementIntent || measurementIntent.done || flightGeneration.current !== measurementGeneration) return
-        const source = coverSourceRef.current
-        const target = coverTargetRef.current
-        if (!source || !target) {
-          intent.current.done = true; restoreAnchors(); setFlight(null)
-          if (stageRef.current) stageRef.current.dataset.coverMotion = "idle"
-          return
-        }
-        const sourceImage = source.querySelector("img") ?? source
-        const targetImage = target.querySelector<HTMLElement>('[role="img"]')
-        if (!targetImage) {
-          if (open && performance.now() - intent.current.at < 2000) { second = requestAnimationFrame(measure); return }
-          intent.current.done = true; restoreAnchors(); setFlight(null)
-          if (stageRef.current) stageRef.current.dataset.coverMotion = "idle"
-          return
-        }
-        const from = (open ? sourceImage : targetImage).getBoundingClientRect()
-        const to = (open ? targetImage : sourceImage).getBoundingClientRect()
-        if (!from.width || !from.height || !to.width || !to.height) {
-          intent.current.done = true
-          if (stageRef.current) stageRef.current.dataset.coverMotion = "idle"
-          return
-        }
-        const radius = (node: HTMLElement, width: number) => {
-          let current: HTMLElement | null = node
-          while (current) {
-            const value = parseFloat(getComputedStyle(current).borderTopLeftRadius)
-            if (value > 0) return value * width / (current.offsetWidth || width)
-            current = current.parentElement
-          }
-          return 8
-        }
-        if (hiddenAnchors.current.length === 0) {
-          for (const node of [source, target]) { hiddenAnchors.current.push({ node, visibility: node.style.visibility }); node.style.visibility = "hidden" }
-        }
-        intent.current.done = true
-        if (stageRef.current) stageRef.current.dataset.coverMotion = "running"
-        setFlight({ id: ++flightGeneration.current, phase: open ? "open" : "close", src: coverUrl,
-          from: { x: from.x, y: from.y, width: from.width, height: from.height },
-          to: { x: to.x, y: to.y, width: to.width, height: to.height },
-          fromRadius: radius(open ? sourceImage : targetImage, from.width),
-          toRadius: radius(open ? targetImage : sourceImage, to.width) })
-      })
+      const source = coverSourceRef.current
+      const target = coverTargetRef.current
+      if (open) closeRef.current?.focus({ preventScroll: true })
+      if (!source || !target) {
+        intent.current.done = true; restoreAnchors(); setFlight(null); reveal()
+        if (stageRef.current) stageRef.current.dataset.coverMotion = "idle"
+        return
+      }
+      const sourceImage = source.querySelector("img") ?? source
+      const targetImage = target.querySelector<HTMLElement>('[role="img"]')
+      if (!targetImage) {
+        if (open && performance.now() - intent.current.at < 2000) { frame = requestAnimationFrame(measure); return }
+        intent.current.done = true; restoreAnchors(); setFlight(null); reveal()
+        if (stageRef.current) stageRef.current.dataset.coverMotion = "idle"
+        return
+      }
+      const cached = coverGeometry.current
+      const reuse = !open && cached?.url === coverUrl && cached.playing === (state.status === "playing")
+        && cached.viewportWidth === window.innerWidth && cached.viewportHeight === window.innerHeight
+      const sourceRect = reuse ? cached.source : sourceImage.getBoundingClientRect()
+      const targetRect = reuse ? cached.target : targetImage.getBoundingClientRect()
+      const from = open ? sourceRect : targetRect
+      const to = open ? targetRect : sourceRect
+      if (!from.width || !from.height || !to.width || !to.height) {
+        intent.current.done = true; restoreAnchors(); setFlight(null); reveal()
+        if (stageRef.current) stageRef.current.dataset.coverMotion = "idle"
+        return
+      }
+      const sourceRadius = reuse ? cached.sourceRadius : parseFloat(getComputedStyle(sourceImage.parentElement ?? source).borderTopLeftRadius) || 8
+      const targetRadius = reuse ? cached.targetRadius : parseFloat(getComputedStyle(targetImage).borderTopLeftRadius) || 12
+      coverGeometry.current = { url: coverUrl, playing: state.status === "playing", viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
+        source: sourceRect, target: targetRect, sourceRadius, targetRadius }
+      if (hiddenAnchors.current.length === 0) {
+        hiddenAnchors.current.push({ node: source, opacity: source.style.opacity })
+        source.style.opacity = "0"
+      }
+      intent.current.done = true
+      setEntered(open)
+      if (stageRef.current) stageRef.current.dataset.coverMotion = "running"
+      setFlight({ id: ++flightGeneration.current, phase: open ? "open" : "close", src: coverUrl,
+        from: { x: from.x, y: from.y, width: from.width, height: from.height },
+        to: { x: to.x, y: to.y, width: to.width, height: to.height },
+        fromRadius: open ? sourceRadius : targetRadius,
+        toRadius: open ? targetRadius : sourceRadius })
     })
-    return () => { cancelAnimationFrame(first); cancelAnimationFrame(second) }
-  }, [open, coverUrl, coverSourceRef, reduceMotion, restoreAnchors])
+    return () => cancelAnimationFrame(frame)
+  }, [open, chrome.ready, coverUrl, coverSourceRef, reduceMotion, restoreAnchors])
   useEffect(() => {
-    const cancel = () => { flightGeneration.current += 1; intent.current.done = true; restoreAnchors(); setFlight(null); if (stageRef.current) stageRef.current.dataset.coverMotion = "idle" }
+    let width = window.innerWidth
+    let height = window.innerHeight
+    let frame = 0
+    const cancel = () => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        if (width === window.innerWidth && height === window.innerHeight) return
+        width = window.innerWidth; height = window.innerHeight
+        flightGeneration.current += 1; intent.current.done = true; restoreAnchors(); setFlight(null)
+        if (stageRef.current) stageRef.current.dataset.coverMotion = "idle"
+      })
+    }
     window.addEventListener("resize", cancel)
-    return () => { window.removeEventListener("resize", cancel); restoreAnchors() }
+    return () => { window.removeEventListener("resize", cancel); cancelAnimationFrame(frame); restoreAnchors() }
   }, [restoreAnchors])
   const lyricsView = lyricsToggleView(lyrics)
   const seekOwner = useRef<number | null>(null)
-  const chrome = useMainChrome(open)
   const rowPress = useRef<{ x: number; y: number } | null>(null)
   const rowDragged = useRef(false)
   useEffect(() => {
@@ -183,8 +231,7 @@ export function PlaybackStage({ open, runtime, state, onClose, coverSourceRef, o
     document.addEventListener("keydown", closeOnEscape)
     return () => document.removeEventListener("keydown", closeOnEscape)
   }, [open, onClose])
-  // 退场演完才卸载：舞台与它的 portal 一并移除（playback-stage 节点随之 detached）
-  if (!stageVisible) return null
+  if (!prepared && !stageVisible) return null
 
   const player = runtime.player
   const notice = lyricsNoticeText(state.lyrics)
@@ -318,8 +365,9 @@ export function PlaybackStage({ open, runtime, state, onClose, coverSourceRef, o
       ) : null}
     </div>
   )
-  const musicControls = <MotionRegion identity={state.track?.id ?? "none"} kind="page" active={open}
-    className="isolate flex min-w-0 flex-col gap-4">{info}{controls}</MotionRegion>
+  const musicControls = <motion.div initial={stageLayerMotion("controls", false, reduceMotion)} animate={stageLayerMotion("controls", animateOpen, reduceMotion)}
+    data-testid="playback-stage-controls-motion" data-motion-owner="js"
+    className="isolate flex min-w-0 flex-col gap-4">{info}{controls}</motion.div>
 
   // 窗口按钮与收起行同一种淡色半透明悬停
   const chromeButton = "h-10 w-11 rounded-none px-0 hover:bg-background/30 dark:hover:bg-foreground/10"
@@ -345,89 +393,91 @@ export function PlaybackStage({ open, runtime, state, onClose, coverSourceRef, o
   return createPortal(
     <>
       {/* 背景、正文和封面各自过渡，正文保持原尺寸。 */}
-      <AnimatePresence onExitComplete={() => setExiting(false)}>
-        {open ? (
-          <motion.div
-            key="playback-stage"
-            ref={stageRef} role="dialog" aria-modal="true" aria-label="沉浸歌词"
-            initial={{ opacity: 1 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={transitionFor("stageExit")}
-            className="fixed inset-0 isolate z-40 overflow-hidden bg-background"
-            data-testid="playback-stage"
-          >
-            <motion.div className="absolute inset-0" aria-hidden="true" initial={{ opacity: reduceMotion ? 1 : 0 }}
-              animate={{ opacity: 1 }} transition={transitionFor("page")}>
-            <AmllBackground playing={playing} hasLyric={hasLyric} albumUrl={trackCoverUrlOf(state.track)} />
-            <div className="absolute inset-0 bg-background/40" data-testid="playback-stage-dim" aria-hidden="true" />
-            </motion.div>
-            <AutoLyricLayout
-              className="relative isolate h-full w-full"
-              data-testid="playback-stage-layout"
-              coverSlot={<div ref={coverTargetRef} className="size-full">{coverImage ? (
-                <Cover
-                  coverUrl={coverUrl ?? undefined}
-                  musicPaused={!playing}
-                  className="motion-reduce:transition-none! motion-reduce:duration-0! motion-reduce:[&_*]:transition-none! motion-reduce:[&_*]:duration-0!"
-                  data-testid="playback-stage-cover"
-                  role="img"
-                  aria-label={`${trackNameOf(state.track)}封面`}
-                />
-              ) : (
-                <Avatar className="size-full rounded-md" data-testid="playback-stage-cover-fallback">
-                  <AvatarFallback className="rounded-md" aria-label="暂无封面"><Disc3Icon className="size-12" /></AvatarFallback>
-                </Avatar>
-              )}</div>}
-              controlsSlot={musicControls}
-              smallControlsSlot={musicControls}
-              lyricSlot={(
-                <MotionRegion identity={state.track?.id ?? "none"} kind="page" active={open} className="relative isolate h-full min-h-0 w-full" data-testid="playback-stage-lyrics-slot">
-                  {hasLyric ? (
-                    <AmllLyricsPanel
-                      runtime={runtime}
-                      lines={state.lyrics.lines}
-                      playing={playing}
-                      seekGeneration={state.seekGeneration}
-                    />
-                  ) : null}
-                  {notice === null ? null : (
-                    <div className="absolute inset-0 flex items-center justify-center p-6">
-                      <p role="status" className="max-w-md text-center text-sm text-foreground">{notice}</p>
-                    </div>
-                  )}
-                </MotionRegion>
-              )}
+      <div
+        key="playback-stage"
+        ref={stageRef} role="dialog" aria-modal={open} aria-label="沉浸歌词"
+        aria-hidden={!open} inert={!open}
+        className={`group/stage fixed inset-0 isolate z-40 overflow-hidden [contain:layout_paint] ${stageVisible ? "visible" : "invisible"} ${open ? "" : "pointer-events-none"}`}
+        data-testid="playback-stage"
+      >
+        <motion.div className="absolute inset-0 bg-background" aria-hidden="true" initial={stageLayerMotion("background", false, reduceMotion)}
+          data-testid="playback-stage-background" data-motion-owner="js"
+          animate={stageLayerMotion("background", animateOpen, reduceMotion)}
+          onAnimationComplete={() => { if (!latestOpen.current) setExiting(false) }}>
+          <AmllBackground active={stageVisible} playing={playing} hasLyric={hasLyric} albumUrl={coverUrl} />
+          <div className="absolute inset-0 bg-background/40" data-testid="playback-stage-dim" aria-hidden="true" />
+        </motion.div>
+        <AutoLyricLayout
+          className="relative isolate h-full w-full"
+          data-testid="playback-stage-layout"
+          coverSlot={<div ref={coverTargetRef} data-testid="playback-stage-cover-anchor"
+            className={`size-full group-data-[cover-motion=pending]/stage:opacity-0 group-data-[cover-motion=running]/stage:opacity-0 ${open && animateOpen ? "" : "opacity-0"}`}>{coverImage ? (
+            <Cover
+              coverUrl={coverUrl ?? undefined}
+              musicPaused={!playing}
+              pauseShrinkAspect={1}
+              className="motion-reduce:transition-none! motion-reduce:duration-0! motion-reduce:[&_*]:transition-none! motion-reduce:[&_*]:duration-0!"
+              data-testid="playback-stage-cover"
+              role="img"
+              aria-label={`${trackNameOf(state.track)}封面`}
             />
-            {/* 收起 = 顶部整行：行高只占顶部一条带，箭头居中，行内任意位置可点（不用右上角叉号）。 */}
-            <Button
-              ref={closeRef}
-              variant="ghost"
-              className="absolute inset-x-0 top-0 h-10 w-full rounded-none hover:bg-background/30 dark:hover:bg-foreground/10 motion-reduce:transition-none! motion-reduce:duration-0!"
-              aria-label="收起歌词"
-              onPointerDown={startRowPress}
-              onPointerMove={trackRowPress}
-              data-testid="playback-stage-close-row"
-              onClick={clickRow}
-            >
-              <ChevronDownIcon className="size-4" />
+          ) : (
+            <Avatar className="size-full rounded-md" data-testid="playback-stage-cover-fallback">
+              <AvatarFallback className="rounded-md" aria-label="暂无封面"><Disc3Icon className="size-12" /></AvatarFallback>
+            </Avatar>
+          )}</div>}
+          controlsSlot={musicControls}
+          smallControlsSlot={musicControls}
+          lyricSlot={(
+            <motion.div initial={stageLayerMotion("lyrics", false, reduceMotion)} animate={stageLayerMotion("lyrics", animateOpen, reduceMotion)}
+              data-motion-owner="js" className="relative isolate h-full min-h-0 w-full" data-testid="playback-stage-lyrics-slot">
+              {hasLyric ? (
+                <AmllLyricsPanel
+                  runtime={runtime}
+                  lines={state.lyrics.lines}
+                  active={stageVisible}
+                  playing={playing}
+                  seekGeneration={state.seekGeneration}
+                />
+              ) : null}
+              {notice === null ? null : (
+                <div className="absolute inset-0 flex items-center justify-center p-6">
+                  <p role="status" className="max-w-md text-center text-sm text-foreground">{notice}</p>
+                </div>
+              )}
+            </motion.div>
+          )}
+        />
+        {/* 收起 = 顶部整行：行高只占顶部一条带，箭头居中，行内任意位置可点（不用右上角叉号）。 */}
+        <motion.div initial={stageLayerMotion("chrome", false, reduceMotion)} animate={stageLayerMotion("chrome", animateOpen, reduceMotion)}
+          className="absolute inset-x-0 top-0 h-10" data-motion-owner="js">
+        <Button
+          ref={closeRef}
+          variant="ghost"
+          className="absolute inset-x-0 top-0 h-10 w-full rounded-none hover:bg-background/30 dark:hover:bg-foreground/10 motion-reduce:transition-none! motion-reduce:duration-0!"
+          aria-label="收起歌词"
+          onPointerDown={startRowPress}
+          onPointerMove={trackRowPress}
+          data-testid="playback-stage-close-row"
+          onClick={clickRow}
+        >
+          <ChevronDownIcon className="size-4" />
+        </Button>
+        {chrome.frameless ? (
+          <div className="absolute right-0 top-0 flex" data-testid="playback-stage-window-controls">
+            <Button variant="ghost" className={chromeButton} aria-label="最小化" onClick={() => chrome.act("minimize")}>
+              <MinusIcon className="size-4" />
             </Button>
-            {chrome.frameless ? (
-              <div className="absolute right-0 top-0 flex" data-testid="playback-stage-window-controls">
-                <Button variant="ghost" className={chromeButton} aria-label="最小化" onClick={() => chrome.act("minimize")}>
-                  <MinusIcon className="size-4" />
-                </Button>
-                <Button variant="ghost" className={chromeButton} aria-label={chrome.maximized ? "还原" : "最大化"} onClick={() => chrome.act("toggle-maximize")}>
-                  {chrome.maximized ? <CopyIcon className="size-3.5" /> : <SquareIcon className="size-3.5" />}
-                </Button>
-                <Button variant="ghost" className={chromeButton} aria-label="关闭窗口" onClick={() => chrome.act("close")}>
-                  <XIcon className="size-4" />
-                </Button>
-              </div>
-            ) : null}
-          </motion.div>
+            <Button variant="ghost" className={chromeButton} aria-label={chrome.maximized ? "还原" : "最大化"} onClick={() => chrome.act("toggle-maximize")}>
+              {chrome.maximized ? <CopyIcon className="size-3.5" /> : <SquareIcon className="size-3.5" />}
+            </Button>
+            <Button variant="ghost" className={chromeButton} aria-label="关闭窗口" onClick={() => chrome.act("close")}>
+              <XIcon className="size-4" />
+            </Button>
+          </div>
         ) : null}
-      </AnimatePresence>
+        </motion.div>
+      </div>
       <CoverFlight request={flight} onComplete={finishFlight} />
     </>,
     document.body,

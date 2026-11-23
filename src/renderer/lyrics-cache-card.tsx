@@ -6,6 +6,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react"
 import { UploadIcon } from "lucide-react"
+import { notify } from "./notifications.ts"
 
 import { Button } from "./components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card"
@@ -32,12 +33,6 @@ import type { LyricsWindowBinding } from "./use-lyrics-window.ts"
 
 const log = (...parts: unknown[]) => console.warn("[hwmusic-lyrics]", ...parts)
 
-/** 一次操作的结论（成功与失败都带一句人话；界面只渲染它）。 */
-interface LyricsCardResult {
-  ok: boolean
-  message: string
-}
-
 export interface LyricsCacheCardProps {
   /**
    * 桌面歌词窗的绑定（与设置页那张卡同一个来源）：`canImport` / `importFile` 从这里来。
@@ -52,7 +47,6 @@ export function LyricsCacheCard({ lyrics = null }: LyricsCacheCardProps) {
   const [infoFailed, setInfoFailed] = useState(false)
   const [busy, setBusy] = useState(false)
   const [withLocal, setWithLocal] = useState(false)
-  const [result, setResult] = useState<LyricsCardResult | null>(null)
   const fileRef = useRef<HTMLInputElement | null>(null)
 
   /** 问一次占用（sidecar 现算）。读不到就如实说读不到——不显示 0 条那种假数字。 */
@@ -63,7 +57,6 @@ export function LyricsCacheCard({ lyrics = null }: LyricsCacheCardProps) {
     } catch (cause) {
       log("读取歌词缓存占用失败：", cause)
       setInfoFailed(true)
-      setResult({ ok: false, message: "读不到歌词缓存占用（详情见运行日志）。" })
     }
   }, [bridge])
 
@@ -77,10 +70,11 @@ export function LyricsCacheCard({ lyrics = null }: LyricsCacheCardProps) {
     try {
       const next = await bridge.clearCache({ local: withLocal })
       setInfo(next)
-      setResult({ ok: true, message: lyricsCacheClearedText(next, { local: withLocal }) })
+      setInfoFailed(false)
+      notify(lyricsCacheClearedText(next, { local: withLocal }), "success")
     } catch (cause) {
       log("清除歌词缓存失败：", cause)
-      setResult({ ok: false, message: "清除失败（详情见运行日志）：缓存可能只清掉了一部分。" })
+      notify("清除失败（详情见运行日志）：缓存可能只清掉了一部分。", "error")
       await refresh()
     } finally {
       setBusy(false)
@@ -93,7 +87,10 @@ export function LyricsCacheCard({ lyrics = null }: LyricsCacheCardProps) {
     setBusy(true)
     try {
       const picked = await lyrics.importFile(file)
-      setResult({ ok: picked.ok, message: picked.message })
+      notify(picked.message, picked.ok ? "success" : "error")
+    } catch (cause) {
+      log("导入本地歌词失败：", cause)
+      notify("导入本地歌词失败（详情见运行日志）。", "error")
     } finally {
       setBusy(false)
       // 清空控件：同一个文件连选两次也要能触发 change（否则第二次"没反应"）
@@ -176,16 +173,6 @@ export function LyricsCacheCard({ lyrics = null }: LyricsCacheCardProps) {
             <p className="text-xs text-muted-foreground">没有正在播放的曲目：先播一首，再导入歌词。</p>
           )}
         </div>
-
-        {result === null ? null : (
-          <p
-            role="status"
-            data-testid="lyrics-card-result"
-            className={result.ok ? "text-sm text-muted-foreground" : "text-sm text-destructive"}
-          >
-            {result.message}
-          </p>
-        )}
       </CardContent>
     </Card>
   )

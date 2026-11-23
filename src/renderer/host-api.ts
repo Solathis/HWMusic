@@ -295,7 +295,7 @@ export async function coreLoginChrome<T = unknown>(payload: LoginChromeRequest):
 
 // 沉浸页的主窗外框：一条专用命令，只对主窗开放。
 
-/** `immersive` / `normal` 收起或装回标题栏，`read` 只读，其余三个是窗口按钮。 */
+/** `immersive` / `normal` 兼容旧调用，与 `read` 一样只读；其余三个是窗口按钮。 */
 export type MainChromeAction = "immersive" | "normal" | "read" | "minimize" | "toggle-maximize" | "close";
 
 /** 宿主回报的实际状态：`frameless` 为真时页面要自己画拖动区与窗口按钮。 */

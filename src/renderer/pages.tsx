@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObjec
 import { ListMusicIcon } from "lucide-react"
 import { motion } from "framer-motion"
 import { useMotionPolicy } from "./features/motion/MotionProvider"
+import { notify } from "./notifications.ts"
 
 import {
   LIBRARY_ALBUM,
@@ -680,7 +681,6 @@ export function LocalSongsPage({ ...navigation }: PageNavigationProps) {
     baseUrl: null,
     available: true,
   })
-  const [status, setStatus] = useState("")
   const [failure, setFailure] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -715,9 +715,9 @@ export function LocalSongsPage({ ...navigation }: PageNavigationProps) {
         apply(answer)
         const summary = describeImportSummary(answer)
         const rejected = describeRejectedImports(answer.rejected)
-        setStatus(rejected === "" ? summary : `${summary}${rejected}`)
+        notify(rejected === "" ? summary : `${summary}${rejected}`, rejected === "" ? "success" : "warning")
       } catch (cause) {
-        setFailure(libraryFailureText(cause))
+        notify(libraryFailureText(cause), "error")
       } finally {
         setBusy(false)
       }
@@ -733,9 +733,9 @@ export function LocalSongsPage({ ...navigation }: PageNavigationProps) {
       try {
         const answer = await removeLocalTrack(id)
         apply(answer)
-        setStatus(answer.removed ? "已从本地曲库移除（文件仍在原处）。" : "这条记录已经不在了。")
+        notify(answer.removed ? "已从本地曲库移除（文件仍在原处）。" : "这条记录已经不在了。", "success")
       } catch (cause) {
-        setFailure(libraryFailureText(cause))
+        notify(libraryFailureText(cause), "error")
       }
     },
     [apply],
@@ -746,7 +746,7 @@ export function LocalSongsPage({ ...navigation }: PageNavigationProps) {
   return (
     <div className="flex flex-col" data-testid="local-songs-page">
       <TrackListToolbar
-        status={status === "" ? listCountText(state.tracks.length) : status}
+        status={listCountText(state.tracks.length)}
         statusTestId="local-songs-status"
         actions={
           <>
@@ -840,8 +840,6 @@ export function SettingsPage({
   const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
-  const [testResult, setTestResult] = useState<string | null>(null)
-  const [notice, setNotice] = useState<string | null>(null)
   const [failure, setFailure] = useState<string | null>(null)
   const [autostartEnabled, setAutostartEnabled] = useState<boolean | null>(null)
   const [autostartReady, setAutostartReady] = useState(false)
@@ -900,21 +898,19 @@ export function SettingsPage({
     const invalid = validateProxyForm(form)
     if (invalid !== null) {
       setFailure(invalid)
-      setNotice(null)
       return
     }
     setSaving(true)
     setFailure(null)
-    setNotice(null)
     try {
       const answer = await coreCall<SettingsAnswer>(SETTINGS_SET, { patch: proxyPatchFromForm(form) })
       // 按回执重建表单：写的和显示的下一次是同一条数据（密码字段随之回到空）
       setForm(proxyFormFromSettings(answer.settings))
       setCloseBehavior(closeBehaviorFromSettings(answer.settings))
       setPlaybackQuality(playbackQualityFromSettings(answer.settings))
-      setNotice(proxySaveNotice(answer.settings, answer.restartRequired === true))
+      notify(proxySaveNotice(answer.settings, answer.restartRequired === true), "success")
     } catch (error) {
-      setFailure(settingsFailureText(error))
+      notify(settingsFailureText(error), "error")
     } finally {
       setSaving(false)
     }
@@ -924,16 +920,14 @@ export function SettingsPage({
   async function restoreDefaultProxy() {
     setSaving(true)
     setFailure(null)
-    setNotice(null)
-    setTestResult(null)
     try {
       const answer = await coreCall<SettingsAnswer>(SETTINGS_SET, { patch: { proxy: null } })
       setForm(proxyFormFromSettings(answer.settings))
       setCloseBehavior(closeBehaviorFromSettings(answer.settings))
       setPlaybackQuality(playbackQualityFromSettings(answer.settings))
-      setNotice(proxySaveNotice(answer.settings, answer.restartRequired === true))
+      notify(proxySaveNotice(answer.settings, answer.restartRequired === true), "success")
     } catch (error) {
-      setFailure(settingsFailureText(error))
+      notify(settingsFailureText(error), "error")
     } finally {
       setSaving(false)
     }
@@ -948,14 +942,14 @@ export function SettingsPage({
     }
     setTesting(true)
     setFailure(null)
-    setTestResult(null)
     try {
-      const answer = await coreCall<{ result: unknown }>(SETTINGS_TEST_PROXY, {
+      const answer = await coreCall<{ result: { ok?: boolean } | null }>(SETTINGS_TEST_PROXY, {
         proxy: proxyPatchFromForm(form).proxy,
       })
-      setTestResult(proxyTestResultText(answer.result))
+      const message = proxyTestResultText(answer.result)
+      if (message !== null) notify(message, answer.result?.ok === true ? "success" : "error")
     } catch (error) {
-      setFailure(settingsFailureText(error))
+      notify(settingsFailureText(error), "error")
     } finally {
       setTesting(false)
     }
@@ -967,15 +961,14 @@ export function SettingsPage({
     setSaving(true)
     setCloseBehavior(next)
     setFailure(null)
-    setNotice(null)
     try {
       const answer = await coreCall<SettingsAnswer>(SETTINGS_SET, { patch: closeBehaviorPatch(next) })
       setCloseBehavior(closeBehaviorFromSettings(answer.settings))
-      setNotice(proxySaveNotice(answer.settings, answer.restartRequired === true))
+      notify(proxySaveNotice(answer.settings, answer.restartRequired === true), "success")
     } catch (error) {
       // 没写成就把选择拨回去：界面上停在一个"没保存的值"，跟撒谎只差一步
       setCloseBehavior(previous)
-      setFailure(settingsFailureText(error))
+      notify(settingsFailureText(error), "error")
     } finally {
       setSaving(false)
     }
@@ -994,7 +987,7 @@ export function SettingsPage({
     } catch (error) {
       // 没写成就把选择拨回去：界面上停在一个"没保存的值"，跟撒谎只差一步
       setPlaybackQuality(previous)
-      setFailure(settingsFailureText(error))
+      notify(settingsFailureText(error), "error")
     } finally {
       setSaving(false)
     }
@@ -1007,7 +1000,7 @@ export function SettingsPage({
     try {
       setAutostartEnabled(await setAutostart(next))
     } catch (error) {
-      setAutostartFailure(autostartFailureText(error))
+      notify(autostartFailureText(error), "error")
     } finally {
       setAutostartBusy(false)
     }
@@ -1021,11 +1014,6 @@ export function SettingsPage({
       {failure !== null ? (
         <p className="text-sm text-destructive" role="alert">
           {failure}
-        </p>
-      ) : null}
-      {notice !== null ? (
-        <p className="text-sm text-muted-foreground" role="status">
-          {notice}
         </p>
       ) : null}
       {saving || testing ? <p className="text-sm text-muted-foreground" role="status" data-motion-notice>
@@ -1312,12 +1300,6 @@ export function SettingsPage({
                   恢复默认代理
                 </Button>
               </div>
-
-              {testResult !== null ? (
-                <p className="text-sm text-muted-foreground" role="status">
-                  {testResult}
-                </p>
-              ) : null}
             </CardContent>
           </Card>
         </TabsContent>

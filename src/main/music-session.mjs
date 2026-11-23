@@ -6,7 +6,7 @@
 import { randomBytes } from "node:crypto";
 
 import { err, ok } from "../shared/result.ts";
-import { isSafeMediaUrl } from "../protocols/safe-media-url.mjs";
+import { isSafeAvatarUrl } from "../protocols/safe-avatar-url.mjs";
 import { normalizeVipExpiry } from "../shared/vip-expiry.mjs";
 
 /** 音乐业务域（公开契约 §1"业务域"）。 */
@@ -102,7 +102,7 @@ export const MUSIC_PROFILE_NESTED_CONTAINER_KEYS = ["queryAllSubInfoResp", "quer
  * id_token claims 里的名字/头像候选，只认这四个键。
  * 没有证据的键不猜：猜错就会显示错人。
  */
-export const MUSIC_PROFILE_CLAIM_NAME_KEYS = ["name", "nickname"];
+export const MUSIC_PROFILE_CLAIM_NAME_KEYS = ["display_name", "name", "nickname"];
 export const MUSIC_PROFILE_CLAIM_AVATAR_KEYS = ["picture", "avatar"];
 /** 键名日志里每个容器最多报多少个子容器（防止一整棵配置树把日志刷满）。 */
 export const MUSIC_PROFILE_NESTED_LOG_LIMIT = 8;
@@ -140,7 +140,30 @@ function profileContainersOf(payload) {
       }
     }
   }
+  const domains = payload.queryAllSubInfoResp?.domainSubInfos;
+  if (Array.isArray(domains)) {
+    for (const domain of domains) {
+      if (!isObject(domain)) continue;
+      if (isObject(domain.hadVIPs)) containers.push(domain.hadVIPs);
+    }
+  }
   return containers;
+}
+
+/** loginex 的音乐会员到期日位于 domainType=1 的 subInfos[].validDate。 */
+function musicVipExpiryFromResponse(payload) {
+  const domains = payload?.queryAllSubInfoResp?.domainSubInfos;
+  if (!Array.isArray(domains)) return null;
+  const expiries = [];
+  for (const domain of domains) {
+    if (!isObject(domain) || String(domain.domainType) !== "1" || !Array.isArray(domain.subInfos)) continue;
+    for (const subscription of domain.subInfos) {
+      if (!isObject(subscription)) continue;
+      const expiry = normalizeVipExpiry(subscription.validDate);
+      if (expiry !== null) expiries.push(expiry);
+    }
+  }
+  return expiries.sort().at(-1) ?? null;
 }
 
 /**
@@ -173,11 +196,11 @@ export function nestedContainerKeyNamesOf(payload) {
 /**
  * 从响应里抠 profile（取到才存）。
  * @param {object} payload loginex 响应
- * @param {{isSafeUrl?: (url: string) => boolean}} [options] 头像 URL 的白名单校验（默认 `isSafeMediaUrl`）
+ * @param {{isSafeUrl?: (url: string) => boolean}} [options] 头像 URL 的白名单校验（默认 `isSafeAvatarUrl`）
  * @returns {{userName?: string, avatarUrl?: string, vip?: boolean}} 可能为空对象（= 认不出任何一项）
  */
 export function profileFromResponse(payload, options = {}) {
-  const isSafeUrl = options.isSafeUrl ?? isSafeMediaUrl;
+  const isSafeUrl = options.isSafeUrl ?? isSafeAvatarUrl;
   const profile = {};
   if (!isObject(payload)) return profile;
 
@@ -194,7 +217,7 @@ export function profileFromResponse(payload, options = {}) {
     if (profile.avatarUrl === undefined) {
       for (const key of MUSIC_PROFILE_AVATAR_KEYS) {
         const value = textOf(container[key]);
-        // 头像要过媒体白名单：渲染层只认 CSP `img-src` 里那些域，白名单外的地址画不出来
+        // 头像校验与 CSP img-src 对齐，账号头像域不用于音频取址。
         if (value !== null && isSafeUrl(value)) {
           profile.avatarUrl = value;
           break;
@@ -225,6 +248,10 @@ export function profileFromResponse(payload, options = {}) {
 
   // 明确的"不是会员"不进载荷（界面只在为真时才显示徽标，缺省与 false 是同一件事）
   if (profile.vip === false) delete profile.vip;
+  if (profile.vip === true) {
+    const vipExpiresOn = musicVipExpiryFromResponse(payload);
+    if (vipExpiresOn !== null) profile.vipExpiresOn = vipExpiresOn;
+  }
   return profile;
 }
 
@@ -235,13 +262,13 @@ export function hasProfileContent(profile) {
 
 /**
  * id_token 的 claims → profile（取到才存，与 `profileFromResponse` 同一份纪律）。
- * 只取名字与头像，头像需过媒体白名单；VIP 不从 claims 取。
+ * 只取名字与头像，头像需过头像白名单；VIP 不从 claims 取。
  * @param {unknown} claims `idTokenClaimsOf` 的产物
  * @param {{isSafeUrl?: (url: string) => boolean}} [options]
  * @returns {{userName?: string, avatarUrl?: string}} 可能为空对象
  */
 export function profileFromClaims(claims, options = {}) {
-  const isSafeUrl = options.isSafeUrl ?? isSafeMediaUrl;
+  const isSafeUrl = options.isSafeUrl ?? isSafeAvatarUrl;
   const profile = {};
   if (!isObject(claims)) return profile;
 
@@ -421,7 +448,7 @@ export function sessionExpiryLine(record, nowMs, offsetMinutes) {
  * @param {Function} [options.now] 注入时钟（默认 `() => new Date()`）
  * @param {number} [options.timeoutMs] 单次请求超时
  * @param {Function} [options.log] 只记**键名**的诊断口（默认不记）
- * @param {Function} [options.isSafeUrl] 头像 URL 的白名单校验（默认 `isSafeMediaUrl`）
+ * @param {Function} [options.isSafeUrl] 头像 URL 的白名单校验（默认 `isSafeAvatarUrl`）
  * @returns {(params: {accessToken: string, endpoint: string}) => Promise<import("../shared/result.ts").CoreResult<unknown>>}
  */
 export function createHuaweiMusicSessionPort({
@@ -430,7 +457,7 @@ export function createHuaweiMusicSessionPort({
   now = () => new Date(),
   timeoutMs = MUSIC_SESSION_TIMEOUT_MS,
   log = () => undefined,
-  isSafeUrl = isSafeMediaUrl,
+  isSafeUrl = isSafeAvatarUrl,
 } = {}) {
   return async function exchangeMusicSession({ accessToken, endpoint } = {}) {
     if (typeof endpoint !== "string" || endpoint.trim() === "") {

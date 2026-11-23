@@ -39,7 +39,7 @@ export const LIBRARY_HISTORY = "library:history" as const;
 
 /**
  * 播放地址频道：载荷 `{trackId}`；地址不写日志、不持久化，渲染层仍需过 safe-media-url。
- * 应答 `{url, fileInfos, format, size, bitrate, duration, auditionLikely, signals, warnings}`。
+ * 应答 `{url, fileInfos, format, size, bitrate, duration, actualQuality, audioDetails, auditionLikely, signals, warnings}`。
  */
 export const PLAYBACK_RESOLVE_URL = "playback:resolve-url" as const;
 

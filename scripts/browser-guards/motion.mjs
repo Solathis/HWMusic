@@ -83,6 +83,7 @@ export async function runMotionChecks(context) {
 }
 
 export async function runDelayedResizeChecks({ page, add, theme }) {
+  const viewport = page.viewportSize();
   await page.goto(page.url().split("?")[0], { waitUntil: "load" });
   await page.waitForFunction(() => window.__guard !== undefined);
   await page.evaluate((choice) => { document.documentElement.className = choice; return window.__guard.ready(); }, theme);
@@ -123,14 +124,17 @@ export async function runDelayedResizeChecks({ page, add, theme }) {
     });
     try {
       await page.getByRole("button", { name: "打开歌词", exact: true }).evaluate((node) => node.click());
-      await page.waitForFunction(() => Boolean(document.querySelector('[data-testid="playback-stage-cover"]')),
+      await page.waitForFunction(() => document.querySelector('[data-testid="playback-stage"]')?.dataset.coverMotion === "pending"
+        && Boolean(document.querySelector('[data-testid="playback-stage-cover"]')) && window.__resizeFrameGate.held.size > 0,
         null, { polling: 10 });
-      await page.evaluate(() => {
-        window.dispatchEvent(new Event("resize"));
-        window.__resizeFrameGate.release();
-      });
+      await page.evaluate(() => { window.__resizeFrameGate.hold = false; });
+      await page.setViewportSize({ width: viewport.width - 180, height: viewport.height - 40 });
+      await page.waitForFunction(() => document.querySelector('[data-testid="playback-stage"]')?.dataset.coverMotion === "idle",
+        null, { polling: 10 });
+      await page.evaluate(() => window.__resizeFrameGate.release());
     } catch (error) {
       await page.evaluate(() => window.__resizeFrameGate?.restore());
+      await page.setViewportSize(viewport);
       throw error;
     }
   });
@@ -140,7 +144,28 @@ export async function runDelayedResizeChecks({ page, add, theme }) {
     JSON.stringify({ flightFramesAfterCancel: shown, finalMotion: motion }));
   await page.evaluate(() => { window.__resizeFrameGate.restore(); delete window.__resizeFrameGate; });
   await page.keyboard.press("Escape");
-  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+  await page.getByTestId("playback-stage").waitFor({ state: "hidden" });
+  await page.waitForFunction(() => !document.querySelector('[data-testid="cover-flight"]'));
+  try {
+    const source = await page.getByTestId("player-track-info").locator("img").boundingBox();
+    const reopened = await recordVisualFrames(page, '[data-testid="cover-flight"]', () =>
+      page.getByRole("button", { name: "打开歌词", exact: true }).click());
+    await page.waitForFunction(() => document.querySelector('[data-testid="playback-stage"]')?.dataset.coverMotion === "idle"
+      && !document.querySelector('[data-testid="cover-flight"]'));
+    const target = await page.getByTestId("playback-stage-cover").boundingBox();
+    const moving = reopened.filter((frame) => frame.present);
+    const first = moving[0]?.rect;
+    const last = moving.at(-1)?.rect;
+    const positions = new Set(moving.map((frame) => Math.round(frame.rect.y))).size;
+    add(theme + "-motion-resize-reopen-measures", Boolean(first && last && source && target
+      && ["x", "y", "width", "height"].every((key) => Math.abs(first[key] - source[key]) < 1
+        && Math.abs(last[key] - target[key]) < 1)) && positions >= 3,
+      JSON.stringify({ viewport: page.viewportSize(), source, first, target, last, positions }));
+    await page.keyboard.press("Escape");
+    await page.getByTestId("playback-stage").waitFor({ state: "hidden" });
+  } finally {
+    await page.setViewportSize(viewport);
+  }
 }
 
 export async function runMotionResourceChecks({ page, add, theme }) {
@@ -152,7 +177,7 @@ export async function runMotionResourceChecks({ page, add, theme }) {
     await stageTrigger.click();
     await page.waitForFunction(() => document.querySelector('[data-testid="playback-stage"]')?.dataset.coverMotion === "idle");
     await page.keyboard.press("Escape");
-    await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+    await page.getByTestId("playback-stage").waitFor({ state: "hidden" });
     await page.waitForFunction(() => !document.querySelector('[data-testid="cover-flight"]'));
   };
   await warmStage();
@@ -165,7 +190,7 @@ export async function runMotionResourceChecks({ page, add, theme }) {
   }
   const after = await page.evaluate(() => ({
     ...window.__guard.resources(),
-    stages: document.querySelectorAll('[data-testid="playback-stage"]').length,
+    stages: document.querySelectorAll('[data-testid="playback-stage"][aria-hidden="false"]').length,
     ghosts: document.querySelectorAll('[data-testid="cover-flight"],[data-testid="queue-exit-snapshot"],[data-testid="queue-exit-scrim"]').length,
   }));
   add(theme + "-motion-ten-cycles-resources", before.audioInstances === 1 && after.audioInstances === 1
@@ -177,6 +202,7 @@ export async function runMotionResourceChecks({ page, add, theme }) {
     await page.evaluate(() => window.__guard.setDesktop(false));
     await page.getByTestId("main-content").waitFor();
   }
+  await warmStage();
   const afterDesktop = await page.evaluate(() => window.__guard.resources());
   add(theme + "-motion-desktop-ten-reopens", afterDesktop.audioInstances === before.audioInstances
     && afterDesktop.playerSubscriptions === before.playerSubscriptions && afterDesktop.canvases === before.canvases,
@@ -243,7 +269,9 @@ export async function runLyricsMotionChecks({ page, add, theme }) {
     await page.evaluate(async () => { await window.__popupGuard.present(false, 2); await window.__popupGuard.present(true, 3); });
   });
   add(theme + "-lyrics-popup-reopen", frames.some((frame) => frame.opacity > 0 && frame.opacity < 1)
-    && frames.at(-1).opacity === 1, "外观窗重新显示有进入过渡");
+    && frames.at(-1).opacity === 1, JSON.stringify({ frames: frames.length,
+      intermediateFrames: frames.filter((frame) => frame.opacity > 0 && frame.opacity < 1).length,
+      finalOpacity: frames.at(-1).opacity, inlineOpacity: await panel.evaluate((node) => node.style.opacity) }));
   const count = await panel.getAttribute("data-presentation-count");
   await page.evaluate(async () => {
     await window.__popupGuard.present(true, 3);
@@ -261,8 +289,10 @@ export async function runLyricsMotionChecks({ page, add, theme }) {
   await page.waitForFunction(() => document.documentElement.dataset.motion === "reduced");
   const reduced = await recordVisualFrames(page, '[data-testid="lyrics-appearance-panel"]', () =>
     page.evaluate(async () => { await window.__popupGuard.present(false, 6); await window.__popupGuard.present(true, 7); }));
-  add(theme + "-lyrics-popup-reduced", reduced.filter((frame) => frame.present).every((frame) => frame.opacity === 1),
-    "独立外观窗减少动效直接到位");
+  const visibleReduced = reduced.filter((frame) => frame.present);
+  add(theme + "-lyrics-popup-reduced", visibleReduced.length > 0 && visibleReduced.every((frame) => frame.opacity === 1),
+    JSON.stringify({ frames: visibleReduced.length, opacities: [...new Set(visibleReduced.map((frame) => frame.opacity))],
+      inlineOpacity: await panel.evaluate((node) => node.style.opacity) }));
   await page.emulateMedia({ reducedMotion: "no-preference" });
 
   const mainUrl = new URL("index.html", base).href;
@@ -277,7 +307,9 @@ export async function runLyricsMotionChecks({ page, add, theme }) {
   const change = await recordVisualFrames(page, '[data-testid="lyrics-layout-content"]', () =>
     page.evaluate(() => window.__guard.configureDesktop({ layout: "vertical", size: "lg" })));
   add(theme + "-lyrics-layout-motion", change.some((frame) => frame.present && frame.opacity > 0 && frame.opacity < 1)
-    && change.at(-1).opacity === 1, "桌面歌词布局改变有短过渡");
+    && change.at(-1).opacity === 1, JSON.stringify({ frames: change.length,
+      intermediateFrames: change.filter((frame) => frame.present && frame.opacity > 0 && frame.opacity < 1).length,
+      finalOpacity: change.at(-1).opacity }));
   await page.evaluate(() => window.__guard.configureDesktop({ mode: "taskbar" }));
   const taskbar = await page.getByTestId("lyrics-layout-content").evaluate((node) => ({
     transform: getComputedStyle(node).transform,
@@ -288,30 +320,84 @@ export async function runLyricsMotionChecks({ page, add, theme }) {
 }
 
 export async function runFeedbackMotionChecks({ page, add, theme }) {
+  await page.emulateMedia({ colorScheme: theme === "dark" ? "light" : "dark", reducedMotion: "no-preference" });
   await page.goto(page.url().split("?")[0], { waitUntil: "load" });
   await page.waitForFunction(() => window.__guard !== undefined);
-  await page.evaluate((choice) => { document.documentElement.className = choice; return window.__guard.ready(); }, theme);
+  await page.evaluate((choice) => {
+    window.__guard.setHostTheme(choice);
+    document.documentElement.className = choice;
+    return window.__guard.ready();
+  }, theme);
   await page.getByTestId("nav-list").getByRole("button", { name: "设置", exact: true }).click();
   const quality = page.getByRole("combobox", { name: "音质", exact: true });
-  await quality.waitFor();
+  await page.waitForFunction(() => {
+    const trigger = document.querySelector('#playback-quality');
+    return trigger && !trigger.disabled && /^(标准|高|无损)$/.test(trigger.textContent.trim());
+  });
   const previousQuality = (await quality.textContent()).trim();
   const targetQuality = previousQuality === "标准" ? "高" : "标准";
+  const targetValue = targetQuality === "高" ? "high" : "standard";
+  const persistentAlerts = await page.getByTestId("settings-page").getByRole("alert").allTextContents();
+  const failureSelector = '[data-sonner-toast][data-type="error"]';
+  const failureToast = page.locator(failureSelector).filter({ hasText: "这一次设置写入被故意拒绝" });
   await page.evaluate(() => window.__guard.setSettingsPlan({ failTimes: 1, delayMs: 200 }));
   await quality.click();
-  const frames = await recordVisualFrames(page, '[data-testid="settings-page"] [role="alert"]', () =>
+  const frames = await recordVisualFrames(page, failureSelector, () =>
     page.getByRole("option", { name: targetQuality, exact: true }).click());
-  add(theme + "-feedback-failure-entry", frames.some((frame) => frame.present && frame.opacity > 0 && frame.opacity < 1), "保存失败有明确进入反馈");
+  await failureToast.waitFor();
+  add(theme + "-feedback-failure-entry", await failureToast.count() === 1
+    && frames.some((frame) => frame.present && frame.opacity > 0 && frame.opacity < 1), "保存失败通过真实 Sonner 进入且仅一条");
+  await page.waitForFunction((expected) => document.querySelector('#playback-quality')?.textContent.trim() === expected, previousQuality);
   add(theme + "-feedback-failure-rolls-back", (await quality.textContent()).trim() === previousQuality, "保存失败选择回到已生效档位");
+  await page.waitForFunction((selector) => {
+    const toast = document.querySelector(selector);
+    return toast && Math.abs(toast.getBoundingClientRect().top - 48) < 1 && getComputedStyle(toast).opacity === "1";
+  }, failureSelector);
+  const appearance = await failureToast.evaluate((node) => {
+    const toaster = node.closest('[data-sonner-toaster]');
+    const rect = node.getBoundingClientRect();
+    return { top: rect.top, center: rect.x + rect.width / 2, viewportCenter: innerWidth / 2,
+      x: toaster.dataset.xPosition, y: toaster.dataset.yPosition, theme: toaster.dataset.sonnerTheme,
+      forcedTheme: document.documentElement.className, systemDark: matchMedia('(prefers-color-scheme: dark)').matches,
+      background: getComputedStyle(node).backgroundColor, color: getComputedStyle(node).color };
+  });
+  add(theme + "-feedback-top-center", appearance.x === "center" && appearance.y === "top"
+    && Math.abs(appearance.center - appearance.viewportCenter) < 1 && Math.abs(appearance.top - 48) < 1,
+    JSON.stringify(appearance));
+  add(theme + "-feedback-forced-theme", appearance.theme === theme && appearance.forcedTheme === theme
+    && appearance.systemDark === (theme === "light") && appearance.background !== appearance.color, JSON.stringify(appearance));
+  const alertsAfterFailure = await page.getByTestId("settings-page").getByRole("alert").allTextContents();
+  add(theme + "-feedback-persistent-alerts", JSON.stringify(alertsAfterFailure) === JSON.stringify(persistentAlerts)
+    && !(await page.getByTestId("settings-page").textContent()).includes("这一次设置写入被故意拒绝"),
+    JSON.stringify({ persistentAlerts, alertsAfterFailure }));
   await page.evaluate(() => window.__guard.setSettingsPlan({ failTimes: 0, delayMs: 0 }));
   await quality.click();
   await page.getByRole("option", { name: targetQuality, exact: true }).click();
-  await page.waitForTimeout(350);
+  await page.waitForFunction(({ targetValue, targetQuality }) => window.__guard.settingsData().playbackQuality === targetValue
+    && document.querySelector('#playback-quality')?.textContent.trim() === targetQuality, { targetValue, targetQuality });
   const retry = await page.evaluate(() => ({
-    failure: document.querySelector('[data-testid="settings-page"] [role="alert"]')?.textContent?.trim() ?? null,
     quality: document.querySelector('#playback-quality')?.textContent?.trim(),
     writes: window.__guard.settingsWrites?.().filter((entry) => "playbackQuality" in entry.patch).map((entry) => entry.patch.playbackQuality) ?? null,
   }));
-  add(theme + "-feedback-retry", !/保存/.test(retry.failure ?? "") && retry.quality === targetQuality, JSON.stringify(retry));
+  add(theme + "-feedback-retry", retry.quality === targetQuality && retry.writes.slice(-2).every((value) => value === targetValue)
+    && retry.writes.length >= 2, JSON.stringify(retry));
+  await page.mouse.move(0, 0);
+  await failureToast.waitFor({ state: "hidden" });
+  add(theme + "-feedback-transient", await failureToast.count() === 0, "瞬时错误自动消失，持续告警保留");
+  await page.getByRole("tab", { name: "网络", exact: true }).click();
+  await page.getByRole("button", { name: "保存", exact: true }).click();
+  const savedToast = page.locator('[data-sonner-toast][data-type="success"]').filter({ hasText: "设置已保存。" });
+  await savedToast.waitFor();
+  add(theme + "-feedback-success", await savedToast.count() === 1
+    && !(await page.getByTestId("settings-page").textContent()).includes("设置已保存。"), "保存回执仅在 Sonner 显示");
+  await savedToast.waitFor({ state: "hidden" });
+  const noticeText = "守卫提示：代理按环境变量生效";
+  await page.evaluate(async (text) => { await window.__guard.emitNotice(text); await window.__guard.emitNotice(text); }, noticeText);
+  const noticeToast = page.locator('[data-sonner-toast]').filter({ hasText: noticeText });
+  await noticeToast.waitFor();
+  add(theme + "-feedback-app-notice-deduplicated", await noticeToast.count() === 1, "真实 app:notice 广播显示，重复广播复用一条 Sonner");
+  await noticeToast.waitFor({ state: "hidden" });
+  await page.emulateMedia({ colorScheme: "light" });
 }
 
 export async function runPlaybackInteractionChecks({ page, add, theme }) {
@@ -383,7 +469,7 @@ export async function runStageMotionChecks({ page, add, theme }) {
   add(theme + "-motion-cold-cover-entry", cold.some((frame) => frame.present)
     && await page.getByTestId("playback-stage").isVisible(), "首次GPU初始化时仍创建并完成封面过渡");
   await page.keyboard.press("Escape");
-  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+  await page.getByTestId("playback-stage").waitFor({ state: "hidden" });
   await page.waitForFunction(() => !document.querySelector('[data-testid="cover-flight"]'));
   const frames = await recordVisualFrames(page, '[data-testid="cover-flight"]', () => source.click());
   const moving = frames.filter((frame) => frame.present);
@@ -400,7 +486,7 @@ export async function runStageMotionChecks({ page, add, theme }) {
     Boolean(document.querySelector('[data-testid="nav-list"]').closest("[inert]"))
     && Boolean(document.activeElement?.closest('[data-testid="playback-stage"]'))), "主壳停用，焦点进入沉浸页");
   await page.keyboard.press("Escape");
-  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+  await page.getByTestId("playback-stage").waitFor({ state: "hidden" });
   add(theme + "-motion-stage-focus-return", await source.evaluate((node) => document.activeElement === node), "焦点回到实际打开入口");
 
   await source.click();
@@ -413,7 +499,7 @@ export async function runStageMotionChecks({ page, add, theme }) {
   const reversed = { stages: await page.getByTestId("playback-stage").count(), flights: await page.getByTestId("cover-flight").count() };
   add(theme + "-motion-stage-reverse", reversed.stages === 1 && reversed.flights === 0, JSON.stringify(reversed));
   await page.keyboard.press("Escape");
-  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+  await page.getByTestId("playback-stage").waitFor({ state: "hidden" });
 
   await source.click();
   await page.waitForTimeout(80);
@@ -422,7 +508,7 @@ export async function runStageMotionChecks({ page, add, theme }) {
     && !document.querySelector('[data-testid="cover-flight"]'));
   add(theme + "-motion-cover-resize-cancel", await page.getByTestId("cover-flight").count() === 0, "窗口改变尺寸取消旧封面飞行");
   await page.keyboard.press("Escape");
-  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+  await page.getByTestId("playback-stage").waitFor({ state: "hidden" });
   await page.setViewportSize({ width: 1280, height: 800 });
 
   await page.emulateMedia({ reducedMotion: "reduce" });
@@ -430,7 +516,7 @@ export async function runStageMotionChecks({ page, add, theme }) {
   await source.click();
   add(theme + "-motion-stage-reduced", await page.getByTestId("cover-flight").count() === 0, "减少动效不生成飞行封面");
   await page.keyboard.press("Escape");
-  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+  await page.getByTestId("playback-stage").waitFor({ state: "hidden" });
   await page.emulateMedia({ reducedMotion: "no-preference" });
 }
 

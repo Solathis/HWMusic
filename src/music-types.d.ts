@@ -66,6 +66,10 @@ export interface PlaybackInfo {
   duration: number | null;
   /** 声明的音质与实际返回对得上才算确认；否则 "unknown"（不虚标） */
   actualQuality: "standard" | "high" | "lossless" | "unknown";
+  /** 实际 playQuality 对应的 songInfo 音频元数据，未知/有冲突时为 null。 */
+  audioDetails: { format: string; sampleRate: number | null; fileSize: number | null; duration: number | null } | null;
+  /** 由实际 playQuality 匹配的 songInfo 文件资源投影出来的当前音频详情。 */
+  audioDetails: { format: string; sampleRate: number | null; fileSize: number | null; duration: number | null } | null;
   /** 仅当 auditionTime 与标志位两个信号齐备时为 true */
   auditionLikely: boolean;
   signals: string[];

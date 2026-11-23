@@ -1,4 +1,4 @@
-/** 队列只保留展示白名单；持久化兼容旧 ids/index，绝不保存音频地址（进度只存毫秒数）。 */
+/** 队列只保留展示与已确认音质白名单；持久化兼容旧 ids/index，绝不保存音频地址（进度只存毫秒数）。 */
 import {
   trackAlbumIdOf,
   trackAlbumOrNull,
@@ -8,10 +8,11 @@ import {
   trackNameOrNull,
 } from "../library/track-fields.mjs";
 import { guardMediaUrl } from "./media-url.mjs";
+import { playbackSnapshotOf } from "../../../shared/playback-quality.mjs";
 
 /** @typedef {{id: string, name: string|null, artists: string|null, duration: number|null, coverUrl: string|null, albumId: string|null, albumName: string|null}} QueueEntry */
 /** @typedef {{trackId: string, positionMs: number}} QueuePosition */
-/** @typedef {{ids: string[], index: number, metadata?: Array<QueueEntry|null>, positionMs?: number, positionTrackId?: string}} QueueRecord */
+/** @typedef {{ids: string[], index: number, metadata?: Array<QueueEntry|null>, positionMs?: number, positionTrackId?: string, playback?: NonNullable<ReturnType<typeof playbackSnapshotOf>>}} QueueRecord */
 
 export const QUEUE_SETTING_KEY = "queue";
 export const QUEUE_POSITION_SETTING_KEY = "queuePosition";
@@ -90,15 +91,17 @@ function positionOf(value, trackId) {
 }
 
 /** @returns {QueueRecord|null} */
-export function queueStructureOf(entries, index) {
+export function queueStructureOf(entries, index, playback = null) {
   const projected = queueEntriesOf(entries);
   if (projected.length === 0) return null;
   const metadata = projected.map((entry) => snapshotOf(entry, entry.id));
   const at = clampIndex(index, projected.length);
+  const confirmed = playbackSnapshotOf(playback, projected[at].id);
   return {
     ids: projected.map((entry) => entry.id),
     index: at,
     ...(metadata.some((entry) => entry !== null) ? { metadata } : {}),
+    ...(confirmed === null ? {} : { playback: confirmed }),
   };
 }
 
@@ -135,8 +138,8 @@ export function mergeQueuePosition(record, position, { explicit = false } = {}) 
 }
 
 /** @returns {QueueRecord|null} */
-export function queueRecordOf(entries, index, position = null) {
-  const structure = queueStructureOf(entries, index);
+export function queueRecordOf(entries, index, position = null, playback = null) {
+  const structure = queueStructureOf(entries, index, playback);
   if (structure === null) return null;
   const resume = positionOf(position, structure.ids[structure.index]);
   return {
@@ -161,6 +164,7 @@ export function sanitizeQueueRecord(raw) {
   }
   if (ids.length === 0) return null;
   const index = clampIndex(ownValue(raw, "index"), ids.length);
+  const playback = playbackSnapshotOf(ownValue(raw, "playback"), ids[index]);
   const positionMs = ownValue(raw, "positionMs");
   const positionTrackId = textOf(ownValue(raw, "positionTrackId"));
   const hasPosition =
@@ -170,6 +174,7 @@ export function sanitizeQueueRecord(raw) {
     index,
     ...(metadata.some((entry) => entry !== null) ? { metadata } : {}),
     ...(hasPosition ? { positionMs: Math.round(positionMs), positionTrackId } : {}),
+    ...(playback === null ? {} : { playback }),
   };
 }
 
@@ -214,12 +219,14 @@ export function dropQueueEntries(raw, shouldDrop) {
       : {};
 
   const metadata = kept.map((entry) => entry.metadata);
+  const playback = playbackSnapshotOf(clean.playback, kept[index].id);
   return {
     record: {
       ids: kept.map((entry) => entry.id),
       index,
       ...(metadata.some((entry) => entry !== null) ? { metadata } : {}),
       ...position,
+      ...(playback === null ? {} : { playback }),
     },
     skipped,
   };

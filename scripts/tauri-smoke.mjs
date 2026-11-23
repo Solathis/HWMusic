@@ -14,6 +14,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 // 主程序 exe 名与 dist:win / check:nsis **同一处事实**（Cargo.toml 的 [[bin]] name）。
 // 按 tauri.conf.json 的 productName 找会 ENOENT：那个是显示名，不是 cargo 产物名。
 import { appExeName } from "./dist-win.mjs";
+import { stageDesktopRuntime } from "./desktop-runtime.mjs";
 
 // 名字口径对外可见（测试要断言"三个脚本同一处事实"，而不是各读各的）
 export { appExeName };
@@ -97,6 +98,8 @@ export function smokeVerdict({
   timeoutMs,
   exitCode,
   stderr,
+  trayRequired = false,
+  trayAvailable = null,
 }) {
   if (spawnFailed) return { verdict: VERDICTS.untested, reason: `本机起不了进程：${spawnFailed}` };
   if (!alive) {
@@ -112,6 +115,9 @@ export function smokeVerdict({
       reason: `进程在冒烟窗口期内自己退出了（exit=${exitCode}）：${stderrTail(stderr)}`,
     };
   }
+  if (trayRequired && trayAvailable !== true) {
+    return { verdict: VERDICTS.fail, reason: `主窗存活但系统托盘未启用：${stderrTail(stderr)}` };
+  }
   if (windowProbeAvailable === false) {
     return {
       verdict: VERDICTS.pass,
@@ -121,7 +127,7 @@ export function smokeVerdict({
   if (windowHandle === 0) {
     return { verdict: VERDICTS.fail, reason: `到了 ${timeoutMs}ms 主窗句柄仍是 0：进程活着但窗口没建出来` };
   }
-  return { verdict: VERDICTS.pass, reason: `主窗句柄 ${windowHandle}（${elapsedMs}ms）` };
+  return { verdict: VERDICTS.pass, reason: `主窗句柄 ${windowHandle}（${elapsedMs}ms）${trayRequired ? "；系统托盘已启用" : ""}` };
 }
 
 /** 结束进程树（GUI 进程没有 stdin EOF 这种优雅退出方式）。 */
@@ -132,7 +138,7 @@ function killTree(pid) {
 async function main() {
   const profileIndex = process.argv.indexOf("--profile");
   const profile = profileIndex === -1 ? (process.env.HWMUSIC_SMOKE_PROFILE ?? "release") : (process.argv[profileIndex + 1] ?? "release");
-  const exePath = await appExePath({ profile });
+  let exePath = await appExePath({ profile });
 
   try {
     await stat(exePath);
@@ -143,6 +149,7 @@ async function main() {
     process.exit(exitCodeFor(VERDICTS.fail));
   }
 
+  exePath = await stageDesktopRuntime(exePath);
   const temp = path.join(ROOT, ".tmp/temp");
   const dataDir = path.join(ROOT, SMOKE_DATA_DIR);
   await mkdir(temp, { recursive: true });
@@ -150,6 +157,8 @@ async function main() {
   await mkdir(dataDir, { recursive: true });
 
   const env = { ...process.env, TEMP: temp, TMP: temp, HWMUSIC_DATA_DIR: dataDir };
+  delete env.HWMUSIC_SIDECAR_SCRIPT;
+  delete env.HWMUSIC_NODE_BIN;
   const timeoutMs = 20_000;
   const started = Date.now();
   // stderr 要接管道：发布版是 windows 子系统（没有控制台），但 panic 仍会写给**继承来的句柄**，
@@ -192,7 +201,7 @@ async function main() {
     }
     if (probe !== 0) {
       windowHandle = probe;
-      break;
+      if (process.platform !== "win32" || /托盘已装上|托盘未能启用/.test(stderr)) break;
     }
   }
 
@@ -206,6 +215,8 @@ async function main() {
     timeoutMs,
     exitCode: exitInfo.code,
     stderr,
+    trayRequired: process.platform === "win32",
+    trayAvailable: /托盘已装上/.test(stderr),
   });
 
   if (alive && child.pid !== undefined) killTree(child.pid);

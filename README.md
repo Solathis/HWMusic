@@ -45,12 +45,16 @@ npm run typecheck
 npm run build:web
 npm run test:browser        # 真 Chromium 的界面守卫（先 build:web 与 dist:sidecar）
 npm run dist:win            # 打包 NSIS 安装包
+npm run start:desktop       # 从正常用户运行目录启动本机打包产物
+npm run smoke:build         # 验证打包产物建窗与 Windows 托盘注册
 npm run check:nsis
 npm run release:checksums
 npm run release:assets      # 英文名安装包、SHA256SUMS、latest.json、RELEASE_NOTES.md
 ```
 
 每个版本的更新内容见 [CHANGELOG.md](CHANGELOG.md)。
+
+Windows 本机验证请用 `start:desktop`：它在 `%LOCALAPPDATA%/HWMusic/runtime` 创建与构建产物字节一致的运行副本，不携带构建目录的文件安全标签。直接运行低完整性目录中的程序会被 Windows 拒绝注册系统托盘。安装包下载后正常安装不依赖此启动脚本。
 
 ## 参考项目
 

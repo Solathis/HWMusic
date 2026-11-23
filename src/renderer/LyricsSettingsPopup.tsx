@@ -82,12 +82,14 @@ export function LyricsSettingsPopup() {
   const { reducedMotion } = useMotionPolicy()
   const presentationRef = useRef<ReturnType<typeof createPresentationAcceptor> | null>(null)
   const presentationCount = useRef(0)
+  const presentationAnimation = useRef<Animation | null>(null)
   if (presentationRef.current === null) presentationRef.current = createPresentationAcceptor((visible: boolean) => {
     const node = contentRef.current
     if (!node) return
-    node.getAnimations().forEach((animation) => animation.cancel())
+    presentationAnimation.current?.cancel()
+    presentationAnimation.current = null
     if (visible && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      node.animate([{ opacity: 0, scale: "0.96" }, { opacity: 1, scale: "1" }],
+      presentationAnimation.current = node.animate([{ opacity: 0, scale: "0.96" }, { opacity: 1, scale: "1" }],
         { duration: MOTION_MS.overlay, easing: "cubic-bezier(" + MOTION_EASES.enter.join(",") + ")" })
       presentationCount.current += 1
       node.dataset.presentationCount = String(presentationCount.current)
@@ -100,7 +102,8 @@ export function LyricsSettingsPopup() {
   const revisionRef = useRef(-1)
   const contentRef = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
-    if (reducedMotion) contentRef.current?.getAnimations().forEach((animation) => animation.cancel())
+    if (reducedMotion) presentationAnimation.current?.cancel()
+    return () => presentationAnimation.current?.cancel()
   }, [reducedMotion])
   const [taskbarSupported, setTaskbarSupported] = useState(false)
 

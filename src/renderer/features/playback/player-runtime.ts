@@ -4,7 +4,8 @@
  * 单例建在模块层：音频元素与媒体会话都是系统级资源，多份会互相打架，而 React 严格模式会双挂载。
  */
 import { toast } from "sonner";
-import { PLAYER_COMMAND } from "../../../shared/channels.ts";import { PLAYBACK_RESOLVE_URL, SETTINGS_GET, SETTINGS_SET } from "../../../shared/request-channels.ts";
+import { AUTH_STATUS, PLAYER_COMMAND } from "../../../shared/channels.ts";
+import { AUTH_GET_STATUS, PLAYBACK_RESOLVE_URL, SETTINGS_GET, SETTINGS_SET } from "../../../shared/request-channels.ts";
 import { LOCAL_TRACK_PREFIX, isLocalTrackId, localHexId } from "../../../shared/local-track.ts";
 import { coreCall, onCoreEvent } from "../../host-api.ts";
 import { fetchLocalLibrary, localBaseUrlCached } from "../library/local-bridge.ts";
@@ -278,6 +279,40 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
   });
 
   let initialized = false;
+  let unlistenAuth: (() => void) | null = null;
+
+  async function confirmQualityAfterAuth(generation: number): Promise<void> {
+    let revision = 0;
+    let started = false;
+    const applyAuth = (payload: unknown) => {
+      if (disposed) return;
+      const status = payload as { loggedIn?: unknown; restoring?: unknown; busy?: unknown } | null;
+      if (status?.loggedIn !== true || status.restoring === true || status.busy === true) {
+        player.cancelQualityConfirmation();
+        started = false;
+        return;
+      }
+      if (started) return;
+      started = true;
+      void player.confirmRestoredQuality(generation).catch(() => {});
+    };
+    try {
+      const off = await subscribeCoreEvent(AUTH_STATUS, (payload: unknown) => {
+        revision += 1;
+        applyAuth(payload);
+      });
+      if (disposed) {
+        off();
+        return;
+      }
+      unlistenAuth = off;
+      const requestedRevision = revision;
+      const status = await callCore(AUTH_GET_STATUS);
+      if (revision === requestedRevision) applyAuth(status);
+    } catch {
+      return;
+    }
+  }
 
   /**
    * 读设置里的下架清单并交给状态机（已知下架的曲目在列表里变灰、点不动）。
@@ -313,16 +348,24 @@ export function createPlayerRuntime(deps: PlayerRuntimeDeps = {}): PlayerRuntime
     if (initialized) return;
     initialized = true;
     await player.restore();
+    const restoredGeneration = player.snapshot().playbackGeneration;
     await hydrateOfflineIds();
     await hydrateAudioPreference();
+    const state = player.snapshot();
+    if (!disposed && state.restored && !state.loaded && state.status === "idle" && state.quality === null &&
+      state.playbackGeneration === restoredGeneration && state.track !== null && !isLocalTrackId(state.track.id)) {
+      void confirmQualityAfterAuth(restoredGeneration);
+    }
   }
 
   function dispose(): void {
+    if (disposed) return;
     disposed = true;
     documentHost?.removeEventListener("visibilitychange", onVisibilityChange);
     windowHost?.removeEventListener("pagehide", flushOnHide);
     unsubscribeState();
     if (unlisten !== null) unlisten();
+    if (unlistenAuth !== null) unlistenAuth();
     player.pause();
     player.dispose();
     mediaSession.clear();

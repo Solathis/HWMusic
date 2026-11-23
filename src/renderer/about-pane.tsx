@@ -4,6 +4,7 @@
  */
 import { useEffect, useState } from "react"
 import { ExternalLinkIcon } from "lucide-react"
+import { notify } from "./notifications.ts"
 
 import { Button } from "./components/ui/button"
 import { Separator } from "./components/ui/separator"
@@ -30,11 +31,9 @@ interface AboutLink {
 
 function LinkList({
   links,
-  failedKey,
   onOpen,
 }: {
   links: AboutLink[]
-  failedKey: string | null
   onOpen: (key: string) => void
 }) {
   return (
@@ -54,11 +53,6 @@ function LinkList({
               打开
             </Button>
           </div>
-          {failedKey === link.key ? (
-            <p className="text-sm text-destructive" role="alert">
-              {ABOUT_OPEN_FAILED}
-            </p>
-          ) : null}
         </li>
       ))}
     </ul>
@@ -68,7 +62,6 @@ function LinkList({
 export function AboutPane() {
   const [info, setInfo] = useState<AppInfo | null>(null)
   const [infoFailed, setInfoFailed] = useState(false)
-  const [failedKey, setFailedKey] = useState<string | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -85,8 +78,7 @@ export function AboutPane() {
   }, [])
 
   const open = (key: string) => {
-    setFailedKey(null)
-    openLink(key).catch(() => setFailedKey(key))
+    openLink(key).catch(() => notify(ABOUT_OPEN_FAILED, "error"))
   }
 
   return (
@@ -148,7 +140,7 @@ export function AboutPane() {
           <CardTitle>开源地址</CardTitle>
         </CardHeader>
         <CardContent>
-          <LinkList links={PROJECT_LINKS} failedKey={failedKey} onOpen={open} />
+          <LinkList links={PROJECT_LINKS} onOpen={open} />
         </CardContent>
       </Card>
 
@@ -157,7 +149,7 @@ export function AboutPane() {
           <CardTitle>参考项目</CardTitle>
         </CardHeader>
         <CardContent>
-          <LinkList links={REFERENCE_LINKS} failedKey={failedKey} onOpen={open} />
+          <LinkList links={REFERENCE_LINKS} onOpen={open} />
         </CardContent>
       </Card>
     </>

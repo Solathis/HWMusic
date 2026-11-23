@@ -17,7 +17,7 @@ export async function runPlaybackQualityChecks({ page, add, theme }) {
     const expected = PLAYBACK_QUALITY_CASES[key].text;
     await page.evaluate((caseKey) => window.__guard.playQualityCase(caseKey), key);
     await page.waitForFunction((text) => document.querySelector('[data-testid="player-bar-quality"]')?.textContent?.trim() === text, expected);
-    if (await page.getByTestId("playback-stage").count() === 0) {
+    if (!await page.getByTestId("playback-stage").isVisible()) {
       await page.getByRole("button", { name: "歌词", exact: true }).click();
     }
     await page.waitForFunction((text) => document.querySelector('[data-testid="playback-stage-quality"]')?.textContent?.trim() === text, expected);
@@ -50,7 +50,7 @@ export async function runPlaybackQualityChecks({ page, add, theme }) {
     && await page.getByTestId("playback-stage-quality").count() === 0, "失败清除上一首档位");
 
   await page.getByRole("button", { name: "收起歌词", exact: true }).click();
-  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+  await page.getByTestId("playback-stage").waitFor({ state: "hidden" });
   await page.evaluate(async () => {
     window.__guard.setResolvedQuality("lossless");
     await window.__guard.queueWithLongArtist("很长的艺人名字".repeat(30));

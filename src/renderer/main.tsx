@@ -10,6 +10,7 @@ import { createRoot } from "react-dom/client"
 
 import { APP_BRAND_LABEL } from "../shared/app-name.mjs"
 import { App } from "./App.tsx"
+import { DesktopFrame } from "./desktop-frame"
 import { installContextMenuGuard } from "./features/shell/context-menu-guard.mjs"
 import { installDesktopBridge } from "./host-api"
 import { installThemeSync } from "./theme-sync"
@@ -35,6 +36,6 @@ if (!container) {
 
 createRoot(container).render(
   <StrictMode>
-    <MotionProvider><App /></MotionProvider>
+    <MotionProvider><DesktopFrame><App /></DesktopFrame></MotionProvider>
   </StrictMode>
 )

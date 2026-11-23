@@ -229,6 +229,7 @@ pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std
         WebviewUrl::App("index.html".into()),
     )
     .title(title)
+    .decorations(!main_chrome::FRAMELESS_SUPPORTED)
     .inner_size(MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT)
     .min_inner_size(MAIN_WINDOW_MIN_WIDTH, MAIN_WINDOW_MIN_HEIGHT)
     .skip_taskbar(false)
@@ -247,12 +248,6 @@ pub fn create_main_window(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std
     if let Some(browser_args) = network.browser_args() {
         builder = builder.additional_browser_args(browser_args);
     }
-    // 页面重载后沉浸页已不在，先把标题栏装回去
-    builder = builder.on_page_load(|window, payload| {
-        if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
-            main_chrome::restore_frame(&window);
-        }
-    });
     let window = builder.build()?;
 
     let close_app = app.clone();
@@ -524,9 +519,6 @@ fn commit_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
     // 用户在退出前开着菜单/拖着窗：只有准备成功之后才取消（准备失败时不能先摧毁他的状态）。
     cancel_own_modals_now(app);
-    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        main_chrome::restore_frame(&window);
-    }
     lyrics_window::stop_persistence(app);
     finish_app_exit(
         || {

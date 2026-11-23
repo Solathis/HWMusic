@@ -17,6 +17,9 @@ import {
 } from "../shared/request-channels.ts"
 import { Button } from "./components/ui/button"
 import { Skeleton } from "./components/ui/skeleton"
+import GhostFibers from "./components/GhostFibers"
+import { useMotionPolicy } from "./features/motion/MotionProvider"
+import { useLoginBackgroundPalette } from "./features/theme/use-login-background"
 import { coreCall, isCoreError, onCoreEvent, rendererReady } from "./host-api"
 import { profileFromStatusPayload, sessionExpiresAtFromStatusPayload } from "./features/auth/account.mjs"
 
@@ -369,6 +372,8 @@ export function StartupChecking({ gate }: { gate: AuthGate }) {
 /** 引导页本体。 */
 export function LoginGate({ gate }: { gate: AuthGate }) {
   const { state, startQr, startLogin } = gate
+  const { decorationsActive } = useMotionPolicy()
+  const backgroundPalette = useLoginBackgroundPalette()
   const status = loginGateStatusLine(state)
   const content = qrContentOf(state)
   const countdown = qrCountdownText(state)
@@ -396,13 +401,13 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
   )
 
   return (
-    <div className="flex h-full w-full flex-col bg-background text-foreground" data-motion-screen="login">
+    <div className="relative isolate flex h-full w-full flex-col overflow-hidden bg-background text-foreground" data-motion-screen="login">
       {/* 顶部是门禁自己的标题区，右上角放主题控件。 */}
-      <header className="flex items-center justify-end px-4" style={{ height: LOGIN_VIEW_TOP_INSET }}>
+      <header className="relative z-10 flex items-center justify-end px-4" style={{ height: LOGIN_VIEW_TOP_INSET }}>
         <ThemeControl />
       </header>
 
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
+      <div className="relative z-10 flex flex-1 flex-col items-center justify-center gap-3 p-6">
         {/* 标题：居中放在二维码**正上方**（语义标题元素，不是 CardTitle：这一页不用 Card 铺陈） */}
         <h1 className="text-center text-lg font-medium">{LOGIN_GATE_TITLE}</h1>
 
@@ -470,6 +475,46 @@ export function LoginGate({ gate }: { gate: AuthGate }) {
 
         {/* 正文只剩「在网页中打开登录」这一种形态。 */}
         {entry.form === "open" ? entryButton : null}
+      </div>
+      <div className="pointer-events-none absolute inset-0 z-0" aria-hidden="true" data-testid="login-background">
+        <GhostFibers
+          glowColor={backgroundPalette.glowColor}
+          layers={3}
+          twist={1.2}
+          threads={72}
+          fiberStyle="dots"
+          depthOfField={0.85}
+          hoverEffect="focus"
+          intro={decorationsActive}
+          lineColor={backgroundPalette.lineColor}
+          secondaryColor={backgroundPalette.secondaryColor}
+          gradient="depth"
+          waves={1}
+          volume={0.7}
+          spread={1}
+          scale={1}
+          rotation={18}
+          perspective={0.65}
+          density={1}
+          thickness={1}
+          tips={0}
+          foldGlow={1}
+          speed={0.5}
+          flow={0.4}
+          rollSpeed={0.15}
+          focusDepth={0}
+          particles={0.5}
+          sparkle={0.5}
+          glow={0.8}
+          brightness={1}
+          vignette={0.3}
+          grain={0.06}
+          mouseStrength={1}
+          pulseOnClick
+          lightMode={backgroundPalette.lightMode}
+          paused={!decorationsActive}
+          mouseInteraction={decorationsActive}
+        />
       </div>
     </div>
   )

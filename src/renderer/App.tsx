@@ -58,6 +58,8 @@ import { TooltipProvider } from "./components/ui/tooltip"
 import { EmptyState, PlayerBar, QueuePanel } from "./components"
 import { MotionRegion } from "./features/motion/primitives"
 import { Toaster } from "./components/ui/sonner"
+import { notify } from "./notifications.ts"
+import { useAppNotifications, usePlayerNotifications } from "./use-notifications.ts"
 import { SidebarPlaylists } from "./sidebar-playlists.tsx"
 import { PlaybackStage } from "./playback-stage.tsx"
 import { ThemeToggle } from "./theme-toggle.tsx"
@@ -110,6 +112,7 @@ import { getTrayAvailable, coreLogout, onCoreEvent } from "./host-api"
 import { TRAY_AVAILABLE, trayAvailabilityFromAnswer } from "./features/settings/settings-form.mjs"
 
 export function App() {
+  useAppNotifications()
   const gate = useAuthGate()
   /**
    * 三态判定只有一处（features/auth/startup-view.mjs 的纯函数）：app-shell 只在已登录时渲染。
@@ -117,20 +120,16 @@ export function App() {
    */
   const view = startupViewOf(gate.state)
 
-  if (view !== STARTUP_VIEW.appShell) {
-    // 确定未登录 → 登录门禁；还不知道（含查询失败）→ 中性启动屏（它自己带可操作的两条出路）
-    return view === STARTUP_VIEW.loginGate ? <LoginGate gate={gate} /> : <StartupChecking gate={gate} />
-  }
-
-  // app-shell：登录之后才存在的那一块。
   return (
     /* TooltipProvider 包在最外层：侧栏收起成图标轨后导航项只剩图标，radix Tooltip 没有 Provider 会直接抛错。 */
     <TooltipProvider>
-      <div className="h-full w-full" data-shell="app-shell">
-        <LibraryShell profile={gate.profile} sessionExpiresAt={gate.sessionExpiresAt} />
-      </div>
+      {view === STARTUP_VIEW.appShell ? (
+        <div className="h-full w-full" data-shell="app-shell">
+          <LibraryShell profile={gate.profile} sessionExpiresAt={gate.sessionExpiresAt} />
+        </div>
+      ) : view === STARTUP_VIEW.loginGate ? <LoginGate gate={gate} /> : <StartupChecking gate={gate} />}
       {/* 一句话提示的唯一出口：shadcn 的 Toaster，样式全走主题变量。 */}
-      <Toaster position="bottom-center" />
+      <Toaster position="top-center" offset={48} mobileOffset={48} />
     </TooltipProvider>
   )
 }
@@ -155,7 +154,7 @@ function LivePlayerBar({ onOpenStage, coverAnchorRef, lyrics }: Pick<PlayerBarPr
 }
 
 function LivePlaybackStage({ open, onClose, coverSourceRef, openerRef, lyrics }: Pick<PlaybackStageProps, "open" | "onClose" | "coverSourceRef" | "openerRef" | "lyrics">) {
-  const { runtime, state } = usePlayer()
+  const { runtime, state } = usePlayer(open)
   return <PlaybackStage open={open} runtime={runtime} state={state} onClose={onClose} coverSourceRef={coverSourceRef} openerRef={openerRef} lyrics={lyrics} />
 }
 
@@ -268,8 +267,6 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
    * 侧栏搜索框里的文字，只活在输入框里；真正的检索词随 VIEW.search 的视图参数走。
    */
   const [keyword, setKeyword] = useState("")
-  /** 退出登录失败那一句（用户主动点的动作，失败必须看得见；成功时界面由 auth:status 广播接管） */
-  const [logoutFailure, setLogoutFailure] = useState<string | null>(null)
   // 托盘可用性：null = **还没取到**（不是"不可用"，也不是"可用"）
   const [trayAvailable, setTrayAvailable] = useState<boolean | null>(null)
   /**
@@ -278,6 +275,7 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
   const notices = useNoticeLog()
   // 播放运行时是模块级单例（音频/媒体会话/广播都只能有一份），外壳只订阅队列投影
   const { runtime, queue } = usePlayerShell()
+  usePlayerNotifications(runtime.player)
   /**
    * 桌面歌词窗的接线：托盘勾选 → 建/显/隐窗口，歌词文本与进度推送共用 player.setLyrics。
    */
@@ -411,11 +409,10 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
 
   /** 退出登录：确认框防误触，调用走 `host-api` 的 `coreLogout`，不做任何跳转。 */
   async function confirmLogout() {
-    setLogoutFailure(null)
     try {
       await coreLogout()
     } catch (cause) {
-      setLogoutFailure(accountLogoutFailureText(cause))
+      notify(accountLogoutFailureText(cause), "error")
     }
   }
 
@@ -500,23 +497,23 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
         <SidebarFooter>
           {/* 账号区：头像 + 名字 + 会员徽标 + 主题 + 退出登录；窄轨里只留头像。 */}
           <div
-            className="flex items-center gap-2 px-1 py-0.5"
+            className="flex items-center gap-2 py-0.5"
             data-testid={ACCOUNT_AREA_TESTID}
           >
-            <Avatar size="sm" data-testid={ACCOUNT_AVATAR_TESTID}>
+            <Avatar size="lg" className="group-data-[collapsible=icon]:size-8!" data-testid={ACCOUNT_AVATAR_TESTID}>
               {accountAvatar === null ? null : <AvatarImage src={accountAvatar} alt="" />}
               <AvatarFallback>
                 {accountInitial === null ? (
-                  <UserIcon className="size-3.5" />
+                  <UserIcon className="size-5" />
                 ) : (
-                  <span className="text-xs font-medium">{accountInitial}</span>
+                  <span className="text-sm font-medium">{accountInitial}</span>
                 )}
               </AvatarFallback>
             </Avatar>
             <div className="flex min-w-0 flex-1 flex-col group-data-[collapsible=icon]:hidden">
               <AccountNameTooltip name={accountName} sessionExpiresAt={sessionExpiresAt} />
               {accountVipLabel === null ? null : (
-                <Badge variant="secondary" className="mt-0.5 w-fit" data-testid={ACCOUNT_VIP_TESTID}>
+                <Badge variant="secondary" className="mt-0.5 w-fit self-center" data-testid={ACCOUNT_VIP_TESTID}>
                   {accountVipLabel}
                 </Badge>
               )}
@@ -548,11 +545,6 @@ export function LibraryShell({ profile = null, sessionExpiresAt = null }: { prof
               </AlertDialogContent>
             </AlertDialog>
           </div>
-          {logoutFailure === null ? null : (
-            <p className="px-1 text-xs text-destructive" role="alert">
-              {logoutFailure}
-            </p>
-          )}
         </SidebarFooter>
       </Sidebar>
 

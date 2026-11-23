@@ -532,17 +532,61 @@ function playbackCodec(value) {
   return null;
 }
 
-/** 当前资源的所有可信声明必须一致；资源候选、URL 和请求偏好不参与。 */
+function playbackCodeOf(raw) {
+  const codes = [raw.playQuality, raw.qualityType].map(playbackQualityCode).filter((code) => code !== null);
+  return codes.length === 0 || codes.includes(undefined) || new Set(codes).size !== 1 ? null : codes[0];
+}
+
+/** Only the candidate whose quality matches the response's actual playQuality can confirm its codec. */
+function playbackResourcesOf(raw, quality) {
+  const songInfo = isObject(raw.songInfo) ? raw.songInfo : null;
+  if (songInfo === null) return [];
+  return resourceCandidates(songInfo).filter((entry) => qualityIdOf(entry.quality) === quality);
+}
+
+function codecDeclarationsOf(raw, resources) {
+  const declarations = [raw.type, raw.format];
+  for (const { resource } of resources) declarations.push(resource.format, resource.mediaFileType);
+  return declarations.filter((value) => value !== undefined && value !== null && value !== "");
+}
+
+function playbackQualityForCode(quality, codec) {
+  if (quality === "3" && codec === "flac") return "lossless";
+  if (quality === "2" && codec === "mp3") return "high";
+  if (quality === "1" && codec === "mp3") return "standard";
+  return "unknown";
+}
+
+/**
+ * Playback returns `type: "1"` on the captured Huawei response. It is not a codec;
+ * resolve the codec only from explicit type/format fields or the same-quality songInfo resource.
+ */
 export function playbackQualityOfPayload(raw) {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return "unknown";
-  const codes = [raw.playQuality, raw.qualityType].map(playbackQualityCode).filter((code) => code !== null);
-  if (codes.length === 0 || codes.includes(undefined) || new Set(codes).size !== 1) return "unknown";
-  const codecs = [raw.type, raw.format].map(playbackCodec).filter((codec) => codec !== null);
+  const quality = playbackCodeOf(raw);
+  if (quality === null) return "unknown";
+  const declarations = codecDeclarationsOf(raw, playbackResourcesOf(raw, quality));
+  if (declarations.some((value) => playbackCodec(value) === null && String(value).trim() !== "1")) return "unknown";
+  const codecs = declarations.map(playbackCodec).filter((codec) => codec !== null);
   if (codecs.length === 0 || new Set(codecs).size !== 1) return "unknown";
-  if (codes[0] === "3" && codecs[0] === "flac") return "lossless";
-  if (codes[0] === "2" && codecs[0] === "mp3") return "high";
-  if (codes[0] === "1" && codecs[0] === "mp3") return "standard";
-  return "unknown";
+  return playbackQualityForCode(quality, codecs[0]);
+}
+
+function audioDetailsForPayload(raw, quality) {
+  if (quality === null) return null;
+  for (const { resource } of playbackResourcesOf(raw, quality)) {
+    const codecs = [resource.format, resource.mediaFileType].map(playbackCodec).filter((codec) => codec !== null);
+    if (codecs.length === 0 || new Set(codecs).size !== 1) continue;
+    const sampleRateValue = Number(resource.sampleRate);
+    const fileSizeValue = Number(resource.fileSize);
+    return {
+      format: codecs[0] === "flac" ? "FLAC" : "MP3",
+      sampleRate: Number.isFinite(sampleRateValue) && sampleRateValue > 0 ? sampleRateValue : null,
+      fileSize: Number.isFinite(fileSizeValue) && fileSizeValue > 0 ? fileSizeValue : null,
+      duration: durationSeconds(resource.duration),
+    };
+  }
+  return null;
 }
 
 /**
@@ -573,14 +617,18 @@ export function parsePlaybackPayload(raw, options = {}) {
 
   const audition = classifyAudition(raw, { flagKeys: options.flagKeys });
   const songInfo = isObject(raw.songInfo) ? raw.songInfo : null;
+  const actualQuality = playbackQualityOfPayload(raw);
+  const qualityCode = playbackCodeOf(raw);
+  const audioDetails = actualQuality === "unknown" ? null : audioDetailsForPayload(raw, qualityCode);
   return ok({
     url: fileUrl,
     fileInfos,
-    format: raw.format ?? null,
-    size: raw.size ?? null,
+    format: audioDetails?.format ?? raw.format ?? null,
+    size: raw.size ?? audioDetails?.fileSize ?? null,
     bitrate: raw.bitrate ?? null,
-    duration: raw.duration ?? songInfo?.duration ?? null,
-    actualQuality: playbackQualityOfPayload(raw),
+    duration: raw.duration ?? songInfo?.duration ?? audioDetails?.duration ?? null,
+    actualQuality,
+    audioDetails,
     auditionLikely: audition.auditionLikely,
     signals: audition.signals,
     warnings,

@@ -1,7 +1,7 @@
 {
   "name": "huawei-music-desktop",
   "private": true,
-  "version": "0.4.1",
+  "version": "0.4.2",
   "type": "module",
   "description": "华为音乐第三方桌面客户端（Tauri v2 + React）。显示名见 src/shared/app-name.mjs。",
   "engines": {
@@ -11,6 +11,7 @@
     "tauri": "tauri",
     "dev": "tauri dev",
     "dev:web": "node node_modules/vite/bin/vite.js",
+    "start:desktop": "node scripts/start-desktop.mjs",
     "build:web": "node node_modules/vite/bin/vite.js build",
     "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
     "test": "node --test test/*.test.mjs",
@@ -27,6 +28,7 @@
     "measure:resources": "node scripts/measure-resources.mjs"
   },
   "dependencies": {
+    "@animate-ui/react": "^2.4.6",
     "@applemusic-like-lyrics/core": "0.6.0",
     "@applemusic-like-lyrics/lyric": "1.1.0",
     "@applemusic-like-lyrics/react": "0.6.0",
@@ -38,12 +40,14 @@
     "@pixi/filter-bulge-pinch": "5.1.1",
     "@pixi/filter-color-matrix": "7.4.3",
     "@pixi/sprite": "7.4.3",
+    "@tanstack/react-virtual": "^3.14.28",
     "@tauri-apps/api": "2.12.4",
     "class-variance-authority": "^0.7.1",
     "cn": "^0.5.0",
     "framer-motion": "13.5.1",
     "jotai": "2.20.3",
     "lucide-react": "0.468.0",
+    "motion": "^14.14.0",
     "next-themes": "^0.4.6",
     "qrcode": "^1.5.4",
     "radix-ui": "^1.8.1",

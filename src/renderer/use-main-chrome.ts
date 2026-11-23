@@ -1,4 +1,3 @@
-/** 沉浸页的主窗外框：打开时请宿主收起标题栏（只有 Windows 真收），关闭或卸载时装回；请求排队，快速开关不会乱序。 */
 import { useCallback, useEffect, useState } from "react"
 
 import { coreMainChrome, type MainChromeAction, type MainChromeState } from "./host-api"
@@ -15,12 +14,17 @@ function request(action: MainChromeAction): Promise<MainChromeState | undefined>
 
 export function useMainChrome(open: boolean) {
   const [chrome, setChrome] = useState<MainChromeState>(FRAMED)
+  const [ready, setReady] = useState(false)
   useEffect(() => {
     if (!open) return undefined
     let live = true
     let timer: number | undefined
-    const accept = (state: MainChromeState | undefined) => { if (live) setChrome(state ?? FRAMED) }
-    void request("immersive").then(accept)
+    const accept = (state: MainChromeState | undefined) => {
+      if (!live) return
+      setChrome(state ?? FRAMED)
+      setReady(true)
+    }
+    void request("read").then(accept)
     // 最大化 / 还原后窗口尺寸会变：读回实际状态，图标跟着换
     const onResize = () => {
       window.clearTimeout(timer)
@@ -32,11 +36,11 @@ export function useMainChrome(open: boolean) {
       window.clearTimeout(timer)
       window.removeEventListener("resize", onResize)
       setChrome(FRAMED)
-      void request("normal")
+      setReady(false)
     }
   }, [open])
   const act = useCallback((action: "minimize" | "toggle-maximize" | "close") => {
     void request(action).then((state) => { if (state) setChrome(state) })
   }, [])
-  return { ...chrome, act }
+  return { ...chrome, ready, act }
 }

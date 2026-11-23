@@ -3,7 +3,9 @@
  * `TrackTable` 是曲目表的唯一实现；`PlayerBar` 不持有音频、不认识 core，动作全部转给 `features/playback`；`QueuePanel` 显示真实队列。
  * 收藏的写入接口还没确认，没接 `onToggleFavorite` 时按钮禁用并直接说明原因，不做乐观更新。
  */
-import { useEffect, useLayoutEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
+import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual"
+import type { Range } from "@tanstack/react-virtual"
 import type { ComponentType, ReactElement, ReactNode, RefObject } from "react"
 import {
   CaptionsOffIcon,
@@ -564,8 +566,8 @@ export function PlayerBar({ runtime, state, onOpenStage, coverAnchorRef, lyrics 
         {/* 「艺人 · 状态」这一行会被截断，所以音质**不放在这里**：它单独成一枚不收缩的 Badge（见下） */}
         <span className="truncate text-xs text-muted-foreground" data-testid="player-bar-status">
           {state.track === null
-            ? playerStatusText(state)
-            : `${trackArtistOf(state.track)} · ${playerStatusText(state)}`}
+            ? playerStatusText({ status: state.status })
+            : `${trackArtistOf(state.track)} · ${playerStatusText({ status: state.status })}`}
         </span>
       </div>
     </MotionRegion>
@@ -760,13 +762,36 @@ export interface QueuePanelProps extends TrackRowActions {
 
 export function QueuePanel({ entries, index, onSelect, onClear, onPlayNext, offlineIds = [] }: QueuePanelProps) {
   const panelRef = useRef<HTMLDivElement>(null)
+  const viewportRef = useRef<HTMLDivElement>(null)
+  const pendingFocus = useRef<number | null>(null)
+  const [focusedIndex, setFocusedIndex] = useState<number | null>(null)
+  const rangeExtractor = useCallback((range: Range) => {
+    const visible = defaultRangeExtractor(range)
+    if (focusedIndex !== null && focusedIndex < range.count && !visible.includes(focusedIndex)) visible.push(focusedIndex)
+    return visible.sort((left, right) => left - right)
+  }, [focusedIndex])
+  const virtualizer = useVirtualizer({
+    count: entries.length,
+    getScrollElement: () => viewportRef.current,
+    estimateSize: () => 32,
+    overscan: 8,
+    initialOffset: Math.max(0, index) * 32,
+    initialRect: { width: 384, height: 640 },
+    rangeExtractor,
+  })
+  const virtualRows = virtualizer.getVirtualItems()
   const clearing = useRef(false)
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (entries.length > 0) {
       clearing.current = false
-      panelRef.current?.querySelector<HTMLElement>('[aria-current="true"]')?.scrollIntoView({ block: "nearest", behavior: "auto" })
+      virtualizer.scrollToIndex(Math.max(0, index), { align: "center" })
     }
-  }, [entries.length > 0])
+  }, [entries])
+  useLayoutEffect(() => {
+    if (pendingFocus.current === null) return
+    const button = panelRef.current?.querySelector<HTMLButtonElement>(`[data-queue-index="${pendingFocus.current}"]`)
+    if (button) { button.focus({ preventScroll: true }); pendingFocus.current = null }
+  }, [virtualRows])
   if (entries.length === 0) {
     return (
       <div className="flex min-h-0 flex-1 flex-col gap-3 px-4 pb-4" data-testid="queue-panel">
@@ -802,13 +827,17 @@ export function QueuePanel({ entries, index, onSelect, onClear, onPlayNext, offl
           </AlertDialogContent>
         </AlertDialog>
       </div>
-      <ScrollArea className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:!block">
-        <ul className="flex min-w-0 flex-col gap-1 [&>li]:min-w-0">
-          {entries.map((entry, position) => {
+      <ScrollArea viewportRef={viewportRef} className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:!block">
+        <ul className="relative min-w-0" style={{ height: virtualizer.getTotalSize() }}>
+          {virtualRows.map((row) => {
+            const position = row.index
+            const entry = entries[position]
             // 已知下架：整行点不动，行菜单里也不出现播放/入队动作（只留"看得见"）
             const isOffline = entry !== null && typeof entry === "object" && offline.has(entry.id)
             return (
-              <li key={`${entry.id}-${position}`}>
+              <li key={`${entry.id}-${position}`} className="absolute inset-x-0 top-0 min-w-0"
+                style={{ height: row.size, transform: `translateY(${row.start}px)` }}
+                aria-posinset={position + 1} aria-setsize={entries.length}>
                 <TrackRowMenu
                   target={TRACK_MENU_TARGET.queue}
                   songs={[entry]}
@@ -822,6 +851,21 @@ export function QueuePanel({ entries, index, onSelect, onClear, onPlayNext, offl
                     className={`w-full min-w-0 max-w-full justify-start transition-opacity motion-reduce:transition-none${isOffline ? " opacity-50" : ""}`}
                     aria-current={position === index ? "true" : undefined}
                     aria-disabled={isOffline ? true : undefined}
+                    data-queue-index={position}
+                    onFocus={() => setFocusedIndex(position)}
+                    onKeyDown={(event) => {
+                      const pageSize = Math.max(1, Math.floor((viewportRef.current?.clientHeight ?? 320) / 32))
+                      const target = event.key === "Home" ? 0 : event.key === "End" ? entries.length - 1
+                        : event.key === "ArrowDown" ? position + 1 : event.key === "ArrowUp" ? position - 1
+                        : event.key === "PageDown" ? position + pageSize : event.key === "PageUp" ? position - pageSize
+                        : event.key === "Tab" ? position + (event.shiftKey ? -1 : 1) : null
+                      if (target === null || (event.key === "Tab" && (target < 0 || target >= entries.length))) return
+                      event.preventDefault()
+                      const next = Math.max(0, Math.min(entries.length - 1, target))
+                      pendingFocus.current = next
+                      virtualizer.scrollToIndex(next, { align: "auto" })
+                      setFocusedIndex(next)
+                    }}
                     onClick={() => {
                       if (isOffline) return
                       onSelect?.(position)

@@ -28,7 +28,7 @@ export function AccountNameTooltip({ name, sessionExpiresAt }: { name: string; s
       }}
     >
       <TooltipTrigger asChild>
-        <span className="min-w-0 truncate text-sm" data-testid={ACCOUNT_NAME_TESTID}>
+        <span className="min-w-0 truncate text-center text-sm" data-testid={ACCOUNT_NAME_TESTID}>
           {name}
         </span>
       </TooltipTrigger>

@@ -75,6 +75,21 @@ export const PLAYBACK_QUALITY_TEXT = {
   lossless: "无损音质",
 };
 
+/** Confirmed media metadata for the selected quality, not the target preference or other available files. */
+export function playbackAudioDetailsText(details) {
+  if (details === null || typeof details !== "object") return null;
+  const parts = [];
+  if (typeof details.format === "string" && details.format.trim() !== "") parts.push(details.format.trim().toUpperCase());
+  if (typeof details.sampleRate === "number" && Number.isFinite(details.sampleRate) && details.sampleRate > 0) {
+    parts.push(`${details.sampleRate} kHz`);
+  }
+  if (typeof details.fileSize === "number" && Number.isFinite(details.fileSize) && details.fileSize > 0) {
+    const megabytes = details.fileSize / (1024 * 1024);
+    parts.push(megabytes >= 1 ? `${megabytes.toFixed(1)} MB` : `${Math.round(details.fileSize / 1024)} KB`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
 /**
  * 音质文案：播放栏副标题与沉浸页左侧小字都读这一份（不许各写一份）。
  * 三个前提缺一不可——有 quality、播放没出错、值在表里；否则返回 `null`（界面一个字都不加）。
@@ -88,15 +103,21 @@ export function playbackQualityText(state) {
   return PLAYBACK_QUALITY_TEXT[quality];
 }
 
-/** @returns {null | {kind: "confirmed"|"loading"|"unknown"|"local", text: string, description: string}} */
+/** @returns {null | {kind: "confirmed"|"loading"|"unknown"|"local"|"pending", text: string, description: string}} */
 export function playbackQualityBadgeView(state) {
   if (state === null || typeof state !== "object" || !state.track || state.error != null) return null;
   const confirmed = playbackQualityText(state);
-  if (confirmed !== null) return { kind: "confirmed", text: confirmed, description: "当前歌曲的实际播放音质" };
+  if (confirmed !== null) return {
+    kind: "confirmed", text: confirmed,
+    description: state.restored === true && state.loaded === false && state.qualitySource !== "resolved"
+      ? "已保存的确认音质，播放时将重新确认"
+      : state.loaded === false ? "当前歌曲播放源已确认的音质" : "当前歌曲的实际播放音质",
+  };
   if (isLocalTrackId(state.track.id)) return { kind: "local", text: "本地音频", description: "本地音频未提供可确认的品质档位" };
   if (state.status === "loading" && state.loaded !== true) {
     return { kind: "loading", text: "获取音质中", description: "正在获取当前歌曲的播放信息" };
   }
+  if (state.loaded === false) return { kind: "pending", text: "待播放确认", description: "播放后确认实际音质" };
   return { kind: "unknown", text: "音质未知", description: "暂无可确认的音质信息" };
 }
 

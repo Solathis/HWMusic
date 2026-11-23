@@ -21,6 +21,8 @@ import sharp from "sharp";
 import { RUN_LOG_EMPTY_TEXT, RUN_LOG_FAILURE_TEXT } from "../src/renderer/features/settings/run-log.mjs";
 import { POPOVER_PAD_DIP } from "../src/renderer/features/lyrics/lyrics-popover.mjs";
 import { runPlaybackQualityChecks } from "./browser-guards/playback-quality.mjs";
+import { runOpenPerformanceChecks } from "./browser-guards/open-performance.mjs";
+import { runStageChoreographyChecks } from "./browser-guards/stage-choreography.mjs";
 import { runMotionChecks, runStageMotionChecks, runPlaybackInteractionChecks, runFeedbackMotionChecks, runLyricsMotionChecks, runOverlayMotionChecks, runInterruptedMotionChecks, runMotionResourceChecks, runDelayedResizeChecks, recordVisualFrames } from "./browser-guards/motion.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -119,6 +121,8 @@ import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 
 import { LibraryShell } from "../../src/renderer/App.tsx";
+import { Toaster } from "../../src/renderer/components/ui/sonner.tsx";
+import { useAppNotifications } from "../../src/renderer/use-notifications.ts";
 import { LyricsWindow } from "../../src/renderer/LyricsWindow.tsx";
 import { PlayerBar } from "../../src/renderer/components.tsx";
 import { PlaybackStage } from "../../src/renderer/playback-stage.tsx";
@@ -449,8 +453,6 @@ mockIPC(async (command, args) => {
     const action = args.payload?.action;
     if (!["immersive", "normal", "read", "minimize", "toggle-maximize", "close"].includes(action)) throw new Error("主窗外框动作不认识：" + action);
     mainChromeCalls.push(action);
-    if (action === "immersive") mainChromeState = { ...mainChromeState, frameless: mainChromeSupported };
-    if (action === "normal") mainChromeState = { ...mainChromeState, frameless: false };
     if (action === "toggle-maximize") mainChromeState = { ...mainChromeState, maximized: !mainChromeState.maximized };
     return { ...mainChromeState };
   }
@@ -540,6 +542,7 @@ function MotionProbe() {
   </main>;
 }
 function Guard() {
+  useAppNotifications();
   const [desktop, setDesktop] = useState(false);
   /**
    * ?surface=no-lyrics 挂的是不带 lyrics binding 的播放栏 + 沉浸页。
@@ -564,6 +567,9 @@ function Guard() {
       setTime: (ms) => runtime.player.seek(ms),
       nextTrack: () => runtime.player.next(),
       prepareRepeatedQueue: () => runtime.player.playQueue([songs[0], songs[0]], 0),
+      prepareLargeQueue(count, index) {
+        runtime.player.setQueue(Array.from({ length: count }, (_, position) => ({ ...songs[0], id: "queue-" + position, name: "队列曲目 " + position })), index);
+      },
       /**
        * 只把队列摆好、不播（恢复队列的样子）。音频一次都没装载，所以总时长只能来自
        * 条目元数据——正是「底栏不该显示占位横线」那条路径。seconds 为 null 的条目没有时长字段。
@@ -624,7 +630,7 @@ function Guard() {
       dragCount: () => dragCalls,
       /** 主窗外框命令的调用记录；setMainChromeSupported(true) = 按 Windows 收起标题栏（同时清空记录与状态）。 */
       mainChromeCalls: () => mainChromeCalls.slice(),
-      setMainChromeSupported: (value) => { mainChromeSupported = value === true; mainChromeState = { frameless: false, maximized: false }; mainChromeCalls.length = 0; },
+      setMainChromeSupported: (value) => { mainChromeSupported = value === true; mainChromeState = { frameless: mainChromeSupported, maximized: false }; mainChromeCalls.length = 0; },
       /** 进度 IPC 的累计次数（配合 resetProgressCount 计一段时间内的推送数）。 */
       progressCount: () => lyricsProgressCalls,
       unlockZones: () => unlockZones.slice(),
@@ -772,6 +778,7 @@ function Guard() {
       <div className="h-full w-full" data-shell="app-shell">
         <LibraryShell />
       </div>
+      <Toaster position="top-center" offset={48} mobileOffset={48} />
     </TooltipProvider>
   );
 }
@@ -1538,7 +1545,7 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
 
   await page.keyboard.press("Escape");
   // 关门有约 220ms 的退场过场：等它真的从 DOM 里退掉，而不是要求瞬时消失
-  const escapeClosed = await stage.waitFor({ state: "detached", timeout: guardScaledMs(3000) }).then(() => true, () => false);
+  const escapeClosed = await stage.waitFor({ state: "hidden", timeout: guardScaledMs(3000) }).then(() => true, () => false);
   add("playback-stage-escape-closes", escapeClosed, "没有上层弹窗时 ESC 关闭舞台（退场过场结束后卸载）");
 
   // 行内任意位置都能收起（点在行的左端，而不是箭头所在的中线上）
@@ -1546,7 +1553,7 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
   await stage.waitFor();
   await page.waitForTimeout(600);
   await stage.click({ position: { x: 40, y: 20 } });
-  const closedByRow = await stage.waitFor({ state: "detached", timeout: guardScaledMs(3000) }).then(() => true, () => false);
+  const closedByRow = await stage.waitFor({ state: "hidden", timeout: guardScaledMs(3000) }).then(() => true, () => false);
   add("r54-stage-close-row-anywhere", closedByRow, "行的左端（远离箭头）点击同样收起沉浸页（退场过场结束后卸载）");
 
   /**
@@ -1619,7 +1626,7 @@ export async function checkPlaybackLyricsToggle(page, port, guardDir, add) {
   await page.waitForFunction(() => window.__guard.toggleLog().at(-1)?.checked === false);
   await plan({ delayMs: 0, failTimes: 0 });
   await page.keyboard.press("Escape");
-  await stage.waitFor({ state: "detached" });
+  await stage.waitFor({ state: "hidden" });
 }
 
 /** 歌词显示目标快捷切换：播放栏与沉浸页的下拉、平台不支持时禁用任务栏、开着时只换模式不重复开窗（自己开一页）。 */
@@ -3671,9 +3678,9 @@ export async function checkLyricsSettingsPopup(page, port, guardDir, add) {
 // 走到 设置 → 歌词（外壳里那一条真实路径）。沉浸页开着就先收起。
 async function openSettingsLyricsPane(page) {
   const stage = page.getByTestId("playback-stage");
-  if (await stage.count()) {
+  if (await stage.isVisible()) {
     await stage.getByRole("button", { name: "收起歌词", exact: true }).click();
-    await stage.waitFor({ state: "detached" });
+    await stage.waitFor({ state: "hidden" });
   }
   if (await page.getByTestId("sidebar-search-rail").count()) await page.getByTestId("sidebar-search-rail").click();
   await page.getByRole("button", { name: "设置", exact: true }).click();
@@ -3728,7 +3735,7 @@ export async function checkImmersiveKaraoke(page, guardDir, add) {
     `沉浸页逐字高亮推进：行内像素差异 ${(fillDiff * 100).toFixed(2)}%`);
 
   await page.getByTestId("playback-stage").getByRole("button", { name: "收起歌词", exact: true }).click();
-  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+  await page.getByTestId("playback-stage").waitFor({ state: "hidden" });
   await configure({ ...DESKTOP_BASELINE });
 }
 
@@ -4211,9 +4218,11 @@ export async function checkSettingsLogPane(page, guardDir, add) {
   await page.evaluate(() => window.__guard.emitNotice("守卫提示：代理按环境变量生效"));
   await page.waitForTimeout(300);
   const withNotice = await snapshot();
+  const noticeToast = page.locator('[data-sonner-toast]').filter({ hasText: "守卫提示：代理按环境变量生效" });
+  await noticeToast.waitFor();
   add(
     "r56-log-notice-entries",
-    withNotice.lines === 1 && withNotice.text.includes("提示"),
+    withNotice.lines === 1 && withNotice.text.includes("提示") && await noticeToast.count() === 1,
     `app:notice 的条目要标来源「提示」：${JSON.stringify({ lines: withNotice.lines, count: withNotice.count })}`,
   );
 
@@ -4269,7 +4278,7 @@ export async function checkRunLogScope(page, guardDir, add) {
 /**
  * 沉浸页的主窗外框。钉四件事：
  * 1. 收起行悬停是**淡色半透明**（背景 alpha 远小于不透明），浅色与深色主题各量一次；
- * 2. 打开与关闭沉浸页成对地请宿主收起 / 装回标题栏；
+ * 2. 打开与关闭沉浸页只读窗口状态，不切换系统外框；
  * 3. 宿主回报收起了标题栏（Windows）才画窗口按钮：在右上角、不压住收起箭头，三枚按钮各发一次对应动作，最大化后换成「还原」；
  * 4. 收起行兼作拖动区：拖动走官方 startDragging 且不收起沉浸页，原地点击仍收起。
  */
@@ -4283,7 +4292,7 @@ export async function checkImmersiveChrome(page, guardDir, add) {
   };
   const closeStage = async () => {
     await row.click();
-    await stage.waitFor({ state: "detached" });
+    await stage.waitFor({ state: "hidden" });
   };
   const hoverAlpha = async () => {
     await page.mouse.move(640, 400);
@@ -4316,12 +4325,9 @@ export async function checkImmersiveChrome(page, guardDir, add) {
     light.parsed && dark.parsed && light.alpha > 0 && light.alpha < 120 && dark.alpha > 0 && dark.alpha < 120 && dark.theme.includes("dark"),
     JSON.stringify({ light, dark }));
 
-  // ② 打开 / 关闭成对地收起 / 装回标题栏
   await page.waitForTimeout(200);
   const lifecycle = await page.evaluate(() => window.__guard.mainChromeCalls().filter((action) => action === "immersive" || action === "normal"));
-  const paired = lifecycle.length >= 2 && lifecycle.length % 2 === 0
-    && lifecycle.every((action, index) => action === (index % 2 === 0 ? "immersive" : "normal"));
-  add("r80-immersive-chrome-paired", paired, JSON.stringify(lifecycle));
+  add("r80-immersive-chrome-stable", lifecycle.length === 0, JSON.stringify(lifecycle));
 
   // ③ 宿主回报收起了标题栏：右上角三枚窗口按钮
   await page.evaluate(() => window.__guard.setMainChromeSupported(true));
@@ -4347,7 +4353,7 @@ export async function checkImmersiveChrome(page, guardDir, add) {
   const restored = await press("还原");
   const closed = await press("关闭窗口");
   await page.waitForTimeout(200);
-  const stillOpen = await stage.count() === 1;
+  const stillOpen = await stage.isVisible();
   const box = await stage.boundingBox();
   if (box) await page.screenshot({ path: path.join(guardDir, "r80-immersive-window-controls.png"), clip: { x: box.x + box.width - 360, y: box.y, width: 360, height: 120 } });
   const windowActions = await page.evaluate(() => window.__guard.mainChromeCalls().filter((action) => !["immersive", "normal", "read"].includes(action)));
@@ -4367,14 +4373,14 @@ export async function checkImmersiveChrome(page, guardDir, add) {
   await page.mouse.up();
   await page.waitForTimeout(200);
   const dragAfter = await page.evaluate(() => window.__guard.dragCount());
-  const openAfterDrag = await stage.count() === 1;
+  const openAfterDrag = await stage.isVisible();
   await row.click({ position: { x: 200, y: 20 } });
-  const closedByClick = await stage.waitFor({ state: "detached", timeout: guardScaledMs(3000) }).then(() => true, () => false);
+  const closedByClick = await stage.waitFor({ state: "hidden", timeout: guardScaledMs(3000) }).then(() => true, () => false);
   await page.waitForTimeout(200);
   const finalCalls = await page.evaluate(() => window.__guard.mainChromeCalls());
   await page.evaluate(() => window.__guard.setMainChromeSupported(false));
   add("r80-immersive-chrome-row-drag",
-    dragAfter === dragBefore + 1 && openAfterDrag && closedByClick && finalCalls.at(-1) === "normal",
+    dragAfter === dragBefore + 1 && openAfterDrag && closedByClick && finalCalls.every(action => action !== "immersive" && action !== "normal"),
     JSON.stringify({ dragBefore, dragAfter, openAfterDrag, closedByClick, finalCalls }));
 }
 
@@ -4418,7 +4424,7 @@ export async function checkImmersiveLyricsColorIsFixed(page, guardDir, add) {
   add("r52-desktop-color-still-its-own", stored.customColor === "#00dd00", `桌面歌词 customColor=${stored.customColor}`);
 
   await page.getByTestId("playback-stage").getByRole("button", { name: "收起歌词", exact: true }).click();
-  await page.getByTestId("playback-stage").waitFor({ state: "detached" });
+  await page.getByTestId("playback-stage").waitFor({ state: "hidden" });
   await configureDesktop({ ...DESKTOP_BASELINE });
 }
 
@@ -5554,7 +5560,7 @@ export async function checkLocalSongs(page, port, guardDir, add) {
     audioUrls().length >= 1 && audioUrls().every((url) => url === "http://hwlocal.localhost/fedcba9876543210fedcba9876543210"),
     JSON.stringify({ audioUrls: audioUrls(), settled }));
 
-  // ——— ⑥ 移除：宿主真的收到 remove，列表少一行，状态行只说事实 ———
+  // ——— ⑥ 移除：宿主收到 remove，列表少一行，Sonner 显示结果，工具栏保留数量 ———
   await page.evaluate(() => window.__guard.pause());
   await open("fixture");
   await rows().first().waitFor();
@@ -5563,10 +5569,12 @@ export async function checkLocalSongs(page, port, guardDir, add) {
   const removeCalls = await page.evaluate(() => window.__guard.localRemoveCalls());
   const remaining = await page.evaluate(() => window.__guard.localTracks().map((track) => track.id));
   const statusText = ((await page.getByTestId("local-songs-status").textContent()) ?? "").trim();
+  const removedToast = page.locator('[data-sonner-toast][data-type="success"]').filter({ hasText: "已从本地曲库移除（文件仍在原处）。" });
+  await removedToast.waitFor();
   add("r65-local-remove",
     removeCalls.length === 1 && removeCalls[0].id === "local:0123456789abcdef0123456789abcdef"
       && remaining.length === 2 && remaining[0] === "fedcba9876543210fedcba9876543210"
-      && (await rows().count()) === 2 && statusText === "已从本地曲库移除（文件仍在原处）。",
+      && (await rows().count()) === 2 && statusText === "共 2 首" && await removedToast.count() === 1,
     JSON.stringify({ removeCalls, remaining, rows: await rows().count(), statusText }));
 
   // 收尾：队列先换掉（重载后谁在渲染，谁就会替这条协议发请求），再离开本地页、卸掉路由、回默认页
@@ -5907,9 +5915,9 @@ async function saveFatalDiagnostics(page, guardDir, log) {
 /** 打开设置「关于」：先收起沉浸页与搜索栏，与 openSettingsLyricsPane 同一条路。 */
 async function openSettingsAboutPane(page) {
   const stage = page.getByTestId("playback-stage");
-  if (await stage.count()) {
+  if (await stage.isVisible()) {
     await stage.getByRole("button", { name: "收起歌词", exact: true }).click();
-    await stage.waitFor({ state: "detached" });
+    await stage.waitFor({ state: "hidden" });
   }
   if (await page.getByTestId("sidebar-search-rail").count()) await page.getByTestId("sidebar-search-rail").click();
   await page.getByRole("button", { name: "设置", exact: true }).click();
@@ -5920,7 +5928,7 @@ async function openSettingsAboutPane(page) {
 
 /**
  * 设置「关于」：版本、系统、WebView 与 Tauri 版本来自宿主回报；技术栈每行三列齐全；
- * 「打开」只把键交给宿主，宿主拒绝时就地说明并给出下一步。
+ * 「打开」只把键交给宿主，宿主拒绝时由 Sonner 说明并给出下一步。
  */
 export async function checkSettingsAboutPane(page, guardDir, add) {
   await openSettingsAboutPane(page);
@@ -5942,13 +5950,14 @@ export async function checkSettingsAboutPane(page, guardDir, add) {
   await page.waitForFunction(() => window.__guard.openLinkCalls().length === 1);
   await page.evaluate(() => window.__guard.setOpenLinkFails(true));
   await page.getByRole("button", { name: "打开问题反馈", exact: true }).click();
-  const alert = page.getByTestId("about-links").getByRole("alert");
+  const alert = page.locator('[data-sonner-toast][data-type="error"]').filter({ hasText: "没能打开浏览器" });
   await alert.waitFor();
   const alertText = (await alert.textContent()) ?? "";
   await page.evaluate(() => window.__guard.setOpenLinkFails(false));
   const calls = await page.evaluate(() => window.__guard.openLinkCalls());
   add("about-pane-links-by-key",
-    JSON.stringify(calls) === JSON.stringify(["repository", "issues"]) && alertText.includes("没能打开浏览器") && alertText.includes("手动打开"),
+    JSON.stringify(calls) === JSON.stringify(["repository", "issues"]) && alertText.includes("没能打开浏览器") && alertText.includes("手动打开")
+      && await alert.count() === 1 && await page.getByTestId("about-links").getByRole("alert").count() === 0,
     `宿主收到的键 ${JSON.stringify(calls)}（不是 URL）· 失败提示「${alertText}」`);
   await page.screenshot({ path: path.join(guardDir, "about-pane.png") });
   await page.getByTestId("settings-page").getByRole("tab", { name: "通用", exact: true }).click();
@@ -6003,7 +6012,7 @@ const withMotionProvider = (source) => 'import { MotionProvider } from "../../sr
   + source.replaceAll("<StrictMode>", "<StrictMode><MotionProvider>").replaceAll("</StrictMode>", "</MotionProvider></StrictMode>");
 
 export async function runGuard({ root = ROOT, log = console.log, scope = "full" } = {}) {
-  if (!["full", "quality", "motion", "stage", "interactions", "feedback", "lyrics", "overlays", "pagination", "interruptions", "resources", "resize", "karaoke"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
+  if (!["full", "quality", "motion", "stage", "interactions", "feedback", "lyrics", "overlays", "pagination", "interruptions", "resources", "resize", "karaoke", "opening", "choreography", "chrome"].includes(scope)) throw new Error("Unknown browser scope: " + scope);
   const guardDir = path.join(root, GUARD_DIR);
   await mkdir(guardDir, { recursive: true });
 
@@ -6185,7 +6194,10 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
         await page.goto(`http://127.0.0.1:${port}/index.html` + (scope === "motion" ? "?motion-probe=1" : ""), { waitUntil: "load" });
         await page.waitForFunction(() => window.__guard !== undefined);
         await page.evaluate((choice) => { document.documentElement.className = choice; }, theme);
-        if (scope === "quality") await runPlaybackQualityChecks({ page, add, theme });
+        if (scope === "chrome") { await page.evaluate(() => window.__guard.ready()); await checkImmersiveChrome(page, guardDir, add); }
+        else if (scope === "choreography") await runStageChoreographyChecks({ page, add, theme });
+        else if (scope === "opening") await runOpenPerformanceChecks({ page, add, theme });
+        else if (scope === "quality") await runPlaybackQualityChecks({ page, add, theme });
         else if (scope === "stage") await runStageMotionChecks({ page, add, theme });
         else if (scope === "interactions") await runPlaybackInteractionChecks({ page, add, theme });
         else if (scope === "feedback") await runFeedbackMotionChecks({ page, add, theme });
@@ -6584,7 +6596,7 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
       const reopened = await textPixels(page, activeLine, theme, path.join(guardDir, `${theme}-reopened-line.png`));
       add(`${theme}-paused-reopen`, reopened.ink > 60, JSON.stringify(reopened));
       await page.keyboard.press("Escape");
-      const escaped = await stage.waitFor({ state: "detached", timeout: guardScaledMs(3000) }).then(() => true, () => false);
+      const escaped = await stage.waitFor({ state: "hidden", timeout: guardScaledMs(3000) }).then(() => true, () => false);
       add(`${theme}-escape-close`, escaped, "无上层弹窗时 ESC 关闭舞台（退场过场结束后卸载）");
       if (escaped) {
         await page.getByRole("button", { name: "打开歌词", exact: true }).click();
@@ -6821,7 +6833,7 @@ export async function runGuard({ root = ROOT, log = console.log, scope = "full" 
       await page.getByRole("alertdialog").waitFor();
       await page.getByRole("button", { name: "取消", exact: true }).click();
       await page.getByRole("alertdialog").waitFor({ state: "detached" });
-      add(`${theme}-overlay-stack`, await page.getByRole("alertdialog").count() === 0 && await stage.count() === 0, "关闭舞台后 Sheet 打开/关闭、AlertDialog 打开/取消均可真点测");
+      add(`${theme}-overlay-stack`, await page.getByRole("alertdialog").count() === 0 && !await stage.isVisible(), "关闭舞台后 Sheet 打开/关闭、AlertDialog 打开/取消均可真点测");
     }
 
     await page.evaluate(() => window.__guard.restoreLyrics());
